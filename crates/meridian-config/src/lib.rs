@@ -19,6 +19,16 @@ pub struct Backend {
     pub address: String,
 }
 
+/// A host name that sends the players who connect through it to one backend
+/// (`[[forced-host]]` in the file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForcedHost {
+    /// The host name the client puts in its handshake, in lower case.
+    pub host: String,
+    /// The backend it leads to.
+    pub backend: String,
+}
+
 /// Everything the proxy reads from its configuration. Its `Debug` output hides
 /// the forwarding secret, so a configuration can be logged safely.
 #[derive(Clone, PartialEq, Eq)]
@@ -48,6 +58,8 @@ pub struct Config {
     /// The most players the proxy takes at once, shown in the server list; 0 means
     /// no limit.
     pub max_players: u32,
+    /// Host names that choose the backend, in place of the default backend.
+    pub forced_hosts: Vec<ForcedHost>,
 }
 
 impl Default for Config {
@@ -63,6 +75,7 @@ impl Default for Config {
             forwarding_secret: String::new(),
             try_backends: Vec::new(),
             max_players: 20,
+            forced_hosts: Vec::new(),
         }
     }
 }
@@ -82,6 +95,7 @@ impl std::fmt::Debug for Config {
             forwarding_secret,
             try_backends,
             max_players,
+            forced_hosts,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -99,6 +113,7 @@ impl std::fmt::Debug for Config {
             .field("forwarding_secret", &format_args!("{secret}"))
             .field("try_backends", try_backends)
             .field("max_players", max_players)
+            .field("forced_hosts", forced_hosts)
             .finish()
     }
 }
@@ -119,6 +134,15 @@ struct File {
     #[serde(default, rename = "try")]
     try_backends: Vec<String>,
     max_players: Option<u32>,
+    #[serde(default, rename = "forced-host")]
+    forced_hosts: Vec<FileForcedHost>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileForcedHost {
+    host: String,
+    backend: String,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +201,15 @@ impl Config {
             forwarding_secret: file.forwarding_secret.unwrap_or(defaults.forwarding_secret),
             try_backends: file.try_backends,
             max_players: file.max_players.unwrap_or(defaults.max_players),
+            // Host names do not depend on case.
+            forced_hosts: file
+                .forced_hosts
+                .into_iter()
+                .map(|f| ForcedHost {
+                    host: f.host.to_ascii_lowercase(),
+                    backend: f.backend,
+                })
+                .collect(),
         };
         config.validate()?;
         Ok(config)
@@ -218,6 +251,19 @@ impl Config {
                 return Err(ConfigError::DuplicateTry(name.clone()));
             }
         }
+        for (i, forced) in self.forced_hosts.iter().enumerate() {
+            check_host(&forced.host).map_err(|reason| ConfigError::InvalidForcedHost {
+                host: forced.host.clone(),
+                reason,
+            })?;
+            if self.forced_hosts[..i]
+                .iter()
+                .any(|f| f.host.eq_ignore_ascii_case(&forced.host))
+            {
+                return Err(ConfigError::DuplicateForcedHost(forced.host.clone()));
+            }
+            self.known_backend(&format!("forced-host \"{}\"", forced.host), &forced.backend)?;
+        }
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
         }
@@ -236,6 +282,16 @@ impl Config {
         self.backends.iter().find(|b| b.name == name)
     }
 
+    /// The backend forced for the host name a client put in its handshake, if any.
+    /// Case does not matter, and a final dot is ignored.
+    pub fn forced_backend(&self, host: &str) -> Option<&str> {
+        let host = host.strip_suffix('.').unwrap_or(host);
+        self.forced_hosts
+            .iter()
+            .find(|f| f.host.eq_ignore_ascii_case(host))
+            .map(|f| f.backend.as_str())
+    }
+
     /// Refuses a reference to a backend that is not configured; `setting` says
     /// where the reference was written.
     fn known_backend(&self, setting: &str, name: &str) -> Result<(), ConfigError> {
@@ -247,6 +303,26 @@ impl Config {
             }),
         }
     }
+}
+
+/// Checks a forced host: a bare host name, without a port or a path.
+fn check_host(host: &str) -> Result<(), &'static str> {
+    if host.is_empty() {
+        return Err("it is empty");
+    }
+    if host.chars().any(char::is_whitespace) {
+        return Err("it contains a space");
+    }
+    if host.contains(':') {
+        return Err("it has a port: the port players use does not choose the backend");
+    }
+    if host.contains('/') {
+        return Err("it has a path: write the host name alone");
+    }
+    if host.ends_with('.') {
+        return Err("it ends with a dot: write it without the final dot");
+    }
+    Ok(())
 }
 
 /// Checks that `address` is `host:port` without resolving the host: the host is

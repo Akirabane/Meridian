@@ -82,3 +82,87 @@ fn max_players_must_fit_the_server_list() {
     // A negative number is not a player count at all.
     assert!(matches!(refused("max-players = -1"), ConfigError::Parse(_)));
 }
+
+const FORCED: &str = r#"
+[[forced-host]]
+host = "Play.Example.com"
+backend = "hub"
+[[forced-host]]
+host = "open.example.com"
+backend = "open"
+"#;
+
+/// `[[forced-host]]` tables must come after the top-level keys of [`with`].
+fn load_forced(tables: &str) -> Result<Config, ConfigError> {
+    Config::from_toml_str(&format!("{}{tables}", with("")))
+}
+
+#[test]
+fn forced_hosts_are_read_in_lower_case() {
+    let config = load_forced(FORCED).unwrap();
+    assert_eq!(
+        config.forced_hosts,
+        [
+            ForcedHost {
+                host: "play.example.com".into(),
+                backend: "hub".into()
+            },
+            ForcedHost {
+                host: "open.example.com".into(),
+                backend: "open".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_forced_host_is_found_whatever_its_case() {
+    let config = load_forced(FORCED).unwrap();
+    assert_eq!(config.forced_backend("PLAY.example.COM"), Some("hub"));
+    assert_eq!(config.forced_backend("open.example.com."), Some("open"));
+    assert_eq!(config.forced_backend("example.com"), None);
+}
+
+#[test]
+fn a_forced_host_must_lead_to_a_configured_backend() {
+    let e =
+        load_forced("[[forced-host]]\nhost = \"a.example.com\"\nbackend = \"nether\"").unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::UnknownBackend { name, .. } if name == "nether"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("a.example.com"), "{e}");
+}
+
+#[test]
+fn a_forced_host_must_be_a_bare_host_name() {
+    for host in [
+        "",
+        "play.example.com:25565",
+        "play .example.com",
+        "example.com/x",
+        "example.com.",
+    ] {
+        let e = load_forced(&format!(
+            "[[forced-host]]\nhost = \"{host}\"\nbackend = \"hub\""
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(e, ConfigError::InvalidForcedHost { .. }),
+            "{host}: {e}"
+        );
+    }
+}
+
+#[test]
+fn a_host_cannot_be_forced_twice() {
+    let e = load_forced(
+        "[[forced-host]]\nhost = \"a.example.com\"\nbackend = \"hub\"\n\
+         [[forced-host]]\nhost = \"A.example.com\"\nbackend = \"open\"",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::DuplicateForcedHost(h) if h == "a.example.com"),
+        "{e}"
+    );
+}

@@ -42,6 +42,10 @@ pub enum ConfigError {
     DuplicateTry(String),
     /// `max-players` does not fit the server list's signed 32-bit number.
     MaxPlayersTooLarge(u32),
+    /// A forced host is not a bare host name.
+    InvalidForcedHost { host: String, reason: &'static str },
+    /// Two forced hosts have the same host name.
+    DuplicateForcedHost(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -95,6 +99,13 @@ impl fmt::Display for ConfigError {
                  try lists only the backends that come after it"
             ),
             ConfigError::DuplicateTry(name) => write!(f, "try lists \"{name}\" twice"),
+            ConfigError::InvalidForcedHost { host, reason } => {
+                write!(f, "forced-host \"{host}\" is not valid: {reason}")
+            }
+            ConfigError::DuplicateForcedHost(host) => write!(
+                f,
+                "two [[forced-host]] entries have the host \"{host}\": each host leads to one backend"
+            ),
             ConfigError::MaxPlayersTooLarge(n) => write!(
                 f,
                 "max-players = {n} is too large: the most is {}, and 0 means no limit",
