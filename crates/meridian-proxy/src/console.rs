@@ -350,6 +350,9 @@ fn reload(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
 /// the listening address only to the next start.
 fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
     let old = proxy.config();
+    if *old == new {
+        return vec!["reloaded: nothing changed".to_owned()];
+    }
     let mut lines = Vec::new();
     if new.motd != old.motd {
         lines.push(format!("motd: {}", new.motd));
@@ -400,6 +403,30 @@ fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
     if new.forwarding_secret != old.forwarding_secret {
         lines.push(format!("forwarding secret changed {next}"));
     }
+    if new.try_backends != old.try_backends {
+        lines.push(match new.try_backends.as_slice() {
+            [] => "no backends to try after the default one".to_owned(),
+            names => format!(
+                "backends to try after the default one: {}",
+                names.join(", ")
+            ),
+        });
+    }
+    if new.max_players != old.max_players {
+        lines.push(match new.max_players {
+            0 => format!("no player limit {next}"),
+            n => format!("player limit {n} {next}"),
+        });
+    }
+    if new.forced_hosts != old.forced_hosts {
+        lines.push(format!("forced hosts changed {next}"));
+    }
+    if new.auth_mode != old.auth_mode {
+        lines.push(format!("login mode {:?} {next}", new.auth_mode).to_lowercase());
+    }
+    if new.groups != old.groups || new.routes != old.routes {
+        lines.push(format!("groups and routes changed {next}"));
+    }
     if new.listen != old.listen {
         lines.push(format!(
             "listen {} needs a restart; the proxy still listens on {}",
@@ -407,7 +434,8 @@ fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
         ));
     }
     if lines.is_empty() {
-        return vec!["reloaded: nothing changed".to_owned()];
+        // A setting this list does not name yet still takes effect.
+        lines.push(format!("settings changed {next}"));
     }
     proxy.set_config(new);
     for line in &lines {
@@ -424,7 +452,7 @@ mod tests {
     use horizon_protocol::{
         connection::Connection, crypto::offline_uuid, packets::configuration, text,
     };
-    use meridian_config::Backend;
+    use meridian_config::{AuthMode, Backend};
     use std::sync::atomic::AtomicBool;
     use std::thread::JoinHandle;
     use std::time::Instant;
@@ -442,7 +470,9 @@ mod tests {
                 },
             ],
             default_backend: "lobby".into(),
+            // The pair the configuration's check requires for an offline proxy.
             online_mode: false,
+            auth_mode: AuthMode::Offline,
             forwarding_secret: "secret".into(),
             ..Config::default()
         }
@@ -677,6 +707,27 @@ mod tests {
         assert_eq!(*proxy.config(), new);
         assert!(proxy.sessions.find("Steve").is_some());
         assert_eq!(apply(&proxy, new), ["reloaded: nothing changed"]);
+    }
+
+    /// Settings beyond the first ones (the player limit, the backends to try)
+    /// are applied and named too, not taken for "nothing changed".
+    #[test]
+    fn a_reload_of_the_routing_settings_applies_them() {
+        let proxy = proxy();
+        let new = Config {
+            max_players: 50,
+            try_backends: vec!["east".into()],
+            ..config()
+        };
+        assert_eq!(
+            apply(&proxy, new),
+            [
+                "reloaded:",
+                "backends to try after the default one: east",
+                "player limit 50 for the next logins",
+            ]
+        );
+        assert_eq!(proxy.config().max_players, 50);
     }
 
     #[test]
