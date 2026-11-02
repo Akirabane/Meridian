@@ -46,6 +46,10 @@ pub struct Phase {
 
 /// Runs `load` against `target`. `proxy` is the process to watch, if any.
 pub fn phase(target: SocketAddr, load: Load, proxy: Option<Pid>, stop: &Arc<AtomicBool>) -> Phase {
+    // A random pause first, so the players do not arrive at the same point of a
+    // cycle of the target each time, such as the proxy's polling of its listener,
+    // which the run's own fixed waits would otherwise line up with.
+    std::thread::sleep(jitter(Duration::from_millis(100)));
     let start = Arc::new(Barrier::new(load.players + 1));
     let began = Instant::now();
     let players: Vec<_> = (0..load.players)
@@ -142,6 +146,16 @@ pub fn phase(target: SocketAddr, load: Load, proxy: Option<Pid>, stop: &Arc<Atom
     phase.login = Summary::of(logins);
     phase.round_trip = Summary::of(round_trips);
     phase
+}
+
+/// A random duration under `limit`.
+fn jitter(limit: Duration) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    // Each RandomState is seeded differently, which is all the randomness needed.
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    Duration::from_nanos(random % limit.as_nanos().max(1) as u64)
 }
 
 /// The proxy's resident memory now, before any player.

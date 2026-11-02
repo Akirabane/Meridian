@@ -45,6 +45,11 @@ pub fn delta_micros(a: Duration, b: Duration) -> String {
     format!("{:+.1} µs", (a.as_secs_f64() - b.as_secs_f64()) * 1e6)
 }
 
+/// `a - b` in milliseconds, with its sign.
+pub fn delta_millis(a: Duration, b: Duration) -> String {
+    format!("{:+.2} ms", (a.as_secs_f64() - b.as_secs_f64()) * 1e3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

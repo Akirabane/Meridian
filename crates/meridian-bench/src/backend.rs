@@ -11,7 +11,7 @@ use meridian_testkit::body;
 use meridian_testkit::peer::Step;
 use meridian_testkit::trace::Recorder;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -37,7 +37,6 @@ impl Backend {
     pub fn start(secret: Option<Vec<u8>>) -> io::Result<Backend> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let address = listener.local_addr()?;
-        listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let (logged_in, refused) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
         let thread = {
@@ -49,14 +48,18 @@ impl Backend {
             std::thread::Builder::new()
                 .name("bench-backend".into())
                 .spawn(move || {
-                    while !stop.load(Ordering::Relaxed) {
-                        let stream = match listener.accept() {
-                            Ok((stream, _)) => stream,
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(Duration::from_millis(5));
-                                continue;
-                            }
-                            Err(_) => continue,
+                    // A blocking accept, so a login is taken at once; a stop
+                    // wakes it with a connection of its own.
+                    loop {
+                        let accepted = listener.accept();
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let Ok((stream, _)) = accepted else {
+                            // Out of descriptors, for example: the player's side
+                            // sees its connection fail and reports it.
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
                         };
                         let (player_secret, player_logged_in, player_refused) =
                             (secret.clone(), Arc::clone(&logged_in), Arc::clone(&refused));
@@ -64,9 +67,6 @@ impl Backend {
                             .name("bench-backend-player".into())
                             .stack_size(256 * 1024)
                             .spawn(move || {
-                                if stream.set_nonblocking(false).is_err() {
-                                    return;
-                                }
                                 let Ok(connection) = Connection::from_stream(stream) else {
                                     return;
                                 };
@@ -94,7 +94,11 @@ impl Drop for Backend {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // Wakes the accept; if even this connection fails, the thread is left
+            // to end with the program rather than waited for.
+            if TcpStream::connect_timeout(&self.address, Duration::from_secs(1)).is_ok() {
+                let _ = thread.join();
+            }
         }
     }
 }

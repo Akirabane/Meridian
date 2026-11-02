@@ -1,6 +1,6 @@
 //! The text of a run's report: how it was made, on what, and what it measured.
 use crate::run::{Load, Phase};
-use crate::stats::{delta_micros, micros};
+use crate::stats::{delta_micros, delta_millis, micros};
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -67,7 +67,11 @@ pub fn header(context: &Context, load: &Load, steps: &[usize]) -> String {
          A player sends one packet, waits for its echo and times it, then waits for its next \
          turn. The added latency is the difference between the two distributions of round \
          trips, both shown. CPU is each process's own time over the measured window, in percent \
-         of one core; the proxy's memory is its resident size. The players and the backend run \
+         of one core; Windows counts it in scheduler ticks of about 15.6 ms, so over a window \
+         of W seconds a figure under 1.56 / W % of a core reads as 0. The proxy's memory is its \
+         resident size. All the players of a step connect at once, so the login figures are \
+         those of a burst of logins, not of players arriving one by one. The players and the \
+         backend run \
          in this program, on the same cores as the proxy: their load is shown, and what the \
          rest of the machine did is the difference."
     );
@@ -111,7 +115,7 @@ pub fn step(step: &Step) -> String {
             "| {name} | {} | {} | {} |",
             millis(a),
             millis(b),
-            delta_micros(b, a)
+            delta_millis(b, a)
         );
     }
     for (name, a, b) in [
