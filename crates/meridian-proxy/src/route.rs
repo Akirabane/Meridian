@@ -102,7 +102,7 @@ pub fn candidates(
 
 /// Whether `backend` is in a group for the other kind of player, once routes
 /// are configured. Without routes, groups do not choose anything.
-fn serves_other_kind(config: &Config, backend: &str, auth: AuthKind) -> bool {
+pub(crate) fn serves_other_kind(config: &Config, backend: &str, auth: AuthKind) -> bool {
     !config.routes.is_empty()
         && config
             .groups

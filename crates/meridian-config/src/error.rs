@@ -37,6 +37,8 @@ pub enum ConfigError {
     ZeroLookupsPerMinute,
     /// `status-sample` is above [`crate::MAX_STATUS_SAMPLE`].
     StatusSampleTooLarge(u32),
+    /// `[commands] enabled` lists a command twice.
+    DuplicateCommand(&'static str),
     /// `forwarding-secret` is empty while backends are configured.
     MissingForwardingSecret,
     /// A setting names a backend that is not configured. `setting` says where,
@@ -133,6 +135,9 @@ impl fmt::Display for ConfigError {
                  {positive}: a free name can become an account's at any time, so \"no account\" \
                  is remembered for less time than \"account\""
             ),
+            ConfigError::DuplicateCommand(name) => {
+                write!(f, "[commands] enabled lists \"{name}\" twice")
+            }
             ConfigError::StatusSampleTooLarge(n) => write!(
                 f,
                 "status-sample = {n} is too large: the server list shows at most {} names",
