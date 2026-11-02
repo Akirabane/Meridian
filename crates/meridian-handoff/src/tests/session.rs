@@ -96,3 +96,18 @@ fn the_proxy_answers_its_commands() {
     drop(source);
     run.join().unwrap().unwrap();
 }
+
+/// A message for the player goes to their chat.
+#[test]
+fn the_player_is_told_in_the_chat() {
+    let mut bench = bench();
+    bench.handle.tell("Moving you to east");
+    let (id, payload) = bench.player.recv().unwrap();
+    match decode(id, &payload) {
+        C::SystemChat(chat) => assert_eq!(
+            horizon_protocol::text::plain(&chat.content, &Default::default()),
+            "Moving you to east"
+        ),
+        other => panic!("{other:?}"),
+    }
+}

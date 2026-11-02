@@ -46,6 +46,8 @@ pub(crate) struct Preparing {
     pub positions: u32,
     pub batches: u32,
     pub last_batch: Option<Instant>,
+    /// When the target last sent anything.
+    pub last_packet: Option<Instant>,
     loaded: bool,
     /// Packets the view does not keep but the client needs from the target, sent
     /// after the delta: the command tree, recipes, advancements, the player's own
@@ -71,6 +73,7 @@ impl Target {
                 positions: 0,
                 batches: 0,
                 last_batch: None,
+                last_packet: None,
                 loaded: false,
                 extras: Vec::new(),
                 ended: None,
@@ -90,6 +93,7 @@ impl Target {
         if !state.preparing {
             return false;
         }
+        state.last_packet = Some(Instant::now());
         state.take(writer, id, payload);
         self.changed.notify_all();
         true

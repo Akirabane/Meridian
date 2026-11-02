@@ -8,6 +8,7 @@
 use crate::log::{debug, info, warning};
 use crate::session::{Player, hyphenated};
 use crate::state::Proxy;
+use crate::switching;
 use meridian_config::Config;
 use std::io::BufRead;
 use std::sync::Arc;
@@ -59,9 +60,15 @@ impl Commands {
                 servers,
             ),
             command(
+                "switch",
+                "switch <player> <server>",
+                "moves a player to another backend while they stay connected",
+                switch,
+            ),
+            command(
                 "send",
                 "send <player|all> <server>",
-                "moves players to another backend (not available yet)",
+                "moves players to another backend, one after the other, as switch does",
                 send,
             ),
             command(
@@ -266,10 +273,28 @@ fn count(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+fn switch(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
+    match args {
+        [who, _] if who.eq_ignore_ascii_case("all") => Err(format!(
+            "{}; to move every player, type send all <server>",
+            usage("switch", commands)
+        )),
+        [who, server] => move_players(proxy, who, server),
+        _ => Err(usage("switch", commands)),
+    }
+}
+
 fn send(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
     let [who, server] = args else {
         return Err(usage("send", commands));
     };
+    move_players(proxy, who, server)
+}
+
+/// Moves the player `who`, or every player for `all`, to `server`, one after the
+/// other: a line for each, which says how it went or at which step it failed.
+/// Each player is told too.
+fn move_players(proxy: &Proxy, who: &str, server: &str) -> Reply {
     let config = proxy.config();
     let Some(backend) = config.backend(server) else {
         return Err(format!(
@@ -295,14 +320,39 @@ fn send(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
             format!("already on {}", backend.name)
         });
     }
-    let names: Vec<&str> = moving.iter().map(|p| p.name.as_str()).collect();
-    let line = format!(
-        "transfer not available yet: {} would move to {}",
-        names.join(", "),
-        backend.name
-    );
-    info!("{line}");
-    Ok(vec![line])
+    let mut lines = Vec::new();
+    let mut failed = 0;
+    for player in &moving {
+        let Some((player, handle)) = proxy.sessions.session(&player.name) else {
+            lines.push(format!("{} left before the switch", player.name));
+            continue;
+        };
+        match switching::switch(
+            &config,
+            &proxy.sessions.switcher,
+            &handle,
+            &player.name,
+            player.address.ip(),
+            &backend.name,
+        ) {
+            Ok(moved) => {
+                let line = moved.describe(&player.name);
+                info!("{line}");
+                handle.tell(&format!("You are now on {}.", moved.to));
+                lines.push(line);
+            }
+            Err(why) => {
+                warning!("{why}");
+                handle.tell(&format!("Could not move you to {}. {why}", backend.name));
+                lines.push(why);
+                failed += 1;
+            }
+        }
+    }
+    match (moving.len(), failed) {
+        (1, 1) => Err(lines.remove(0)),
+        _ => Ok(lines),
+    }
 }
 
 fn kick(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
@@ -448,7 +498,7 @@ fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Open, tests::idle_session};
+    use crate::session::{Open, tests::idle_session_on};
     use horizon_protocol::{
         connection::Connection, crypto::offline_uuid, packets::configuration, text,
     };
@@ -501,7 +551,7 @@ mod tests {
     }
 
     fn join<'a>(proxy: &'a Proxy, name: &str, backend: &str) -> Joined<'a> {
-        let (relay, handle, player, server) = idle_session(name);
+        let (relay, handle, player, server) = idle_session_on(name, backend);
         let open = proxy
             .sessions
             .open(
@@ -531,7 +581,9 @@ mod tests {
     fn help_lists_every_command_and_explains_one() {
         let proxy = proxy();
         let lines = run(&proxy, "help");
-        for name in ["help", "list", "servers", "send", "kick", "reload", "end"] {
+        for name in [
+            "help", "list", "servers", "switch", "send", "kick", "reload", "end",
+        ] {
             assert!(
                 lines.iter().any(|l| l.starts_with(name)),
                 "{name} missing from {lines:?}"
@@ -576,35 +628,42 @@ mod tests {
         );
     }
 
+    /// `switch` and `send` check their arguments and say why a player cannot
+    /// move; switches themselves are tested in `switching`.
     #[test]
-    fn send_checks_its_arguments_and_says_the_transfer_is_not_there_yet() {
+    fn switch_and_send_check_their_arguments() {
         let proxy = proxy();
         assert_eq!(run(&proxy, "send"), ["usage: send <player|all> <server>"]);
         assert_eq!(
             run(&proxy, "send Alex"),
             ["usage: send <player|all> <server>"]
         );
+        assert_eq!(
+            run(&proxy, "switch Alex"),
+            ["usage: switch <player> <server>"]
+        );
+        assert_eq!(
+            run(&proxy, "switch all east"),
+            ["usage: switch <player> <server>; to move every player, type send all <server>"]
+        );
         assert_eq!(run(&proxy, "send all east"), ["no players online"]);
         let _alex = join(&proxy, "Alex", "lobby");
         let _steve = join(&proxy, "Steve", "east");
         assert_eq!(
-            run(&proxy, "send Alex west"),
+            run(&proxy, "switch Alex west"),
             ["there is no server called west; type servers for the list"]
         );
         assert_eq!(
-            run(&proxy, "send Herobrine east"),
+            run(&proxy, "switch Herobrine east"),
             ["Herobrine is not online"]
         );
-        assert_eq!(run(&proxy, "send alex lobby"), ["already on lobby"]);
-        assert_eq!(
-            run(&proxy, "send alex east"),
-            ["transfer not available yet: Alex would move to east"]
-        );
-        // Steve is already on east, so only Alex would move.
-        assert_eq!(
-            run(&proxy, "send all east"),
-            ["transfer not available yet: Alex would move to east"]
-        );
+        assert_eq!(run(&proxy, "switch alex lobby"), ["already on lobby"]);
+        // No sidecar is configured here: the check says so, for each player.
+        let no_sidecar = "Alex could not move from lobby to east: check: lobby has no sidecar \
+                          in the configuration, so no player can be switched to or from it";
+        assert_eq!(run(&proxy, "switch alex east"), [no_sidecar]);
+        // Steve is already on east, so only Alex is tried.
+        assert_eq!(run(&proxy, "send all east"), [no_sidecar]);
         // Nobody was moved or disconnected.
         assert_eq!(proxy.sessions.players().len(), 2);
     }

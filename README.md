@@ -29,10 +29,10 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Connection limit per address | Done | Counted before any packet is read |
 | Backend health | Done | A server that just failed is tried last for a while |
 | Server list status | Done | The proxy's own message, player count, limit and a sample of names |
-| Console | Done | `list`, `servers`, `kick`, `reload`, `end`, `help`; `send` answers but cannot move players yet |
+| Console | Done | `list`, `servers`, `switch`, `send`, `kick`, `reload`, `end`, `help` |
 | Reload | Done | Without a restart; `listen` needs a restart |
-| In-game commands | Done | `/server`, `/hub`, `/lobby`; moving answers "transfer not available yet" |
-| Moving a player to another server | In progress | Neither visible nor seamless switching is available yet |
+| In-game commands | Done | `/server`, `/hub`, `/lobby`; moving starts a seamless switch |
+| Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests; not yet tried on real servers. It needs a sidecar next to each server |
 | A server that stops while players are on it | In progress | The fallback list applies at login only; players on a stopped server are disconnected |
 | Pass-through of a backend's status | Planned | The proxy shows its own |
 | PROXY protocol, permissions file | Planned | |
@@ -120,7 +120,8 @@ Type these in the terminal the proxy runs in.
 | `help [command]` | Lists the commands, or explains one |
 | `list` | Lists the players online and where they are |
 | `servers` | Lists the servers, whether each one answers, and who is on it |
-| `send <player\|all> <server>` | Not available yet: it says where the player would go |
+| `switch <player> <server>` | Moves a player to another server while they stay connected. The answer gives the time and bytes it took, or the step that failed and where the player is; the player is told too |
+| `send <player\|all> <server>` | The same, for one player or, with `all`, for each player in turn |
 | `kick <player> [reason]` | Disconnects a player, telling them why |
 | `reload` | Reads the configuration file again and applies it to the next logins |
 | `end` | Stops the proxy, as Ctrl+C does |
@@ -134,8 +135,8 @@ configuration turns them on or off.
 | Command | What it does |
 | --- | --- |
 | `/server` | Lists the servers the player may join, and says which one they are on |
-| `/server <name>` | Asks to move to a server. Not available yet: the player is told so |
-| `/hub`, `/lobby` | Asks to move to the hub server. Not available yet either |
+| `/server <name>` | Moves the player to a server. They are told when it starts and how it ended |
+| `/hub`, `/lobby` | Moves the player to the hub server |
 
 ## Configuration
 

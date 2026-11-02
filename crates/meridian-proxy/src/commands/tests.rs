@@ -20,14 +20,21 @@ fn config(extra: &str) -> Config {
 
 fn alex_on(backend: &str) -> Typist {
     Typist {
-        name: "Alex".into(),
         auth: AuthKind::Verified,
         backend: backend.into(),
     }
 }
 
+/// The answer as one line: what the player is shown, or `move to <backend>`.
+fn said(answer: Option<Answer>) -> Option<String> {
+    answer.map(|answer| match answer {
+        Answer::Say(line) => line,
+        Answer::Move(target) => format!("move to {target}"),
+    })
+}
+
 fn ask(config: &Config, command: &str) -> Option<String> {
-    answer(config, &alex_on("lobby"), command)
+    said(answer(config, &alex_on("lobby"), command))
 }
 
 #[test]
@@ -39,12 +46,9 @@ fn server_lists_the_backends_and_where_the_player_is() {
 }
 
 #[test]
-fn server_with_a_name_answers_as_send_does() {
+fn server_with_a_name_moves_the_player() {
     let config = config("");
-    assert_eq!(
-        ask(&config, "server east").as_deref(),
-        Some("transfer not available yet: Alex would move to east")
-    );
+    assert_eq!(ask(&config, "server east").as_deref(), Some("move to east"));
     assert_eq!(
         ask(&config, "server lobby").as_deref(),
         Some("You are already on lobby.")
@@ -65,8 +69,8 @@ fn hub_and_lobby_lead_to_the_hub_backend() {
     let config = config("");
     for word in ["hub", "lobby"] {
         assert_eq!(
-            answer(&config, &on_east, word).as_deref(),
-            Some("transfer not available yet: Alex would move to lobby"),
+            said(answer(&config, &on_east, word)).as_deref(),
+            Some("move to lobby"),
             "{word}"
         );
     }
@@ -77,10 +81,7 @@ fn hub_and_lobby_lead_to_the_hub_backend() {
     assert_eq!(ask(&config, "hub now").as_deref(), Some("Usage: /hub"));
     // A hub of its own.
     let config = self::config("[commands]\nhub-backend = \"east\"");
-    assert_eq!(
-        ask(&config, "lobby").as_deref(),
-        Some("transfer not available yet: Alex would move to east")
-    );
+    assert_eq!(ask(&config, "lobby").as_deref(), Some("move to east"));
 }
 
 #[test]
@@ -119,7 +120,7 @@ fn the_list_can_be_withheld() {
     assert!(
         ask(&config, "server east")
             .unwrap()
-            .contains("would move to east")
+            .contains("move to east")
     );
 }
 
@@ -154,24 +155,39 @@ fn backends_of_the_other_kind_are_neither_listed_nor_offered() {
         Some("There is no server called guests.")
     );
     let guest = Typist {
-        name: "guest".into(),
         auth: AuthKind::Unverified,
         backend: "guests".into(),
     };
     assert_eq!(
-        answer(&config, &guest, "server").as_deref(),
+        said(answer(&config, &guest, "server")).as_deref(),
         Some("Servers: guests. You are on guests.")
     );
     assert_eq!(
-        answer(&config, &guest, "hub").as_deref(),
+        said(answer(&config, &guest, "hub")).as_deref(),
         Some("There is no server called lobby.")
     );
 }
 
+/// The hook shows what `answer` says, starts a move through `mover`, and asks
+/// where the player is at each command.
 #[test]
-fn the_hook_answers_like_answer() {
+fn the_hook_answers_and_moves() {
     let config = Arc::new(config(""));
-    let hook = hook(Arc::clone(&config), alex_on("lobby"));
-    assert_eq!(hook("server east"), ask(&config, "server east"));
+    let on = Arc::new(std::sync::Mutex::new("lobby".to_owned()));
+    let where_now = Arc::clone(&on);
+    let hook = hook(
+        Arc::clone(&config),
+        move || alex_on(&where_now.lock().unwrap()),
+        |target: &str| format!("Moving you to {target}..."),
+    );
+    assert_eq!(
+        hook("server east").as_deref(),
+        Some("Moving you to east...")
+    );
     assert_eq!(hook("tell Bob hi"), None);
+    *on.lock().unwrap() = "east".into();
+    assert_eq!(
+        hook("server east").as_deref(),
+        Some("You are already on east.")
+    );
 }

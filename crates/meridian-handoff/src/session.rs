@@ -261,6 +261,25 @@ impl SessionHandle {
         &self.0.profile
     }
 
+    /// Shows the player `message` in the chat. Nothing is sent outside the play
+    /// phase, where the client reads no chat.
+    pub fn tell(&self, message: &str) {
+        let mut down = self.0.down();
+        if down.phase != Phase::Play {
+            return;
+        }
+        let packet = play::Clientbound::SystemChat(play::SystemChat {
+            content: text::literal(message),
+            overlay: false,
+        });
+        let _ = down.writer.send(&packet.encode());
+    }
+
+    /// Whether a switch of this player is under way.
+    pub fn is_switching(&self) -> bool {
+        self.0.switching.load(Ordering::SeqCst)
+    }
+
     /// Whether the session is over for the client: it left, or was closed.
     pub fn is_over(&self) -> bool {
         self.0.client_gone.load(Ordering::SeqCst)
