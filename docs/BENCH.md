@@ -78,12 +78,13 @@ such packets both ways and checks they arrive byte for byte.
   machine was. Loopback hides network latency and losses.
 - **Logins come in a burst.** All the players of a step connect at once, so the login
   figures are those of a burst, not of players arriving one by one.
-- **The proxy polls its listener every 50 ms.** When no connection is waiting, the
-  accept loop of `meridian-proxy` (`serve.rs`) sleeps 50 ms, so a login waits between
-  0 and 50 ms before the proxy reads it. Each phase starts after a random pause, so a
-  run does not line up with that cycle the same way every time; the login figures
-  include this wait, and in a large burst connections are left waiting in the
-  listener's queue or tried again by the client's system.
+- **Listen queues.** The proxy and the stand-in backend each keep a queue of 4,096
+  connections waiting to be accepted. A burst larger than a queue is refused by the
+  system, and the client's system tries again about every half second, which shows
+  in the login figures as steps of 0.5 s. std's listener has a queue of 128, and
+  Windows keeps more than 200 only when asked with `SOMAXCONN_HINT`; Linux holds the
+  queue to `net.core.somaxconn`. Each phase starts after a random pause under
+  100 ms.
 - **CPU on Windows.** Windows charges a process's processor time by clock tick,
   about every 15.6 ms, to whichever thread runs at that moment; the short bursts of
   work of a run fall between ticks and are mostly missed (at 100 players the proxy
@@ -217,5 +218,32 @@ These are observations of one run on one machine, not targets met or promised.
   1.55 s against 39 ms directly, and 478 logins a second were taken against 11,078.
   The waits of about 0.5 and 1.5 s are those of connections tried again by the
   client's system, which fits the proxy's listener filling its queue while the
-  accept loop sleeps its 50 ms (see Limits). This is a fault of the proxy, to be
-  fixed apart and measured again with this bench.
+  accept loop sleeps its 50 ms. That proxy accepted with a 50 ms poll and a queue
+  of 128; the proxy now blocks in accept and keeps a queue of 4,096 (see
+  [Login bursts since](#login-bursts-since)).
+
+### Login bursts since
+
+The proxy used to poll its listener every 50 ms, with std's queue of 128
+connections; it now blocks in accept and keeps a queue of 4,096 (`serve.rs`). Four
+runs, alternating the proxy before (`a7774ed`) and after the change, with the same
+`meridian-bench` (whose stand-in backend also has a queue of 4,096), 10 s windows,
+and 150 s between runs for closed connections to leave TIME_WAIT. The proxy's
+configuration for the bench has `connections-per-minute = 0`, since every player
+comes from 127.0.0.1. Other programs were running: the machine had 3 to 12 cores in
+use before each run. No player failed in any run.
+
+| Players | | Before, run 1 | Before, run 2 | After, run 1 | After, run 2 |
+| --- | --- | --- | --- | --- | --- |
+| 500 | Login p95, through the proxy | 638 ms | 1,005 ms | 100 ms | 72 ms |
+| 500 | Login p95, direct | 40 ms | 163 ms | 28 ms | 26 ms |
+| 500 | Logins a second, through the proxy | 449 | 379 | 3,434 | 4,510 |
+| 500 | Logins a second, direct | 6,124 | 1,609 | 7,621 | 7,855 |
+| 1,000 | Login p95, through the proxy | 1,598 ms | 1,556 ms | 142 ms | 150 ms |
+| 1,000 | Login p95, direct | 76 ms | 76 ms | 73 ms | 67 ms |
+| 1,000 | Logins a second, through the proxy | 467 | 614 | 4,996 | 4,613 |
+| 1,000 | Logins a second, direct | 6,891 | 7,659 | 7,927 | 7,785 |
+
+A login through the proxy is two logins, the player's and the proxy's to the backend,
+so it stays slower than a direct one. The round trips did not change: the relay
+added 72 to 108 µs to the median in every run.
