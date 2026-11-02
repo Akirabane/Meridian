@@ -35,6 +35,32 @@ pub enum ConfigError {
     NegativeCacheLonger { positive: u64, negative: u64 },
     /// `[auth] lookups-per-minute` is zero.
     ZeroLookupsPerMinute,
+    /// A backend has a `sidecar` and no `sidecar-secret-file`.
+    SidecarWithoutSecret(String),
+    /// A backend has a `sidecar-secret-file` and no `sidecar`.
+    SecretWithoutSidecar(String),
+    /// A sidecar's address is not `host:port`.
+    InvalidSidecarAddress {
+        backend: String,
+        address: String,
+        reason: &'static str,
+    },
+    /// A sidecar's secret file cannot be read or is too short.
+    SidecarSecret { backend: String, reason: String },
+    /// Two backends name the same sidecar address.
+    SharedSidecarAddress {
+        first: String,
+        second: String,
+        address: String,
+    },
+    /// Two backends name the same secret file.
+    SharedSidecarSecret {
+        first: String,
+        second: String,
+        path: std::path::PathBuf,
+    },
+    /// `sidecar-timeout-ms` is zero.
+    ZeroSidecarTimeout,
     /// `status-sample` is above [`crate::MAX_STATUS_SAMPLE`].
     StatusSampleTooLarge(u32),
     /// `[commands] enabled` lists a command twice.
@@ -137,6 +163,48 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::DuplicateCommand(name) => {
                 write!(f, "[commands] enabled lists \"{name}\" twice")
+            }
+            ConfigError::SidecarWithoutSecret(backend) => write!(
+                f,
+                "backend \"{backend}\" has a sidecar but no sidecar-secret-file: the secret \
+                 is kept in a file of its own, never in the configuration"
+            ),
+            ConfigError::SecretWithoutSidecar(backend) => write!(
+                f,
+                "backend \"{backend}\" has a sidecar-secret-file but no sidecar address"
+            ),
+            ConfigError::InvalidSidecarAddress {
+                backend,
+                address,
+                reason,
+            } => write!(
+                f,
+                "backend \"{backend}\" has the sidecar address \"{address}\", which is not valid: {reason}"
+            ),
+            ConfigError::SidecarSecret { backend, reason } => {
+                write!(f, "the sidecar secret of backend \"{backend}\": {reason}")
+            }
+            ConfigError::SharedSidecarAddress {
+                first,
+                second,
+                address,
+            } => write!(
+                f,
+                "backends \"{first}\" and \"{second}\" both have the sidecar {address}: each \
+                 backend has a sidecar of its own"
+            ),
+            ConfigError::SharedSidecarSecret {
+                first,
+                second,
+                path,
+            } => write!(
+                f,
+                "backends \"{first}\" and \"{second}\" both use the secret file {}: each \
+                 sidecar has a secret of its own",
+                path.display()
+            ),
+            ConfigError::ZeroSidecarTimeout => {
+                write!(f, "sidecar-timeout-ms must be more than 0")
             }
             ConfigError::StatusSampleTooLarge(n) => write!(
                 f,

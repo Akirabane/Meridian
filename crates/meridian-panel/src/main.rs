@@ -9,7 +9,7 @@ const USAGE: &str = "\
 Usage:
   meridian-panel [BENCH]              Runs the panel for the bench file BENCH
                                       (bench.toml by default) on 127.0.0.1
-  meridian-panel init --dir DIR --horizon-server PATH --meridian PATH [--resources DIR]
+  meridian-panel init --dir DIR --horizon-server PATH --meridian PATH [--resources DIR] [--sidecar PATH]
                                       Writes a bench of a proxy and three servers in DIR
   meridian-panel accept-eula --dir DIR --i-accept-the-minecraft-eula
                                       Accepts the Minecraft EULA for the servers of DIR,
@@ -86,6 +86,7 @@ fn parse_init(args: &[String]) -> Result<init::InitOptions, String> {
         horizon_server: need("--horizon-server")?,
         meridian: need("--meridian")?,
         resources: value(args, "--resources"),
+        sidecar: value(args, "--sidecar"),
     })
 }
 

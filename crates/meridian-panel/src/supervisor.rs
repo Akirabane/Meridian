@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 pub const LOG_LINES: usize = 2000;
 /// Samples of CPU and memory kept per process: five minutes at one every two seconds.
 pub const HISTORY: usize = 150;
+/// The order the whole bench starts in; it stops in the reverse order.
+pub const START_ORDER: [Kind; 3] = [Kind::Server, Kind::Sidecar, Kind::Proxy];
 /// How long an answer's output must be quiet before it is taken as complete.
 pub const QUIET: Duration = Duration::from_millis(700);
 /// How long a command that prints nothing is waited for: longer than the proxy's
@@ -230,7 +232,8 @@ impl Supervisor {
     }
 
     /// Asks the process `name` to stop with its console command, and kills it if it
-    /// has not ended after its stop timeout. Returns at once.
+    /// has not ended after its stop timeout; a process with no console command is
+    /// ended at once. Returns at once.
     pub fn stop(&self, name: &str) -> Result<(), String> {
         let process = Arc::clone(self.process(name)?);
         let run = {
@@ -239,13 +242,15 @@ impl Supervisor {
                 return Err(format!("{name} is not running"));
             };
             let run = running.run;
-            let line = format!("{}\n", process.spec.stop_command);
-            let asked = running.stdin.as_mut().is_some_and(|stdin| {
-                stdin
-                    .write_all(line.as_bytes())
-                    .and_then(|()| stdin.flush())
-                    .is_ok()
-            });
+            let asked = match &process.spec.stop_command {
+                Some(command) => running.stdin.as_mut().is_some_and(|stdin| {
+                    stdin
+                        .write_all(format!("{command}\n").as_bytes())
+                        .and_then(|()| stdin.flush())
+                        .is_ok()
+                }),
+                None => false,
+            };
             inner.state = State::Stopping;
             if !asked {
                 // No console to ask: the process is ended at once.
@@ -253,10 +258,10 @@ impl Supervisor {
             }
             run
         };
-        process.log().push(format!(
-            "[panel] stopping with \"{}\"",
-            process.spec.stop_command
-        ));
+        process.log().push(match &process.spec.stop_command {
+            Some(command) => format!("[panel] stopping with \"{command}\""),
+            None => "[panel] stopping: it has no console, so it is ended".to_owned(),
+        });
         let timeout = process.spec.stop_timeout;
         let _ = thread::Builder::new()
             .name(format!("panel-stop-{name}"))
@@ -304,51 +309,51 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Starts every stopped process: the servers first, then, once they answer or
-    /// after a minute, the proxy. Runs in the background; returns at once.
+    /// Starts every stopped process, kind by kind: the servers, then their
+    /// sidecars once the servers answer, then the proxy once the sidecars answer
+    /// (each stage waits a minute at most). Runs in the background; returns at once.
     pub fn start_all(self: &Arc<Self>) {
         let supervisor = Arc::clone(self);
         let _ = thread::Builder::new()
             .name("panel-start-all".to_owned())
             .spawn(move || {
-                let servers = supervisor.of_kind(Kind::Server);
-                for p in &servers {
-                    supervisor.start_quietly(p);
-                }
-                let until = Instant::now() + Duration::from_secs(60);
-                while Instant::now() < until
-                    && servers.iter().any(|p| p.lock().state == State::Starting)
-                {
-                    thread::sleep(TICK);
-                }
-                for p in supervisor.of_kind(Kind::Proxy) {
-                    supervisor.start_quietly(&p);
+                for kind in START_ORDER {
+                    let stage = supervisor.of_kind(kind);
+                    for p in &stage {
+                        supervisor.start_quietly(p);
+                    }
+                    let until = Instant::now() + Duration::from_secs(60);
+                    while Instant::now() < until
+                        && stage.iter().any(|p| p.lock().state == State::Starting)
+                    {
+                        thread::sleep(TICK);
+                    }
                 }
             });
     }
 
-    /// Stops every running process: the servers first, then the proxy once they
-    /// have ended. Runs in the background; returns at once.
+    /// Stops every running process in the reverse order: the proxy, then the
+    /// sidecars once it has ended, then the servers. Runs in the background;
+    /// returns at once.
     pub fn stop_all(self: &Arc<Self>) {
         let supervisor = Arc::clone(self);
         let _ = thread::Builder::new()
             .name("panel-stop-all".to_owned())
             .spawn(move || {
-                let servers = supervisor.of_kind(Kind::Server);
-                for p in &servers {
-                    let _ = supervisor.stop(&p.spec.name);
-                }
-                let longest = servers
-                    .iter()
-                    .map(|p| p.spec.stop_timeout)
-                    .max()
-                    .unwrap_or_default();
-                let until = Instant::now() + longest + Duration::from_secs(5);
-                while Instant::now() < until && servers.iter().any(|p| p.lock().state.running()) {
-                    thread::sleep(TICK);
-                }
-                for p in supervisor.of_kind(Kind::Proxy) {
-                    let _ = supervisor.stop(&p.spec.name);
+                for kind in START_ORDER.iter().rev() {
+                    let stage = supervisor.of_kind(*kind);
+                    for p in &stage {
+                        let _ = supervisor.stop(&p.spec.name);
+                    }
+                    let longest = stage
+                        .iter()
+                        .map(|p| p.spec.stop_timeout)
+                        .max()
+                        .unwrap_or_default();
+                    let until = Instant::now() + longest + Duration::from_secs(5);
+                    while Instant::now() < until && stage.iter().any(|p| p.lock().state.running()) {
+                        thread::sleep(TICK);
+                    }
                 }
             });
     }

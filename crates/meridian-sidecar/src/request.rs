@@ -8,7 +8,8 @@
 //! | --- | --- |
 //! | expect | `player-expect <uuid> [seconds]` |
 //! | export | `player-export <uuid> [freeze]` |
-//! | import | `player-import <uuid> <json>`, the JSON `{"record": ..., "parts": [...], "announce": bool}` |
+//! | import | `player-import <uuid> <json>`, the JSON `{"record": ..., "parts": [...], "announce": bool, "place": bool}` |
+//! | confirm | `player-confirm <uuid>` |
 //! | release | `player-release <uuid> moved [announce]` or `player-release <uuid> abort` |
 //! | drop | `player-drop <uuid>` |
 //!
@@ -39,7 +40,9 @@ pub enum Request {
     },
     /// Put a record on the held player and let them into the world: every part
     /// of it, or only `parts`; the others are told the player came unless
-    /// `announce` is false.
+    /// `announce` is false. With `place` false, the player stays held after the
+    /// record is applied, until a [`Request::Confirm`] places them or a
+    /// [`Request::Drop`] cancels the arrival.
     Import {
         uuid: String,
         record: Value,
@@ -47,7 +50,11 @@ pub enum Request {
         parts: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         announce: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        place: Option<bool>,
     },
+    /// Place a held player whose record was imported with `place` false.
+    Confirm { uuid: String },
     /// The switch is over: the player has `Moved` away for good, or the switch
     /// was abandoned (`Abort`) and the player stays. `announce` (with `Moved`
     /// only) sends the others the "left the game" line.
@@ -99,6 +106,7 @@ impl Request {
             | Request::Export { uuid, .. }
             | Request::Import { uuid, .. }
             | Request::Release { uuid, .. }
+            | Request::Confirm { uuid }
             | Request::Drop { uuid } => uuid,
         }
     }
@@ -132,6 +140,7 @@ impl Request {
                 record,
                 parts,
                 announce,
+                place,
                 ..
             } => {
                 if !record.is_object() {
@@ -144,6 +153,9 @@ impl Request {
                 }
                 if let Some(announce) = announce {
                     body.insert("announce".into(), Value::Bool(*announce));
+                }
+                if let Some(place) = place {
+                    body.insert("place".into(), Value::Bool(*place));
                 }
                 // Compact JSON has no line break, so the request stays one line.
                 format!("player-import {uuid} {}", Value::Object(body))
@@ -172,6 +184,7 @@ impl Request {
                     "announce goes with moved only: an aborted switch keeps the player".into(),
                 );
             }
+            Request::Confirm { .. } => format!("player-confirm {uuid}"),
             Request::Drop { .. } => format!("player-drop {uuid}"),
         })
     }
@@ -298,6 +311,7 @@ mod tests {
             record: record.clone(),
             parts: None,
             announce: None,
+            place: None,
         });
         let (head, body) = all.split_at(format!("player-import {DASHED} ").len());
         assert_eq!(head, format!("player-import {DASHED} "));
@@ -310,11 +324,12 @@ mod tests {
             record: record.clone(),
             parts: Some(vec!["inventory".into(), "experience".into()]),
             announce: Some(false),
+            place: Some(false),
         });
         let body: Value = serde_json::from_str(some.splitn(3, ' ').nth(2).unwrap()).unwrap();
         assert_eq!(
             body,
-            json!({ "record": record, "parts": ["inventory", "experience"], "announce": false })
+            json!({ "record": record, "parts": ["inventory", "experience"], "announce": false, "place": false })
         );
 
         let e = Request::Import {
@@ -322,6 +337,7 @@ mod tests {
             record: json!("not an object"),
             parts: None,
             announce: None,
+            place: None,
         }
         .endpoint_line()
         .unwrap_err();
@@ -348,6 +364,21 @@ mod tests {
             format!("player-release {DASHED} abort")
         );
         assert!(release(Outcome::Abort, true).endpoint_line().is_err());
+    }
+
+    #[test]
+    fn confirm_is_its_unique_id() {
+        assert_eq!(
+            line(Request::Confirm { uuid: PLAIN.into() }),
+            format!("player-confirm {DASHED}")
+        );
+        let text = format!(r#"{{"op":"confirm","uuid":"{DASHED}"}}"#);
+        assert_eq!(
+            serde_json::from_str::<Request>(&text).unwrap(),
+            Request::Confirm {
+                uuid: DASHED.into()
+            }
+        );
     }
 
     #[test]
