@@ -8,7 +8,7 @@
 //! | --- | --- |
 //! | expect | `player-expect <uuid> [seconds]` |
 //! | export | `player-export <uuid> [freeze]` |
-//! | import | `player-import <uuid> <json>`, the JSON `{"record": ..., "parts": [...], "announce": bool, "place": bool}` |
+//! | import | `player-import <uuid> <json>`, the JSON `{"record": ..., "parts": [...], "announce": bool, "place": bool}`, and with an [`Arrival`] its `position`, `rotation`, `velocity` and `on_ground` |
 //! | confirm | `player-confirm <uuid>` |
 //! | release | `player-release <uuid> moved [announce]` or `player-release <uuid> abort` |
 //! | drop | `player-drop <uuid>` |
@@ -52,6 +52,10 @@ pub enum Request {
         announce: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         place: Option<bool>,
+        /// Where the player arrives, instead of the record's place: with the
+        /// `position` part only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arrival: Option<Arrival>,
     },
     /// Place a held player whose record was imported with `place` false.
     Confirm { uuid: String },
@@ -70,6 +74,62 @@ pub enum Request {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Where an imported player arrives, given in the import request itself: the
+/// target reads only the record's player compound, never the fields above it,
+/// and these take the place of the compound's. Horizon takes them with the
+/// `position` part only (`docs/server.md`, "Where the player arrives").
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Arrival {
+    /// In blocks.
+    pub position: [f64; 3],
+    /// Yaw and pitch, in degrees; Horizon cuts the pitch to ±90.
+    pub rotation: [f32; 2],
+    /// In blocks per tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_ground: Option<bool>,
+}
+
+/// The farthest a coordinate may be, as Horizon checks it.
+pub const MAX_COORDINATE: f64 = 30_000_000.0;
+/// The fastest a velocity component may be, in blocks per tick.
+pub const MAX_VELOCITY: f64 = 100.0;
+
+impl Arrival {
+    /// Why Horizon would refuse it, before it is sent.
+    fn check(&self) -> Result<(), String> {
+        if !self
+            .position
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= MAX_COORDINATE)
+        {
+            return Err(format!(
+                "an arrival position is finite and within {MAX_COORDINATE} blocks: {:?}",
+                self.position
+            ));
+        }
+        if !self.rotation.iter().all(|v| v.is_finite()) {
+            return Err(format!(
+                "an arrival rotation is finite: {:?}",
+                self.rotation
+            ));
+        }
+        if let Some(velocity) = self.velocity
+            && !velocity
+                .iter()
+                .all(|v| v.is_finite() && v.abs() <= MAX_VELOCITY)
+        {
+            return Err(format!(
+                "an arrival velocity is finite and at most {MAX_VELOCITY} blocks per tick: \
+                 {velocity:?}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// How a switch ended, for [`Request::Release`].
@@ -141,10 +201,20 @@ impl Request {
                 parts,
                 announce,
                 place,
+                arrival,
                 ..
             } => {
                 if !record.is_object() {
                     return Err("a record is a JSON object, as player-export gives it".into());
+                }
+                if let Some(arrival) = arrival {
+                    arrival.check()?;
+                    if parts
+                        .as_ref()
+                        .is_some_and(|parts| !parts.iter().any(|p| p == "position"))
+                    {
+                        return Err("an arrival goes with the position part".into());
+                    }
                 }
                 let mut body = Map::new();
                 body.insert("record".into(), record.clone());
@@ -156,6 +226,16 @@ impl Request {
                 }
                 if let Some(place) = place {
                     body.insert("place".into(), Value::Bool(*place));
+                }
+                if let Some(arrival) = arrival {
+                    body.insert("position".into(), Value::from(arrival.position.to_vec()));
+                    body.insert("rotation".into(), Value::from(arrival.rotation.to_vec()));
+                    if let Some(velocity) = arrival.velocity {
+                        body.insert("velocity".into(), Value::from(velocity.to_vec()));
+                    }
+                    if let Some(on_ground) = arrival.on_ground {
+                        body.insert("on_ground".into(), Value::Bool(on_ground));
+                    }
                 }
                 // Compact JSON has no line break, so the request stays one line.
                 format!("player-import {uuid} {}", Value::Object(body))
@@ -312,6 +392,7 @@ mod tests {
             parts: None,
             announce: None,
             place: None,
+            arrival: None,
         });
         let (head, body) = all.split_at(format!("player-import {DASHED} ").len());
         assert_eq!(head, format!("player-import {DASHED} "));
@@ -325,6 +406,7 @@ mod tests {
             parts: Some(vec!["inventory".into(), "experience".into()]),
             announce: Some(false),
             place: Some(false),
+            arrival: None,
         });
         let body: Value = serde_json::from_str(some.splitn(3, ' ').nth(2).unwrap()).unwrap();
         assert_eq!(
@@ -338,10 +420,106 @@ mod tests {
             parts: None,
             announce: None,
             place: None,
+            arrival: None,
         }
         .endpoint_line()
         .unwrap_err();
         assert!(e.contains("JSON object"), "{e}");
+    }
+
+    /// An arrival goes to the backend as the import's own fields, beside the
+    /// record, and crosses the proxy's exchange with the sidecar as it is.
+    #[test]
+    fn an_arrival_goes_beside_the_record() {
+        let arrival = Arrival {
+            position: [12.5, 71.0, -3.5],
+            rotation: [45.0, 10.0],
+            velocity: Some([0.0, 0.0, 0.0]),
+            on_ground: Some(true),
+        };
+        let request = Request::Import {
+            uuid: PLAIN.into(),
+            record: json!({ "version": 1 }),
+            parts: None,
+            announce: None,
+            place: Some(false),
+            arrival: Some(arrival),
+        };
+        let body: Value =
+            serde_json::from_str(line(request.clone()).splitn(3, ' ').nth(2).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "record": { "version": 1 },
+                "place": false,
+                "position": [12.5, 71.0, -3.5],
+                "rotation": [45.0, 10.0],
+                "velocity": [0.0, 0.0, 0.0],
+                "on_ground": true,
+            })
+        );
+        let wire = serde_json::to_string(&request).unwrap();
+        assert_eq!(serde_json::from_str::<Request>(&wire).unwrap(), request);
+        // Velocity and the ground are optional.
+        let bare = Request::Import {
+            uuid: PLAIN.into(),
+            record: json!({ "version": 1 }),
+            parts: Some(vec!["position".into()]),
+            announce: None,
+            place: None,
+            arrival: Some(Arrival {
+                velocity: None,
+                on_ground: None,
+                ..arrival
+            }),
+        };
+        let body: Value = serde_json::from_str(line(bare).splitn(3, ' ').nth(2).unwrap()).unwrap();
+        assert!(body.get("velocity").is_none() && body.get("on_ground").is_none());
+    }
+
+    /// What Horizon would refuse is refused before it is sent: an arrival without
+    /// the position part, or numbers out of its bounds.
+    #[test]
+    fn an_arrival_horizon_would_refuse_is_not_sent() {
+        let arrival = Arrival {
+            position: [0.0, 64.0, 0.0],
+            rotation: [0.0, 0.0],
+            velocity: None,
+            on_ground: None,
+        };
+        let import = |parts: Option<Vec<String>>, arrival: Arrival| {
+            Request::Import {
+                uuid: PLAIN.into(),
+                record: json!({}),
+                parts,
+                announce: None,
+                place: None,
+                arrival: Some(arrival),
+            }
+            .endpoint_line()
+        };
+        let e = import(Some(vec!["inventory".into()]), arrival).unwrap_err();
+        assert!(e.contains("position part"), "{e}");
+        for bad in [
+            Arrival {
+                position: [f64::NAN, 64.0, 0.0],
+                ..arrival
+            },
+            Arrival {
+                position: [30_000_001.0, 64.0, 0.0],
+                ..arrival
+            },
+            Arrival {
+                rotation: [f32::INFINITY, 0.0],
+                ..arrival
+            },
+            Arrival {
+                velocity: Some([0.0, 101.0, 0.0]),
+                ..arrival
+            },
+        ] {
+            assert!(import(None, bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

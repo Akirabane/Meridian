@@ -1,7 +1,7 @@
 //! The switch itself: prepare, freeze, hand over, commit (DESIGN.md section 5).
 use crate::{
     configure::{Digest, configure},
-    control::{Outcome, PlayerControl, Record, record_dimension, set_pose, uuid_text},
+    control::{Arrival, Outcome, PlayerControl, Record, record_dimension, uuid_text},
     prepare::Target,
     session::{Lane, SessionHandle, Shared, add, encode, lock, spawn_lane},
 };
@@ -222,6 +222,8 @@ struct Run<'a> {
     lane: Option<Arc<Lane>>,
     /// The parts of the record the target takes.
     parts: Option<Vec<String>>,
+    /// Whether the player's place goes to the target.
+    carry: bool,
 }
 
 impl Run<'_> {
@@ -247,6 +249,23 @@ impl Run<'_> {
         self.abandon_target();
     }
 
+    /// Where the player arrives on the target when their place is carried: where
+    /// their client last said it stands and how it looks, standing still, as it
+    /// said it stood. `None` without carrying, or when the client never said.
+    fn arrival(&self) -> Option<Arrival> {
+        if !self.carry {
+            return None;
+        }
+        let pose = self.shared.up().client_pose?;
+        Some(Arrival {
+            position: pose.at,
+            rotation: [pose.yaw, pose.pitch],
+            // The client never sends its velocity; the record's is the export's,
+            // which the client has left behind since.
+            velocity: Some([0.0; 3]),
+            on_ground: pose.on_ground,
+        })
+    }
     fn client_gone(&self) -> bool {
         self.shared.client_gone.load(Ordering::SeqCst)
     }
@@ -260,7 +279,14 @@ impl Run<'_> {
         let placed = match record {
             Some(record) => self
                 .target
-                .import(&self.uuid, record, self.parts.clone(), Some(false), true)
+                .import(
+                    &self.uuid,
+                    record,
+                    self.parts.clone(),
+                    Some(false),
+                    true,
+                    self.arrival(),
+                )
                 .is_ok(),
             None => self.target.confirm(&self.uuid).is_ok(),
         };
@@ -310,6 +336,7 @@ pub fn switch(
         source_lane: Arc::clone(&shared.up().lane),
         lane: None,
         parts: settings.parts(),
+        carry: settings.carry_position,
     };
     if shared.switching.swap(true, Ordering::SeqCst) {
         return Err(run.fail(Step::Check, "a switch of this player is already under way"));
@@ -516,19 +543,14 @@ pub fn switch(
     // A carried position is where the client stands now, not where the source
     // froze the player: what the client did since the export is kept, so it is
     // not pulled back.
-    let mut record = record;
-    let client_pose = shared.up().client_pose;
-    if settings.carry_position
-        && let Some(pose) = client_pose
-    {
-        set_pose(&mut record, pose.at, pose.yaw, pose.pitch);
-    }
+    let arrival = run.arrival();
     let imported = match run.target.import(
         &run.uuid,
         record,
         run.parts.clone(),
         Some(settings.announce_arrival),
         false,
+        arrival,
     ) {
         Ok(imported) => imported,
         Err(e) => {
@@ -540,14 +562,14 @@ pub fn switch(
         }
     };
     let imported_at = Instant::now();
-    note(&match (settings.carry_position, client_pose) {
+    note(&match (settings.carry_position, arrival) {
         (false, _) => "hand over: the target took the record, all but the position".to_owned(),
-        (true, Some(pose)) => format!(
+        (true, Some(arrival)) => format!(
             "hand over: the target took the record, at the client's place {:.2} {:.2} {:.2} \
              (recentered: {})",
-            pose.at[0],
-            pose.at[1],
-            pose.at[2],
+            arrival.position[0],
+            arrival.position[1],
+            arrival.position[2],
             imported
                 .recentered
                 .map_or("not said".to_owned(), |r| r.to_string())

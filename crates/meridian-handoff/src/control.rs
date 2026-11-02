@@ -7,10 +7,12 @@
 use meridian_sidecar::client::SidecarClient;
 use serde_json::Value;
 
-pub use meridian_sidecar::request::Outcome;
+pub use meridian_sidecar::request::{Arrival, Outcome};
 
 /// A player record as `player-export` gives it. The proxy carries it from one
-/// backend to the other without reading it, except for its dimension.
+/// backend to the other without reading it, except for its dimension. The
+/// target reads only its player compound: the fields above it are for the
+/// proxy's checks and logs, and changing them changes nothing.
 pub type Record = Value;
 
 /// The player requests of a switch. Each error is the reason the backend or its
@@ -27,7 +29,8 @@ pub trait PlayerControl {
     /// Puts `record` on the held player: every part of it, or only `parts`. With
     /// `place`, the player is placed in the world at once; without, they stay held
     /// until [`PlayerControl::confirm`], and a [`PlayerControl::drop_player`] still
-    /// cancels the arrival with nothing saved or said.
+    /// cancels the arrival with nothing saved or said. An `arrival` puts the
+    /// player there rather than at the record's place, with the `position` part.
     fn import(
         &mut self,
         uuid: &str,
@@ -35,6 +38,7 @@ pub trait PlayerControl {
         parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
+        arrival: Option<Arrival>,
     ) -> Result<Imported, String>;
 
     /// Places a player imported without being placed, and announces them if the
@@ -72,9 +76,11 @@ impl PlayerControl for SidecarClient {
         parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
+        arrival: Option<Arrival>,
     ) -> Result<Imported, String> {
-        let answer = SidecarClient::import(self, uuid, record, parts, announce, Some(place))
-            .map_err(|e| e.to_string())?;
+        let answer =
+            SidecarClient::import(self, uuid, record, parts, announce, Some(place), arrival)
+                .map_err(|e| e.to_string())?;
         Ok(Imported {
             recentered: answer.get("recentered").and_then(Value::as_bool),
         })
@@ -107,14 +113,6 @@ pub struct Imported {
     pub recentered: Option<bool>,
 }
 
-/// Puts `at` and the look `yaw`, `pitch` in a record, as its `position` and
-/// `rotation`: where the player's client stands when the record is imported.
-pub fn set_pose(record: &mut Record, at: [f64; 3], yaw: f32, pitch: f32) {
-    if let Some(fields) = record.as_object_mut() {
-        fields.insert("position".into(), Value::from(at.to_vec()));
-        fields.insert("rotation".into(), Value::from(vec![yaw, pitch]));
-    }
-}
 /// A unique id as the requests take it: 32 hexadecimal digits.
 pub fn uuid_text(uuid: [u8; 16]) -> String {
     format!("{:032x}", u128::from_be_bytes(uuid))

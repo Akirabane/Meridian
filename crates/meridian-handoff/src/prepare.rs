@@ -292,13 +292,21 @@ fn send_body(writer: &Mutex<ConnWriter>, body: &[u8]) {
     let _ = lock(writer).send(body);
 }
 
-/// Where the target last put the player, and how they look.
+/// Where the player stands and how they look: where the target last put them,
+/// or where their client last said it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Pose {
     pub at: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// Whether the client last said it stands on the ground; `None` until a move
+    /// said.
+    pub on_ground: Option<bool>,
 }
+
+/// The flag of a move that says the client stands on the ground
+/// (`ServerboundMovePlayerPacket`'s first bit).
+const ON_GROUND: u8 = 1;
 
 impl Pose {
     /// The pose a client says it has, from a packet it sends in the play phase:
@@ -311,16 +319,34 @@ impl Pose {
             s::MOVE_PLAYER_POS
                 | s::MOVE_PLAYER_POS_ROT
                 | s::MOVE_PLAYER_ROT
+                | s::MOVE_PLAYER_STATUS_ONLY
                 | s::ACCEPT_TELEPORTATION
         ) {
             return None;
         }
-        let pose = |at, yaw, pitch| Some(Pose { at, yaw, pitch });
+        let ground = |flags: u8| Some(flags & ON_GROUND != 0);
+        let pose = |at, yaw, pitch, on_ground| {
+            Some(Pose {
+                at,
+                yaw,
+                pitch,
+                on_ground,
+            })
+        };
         match Serverbound::decode(id, payload).ok()? {
-            Serverbound::MovePlayerPos(p) => pose([p.x, p.y, p.z], self.yaw, self.pitch),
-            Serverbound::MovePlayerPosRot(p) => pose([p.x, p.y, p.z], p.yaw, p.pitch),
-            Serverbound::MovePlayerRot(p) => pose(self.at, p.yaw, p.pitch),
-            Serverbound::AcceptTeleportation(p) => pose([p.x, p.y, p.z], p.yaw, p.pitch),
+            Serverbound::MovePlayerPos(p) => {
+                pose([p.x, p.y, p.z], self.yaw, self.pitch, ground(p.flags))
+            }
+            Serverbound::MovePlayerPosRot(p) => {
+                pose([p.x, p.y, p.z], p.yaw, p.pitch, ground(p.flags))
+            }
+            Serverbound::MovePlayerRot(p) => pose(self.at, p.yaw, p.pitch, ground(p.flags)),
+            Serverbound::MovePlayerStatus(p) => {
+                pose(self.at, self.yaw, self.pitch, ground(p.flags))
+            }
+            Serverbound::AcceptTeleportation(p) => {
+                pose([p.x, p.y, p.z], p.yaw, p.pitch, self.on_ground)
+            }
             _ => None,
         }
     }

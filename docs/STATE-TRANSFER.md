@@ -347,14 +347,20 @@ A JSON object:
   code to write and read it exists and is tested. The proxy never decodes it.
 - The fields above it are the ones the proxy reads for itself: it checks the
   dimension and the position against the target before it imports, and logs
-  them.- With `switch-carry-position = true`, the proxy writes `position` and
-  `rotation` itself just before the import: where the player's client last said
-  it stands and how it looks (its moves, and its answers to teleports). The
-  client keeps moving while the source holds the player frozen; taking the
-  source's place of the export would pull the player back by what they did
-  meanwhile. Only the import of a carried position moves the player on the
-  target, so only then does the hand-over wait for the chunks around the new
-  place (the import's `recentered`, or the view's centre moving after it).
+  them. The target reads only the `player` compound: changing these fields
+  changes nothing there.
+- Where the player arrives is given in the import request itself, not in the
+  record. With `switch-carry-position = true` the proxy sends `position`,
+  `rotation`, `velocity` and `on_ground` beside the record (Horizon's
+  `docs/server.md`, "Where the player arrives", from fork commit 46bfe5de0),
+  with the `position` part; they take the place of the compound's. They are
+  where the player's client last said it stands and how it looks (its moves, and
+  its answers to teleports), standing still. The client keeps moving while the
+  source holds the player frozen; the export's place would pull the player back
+  by what they did meanwhile. Only the import of a carried position can move the
+  player on the target, so only then does the hand-over wait for the chunks
+  around the new place, when the import's `recentered` says the chunk changed
+  (or, without it, the view's centre moves after the import).
 - `live` holds what the compound loses today (section 3). Once Horizon's save
   path carries them, they move into the compound and `live` empties.
 - `advancements` is the JSON that `save_guest_records` writes.

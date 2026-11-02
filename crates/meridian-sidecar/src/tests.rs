@@ -92,7 +92,7 @@ fn every_request_reaches_the_backend_and_its_answer_comes_back() {
         json!({ "echo": format!("player-export {DASHED}") })
     );
     client
-        .import(UUID, json!({ "version": 1 }), None, None, None)
+        .import(UUID, json!({ "version": 1 }), None, None, None, None)
         .unwrap();
     client.release(UUID, Outcome::Moved, false).unwrap();
     client.drop_player(UUID).unwrap();
@@ -464,6 +464,7 @@ fn a_switch_goes_through_the_contract_line_by_line() {
             Some(vec!["inventory".into(), "experience".into()]),
             Some(false),
             None,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -471,7 +472,9 @@ fn a_switch_goes_through_the_contract_line_by_line() {
         json!({ "ok": true, "parts": ["inventory", "experience"], "placed": true, "announced": false })
     );
     // ...or whole, with the default announce.
-    let whole = client.import(UUID, record(), None, None, None).unwrap();
+    let whole = client
+        .import(UUID, record(), None, None, None, None)
+        .unwrap();
     assert_eq!(whole["announced"], json!(true));
     assert_eq!(whole["parts"], json!(ALL_PARTS));
 
@@ -503,7 +506,9 @@ fn the_backends_refusals_come_back_as_refusals() {
     let mut client = running.client(SECRET);
     let mut old = record();
     old["data_version"] = json!(4000);
-    let error = client.import(UUID, old, None, None, None).unwrap_err();
+    let error = client
+        .import(UUID, old, None, None, None, None)
+        .unwrap_err();
     assert!(
         matches!(&error, Error::Refused(why) if why.contains("another version")),
         "{error}"
@@ -528,7 +533,7 @@ fn a_request_that_cannot_be_a_line_never_reaches_the_backend() {
         ),
         (
             client
-                .import(UUID, json!([1, 2]), None, None, None)
+                .import(UUID, json!([1, 2]), None, None, None, None)
                 .unwrap_err(),
             "JSON object",
         ),
@@ -557,7 +562,7 @@ fn an_import_without_placing_is_confirmed_later() {
         "{error}"
     );
     let imported = client
-        .import(UUID, record(), None, Some(true), Some(false))
+        .import(UUID, record(), None, Some(true), Some(false), None)
         .unwrap();
     assert_eq!(imported["placed"], json!(false));
     assert_eq!(imported["announced"], json!(true));
@@ -577,7 +582,7 @@ fn a_dropped_arrival_cannot_be_confirmed() {
     let running = Running::start(contract(), WAIT);
     let mut client = running.client(SECRET);
     client
-        .import(UUID, record(), None, None, Some(false))
+        .import(UUID, record(), None, None, Some(false), None)
         .unwrap();
     assert_eq!(
         client.drop_player(UUID).unwrap(),
