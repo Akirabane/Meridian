@@ -116,8 +116,13 @@ fn answer(body: &str, settings: &Settings) -> Value {
         Ok(request) => request,
         Err(e) => return json!({ "ok": false, "error": format!("not a player request: {e}") }),
     };
-    let asked = (settings.endpoint)()
-        .and_then(|endpoint| endpoint.ask(&request.endpoint_line(), settings.endpoint_timeout));
+    // A request that cannot be a well-formed line never reaches the backend.
+    let line = match request.endpoint_line() {
+        Ok(line) => line,
+        Err(why) => return json!({ "ok": false, "error": why }),
+    };
+    let asked =
+        (settings.endpoint)().and_then(|endpoint| endpoint.ask(&line, settings.endpoint_timeout));
     match asked {
         Ok(Value::Object(map)) if map.contains_key("error") => {
             json!({ "ok": false, "error": map["error"] })

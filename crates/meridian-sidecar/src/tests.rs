@@ -17,6 +17,8 @@ use std::time::Duration;
 const SECRET: &[u8] = b"the secret the proxy and the sidecar share";
 const TOKEN: &str = "the backend's own token";
 const UUID: &str = "0123456789abcdef0123456789abcdef";
+/// [`UUID`] as Horizon writes it.
+const DASHED: &str = "01234567-89ab-cdef-0123-456789abcdef";
 const WAIT: Duration = Duration::from_secs(3);
 
 /// A sidecar on 127.0.0.1 in front of a fake endpoint that answers with `answer`.
@@ -83,14 +85,16 @@ fn echo() -> fake::Answer {
 fn every_request_reaches_the_backend_and_its_answer_comes_back() {
     let running = Running::start(echo(), WAIT);
     let mut client = running.client(SECRET);
-    client.expect(UUID, "Alex").unwrap();
-    let exported = client.export(UUID).unwrap();
+    client.expect(UUID, None).unwrap();
+    let exported = client.export(UUID, false).unwrap();
     assert_eq!(
         exported,
-        json!({ "echo": format!(r#"player-export {{"uuid":"{UUID}"}}"#) })
+        json!({ "echo": format!("player-export {DASHED}") })
     );
-    client.import(UUID, json!({ "health": 20.0 })).unwrap();
-    client.release(UUID, Outcome::Moved).unwrap();
+    client
+        .import(UUID, json!({ "version": 1 }), None, None)
+        .unwrap();
+    client.release(UUID, Outcome::Moved, false).unwrap();
     client.drop_player(UUID).unwrap();
     let commands: Vec<String> = running
         .seen
@@ -115,14 +119,14 @@ fn every_request_reaches_the_backend_and_its_answer_comes_back() {
 fn a_client_with_another_secret_is_refused_and_nothing_reaches_the_backend() {
     let running = Running::start(echo(), WAIT);
     let mut client = running.client(b"not the shared secret");
-    let error = client.export(UUID).unwrap_err();
+    let error = client.export(UUID, false).unwrap_err();
     assert!(
         matches!(&error, Error::Refused(why) if why.contains("signature")),
         "{error}"
     );
     assert!(running.seen.lock().unwrap().is_empty());
     // The connection is not used again.
-    assert!(client.export(UUID).is_err());
+    assert!(client.export(UUID, false).is_err());
 }
 
 /// A raw connection: its challenge, and a way to send lines and read answers.
@@ -192,7 +196,7 @@ fn a_replayed_request_is_refused_on_its_connection_and_on_another() {
 fn a_silent_backend_is_reported_in_time() {
     let running = Running::start(Arc::new(|_| None), Duration::from_millis(300));
     let mut client = running.client(SECRET);
-    let error = client.export(UUID).unwrap_err();
+    let error = client.export(UUID, false).unwrap_err();
     assert!(
         matches!(&error, Error::Refused(why) if why.contains("no answer in time")),
         "{error}"
@@ -215,7 +219,7 @@ fn a_silent_sidecar_times_out_on_the_client() {
         std::thread::sleep(Duration::from_secs(1));
     });
     let mut client = SidecarClient::connect(&address, SECRET, Duration::from_millis(200)).unwrap();
-    assert!(matches!(client.export(UUID), Err(Error::Timeout)));
+    assert!(matches!(client.export(UUID, false), Err(Error::Timeout)));
     mute.join().unwrap();
 }
 
@@ -223,7 +227,7 @@ fn a_silent_sidecar_times_out_on_the_client() {
 fn a_backend_answer_that_is_not_json_is_an_error() {
     let running = Running::start(Arc::new(|_| Some("not json".to_owned())), WAIT);
     let mut client = running.client(SECRET);
-    let error = client.export(UUID).unwrap_err().to_string();
+    let error = client.export(UUID, false).unwrap_err().to_string();
     assert!(error.contains("did not answer with JSON"), "{error}");
 }
 
@@ -234,7 +238,7 @@ fn a_backend_error_is_passed_on() {
         WAIT,
     );
     let mut client = running.client(SECRET);
-    let error = client.export(UUID).unwrap_err();
+    let error = client.export(UUID, false).unwrap_err();
     assert!(
         matches!(&error, Error::Refused(why) if why == "no such player"),
         "{error}"
@@ -262,7 +266,7 @@ fn a_forged_reply_is_refused_by_the_client() {
         writeln!(writer, "{forged}").unwrap();
     });
     let mut client = SidecarClient::connect(&address, SECRET, WAIT).unwrap();
-    let error = client.export(UUID).unwrap_err();
+    let error = client.export(UUID, false).unwrap_err();
     assert!(
         matches!(error, Error::Wire(wire::WireError::BadMac)),
         "{error}"
