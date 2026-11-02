@@ -1,5 +1,8 @@
 //! A view: the state one side of a switch describes, read from its packets.
-use crate::{Packet, chunks::Chunks, entities::Entities, ids, player::Player, world::World};
+use crate::{
+    Packet, bossbars::BossBars, chunks::Chunks, entities::Entities, ids, player::Player,
+    scoreboard::Scoreboard, tab::Tab, world::World,
+};
 use horizon_protocol::{
     buf::Reader,
     packets::play::{self, Clientbound as C, relative},
@@ -32,6 +35,9 @@ pub struct View {
     pub(crate) entities: Entities,
     pub(crate) player: Player,
     pub(crate) world: World,
+    pub(crate) tab: Tab,
+    pub(crate) bossbars: BossBars,
+    pub(crate) scoreboard: Scoreboard,
 }
 
 impl View {
@@ -55,6 +61,9 @@ impl View {
             entities: Entities::default(),
             player: Player::default(),
             world: World::default(),
+            tab: Tab::default(),
+            bossbars: BossBars::default(),
+            scoreboard: Scoreboard::default(),
         }
     }
 
@@ -102,6 +111,9 @@ impl View {
                     ..Player::default()
                 };
                 self.world = World::default();
+                self.tab = Tab::default();
+                self.bossbars = BossBars::default();
+                self.scoreboard = Scoreboard::default();
             }
             // A new player in a new level; the world values the server sends again.
             C::Respawn(p) => {
@@ -123,6 +135,9 @@ impl View {
                 self.entities.apply(other);
                 self.player.apply(other, self.player_id);
                 self.world.apply(other);
+                self.tab.apply(other);
+                self.bossbars.apply(other);
+                self.scoreboard.apply(other);
             }
         }
         Ok(())
@@ -166,7 +181,8 @@ impl View {
 
 impl PartialEq for View {
     /// Two views are equal when a client would hold the same: the same chunks,
-    /// entities, position, player state and world values. Whether packets were kept, and the player's own id,
+    /// entities, position, player state, world values, player list, boss bars and
+    /// scoreboard. Whether packets were kept, and the player's own id,
     /// which each server numbers its own way, do not count.
     fn eq(&self, other: &Self) -> bool {
         self.placed == other.placed
@@ -174,6 +190,9 @@ impl PartialEq for View {
             && self.entities == other.entities
             && self.player == other.player
             && self.world == other.world
+            && self.tab == other.tab
+            && self.bossbars == other.bossbars
+            && self.scoreboard == other.scoreboard
     }
 }
 
@@ -232,5 +251,14 @@ fn read(id: i32) -> bool {
             | ids::TICKING_STATE
             | ids::TICKING_STEP
             | ids::SET_SIMULATION_DISTANCE
+            | ids::PLAYER_INFO_UPDATE
+            | ids::PLAYER_INFO_REMOVE
+            | ids::TAB_LIST
+            | ids::BOSS_EVENT
+            | ids::SET_OBJECTIVE
+            | ids::SET_SCORE
+            | ids::RESET_SCORE
+            | ids::SET_DISPLAY_OBJECTIVE
+            | ids::SET_PLAYER_TEAM
     )
 }
