@@ -4,13 +4,33 @@ A small program that runs next to each Horizon server behind a Meridian proxy. I
 talks to the server's local control endpoint and offers the proxy the player
 requests of a switch (DESIGN.md section 6, decision 8):
 
-| Request | What the backend does |
-| --- | --- |
-| `expect` | holds the player when they log in through the proxy |
-| `export` | gives the player's record, to move to another backend |
-| `import` | puts a record on the held player |
-| `release moved` / `release abort` | ends a switch: the player has gone for good, or stays |
-| `drop` | forgets an expected or held player |
+| Request | Line on the server's endpoint | What the backend does |
+| --- | --- | --- |
+| `expect` (`seconds`) | `player-expect <uuid> [seconds]` | holds the player when they log in through the proxy within that time (10 s by default, 60 at most) |
+| `export` (`freeze`) | `player-export <uuid> [freeze]` | gives the player's record, to move to another backend; with `freeze`, stops acting on the player's own inputs until a release |
+| `import` (`record`, `parts`, `announce`) | `player-import <uuid> {"record":…,"parts":[…],"announce":…}` | puts the record on the held player, whole or in parts, and lets them into the world |
+| `release` (`moved` with `announce`, or `abort`) | `player-release <uuid> moved [announce]`, `player-release <uuid> abort` | ends a switch: the player has gone for good, or stays |
+| `drop` | `player-drop <uuid>` | forgets an expected or held player |
+
+The lines are those of Horizon's held-player work (its `docs/server.md`, "Players
+arriving from another server"). A request names the player by a unique id of 32
+hexadecimal digits, with or without dashes; the sidecar writes it as Horizon does,
+lowercase with dashes. It carries a player's record exactly as the backend gave
+it: the sidecar never reads it, and the backend that imports it checks it. A
+request that cannot become a well-formed line (an id that is not one, a time of
+0 or over 60 seconds, `announce` with `abort`, a record that is not a JSON object)
+is refused by the sidecar and never reaches the backend. The backend's answer comes
+back as it is: `{"ok": true, ...}`, or a refusal with its `error`.
+
+A request from the proxy is one JSON object with an `op`, for example:
+
+```json
+{"op": "export", "uuid": "123e4567-e89b-12d3-a456-426614174000", "freeze": true}
+{"op": "import", "uuid": "123e4567e89b12d3a456426614174000", "record": {...}, "parts": ["inventory"], "announce": false}
+{"op": "release", "uuid": "123e4567-e89b-12d3-a456-426614174000", "outcome": "moved", "announce": true}
+```
+
+Options left out take Horizon's defaults; any other field is refused.
 
 The server needs no network change: it answers these only on its control
 endpoint, which listens on 127.0.0.1 with a token.
