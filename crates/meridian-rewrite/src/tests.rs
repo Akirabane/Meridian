@@ -188,3 +188,37 @@ fn entity_ids_are_swapped_in_serverbound_packets() {
         })
     );
 }
+
+#[test]
+fn answers_the_proxy_gave_and_old_answers_are_dropped() {
+    let mut t = Teleports::default();
+    // The old backend's correction 4 is still unanswered at the switch.
+    t.sent(4);
+    t.switched();
+    // The target's correction 1 was answered by the proxy during the prepare.
+    t.answered_by_proxy(1);
+    assert!(!t.forward(4), "an answer owed to the old backend");
+    assert!(!t.forward(1), "an answer the proxy already gave");
+    // Each is dropped once: the target may use the same id later.
+    assert!(t.forward(1));
+    t.sent(2);
+    assert!(t.forward(2));
+}
+
+#[test]
+fn keep_alives_and_pings_are_answered_with_their_payload() {
+    let id = 0x0102_0304_0506_0708i64.to_be_bytes();
+    assert_eq!(
+        answer(false, ids_play::clientbound::KEEP_ALIVE, &id),
+        Some((ids_play::serverbound::KEEP_ALIVE, id.to_vec()))
+    );
+    assert_eq!(
+        answer(false, ids_play::clientbound::PING, &[0, 0, 0, 9]),
+        Some((ids_play::serverbound::PONG, vec![0, 0, 0, 9]))
+    );
+    assert_eq!(
+        answer(true, configuration::clientbound::KEEP_ALIVE, &id),
+        Some((configuration::serverbound::KEEP_ALIVE, id.to_vec()))
+    );
+    assert_eq!(answer(false, ids_play::clientbound::SET_HEALTH, &[]), None);
+}

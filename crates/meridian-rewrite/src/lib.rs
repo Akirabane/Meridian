@@ -1,6 +1,6 @@
 //! What is numbered per connection or per server, translated between the client
 //! and the backend it is relayed to (DESIGN.md section 7). This first version does
-//! the minimum a switch needs, starting with:
+//! the minimum a switch needs:
 //!
 //! - [`Swap`]: the player's own entity id. The client keeps the id of its first
 //!   Login for the whole session; each backend gives the player its own. The swap
@@ -8,6 +8,10 @@
 //!   the client sees the active backend's entities under the backend's ids. It is
 //!   its own inverse, and an entity of the backend that happens to carry the
 //!   client's id takes the backend's player id instead, so nothing collides.
+//! - [`Teleports`]: answers to position corrections that must not reach the backend:
+//!   those the proxy gave itself, and those to the old backend after a switch.
+//! - [`answer`]: the keep-alive and ping answers the proxy gives itself to a
+//!   connection that is not relayed.
 //!
 //! # The packets with an entity id
 //!
@@ -43,7 +47,7 @@
 use horizon_protocol::{
     Result,
     buf::Reader,
-    ids::play,
+    ids::{configuration, play},
     packets::play::{Clientbound as C, Serverbound as S},
 };
 
@@ -231,6 +235,74 @@ fn payload_of(body: &[u8]) -> Vec<u8> {
     // An encoded body starts with its id.
     let _ = r.varint();
     r.rest().to_vec()
+}
+
+/// Answers to Player Position that must not reach the backend.
+///
+/// The client answers every position correction it gets with Accept Teleportation
+/// and the same id. Two kinds of answer are dropped: those to a correction the
+/// proxy already answered itself (a target's, during the prepare phase of a switch,
+/// sent to the client again with the delta), and those to the old backend's
+/// corrections that were still unanswered when the switch happened.
+#[derive(Clone, Debug, Default)]
+pub struct Teleports {
+    /// Corrections sent to the client by the active backend and not yet answered.
+    pending: Vec<i32>,
+    /// Ids whose answer the proxy drops, once each.
+    dropped: Vec<i32>,
+}
+
+impl Teleports {
+    /// A Player Position from the active backend went to the client.
+    pub fn sent(&mut self, teleport: i32) {
+        self.pending.push(teleport);
+    }
+
+    /// The proxy answered this correction itself: the client's answer is dropped.
+    pub fn answered_by_proxy(&mut self, teleport: i32) {
+        self.dropped.push(teleport);
+    }
+
+    /// The client now talks to another backend: answers still owed to the old one
+    /// are dropped.
+    pub fn switched(&mut self) {
+        self.dropped.append(&mut self.pending);
+    }
+
+    /// Whether the client's answer to `teleport` goes to the backend.
+    pub fn forward(&mut self, teleport: i32) -> bool {
+        if let Some(at) = self.dropped.iter().position(|&t| t == teleport) {
+            self.dropped.remove(at);
+            return false;
+        }
+        if let Some(at) = self.pending.iter().position(|&t| t == teleport) {
+            self.pending.remove(at);
+        }
+        true
+    }
+}
+
+/// The answer the proxy gives itself to a keep-alive or a ping from a backend
+/// whose packets reach nobody (a switch's target during the prepare phase): the
+/// serverbound packet with the same payload, as the client would send. `None` for
+/// any other packet. `configuration` says which phase the connection is in.
+pub fn answer(configuration: bool, id: i32, payload: &[u8]) -> Option<(i32, Vec<u8>)> {
+    let answer = if configuration {
+        use configuration::{clientbound as c, serverbound as s};
+        match id {
+            c::KEEP_ALIVE => s::KEEP_ALIVE,
+            c::PING => s::PONG,
+            _ => return None,
+        }
+    } else {
+        use play::{clientbound as c, serverbound as s};
+        match id {
+            c::KEEP_ALIVE => s::KEEP_ALIVE,
+            c::PING => s::PONG,
+            _ => return None,
+        }
+    };
+    Some((answer, payload.to_vec()))
 }
 
 #[cfg(test)]
