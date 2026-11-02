@@ -515,6 +515,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridian-sidecar"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "meridian-testkit"
 version = "0.1.0"
 dependencies = [
