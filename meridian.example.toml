@@ -13,6 +13,20 @@ motd = "A Meridian proxy"
 # 0 means no limit.
 max-players = 20
 
+# How many player names the server list shows when the pointer rests on the
+# player count, at most 100.
+status-sample = 12
+
+# What happens when a player who is already connected logs in again (the same
+# account, or for an unverified player the same name whatever its case):
+# "refuse" the new login, or "replace" the session already open with it.
+on-duplicate = "refuse"
+
+# Connections one address may open in a minute, server list pings included.
+# Further connections are closed at once, before any of their packets are read.
+# 0 means no limit.
+connections-per-minute = 20
+
 # How players log in. Backends never check accounts themselves: they trust the
 # proxy.
 #   "online"   checks every player's account with the session service. A client
@@ -31,6 +45,11 @@ compression-threshold = 256
 
 # Milliseconds allowed to reach a backend.
 connect-timeout-ms = 5000
+
+# Seconds a backend that just failed to take a player is passed over: the next
+# players go straight to the next backend of their list, and it is tried last
+# until the time is over. 0 never passes a backend over.
+backend-retry-seconds = 10
 
 # The secret shared with the backends. They use it to check that a login really
 # comes from the proxy (Velocity modern forwarding), so it must be set, and set to

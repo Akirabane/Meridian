@@ -2,10 +2,11 @@
 //! login there with the player information forwarding, then the relay until either
 //! side leaves. [`Sessions`] keeps every session being relayed: who the player
 //! is, where they are, and the handle that ends the session.
+use crate::health::Health;
 use crate::log::{debug, info, warning};
 use crate::route::{self, Full};
 use horizon_protocol::{connection::Connection, packets::configuration, text};
-use meridian_config::Config;
+use meridian_config::{Config, OnDuplicate};
 use meridian_net::{
     Profile,
     backend::{BackendLink, BackendOptions},
@@ -40,15 +41,57 @@ pub struct Player {
     pub joined: Instant,
 }
 
-/// The sessions being relayed.
+/// The sessions being relayed, and the health of the backends players are sent to.
 #[derive(Default)]
 pub struct Sessions {
+    /// Which backends recently failed to take a player.
+    pub health: Health,
     next: AtomicU64,
     closing: AtomicBool,
-    open: Mutex<HashMap<u64, (Player, Handle)>>,
+    open: Mutex<HashMap<u64, Entry>>,
     /// The players let in, from the check of the player limit to the end of
     /// their session, including those still being sent to a backend.
     admitted: AtomicUsize,
+}
+
+/// Who a player is, for telling a second login of theirs: the unique id of a
+/// verified account, or the name of an unverified player whatever its case, since
+/// their unique id is derived from the name as typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Identity {
+    Verified([u8; 16]),
+    Unverified(String),
+}
+
+impl Identity {
+    pub(crate) fn of(session: &ClientSession) -> Self {
+        match session.auth {
+            client::AuthKind::Premium => Identity::Verified(session.profile.uuid),
+            client::AuthKind::Offline => {
+                Identity::Unverified(session.profile.name.to_ascii_lowercase())
+            }
+        }
+    }
+}
+
+/// What a second login is told when it is refused.
+pub(crate) const ALREADY_CONNECTED: &str = "You are already connected to this proxy";
+
+/// A session in [`Sessions`]. `identity` is `None` for a session opened without
+/// one, which no login is checked against.
+struct Entry {
+    player: Player,
+    handle: Handle,
+    identity: Option<Identity>,
+}
+
+/// Why [`Sessions::open_as`] did not count a session in.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotOpened {
+    /// The proxy is stopping.
+    Stopping,
+    /// The same player has a session and duplicates are refused.
+    Duplicate,
 }
 
 /// A place taken under the player limit, given back when it is dropped.
@@ -87,22 +130,89 @@ impl Sessions {
         self.admitted.load(Ordering::Relaxed)
     }
 
-    /// Counts a session in. `None` once the proxy is stopping: the session must
-    /// end at once.
+    /// Counts a session in, with no identity to check a second login against.
+    /// `None` once the proxy is stopping: the session must end at once. Logins go
+    /// through [`Sessions::open_as`]; this is for tests that need a session.
+    #[cfg(test)]
     pub(crate) fn open(&self, player: Player, handle: Handle) -> Option<Open<'_>> {
+        let entry = Entry {
+            player,
+            handle,
+            identity: None,
+        };
+        self.insert(entry, OnDuplicate::Replace).ok()
+    }
+
+    /// Counts in the session of the player `identity`, unless the same player
+    /// already has one: then `on_duplicate` refuses the new session, or ends the
+    /// old one and counts the new one in. The check and the count are one step,
+    /// so two logins of one player at once cannot both be counted in.
+    pub(crate) fn open_as(
+        &self,
+        player: Player,
+        handle: Handle,
+        identity: Identity,
+        on_duplicate: OnDuplicate,
+    ) -> Result<Open<'_>, NotOpened> {
+        let entry = Entry {
+            player,
+            handle,
+            identity: Some(identity),
+        };
+        self.insert(entry, on_duplicate)
+    }
+
+    fn insert(&self, entry: Entry, on_duplicate: OnDuplicate) -> Result<Open<'_>, NotOpened> {
         let mut open = self.lock();
         // Checked under the lock, so a stop cannot miss a session opening now.
         if self.closing.load(Ordering::Relaxed) {
-            return None;
+            return Err(NotOpened::Stopping);
+        }
+        if let Some(identity) = &entry.identity {
+            let same: Vec<&Entry> = open
+                .values()
+                .filter(|e| e.identity.as_ref() == Some(identity))
+                .collect();
+            if !same.is_empty() {
+                match on_duplicate {
+                    OnDuplicate::Refuse => return Err(NotOpened::Duplicate),
+                    OnDuplicate::Replace => {
+                        for old in same {
+                            old.handle.disconnect(duplicate_login());
+                        }
+                    }
+                }
+            }
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        open.insert(id, (player, handle));
-        Some(Open { sessions: self, id })
+        open.insert(id, entry);
+        Ok(Open { sessions: self, id })
+    }
+
+    /// Whether the player `identity` has a session.
+    pub(crate) fn is_connected(&self, identity: &Identity) -> bool {
+        self.lock()
+            .values()
+            .any(|e| e.identity.as_ref() == Some(identity))
+    }
+
+    /// Ends every session of the player `identity`, telling them they logged in
+    /// from another location. Returns how many were ended.
+    pub(crate) fn replace(&self, identity: &Identity) -> usize {
+        let open = self.lock();
+        let same: Vec<&Entry> = open
+            .values()
+            .filter(|e| e.identity.as_ref() == Some(identity))
+            .collect();
+        for old in &same {
+            old.handle.disconnect(duplicate_login());
+        }
+        same.len()
     }
 
     /// The players being relayed, in the order they joined.
     pub fn players(&self) -> Vec<Player> {
-        let mut players: Vec<Player> = self.lock().values().map(|(p, _)| p.clone()).collect();
+        let mut players: Vec<Player> = self.lock().values().map(|e| e.player.clone()).collect();
         players.sort_by_key(|p| p.joined);
         players
     }
@@ -117,8 +227,8 @@ impl Sessions {
     pub fn find(&self, name: &str) -> Option<Player> {
         self.lock()
             .values()
-            .find(|(p, _)| p.name.eq_ignore_ascii_case(name))
-            .map(|(p, _)| p.clone())
+            .find(|e| e.player.name.eq_ignore_ascii_case(name))
+            .map(|e| e.player.clone())
     }
 
     /// Ends the session of the player called `name`, telling them `reason`.
@@ -127,8 +237,8 @@ impl Sessions {
         let (player, handle) = self
             .lock()
             .values()
-            .find(|(p, _)| p.name.eq_ignore_ascii_case(name))
-            .cloned()?;
+            .find(|e| e.player.name.eq_ignore_ascii_case(name))
+            .map(|e| (e.player.clone(), e.handle.clone()))?;
         handle.disconnect(configuration::Disconnect {
             reason: text::literal(reason),
         });
@@ -140,7 +250,7 @@ impl Sessions {
     pub fn close_all(&self) -> usize {
         let open = self.lock();
         self.closing.store(true, Ordering::Relaxed);
-        for (_, handle) in open.values() {
+        for Entry { handle, .. } in open.values() {
             // `multiplayer.disconnect.server_shutdown`: the "Server closed" of the
             // player's own language.
             handle.disconnect(configuration::Disconnect {
@@ -150,7 +260,7 @@ impl Sessions {
         open.len()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, (Player, Handle)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Entry>> {
         self.open.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -164,6 +274,14 @@ pub(crate) struct Open<'a> {
 impl Drop for Open<'_> {
     fn drop(&mut self) {
         self.sessions.lock().remove(&self.id);
+    }
+}
+
+/// What the session a second login replaces is told: vanilla's "You logged in
+/// from another location".
+fn duplicate_login() -> configuration::Disconnect {
+    configuration::Disconnect {
+        reason: text::translatable("multiplayer.disconnect.duplicate_login", &[]),
     }
 }
 
@@ -202,6 +320,28 @@ pub(crate) fn serve(
 ) {
     let name = session.profile.name.clone();
     let uuid = session.profile.uuid;
+    // A second login of a connected player is settled before anything else, so
+    // a refused one costs no place and no backend login.
+    let identity = Identity::of(&session);
+    if sessions.is_connected(&identity) {
+        match config.on_duplicate {
+            OnDuplicate::Refuse => {
+                info!(
+                    "{peer}: {name} ({}) refused: already connected",
+                    hyphenated(uuid)
+                );
+                refuse(session.connection, ALREADY_CONNECTED);
+                return;
+            }
+            OnDuplicate::Replace => {
+                sessions.replace(&identity);
+                info!(
+                    "{peer}: {name} ({}) logged in again; their other session ends",
+                    hyphenated(uuid)
+                );
+            }
+        }
+    }
     let Ok(_admission) = sessions.admit(config.max_players) else {
         info!(
             "{peer}: {name} ({}) refused: the proxy has its {} players",
@@ -212,10 +352,12 @@ pub(crate) fn serve(
         return;
     };
     // Counted as online in the server list from now until the session ends.
-    let _seat = client::Seat::take();
+    let _seat = client::Seat::take(&name, uuid);
     let auth = route_auth(session.auth);
+    let retry = Duration::from_secs(config.backend_retry_seconds);
     let candidates = match route::candidates(config, session.virtual_host.as_deref(), auth) {
-        Ok(candidates) => candidates,
+        // A backend that just failed is tried after the others.
+        Ok(candidates) => sessions.health.order(candidates, retry, Instant::now()),
         Err(e) => {
             warning!(
                 "{peer}: {name} ({}): no backend to send them to: {e}",
@@ -238,15 +380,19 @@ pub(crate) fn serve(
         };
         match connect(&backend.address, &session.profile, &options) {
             Ok(link) => {
+                sessions.health.answered(&backend.name);
                 joined = Some((backend, link));
                 break;
             }
-            Err(e) => warning!(
-                "{peer}: {name} ({}) cannot join backend \"{}\" at {}: {e}",
-                hyphenated(uuid),
-                backend.name,
-                backend.address
-            ),
+            Err(e) => {
+                sessions.health.failed(&backend.name, Instant::now());
+                warning!(
+                    "{peer}: {name} ({}) cannot join backend \"{}\" at {}: {e}",
+                    hyphenated(uuid),
+                    backend.name,
+                    backend.address
+                );
+            }
         }
     }
     let Some((backend, link)) = joined else {
@@ -267,12 +413,26 @@ pub(crate) fn serve(
         address: peer,
         joined: Instant::now(),
     };
-    let Some(_open) = sessions.open(player, handle.clone()) else {
-        debug!("{peer}: {name}: the proxy is stopping; not relaying");
-        handle.disconnect(configuration::Disconnect {
-            reason: text::translatable("multiplayer.disconnect.server_shutdown", &[]),
-        });
-        return;
+    let _open = match sessions.open_as(player, handle.clone(), identity, config.on_duplicate) {
+        Ok(open) => open,
+        Err(NotOpened::Stopping) => {
+            debug!("{peer}: {name}: the proxy is stopping; not relaying");
+            handle.disconnect(configuration::Disconnect {
+                reason: text::translatable("multiplayer.disconnect.server_shutdown", &[]),
+            });
+            return;
+        }
+        Err(NotOpened::Duplicate) => {
+            // Another login of the same player got there first.
+            info!(
+                "{peer}: {name} ({}) refused: already connected",
+                hyphenated(uuid)
+            );
+            handle.disconnect(configuration::Disconnect {
+                reason: text::literal(ALREADY_CONNECTED),
+            });
+            return;
+        }
     };
     info!(
         "{peer}: {name} ({}) joined backend \"{}\"",
@@ -766,18 +926,10 @@ pub(crate) mod tests {
     }
 
     fn reachable(backends: Vec<(&str, bool)>) -> (Arc<Connect>, Reachable) {
-        let answering: HashMap<String, Option<FakeBackend>> = backends
+        let answering: HashMap<String, bool> = backends
             .into_iter()
-            .map(|(address, answers)| {
-                let backend = answers.then(|| FakeBackend {
-                    forwarding_secret: Some(SECRET.as_bytes().to_vec()),
-                    after_login: vec![Step::Close],
-                    ..FakeBackend::default()
-                });
-                (address.to_owned(), backend)
-            })
+            .map(|(address, answers)| (address.to_owned(), answers))
             .collect();
-        let answering = Mutex::new(answering);
         let kept = Reachable {
             tried: Arc::new(Mutex::new(Vec::new())),
             threads: Arc::new(Mutex::new(Vec::new())),
@@ -785,11 +937,16 @@ pub(crate) mod tests {
         let (tried, threads) = (Arc::clone(&kept.tried), Arc::clone(&kept.threads));
         let connect: Arc<Connect> = Arc::new(move |address, profile, options| {
             tried.lock().unwrap().push(address.to_owned());
+            // A backend that answers takes every player sent to it.
             let fake = answering
-                .lock()
-                .unwrap()
-                .get_mut(address)
-                .and_then(Option::take);
+                .get(address)
+                .copied()
+                .unwrap_or(false)
+                .then(|| FakeBackend {
+                    forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                    after_login: vec![Step::Close],
+                    ..FakeBackend::default()
+                });
             let Some(fake) = fake else {
                 return Err(meridian_net::Error::Io(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
@@ -899,6 +1056,221 @@ pub(crate) mod tests {
             vec![Step::ExpectClose],
         );
         assert_eq!(tried, ["127.0.0.1:25601", "127.0.0.1:25602"]);
+    }
+
+    /// The default backend failed for one player: the next goes straight to the
+    /// fallback, and the default is tried again once the retry time is over.
+    #[test]
+    fn a_backend_that_failed_is_passed_over_for_the_next_player() {
+        let config = Config {
+            try_backends: vec!["east".into()],
+            ..routed()
+        };
+        let sessions = Sessions::default();
+        let (connect, backends) =
+            reachable(vec![("127.0.0.1:25601", false), ("127.0.0.1:25602", true)]);
+        let first = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Alex", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(first.0, ["127.0.0.1:25601", "127.0.0.1:25602"]);
+        let second = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Steve", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(
+            second.0,
+            ["127.0.0.1:25602"],
+            "lobby is not waited for again"
+        );
+        assert!(
+            sessions
+                .health
+                .describe("lobby", Duration::from_secs(10), Instant::now())
+                .is_some()
+        );
+
+        // With no retry time, every player tries the default first.
+        let config = Config {
+            backend_retry_seconds: 0,
+            ..config
+        };
+        let third = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Notch", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(third.0, ["127.0.0.1:25601", "127.0.0.1:25602"]);
+    }
+
+    /// A relayed session of `name` with `identity`, kept until the returned
+    /// values are dropped: the session, the relay's thread and both far ends.
+    fn connected<'a>(
+        sessions: &'a Sessions,
+        name: &str,
+        identity: Identity,
+    ) -> (
+        Open<'a>,
+        std::thread::JoinHandle<meridian_net::Result<meridian_net::relay::Report>>,
+        Connection,
+        Connection,
+    ) {
+        let (relay, handle, player, server) = idle_session(name);
+        let info = Player {
+            name: name.into(),
+            uuid: offline_uuid(name).to_be_bytes(),
+            backend: "lobby".into(),
+            address: peer(),
+            joined: Instant::now(),
+        };
+        let open = sessions
+            .open_as(info, handle, identity, OnDuplicate::Refuse)
+            .unwrap();
+        (
+            open,
+            std::thread::spawn(move || relay.run()),
+            player,
+            server,
+        )
+    }
+
+    /// Whether the Disconnect a relayed player received says they logged in
+    /// from another location.
+    fn disconnect_reason(player: &mut Connection) -> bool {
+        let (id, payload) = player.recv().unwrap();
+        let configuration::Clientbound::Disconnect(d) =
+            configuration::Clientbound::decode(id, &payload).unwrap()
+        else {
+            panic!("not a disconnect");
+        };
+        d == duplicate_login()
+    }
+
+    #[test]
+    fn identities_follow_how_the_player_logged_in() {
+        let (verified, _) = logged_in("Notch", client::AuthKind::Premium, None);
+        assert_eq!(
+            Identity::of(&verified),
+            Identity::Verified(offline_uuid("Notch").to_be_bytes())
+        );
+        // An unverified name is the same player whatever its case.
+        let (a, _) = logged_in("Alex", client::AuthKind::Offline, None);
+        let (b, _) = logged_in("aLEX", client::AuthKind::Offline, None);
+        assert_eq!(Identity::of(&a), Identity::of(&b));
+        assert_eq!(Identity::of(&a), Identity::Unverified("alex".into()));
+    }
+
+    #[test]
+    fn a_second_session_of_one_player_is_refused_or_replaces_the_first() {
+        let sessions = Sessions::default();
+        let alex = Identity::Unverified("alex".into());
+        let (first, relay, mut player, _server) = connected(&sessions, "Alex", alex.clone());
+
+        // Refused: the first session goes on.
+        let (_r, handle, _p, _s) = idle_session("ALEX");
+        let info = sessions.players()[0].clone();
+        assert_eq!(
+            sessions
+                .open_as(info.clone(), handle, alex.clone(), OnDuplicate::Refuse)
+                .err(),
+            Some(NotOpened::Duplicate)
+        );
+        assert_eq!(sessions.count(), 1);
+
+        // Another player, or the same name verified, is not a duplicate.
+        let (_r2, handle, _p2, _s2) = idle_session("Steve");
+        let steve = sessions.open_as(
+            info.clone(),
+            handle,
+            Identity::Unverified("steve".into()),
+            OnDuplicate::Refuse,
+        );
+        assert!(steve.is_ok());
+        let (_r3, handle, _p3, _s3) = idle_session("Alex");
+        let verified = sessions.open_as(
+            info.clone(),
+            handle,
+            Identity::Verified([7; 16]),
+            OnDuplicate::Refuse,
+        );
+        assert!(verified.is_ok());
+
+        // Replaced: the first session is told it logged in elsewhere.
+        let (_r4, handle, _p4, _s4) = idle_session("alex");
+        let replacing = sessions.open_as(info, handle, alex, OnDuplicate::Replace);
+        assert!(replacing.is_ok());
+        assert!(
+            disconnect_reason(&mut player),
+            "told of the login elsewhere"
+        );
+        assert!(relay.join().unwrap().is_ok());
+        drop(first);
+    }
+
+    /// With duplicates refused, a second login of a connected player is told so
+    /// before any backend is asked, and takes no place.
+    #[test]
+    fn a_player_already_connected_is_refused_before_any_backend() {
+        let config = routed();
+        let sessions = Sessions::default();
+        let (_open, _relay, _player, _server) =
+            connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        let (tried, trace) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("ALEX", client::AuthKind::Offline, None),
+            refused(),
+        );
+        assert!(tried.is_empty(), "no backend login for a refused duplicate");
+        assert_eq!(refusal(&trace), ALREADY_CONNECTED);
+        assert_eq!(sessions.admitted(), 0);
+        assert_eq!(sessions.count(), 1);
+    }
+
+    /// With duplicates replaced, the second login ends the first session and is
+    /// sent to a backend.
+    #[test]
+    fn a_second_login_replaces_the_first_when_set_so() {
+        let config = Config {
+            on_duplicate: OnDuplicate::Replace,
+            ..routed()
+        };
+        let sessions = Sessions::default();
+        let (open, relay, mut player, _server) =
+            connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        let ended = std::thread::spawn(move || {
+            let reason = disconnect_reason(&mut player);
+            let report = relay.join().unwrap();
+            (reason, report.is_ok())
+        });
+        let (tried, _) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("alex", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(tried, ["127.0.0.1:25601"]);
+        let (reason, relay_ended) = ended.join().unwrap();
+        assert!(reason, "told of the login elsewhere");
+        assert!(relay_ended);
+        drop(open);
     }
 
     /// None of the candidates answers: the player is told which were tried.

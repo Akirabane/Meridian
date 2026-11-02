@@ -103,6 +103,13 @@ fn the_example_file_is_valid() {
     assert_eq!(config.max_players, defaults.max_players);
     assert_eq!(config.auth_mode, defaults.auth_mode);
     assert_eq!(config.auth, defaults.auth);
+    assert_eq!(config.on_duplicate, defaults.on_duplicate);
+    assert_eq!(
+        config.connections_per_minute,
+        defaults.connections_per_minute
+    );
+    assert_eq!(config.backend_retry_seconds, defaults.backend_retry_seconds);
+    assert_eq!(config.status_sample, defaults.status_sample);
     // The example's secret is a placeholder that says so.
     assert!(config.forwarding_secret.starts_with("replace-me"));
     // The lists and tables are examples, one of each.

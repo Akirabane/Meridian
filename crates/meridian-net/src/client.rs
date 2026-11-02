@@ -15,10 +15,11 @@ use horizon_protocol::{
 };
 use meridian_config::Config;
 use std::{
+    collections::BTreeMap,
     net::IpAddr,
     sync::{
-        OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -35,10 +36,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// `ServerHandshakePacketListenerImpl`: a client older than this protocol is told
 /// it is outdated, any other mismatch that it is incompatible.
 const OUTDATED_BELOW: i32 = 754;
-
-/// The player limit shown in the server list. The configuration has no limit
-/// yet, so the list shows vanilla's default `max-players`.
-const MAX_PLAYERS_SHOWN: usize = 20;
 
 /// A player who has logged in to the proxy and is ready to be relayed.
 pub struct ClientSession {
@@ -108,30 +105,45 @@ impl Checks<'static> {
     }
 }
 
-/// The players the server list counts: one per live [`Seat`].
-static ONLINE: AtomicUsize = AtomicUsize::new(0);
+/// The players the server list counts, one per live [`Seat`], in the order they
+/// took it: the name and unique id the list may show.
+static SEATS: Mutex<BTreeMap<u64, (String, [u8; 16])>> = Mutex::new(BTreeMap::new());
+/// The number of the next seat, which orders them.
+static NEXT_SEAT: AtomicU64 = AtomicU64::new(0);
 
 /// A player counted as online in the server list for as long as it lives. The
 /// relay takes one for each session it runs.
 #[derive(Debug)]
-pub struct Seat(());
+pub struct Seat(u64);
 
 impl Seat {
-    pub fn take() -> Self {
-        ONLINE.fetch_add(1, Ordering::Relaxed);
-        Seat(())
+    /// Counts the player called `name`, with the unique id `uuid`, as online.
+    pub fn take(name: &str, uuid: [u8; 16]) -> Self {
+        let id = NEXT_SEAT.fetch_add(1, Ordering::Relaxed);
+        seats().insert(id, (name.to_owned(), uuid));
+        Seat(id)
     }
 }
 
 impl Drop for Seat {
     fn drop(&mut self) {
-        ONLINE.fetch_sub(1, Ordering::Relaxed);
+        seats().remove(&self.0);
     }
+}
+
+fn seats() -> std::sync::MutexGuard<'static, BTreeMap<u64, (String, [u8; 16])>> {
+    SEATS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// How many players the server list shows as online.
 pub fn players_online() -> usize {
-    ONLINE.load(Ordering::Relaxed)
+    seats().len()
+}
+
+/// Up to `count` of the players online, the longest there first: the sample the
+/// server list shows.
+pub fn players_sample(count: usize) -> Vec<(String, [u8; 16])> {
+    seats().values().take(count).cloned().collect()
 }
 
 /// Takes a new connection through handshake and login. A status request is
@@ -592,7 +604,8 @@ fn serve_status(connection: &mut Connection, config: &Config) -> Result<()> {
             status::Serverbound::StatusRequest(_) if answered => return Ok(()),
             status::Serverbound::StatusRequest(_) => {
                 answered = true;
-                let json = status_json(config, players_online());
+                let sample = players_sample(config.status_sample as usize);
+                let json = status_json(config, players_online(), &sample);
                 let response = status::Clientbound::StatusResponse(status::StatusResponse { json });
                 connection.send(&response.encode())?;
             }
@@ -608,19 +621,45 @@ fn serve_status(connection: &mut Connection, config: &Config) -> Result<()> {
 /// The status the server list shows. The proxy answers it alone, without asking
 /// a backend: a status request is the cheapest and most frequent connection there
 /// is, and it must not open a second one. So the version is the one the proxy
-/// speaks, the players are those the proxy relays, and the description is the
-/// proxy's own.
-fn status_json(config: &Config, online: usize) -> String {
+/// speaks, which is Horizon's, the players are those the proxy relays, with a
+/// sample of their names, and the description is the proxy's own.
+fn status_json(config: &Config, online: usize, sample: &[(String, [u8; 16])]) -> String {
+    let sample: Vec<serde_json::Value> = sample
+        .iter()
+        .map(|(name, uuid)| serde_json::json!({ "name": name, "id": hyphenated(*uuid) }))
+        .collect();
     serde_json::json!({
         "version": {
             "name": horizon_protocol::GAME_VERSION,
             "protocol": horizon_protocol::PROTOCOL_VERSION,
         },
-        "players": { "max": MAX_PLAYERS_SHOWN, "online": online },
+        "players": { "max": max_shown(config, online), "online": online, "sample": sample },
         "description": config.motd,
         "enforcesSecureChat": false,
     })
     .to_string()
+}
+
+/// The player limit the server list shows: `max-players`, or one more than the
+/// players online when there is no limit, since the list needs a number.
+fn max_shown(config: &Config, online: usize) -> usize {
+    match config.max_players {
+        0 => online + 1,
+        max => max as usize,
+    }
+}
+
+/// A unique id as the server list writes it, with hyphens.
+fn hyphenated(uuid: [u8; 16]) -> String {
+    let hex = format!("{:032x}", u128::from_be_bytes(uuid));
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 fn protocol_error(message: String) -> Error {
@@ -701,7 +740,7 @@ mod tests {
             horizon_protocol::PROTOCOL_VERSION
         );
         assert_eq!(json["version"]["name"], horizon_protocol::GAME_VERSION);
-        assert_eq!(json["players"]["max"], MAX_PLAYERS_SHOWN);
+        assert_eq!(json["players"]["max"], Config::default().max_players);
 
         let ping = status::Ping { time: 1234 };
         client
@@ -748,18 +787,83 @@ mod tests {
     #[test]
     fn the_status_counts_the_players_online() {
         let json: serde_json::Value =
-            serde_json::from_str(&status_json(&Config::default(), 3)).unwrap();
+            serde_json::from_str(&status_json(&Config::default(), 3, &[])).unwrap();
         assert_eq!(json["players"]["online"], 3);
         assert_eq!(json["enforcesSecureChat"], false);
     }
 
     #[test]
-    fn a_seat_counts_while_it_lives() {
-        let before = players_online();
-        let seat = Seat::take();
-        assert_eq!(players_online(), before + 1);
+    fn the_status_shows_the_player_limit_of_the_configuration() {
+        let limited = Config {
+            max_players: 50,
+            ..Config::default()
+        };
+        let json: serde_json::Value = serde_json::from_str(&status_json(&limited, 3, &[])).unwrap();
+        assert_eq!(json["players"]["max"], 50);
+        // Without a limit, the list still needs a number: one more than online.
+        let unlimited = Config {
+            max_players: 0,
+            ..Config::default()
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&status_json(&unlimited, 3, &[])).unwrap();
+        assert_eq!(json["players"]["max"], 4);
+    }
+
+    #[test]
+    fn the_status_shows_a_sample_of_names() {
+        let sample = vec![
+            ("Alex".to_owned(), [0x11; 16]),
+            ("Steve".to_owned(), [0x22; 16]),
+        ];
+        let json: serde_json::Value =
+            serde_json::from_str(&status_json(&Config::default(), 2, &sample)).unwrap();
+        assert_eq!(json["players"]["sample"][0]["name"], "Alex");
+        assert_eq!(
+            json["players"]["sample"][0]["id"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(json["players"]["sample"][1]["name"], "Steve");
+        let json: serde_json::Value =
+            serde_json::from_str(&status_json(&Config::default(), 0, &[])).unwrap();
+        assert_eq!(json["players"]["sample"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn the_status_announces_horizons_protocol() {
+        let json: serde_json::Value =
+            serde_json::from_str(&status_json(&Config::default(), 0, &[])).unwrap();
+        assert_eq!(
+            json["version"]["protocol"],
+            horizon_protocol::PROTOCOL_VERSION
+        );
+        assert_eq!(json["version"]["name"], horizon_protocol::GAME_VERSION);
+    }
+
+    #[test]
+    fn a_seat_counts_while_it_lives_and_names_its_player() {
+        // Other tests may hold seats at the same time, so this one looks for its
+        // own unique id rather than at the totals alone.
+        let uuid = [0x5e; 16];
+        let mine = |sample: &[(String, [u8; 16])]| sample.iter().any(|(_, id)| *id == uuid);
+        let seat = Seat::take("SeatTest", uuid);
+        assert!(players_online() >= 1);
+        assert!(mine(&players_sample(usize::MAX)));
         drop(seat);
-        assert_eq!(players_online(), before);
+        assert!(!mine(&players_sample(usize::MAX)));
+    }
+
+    #[test]
+    fn the_sample_is_the_longest_online_first_and_limited() {
+        let first = Seat::take("Early", [0x61; 16]);
+        let second = Seat::take("Late", [0x62; 16]);
+        let sample = players_sample(usize::MAX);
+        let early = sample.iter().position(|(_, id)| *id == [0x61; 16]).unwrap();
+        let late = sample.iter().position(|(_, id)| *id == [0x62; 16]).unwrap();
+        assert!(early < late);
+        assert!(players_sample(1).len() <= 1);
+        assert!(players_sample(0).is_empty());
+        drop((first, second));
     }
 
     #[test]
