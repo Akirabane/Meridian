@@ -304,3 +304,200 @@ fn a_request_that_is_not_a_player_request_is_refused_by_the_sidecar() {
     );
     assert!(running.seen.lock().unwrap().is_empty());
 }
+
+// The contract of Horizon's held-player work (docs/server.md, "Players arriving
+// from another server"), with a fake endpoint that answers as it documents.
+
+/// The record of the contract's `player-export` example, for [`DASHED`].
+fn record() -> Value {
+    json!({
+        "version": 1,
+        "data_version": 5023,
+        "uuid": DASHED,
+        "name": "Alex",
+        "dimension": "minecraft:overworld",
+        "position": [10.5, 70.0, -3.25],
+        "rotation": [90.0, 15.0],
+        "velocity": [0.0, 0.0, 0.0],
+        "game_mode": 0,
+        "player": "CgAAAA==",
+        "advancements": {}
+    })
+}
+
+/// The parts of a record, in the order the contract lists them.
+const ALL_PARTS: [&str; 10] = [
+    "inventory",
+    "ender_chest",
+    "experience",
+    "health",
+    "effects",
+    "game_mode",
+    "position",
+    "spawn_point",
+    "recipe_book",
+    "advancements",
+];
+
+/// A backend that answers each command as the contract says, from what the line
+/// holds, and refuses the lines the contract refuses.
+fn contract() -> fake::Answer {
+    Arc::new(|line: &str| {
+        let refuse = |why: &str| Some(json!({ "error": why }).to_string());
+        let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let mut args = rest.split_whitespace();
+        if args.next() != Some(DASHED) {
+            return refuse("the sidecar sent a unique id Horizon would not write");
+        }
+        let reply = match command {
+            "player-expect" => match args.next() {
+                None => json!({ "ok": true, "renewed": false, "ttl_seconds": 10 }),
+                Some("30") => json!({ "ok": true, "renewed": true, "ttl_seconds": 30 }),
+                Some(_) => return refuse("the time must be a number of seconds above zero"),
+            },
+            "player-export" => match (args.next(), args.next()) {
+                (None | Some("freeze"), None) => json!({ "ok": true, "record": record() }),
+                _ => return refuse("player-export takes a unique id and at most freeze"),
+            },
+            "player-import" => {
+                let body = rest.split_once(' ').map(|(_, b)| b).unwrap_or("");
+                let Ok(request) = serde_json::from_str::<Value>(body) else {
+                    return refuse("the request is not JSON");
+                };
+                if request["record"]["data_version"] != json!(5023) {
+                    return refuse("the record was made by another version of the game");
+                }
+                let parts = request
+                    .get("parts")
+                    .cloned()
+                    .unwrap_or_else(|| json!(ALL_PARTS));
+                let announced = request.get("announce").cloned().unwrap_or(json!(true));
+                json!({ "ok": true, "parts": parts, "announced": announced })
+            }
+            "player-release" => match (args.next(), args.next()) {
+                (Some("moved"), None) => {
+                    json!({ "ok": true, "released": "moved", "announced": false })
+                }
+                (Some("moved"), Some("announce")) => {
+                    json!({ "ok": true, "released": "moved", "announced": true })
+                }
+                (Some("abort"), None) => json!({ "ok": true, "released": "abort" }),
+                _ => {
+                    return refuse(
+                        "player-release <uuid> is followed by moved [announce] or abort",
+                    );
+                }
+            },
+            "player-drop" => json!({ "ok": true, "held": false, "expected": true }),
+            _ => return refuse("unknown command"),
+        };
+        Some(reply.to_string())
+    })
+}
+
+#[test]
+fn a_switch_goes_through_the_contract_line_by_line() {
+    let running = Running::start(contract(), WAIT);
+    let mut client = running.client(SECRET);
+
+    // On the backend the player goes to: expected for the default time, then 30 s.
+    assert_eq!(
+        client.expect(UUID, None).unwrap(),
+        json!({ "ok": true, "renewed": false, "ttl_seconds": 10 })
+    );
+    assert_eq!(
+        client.expect(UUID, Some(30)).unwrap(),
+        json!({ "ok": true, "renewed": true, "ttl_seconds": 30 })
+    );
+
+    // On the backend the player leaves: exported with a freeze. The record comes
+    // back exactly as the backend wrote it.
+    let exported = client.export(UUID, true).unwrap();
+    assert_eq!(exported, json!({ "ok": true, "record": record() }));
+
+    // The record goes to the held player as it is: some parts, quietly...
+    let imported = client
+        .import(
+            UUID,
+            exported["record"].clone(),
+            Some(vec!["inventory".into(), "experience".into()]),
+            Some(false),
+        )
+        .unwrap();
+    assert_eq!(
+        imported,
+        json!({ "ok": true, "parts": ["inventory", "experience"], "announced": false })
+    );
+    // ...or whole, with the default announce.
+    let whole = client.import(UUID, record(), None, None).unwrap();
+    assert_eq!(whole["announced"], json!(true));
+    assert_eq!(whole["parts"], json!(ALL_PARTS));
+
+    // The old backend lets the player go, or keeps them.
+    assert_eq!(
+        client.release(UUID, Outcome::Moved, true).unwrap(),
+        json!({ "ok": true, "released": "moved", "announced": true })
+    );
+    assert_eq!(
+        client.release(UUID, Outcome::Abort, false).unwrap(),
+        json!({ "ok": true, "released": "abort" })
+    );
+    assert_eq!(client.drop_player(UUID).unwrap()["ok"], json!(true));
+
+    // The lines are the contract's, word for word.
+    let seen = running.seen.lock().unwrap().clone();
+    assert_eq!(seen[0], format!("player-expect {DASHED}"));
+    assert_eq!(seen[1], format!("player-expect {DASHED} 30"));
+    assert_eq!(seen[2], format!("player-export {DASHED} freeze"));
+    assert!(seen[3].starts_with(&format!("player-import {DASHED} {{")));
+    assert_eq!(seen[5], format!("player-release {DASHED} moved announce"));
+    assert_eq!(seen[6], format!("player-release {DASHED} abort"));
+    assert_eq!(seen[7], format!("player-drop {DASHED}"));
+}
+
+#[test]
+fn the_backends_refusals_come_back_as_refusals() {
+    let running = Running::start(contract(), WAIT);
+    let mut client = running.client(SECRET);
+    let mut old = record();
+    old["data_version"] = json!(4000);
+    let error = client.import(UUID, old, None, None).unwrap_err();
+    assert!(
+        matches!(&error, Error::Refused(why) if why.contains("another version")),
+        "{error}"
+    );
+    // The connection still serves the next request.
+    assert_eq!(client.drop_player(UUID).unwrap()["ok"], json!(true));
+}
+
+#[test]
+fn a_request_that_cannot_be_a_line_never_reaches_the_backend() {
+    let running = Running::start(contract(), WAIT);
+    let mut client = running.client(SECRET);
+    let cases = [
+        (
+            client.expect("Alex", None).unwrap_err(),
+            "is not a unique id",
+        ),
+        (client.expect(UUID, Some(61)).unwrap_err(), "from 1 to 60"),
+        (
+            client.release(UUID, Outcome::Abort, true).unwrap_err(),
+            "announce goes with moved",
+        ),
+        (
+            client.import(UUID, json!([1, 2]), None, None).unwrap_err(),
+            "JSON object",
+        ),
+        (
+            client.drop_player("x player-drop").unwrap_err(),
+            "is not a unique id",
+        ),
+    ];
+    for (error, says) in cases {
+        assert!(
+            matches!(&error, Error::Refused(why) if why.contains(says)),
+            "{says}: {error}"
+        );
+    }
+    assert!(running.seen.lock().unwrap().is_empty());
+}
