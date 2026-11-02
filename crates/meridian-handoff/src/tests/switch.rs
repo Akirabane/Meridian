@@ -538,3 +538,57 @@ fn a_teleport_answer_gives_the_place_it_led_to() {
         ([9.0, 0.0, 6.0], 135.0, 10.0)
     );
 }
+
+/// A busy target never stops sending after the import (mobs move, time passes):
+/// the delta goes as soon as the import's position is there, well before the
+/// import timeout, and the player is not kept frozen.
+#[test]
+fn a_busy_target_does_not_hold_the_hand_over() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld {
+        chatter: Duration::from_millis(1500),
+        ..TargetWorld::default()
+    });
+    let done = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            import_timeout: Duration::from_millis(500),
+            ..settings()
+        },
+    )
+    .unwrap();
+    // Freeze, import and hand-over well inside the import timeout.
+    assert!(
+        done.times[1] + done.times[2] < Duration::from_millis(500),
+        "{:?}",
+        done.times
+    );
+    // The client: the delta and the extras, then the chatter and the live effect.
+    loop {
+        let (id, _) = player.recv().unwrap();
+        if id == pc::COMMANDS {
+            break;
+        }
+    }
+    accept(&mut player, 2, [41.0, 70.0, 41.0]);
+    loop {
+        let (id, payload) = player.recv().unwrap();
+        if id == pc::UPDATE_MOB_EFFECT {
+            assert_eq!(decode(id, &payload), effect(CLIENT_ID));
+            break;
+        }
+    }
+    attack(&mut player, TARGET_ID);
+    assert_eq!(target_thread.join().unwrap().unwrap().attacked, CLIENT_ID);
+    run.join().unwrap().unwrap();
+}
