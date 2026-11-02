@@ -73,16 +73,15 @@ impl PlayerControl for SidecarClient {
         announce: Option<bool>,
         place: bool,
     ) -> Result<(), String> {
-        if !place {
-            return Err(NO_TWO_STEPS.into());
-        }
-        SidecarClient::import(self, uuid, record, parts, announce)
+        SidecarClient::import(self, uuid, record, parts, announce, Some(place))
             .map(drop)
             .map_err(|e| e.to_string())
     }
 
-    fn confirm(&mut self, _: &str) -> Result<(), String> {
-        Err(NO_TWO_STEPS.into())
+    fn confirm(&mut self, uuid: &str) -> Result<(), String> {
+        SidecarClient::confirm(self, uuid)
+            .map(drop)
+            .map_err(|e| e.to_string())
     }
 
     fn release(&mut self, uuid: &str, outcome: Outcome, announce: bool) -> Result<(), String> {
@@ -97,11 +96,6 @@ impl PlayerControl for SidecarClient {
             .map_err(|e| e.to_string())
     }
 }
-
-/// Why the sidecar cannot be asked for an import in two steps: its requests do
-/// not carry `place` or `player-confirm` yet.
-const NO_TWO_STEPS: &str = "this sidecar cannot import a player without placing them, or confirm \
-                            an import, yet";
 
 /// A unique id as the requests take it: 32 hexadecimal digits.
 pub fn uuid_text(uuid: [u8; 16]) -> String {
