@@ -80,10 +80,17 @@ For each player there are two kinds of connection.
 
 The proxy authenticates the player against the session service once, at login.
 Backends must not repeat it. They run in a mode where they accept the player's
-identity from the proxy and from nobody else. The recommended form is a signed
-statement of name, unique id and profile properties, passed in the login phase
-with a secret shared between proxy and backends, and backends that refuse any
-login without it. Backends are never reachable from outside the private network.
+identity from the proxy and from nobody else. Horizon servers already have that
+mode: the modern player information forwarding that proxies of this kind use,
+described in Horizon's `docs/velocity-forwarding.md`. The server runs with online
+mode off and asks on the login channel `velocity:player_info`; the proxy answers
+with a signature made with a shared secret, followed by the player's address,
+unique id, name and profile properties, and the server refuses any login that does
+not carry a valid answer. Meridian speaks this exchange as it is documented there,
+so no new mode is needed in Horizon for identity. Backends are never reachable
+from outside the private network. One point of that document is still to check:
+profile properties (the skin) have not yet been tried against a real proxy, and
+Meridian will be the first to send them.
 
 ### The configuration phase must match
 
@@ -209,9 +216,11 @@ a small sidecar process next to each backend: it talks to the local endpoint and
 offers the same requests to the proxy over TLS with a shared secret. Horizon then
 needs no network change.
 
-The work in Horizon is an export on demand, a held player, an import, the release
-requests and the login that trusts the proxy. It is estimated at thirteen to
-nineteen days, most of it in the held player, which every part of the server that
+The work in Horizon is an export on demand, a held player, an import, and the
+release requests. The login that trusts the proxy is already there (section 3), so
+the earlier estimate of thirteen to nineteen days drops by the two or three days
+that login was counted for, to about eleven to sixteen, most of it in the held
+player, which every part of the server that
 shows, tracks, ticks or hurts players has to skip. It lives in the game itself,
 not in the supervisor, and should not be written until it has been agreed. This
 document only describes the need.
@@ -397,10 +406,12 @@ test kit.
 
 ## 12. Decisions that are not ours alone
 
-- **Changes in Horizon's game**: player export and import, a held state for a
-  joining player, and a login mode that trusts the proxy's identity, about thirteen
-  to nineteen days of work in all. They are needed, and they belong to the Horizon
-  project, so they must be agreed first. The save gaps of section 6 can be fixed
+- **Changes in Horizon's game**: player export and import, and a held state for a
+  joining player, about eleven to sixteen days of work in all. The login that
+  trusts the proxy exists already (forwarding, section 3). The new work is needed,
+  and it belongs to the Horizon project, so it must be agreed first. The switch
+  itself, with no new connection and no Login, is the part nothing in Horizon
+  provides today. The save gaps of section 6 can be fixed
   first and on their own.
 - **Where the requests are served**: the sidecar of section 6 keeps Horizon free of
   a remote surface; the alternative is to let the supervisor's HTTP interface
