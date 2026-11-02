@@ -67,12 +67,7 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
     }
     let mut playing = false;
     let mut play_started = Instant::now();
-    let mut next_move = Instant::now();
     let mut said = false;
-    // A move is sent only from a position the server gave: before that the
-    // client does not know where it stands, and a server would kick it for moving.
-    let mut positioned = false;
-    let mut at = [0.5_f64, 64.0, 0.5];
     loop {
         if playing {
             let elapsed = play_started.elapsed();
@@ -84,21 +79,6 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
                 said = true;
                 let body = play::Serverbound::ChatCommand(play::ChatCommand {
                     command: "list".into(),
-                })
-                .encode();
-                if send(&mut connection, body).is_err() {
-                    return End::Closed;
-                }
-            }
-            if positioned && Instant::now() >= next_move {
-                next_move = Instant::now() + Duration::from_secs(1);
-                let body = play::Serverbound::MovePlayerPosRot(play::MovePlayerPosRot {
-                    x: at[0],
-                    y: at[1],
-                    z: at[2],
-                    yaw: 0.0,
-                    pitch: 0.0,
-                    flags: 1,
                 })
                 .encode();
                 if send(&mut connection, body).is_err() {
@@ -138,8 +118,6 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
                 ids::play::clientbound::PLAYER_POSITION => {
                     match play::Clientbound::decode(id, &payload) {
                         Ok(play::Clientbound::PlayerPosition(p)) => {
-                            at = p.position;
-                            positioned = true;
                             let accept =
                                 play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
                                     id: p.teleport,
@@ -194,7 +172,6 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
                 ids::configuration::clientbound::FINISH_CONFIGURATION => {
                     playing = true;
                     play_started = Instant::now();
-                    next_move = Instant::now() + Duration::from_secs(1);
                     Some(configuration::Serverbound::FinishConfiguration(Empty).encode())
                 }
                 ids::configuration::clientbound::DISCONNECT => {
