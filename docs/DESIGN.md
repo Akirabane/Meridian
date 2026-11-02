@@ -209,7 +209,8 @@ itself (dimension, position), the advancements, and the live values that the sav
 path loses today. Times are relative ("this effect has nine seconds left") and
 never absolute, because the two servers' clocks need not match.
 [STATE-TRANSFER.md](STATE-TRANSFER.md) gives the field list, the gaps and the
-requests.
+requests. Which parts of the record cross a given switch is a matter of policy
+(section 13), so the import has to accept a partial record.
 
 The save path of a Horizon server has gaps that matter here: the velocity, the
 food exhaustion, the freezing ticks, the previous game mode and the cursor stack
@@ -528,3 +529,322 @@ test kit.
 - **Pinning the protocol crate**: Horizon has no stable protocol crate release, so
   the dependency is a pinned commit and moves when the project's version does. It
   starts pinned, and its build cost is small.
+
+## 13. What is kept
+
+Between two servers that do not share a map, a player's state is not obviously
+something to carry. A lobby does not want the inventory of a game, a game may want
+to start every player with the same kit, and a rank belongs to the player on every
+server. So what crosses a switch is a policy, chosen by the operator, and not a
+fixed list.
+
+### 13.1 The record and the blocks
+
+For the length of a session the proxy holds a copy of the player's data, the
+record of section 6, in memory. At a switch the source exports it, the proxy applies
+the policy to it, and the target imports the result. The proxy does not write
+player files; the servers do. A disconnect in the middle of a switch is covered in
+section 12.
+
+The record is split into *blocks*, and the policy speaks about blocks:
+
+| Block | What it holds |
+| --- | --- |
+| `inventory` | Main inventory, armour, off hand, held slot |
+| `ender_chest` | The ender chest |
+| `experience` | Level, progress, total |
+| `health` | Health and absorption |
+| `food` | Food, saturation, exhaustion |
+| `effects` | Active effects with their time left |
+| `game_mode` | Game mode and abilities |
+| `position` | Where the player stands, and their velocity |
+| `spawn_point` | The respawn point |
+| `recipe_book` | The recipe book |
+| `advancements` | The advancements |
+| `statistics` | The statistics |
+| `namespace:name` | A named block that is opaque to the proxy (13.3) |
+
+### 13.2 Modes and profiles
+
+Each block has one of three modes:
+
+- `carry`: the source's value goes to the target.
+- `target`: the player gets what the target already has for them, its own saved
+  value if they have been there before and its default if they have not. The proxy
+  leaves the block out of the import.
+- `reset`: the player gets the blank value (an empty inventory, zero experience,
+  full health).
+
+`position` has its own forms: `carry` keeps the coordinates (valid only when the
+target accepts them and the dimension is the one the client is in, section 8.2),
+`target` uses the target's saved position or its spawn, and an arrival point names
+coordinates and a dimension. Because the client cannot change dimension without a
+loading screen, an arrival point in another dimension is a configuration error.
+
+A *profile* is a named set of modes. Profiles are written in the TOML
+configuration, and a route says which profile applies to a move:
+
+```toml
+[retention.default]
+inventory = "carry"
+ender_chest = "carry"
+experience = "carry"
+health = "carry"
+food = "carry"
+effects = "carry"
+game_mode = "target"
+position = "target"
+advancements = "target"
+statistics = "target"
+unknown_blocks = "keep"
+
+[retention.lobby_to_game]
+inventory = "reset"
+effects = "reset"
+position = { arrival = "0 64 0", dimension = "minecraft:overworld" }
+
+[retention.default.blocks]
+"ranks:rank" = "carry"
+
+[[route]]
+from = "lobby"
+to = "game-1"
+retention = "lobby_to_game"
+```
+
+When several profiles could apply, the most specific wins: a profile for the pair
+of servers, then a profile for the destination, then the default. A profile starts
+from the default and changes only the blocks it names. The names above are a
+proposal, not a fixed format.
+
+### 13.3 Opaque blocks
+
+Data that a vanilla player file does not hold, such as a rank or a currency
+balance, belongs to a plugin of the server and is not in the compound. For these the
+record carries *named blocks* keyed by `namespace:name`, with bytes the proxy never
+reads. A block has a size limit (a proposal: 64 KiB), a version number that its
+owner writes, and a mode like the others. A block the target has no reader for is
+dropped or, with `unknown_blocks = "keep"`, kept in the proxy's copy for the rest of
+the session, so that it comes back if the player returns to a server that reads it.
+
+### 13.4 What exists, and what is missing
+
+What exists in Horizon, as far as it was read:
+
+- The player compound that the server saves and loads. Keys Horizon does not model
+  survive a load and a save, as [STATE-TRANSFER.md](STATE-TRANSFER.md) found. It
+  was not checked whether a mod can write into it.
+- Native mods with server-side hook points on a dedicated server: world lifecycle,
+  server ticks, blocks, sounds, a file of their own under the server's folder
+  (`docs/native-mods.md`).
+- Mod messages between the server half and the client half of one mod (the
+  `horizon:mod_net` channel). They connect a server and its own players, not two
+  servers.
+- Issue #6774, open, which proposes client-side hook points for custom payloads on
+  a mod's own channel. It is aimed at client mods talking to a server's plugin, and
+  would not carry anything from one server to another.
+
+What is missing:
+
+1. In the game: export and import of a player, with an import that accepts a
+   partial record (the `target` mode leaves blocks out).
+2. A pair of hook points that let a mod add named blocks to an export and read
+   them at an import. The shape proposed is one call at export, with the player and
+   a list to push `(name, bytes)` pairs into, and one at import with the blocks the
+   mod owns.
+3. The sidecar's requests carrying the named blocks.
+4. On the proxy: the policy engine and its TOML, and an extension point (13.5).
+
+Nothing in this section is accepted by Horizon. It describes what Meridian would
+need, to be proposed there according to that project's own process (section 15).
+
+### 13.5 An extension point on the proxy
+
+A plugin sometimes needs to act on the proxy itself: to change a policy for one
+player, to refuse a move, to add a block no server produces, to choose a target.
+The proxy exposes points where such code runs: before a switch is decided, after the
+export, before the import, and after the commit. Each sees the record and the
+players involved and can change the record or refuse the move.
+
+Two forms are possible. A Rust trait that built-in policies and anyone building the
+proxy from source can implement, and a local socket protocol, like the sidecar's,
+that lets a separate process do the same in any language. The recommendation is to
+start with the trait, which is cheap and gives the policy engine a clean shape, and
+to add the socket later if people ask for it. Loading plugins as dynamic libraries
+is not proposed.
+
+## 14. What a proxy such as Velocity or BungeeCord does, and where Meridian stands
+
+The aim is a proxy that does what those two do, built only for Horizon and in Rust
+for speed, with the seamless switch on top. This section lists the functions such a
+proxy is known for and says when each arrives, or that it is out of scope.
+
+**Where this list comes from.** It is made from what the two projects describe
+publicly to their users, the names of their settings and commands and their
+documented behaviour, and from what a proxy of this kind is seen to do. No source
+code of Velocity or BungeeCord has been read or copied for Meridian, and none will
+be. Before a function is built, it is specified from the user documentation and from
+observed behaviour, then checked against Horizon, the same way Horizon's own
+forwarding was written. The milestones are those of section 11.
+
+### Core
+
+| Function | In Meridian | Milestone |
+| --- | --- | --- |
+| Named servers | A list of backends with a name and an address, read from the configuration | J1 |
+| Default server | Where a new player lands | J1 |
+| Player information forwarding | Horizon's existing exchange (section 3), with a shared secret | J1 |
+| Online mode | The proxy checks the player with the session service; backends run with it off | J1 |
+| Compression | A threshold set in the configuration, applied on both sides | J1 |
+| Connect and read timeouts | Set in the configuration | J1 |
+| Status reply | The proxy's own message of the day, or one passed through from a chosen backend | J1 |
+| Aggregated status | Online count summed over the backends, the shown maximum set in the configuration | J2 |
+| Player limit | A maximum enforced at login, apart from the number shown | J2 |
+| Fallback list | An ordered list ("try") used when the default server is down or a player's server stops | J2 |
+| Forced hosts | Routing by the hostname the player typed | J2 |
+| Command to change server | `/server <name>` for a player, with the names completed, as an ordinary visible switch first | J2 |
+| Moving others | A console or permitted command that sends one player, or everyone on a server, elsewhere | J2 |
+| Listing players | Commands that list the players, per server and in all, and find one | J2 |
+| Proxy console | Commands to list, switch, send, reload, show the version and stop | J2 |
+| Reload | The configuration is read again without a restart | J2 |
+| Backend down | Players on a backend that stops are sent to the fallback, or told why | J2 |
+| Duplicate login | A second login of the same player replaces the first or is refused, as set | J2 |
+| Login rate limit | A limit on connections per address in a given time | J2 |
+| Proxy protocol | Reading the real address from a front balancer that sends it | J2 |
+| Basic permissions | A short file that says who may use the proxy's commands | J2 |
+| Logging | Readable logs, with a level setting | J2 |
+
+### The seamless switch
+
+| Function | In Meridian | Milestone |
+| --- | --- | --- |
+| Ghost of the client's state | Section 4 | J3 |
+| Seamless switch, the proxy's own command and API | Sections 5 to 8, between test servers first | J4 |
+| Proof on screen with a Horizon client | Section 9, cooperative mode | J5 |
+| Policy for what is kept | Section 13, with profiles in the configuration | J6 |
+| Data of plugins between servers | Section 13.3, with the hooks proposed in section 15 | J7 |
+
+### Extensions
+
+| Function | In Meridian | Milestone |
+| --- | --- | --- |
+| Events and an extension API | Rust trait on the proxy (13.5) | J7 |
+| Messages between servers | Named channels carried through the proxy and the sidecars | J7 |
+| Ban lists at the proxy | Bans by name, unique id and address that apply before any backend | J7 |
+| Richer permissions | Groups and per-command permissions, through the extension API | J7 |
+| Metrics | Counters of players, switches and timings, in a text format | J7 |
+
+### Out of scope
+
+- Plugins written in Java, or a Java API compatible with theirs.
+- Legacy forwarding variants and the shared-secret scheme of BungeeCord's older
+  mode: Horizon already reads one form, and that is the one Meridian speaks.
+- Versions of the game other than the one Horizon serves, and modded handshakes.
+- A tab list merged across servers, global chat, queues and load balancing between
+  copies of one server, and a remote console: these are plugin matters.
+- Sending resource packs from the proxy. A pack comes with the configuration
+  phase, which belongs to the backend (section 3).
+- The query protocol of the server list.
+
+The core is what comes first: the server list, routing, the command to change
+server and forwarding. The ghost and the switch follow, because they depend on the
+relay being sound.
+
+## 15. Login: verified and unverified players
+
+A proxy can log a player in in two ways: it can check their account with the
+session service, or it can accept a name it cannot check. This section describes
+both, how the proxy chooses, and how players of each kind are kept apart.
+
+### 15.1 The proxy does the checking
+
+Backends always run with online mode off, behind Horizon's forwarding (section 3).
+It is the proxy that authenticates. For a *verified* player the sequence is the
+usual one: the client sends its name, the proxy sends an encryption request, the
+client answers it after telling the session service that it is joining, the proxy
+asks the session service to confirm, and from then on the connection is encrypted.
+The proxy then marks the player *verified*, or *unverified* when it let a name
+through without that check, and routes by the mark.
+
+This changes what "online" and "offline" servers mean. They are no longer a setting
+of each server. All backends are the same, and the operator defines *groups* of
+backends, one for each kind of player. The proxy sends a verified player to a server
+of the verified group and an unverified player to a server of the unverified group.
+
+### 15.2 Deciding before the encryption request
+
+A client that has no account to check cannot answer an encryption request, so the
+proxy has to decide, from the name alone and before it asks, whether to ask. Three
+modes:
+
+- `online`: always ask. A client that cannot answer is refused. This is the
+  default.
+- `offline`: never ask. Every player is unverified. Nothing proves who anyone is, so
+  this suits a closed network (a LAN, private tests) and nothing else.
+- `hybrid`: look the name up with the account service's public profile lookup.
+  If an account with that name exists, ask for encryption, and refuse a client that
+  cannot answer. If none exists, let the player in as unverified. The lookup has a
+  cache (a positive answer is kept longer than a negative one), a timeout, and a
+  limit per address. `on_lookup_failure` says what happens when the service does not
+  answer: `refuse` (the recommendation, since a name might be an account's) or
+  `unverified`.
+
+The limits of the hybrid mode are known and should be stated to whoever turns it
+on:
+
+- Nobody can take over a name that exists as an account: a client that claims one
+  and cannot authenticate is refused.
+- A player without an account whose chosen name also exists as an account is
+  refused as well. The proxy has no way to tell them from someone claiming the name.
+  A list of exceptions would reopen the impersonation it prevents, and login
+  passwords would be a feature of their own, so both are outside this design.
+- A free name today can become an account tomorrow, and the same person is then
+  asked to authenticate. Their unverified identity does not carry over.
+- The lookup is one more call at every login, and it can be slow or unavailable.
+
+### 15.3 The unique id
+
+A verified player has the unique id of their account. An unverified player has an
+id derived from the name, the way a server with online mode off derives it. The two
+are different for the same person, and a server keeps files by this id, so the two
+kinds must not meet in one group: they would have two files, and the ranks and
+inventories of one would not be seen by the other. The configuration therefore
+refuses a backend that is listed in two groups of different kinds, and the profile
+the proxy keeps for a player says which kind of id it is. Moving a player between
+groups of different kinds is refused by default, and the retention policy of
+section 13 means nothing across them.
+
+### 15.4 Configuration
+
+```toml
+[auth]
+mode = "hybrid"                # online | offline | hybrid
+on_lookup_failure = "refuse"   # refuse | unverified
+lookup_cache_seconds = 3600
+
+[groups.verified]
+servers = ["lobby", "game-1", "game-2"]
+default = "lobby"
+
+[groups.unverified]
+servers = ["lobby-open"]
+default = "lobby-open"
+```
+
+With `mode = "online"` only the verified group is needed, and with
+`mode = "offline"` only the unverified one. The names and keys are a proposal.
+
+### 15.5 Position
+
+Taking unverified players is a choice for whoever runs the proxy, and the default
+refuses them. Horizon the game asks each player for their own copy of the game and
+prepares it from there (Horizon's documentation on preparation from the player's own
+copy); Meridian carries no game content and says nothing about how to obtain any.
+The word used here and in the configuration is *unverified*, because it describes
+what the proxy knows: it could not check the account. It is not a way around
+anything. An unverified name proves nothing, so groups for unverified players
+should carry no privileges, and bans and permissions that depend on a name are weak
+for them.
+
+Milestones: a fixed mode (`online`, or `offline` for tests) comes with the relay in
+J1; the hybrid mode and the groups come in J2.
