@@ -2,6 +2,7 @@
 //! login there with the player information forwarding, then the relay until either
 //! side leaves. [`Sessions`] keeps every session being relayed: who the player
 //! is, where they are, and the handle that ends the session.
+use crate::health::Health;
 use crate::log::{debug, info, warning};
 use crate::route::{self, Full};
 use horizon_protocol::{connection::Connection, packets::configuration, text};
@@ -40,9 +41,11 @@ pub struct Player {
     pub joined: Instant,
 }
 
-/// The sessions being relayed.
+/// The sessions being relayed, and the health of the backends players are sent to.
 #[derive(Default)]
 pub struct Sessions {
+    /// Which backends recently failed to take a player.
+    pub health: Health,
     next: AtomicU64,
     closing: AtomicBool,
     open: Mutex<HashMap<u64, (Player, Handle)>>,
@@ -214,8 +217,10 @@ pub(crate) fn serve(
     // Counted as online in the server list from now until the session ends.
     let _seat = client::Seat::take();
     let auth = route_auth(session.auth);
+    let retry = Duration::from_secs(config.backend_retry_seconds);
     let candidates = match route::candidates(config, session.virtual_host.as_deref(), auth) {
-        Ok(candidates) => candidates,
+        // A backend that just failed is tried after the others.
+        Ok(candidates) => sessions.health.order(candidates, retry, Instant::now()),
         Err(e) => {
             warning!(
                 "{peer}: {name} ({}): no backend to send them to: {e}",
@@ -238,15 +243,19 @@ pub(crate) fn serve(
         };
         match connect(&backend.address, &session.profile, &options) {
             Ok(link) => {
+                sessions.health.answered(&backend.name);
                 joined = Some((backend, link));
                 break;
             }
-            Err(e) => warning!(
-                "{peer}: {name} ({}) cannot join backend \"{}\" at {}: {e}",
-                hyphenated(uuid),
-                backend.name,
-                backend.address
-            ),
+            Err(e) => {
+                sessions.health.failed(&backend.name, Instant::now());
+                warning!(
+                    "{peer}: {name} ({}) cannot join backend \"{}\" at {}: {e}",
+                    hyphenated(uuid),
+                    backend.name,
+                    backend.address
+                );
+            }
         }
     }
     let Some((backend, link)) = joined else {
@@ -766,18 +775,10 @@ pub(crate) mod tests {
     }
 
     fn reachable(backends: Vec<(&str, bool)>) -> (Arc<Connect>, Reachable) {
-        let answering: HashMap<String, Option<FakeBackend>> = backends
+        let answering: HashMap<String, bool> = backends
             .into_iter()
-            .map(|(address, answers)| {
-                let backend = answers.then(|| FakeBackend {
-                    forwarding_secret: Some(SECRET.as_bytes().to_vec()),
-                    after_login: vec![Step::Close],
-                    ..FakeBackend::default()
-                });
-                (address.to_owned(), backend)
-            })
+            .map(|(address, answers)| (address.to_owned(), answers))
             .collect();
-        let answering = Mutex::new(answering);
         let kept = Reachable {
             tried: Arc::new(Mutex::new(Vec::new())),
             threads: Arc::new(Mutex::new(Vec::new())),
@@ -785,11 +786,16 @@ pub(crate) mod tests {
         let (tried, threads) = (Arc::clone(&kept.tried), Arc::clone(&kept.threads));
         let connect: Arc<Connect> = Arc::new(move |address, profile, options| {
             tried.lock().unwrap().push(address.to_owned());
+            // A backend that answers takes every player sent to it.
             let fake = answering
-                .lock()
-                .unwrap()
-                .get_mut(address)
-                .and_then(Option::take);
+                .get(address)
+                .copied()
+                .unwrap_or(false)
+                .then(|| FakeBackend {
+                    forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                    after_login: vec![Step::Close],
+                    ..FakeBackend::default()
+                });
             let Some(fake) = fake else {
                 return Err(meridian_net::Error::Io(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
@@ -899,6 +905,62 @@ pub(crate) mod tests {
             vec![Step::ExpectClose],
         );
         assert_eq!(tried, ["127.0.0.1:25601", "127.0.0.1:25602"]);
+    }
+
+    /// The default backend failed for one player: the next goes straight to the
+    /// fallback, and the default is tried again once the retry time is over.
+    #[test]
+    fn a_backend_that_failed_is_passed_over_for_the_next_player() {
+        let config = Config {
+            try_backends: vec!["east".into()],
+            ..routed()
+        };
+        let sessions = Sessions::default();
+        let (connect, backends) =
+            reachable(vec![("127.0.0.1:25601", false), ("127.0.0.1:25602", true)]);
+        let first = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Alex", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(first.0, ["127.0.0.1:25601", "127.0.0.1:25602"]);
+        let second = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Steve", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(
+            second.0,
+            ["127.0.0.1:25602"],
+            "lobby is not waited for again"
+        );
+        assert!(
+            sessions
+                .health
+                .describe("lobby", Duration::from_secs(10), Instant::now())
+                .is_some()
+        );
+
+        // With no retry time, every player tries the default first.
+        let config = Config {
+            backend_retry_seconds: 0,
+            ..config
+        };
+        let third = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Notch", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(third.0, ["127.0.0.1:25601", "127.0.0.1:25602"]);
     }
 
     /// None of the candidates answers: the player is told which were tried.

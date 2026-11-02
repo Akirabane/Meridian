@@ -1,6 +1,7 @@
 //! The Meridian proxy.
 mod args;
 mod console;
+mod health;
 mod log;
 // Used by the session once routing is wired in; until then only its tests call it.
 #[cfg_attr(not(test), allow(dead_code))]
