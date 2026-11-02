@@ -18,6 +18,32 @@ use std::time::{Duration, Instant};
 const POLL: Duration = Duration::from_millis(50);
 /// How long a stop waits for players' threads to finish.
 const DRAIN: Duration = Duration::from_secs(5);
+/// How many connections may wait in the listener's queue for the accept loop.
+/// A burst of logins larger than the queue is refused by the system, and the
+/// client's system tries again about every half second; std's listener has 128.
+const BACKLOG: i32 = 4096;
+
+/// Listens on `address` with a queue of [`BACKLOG`] connections.
+///
+/// Windows holds a plain queue length to 200, whatever is asked; the length is
+/// given as `SOMAXCONN_HINT(BACKLOG)`, which Windows writes as its negative,
+/// for it to be kept. Elsewhere the system may lower it to its own maximum
+/// (`net.core.somaxconn` on Linux). Like std, the address is made reusable at
+/// once on Unix, and not on Windows, where that would let another program take
+/// the port.
+pub fn listen(address: SocketAddr) -> io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(
+        Domain::for_address(address),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(if cfg!(windows) { -BACKLOG } else { BACKLOG })?;
+    Ok(socket.into())
+}
 
 /// Accepts players on `listener` until the proxy is asked to stop, then ends the
 /// sessions being relayed and waits up to [`DRAIN`] for the players' threads.
@@ -322,6 +348,29 @@ mod tests {
             wake_address(address("192.168.1.2:25565")),
             address("192.168.1.2:25565")
         );
+    }
+
+    /// The listener holds a burst of connections far larger than std's 128
+    /// before the accept loop takes any.
+    #[test]
+    fn the_listener_queues_a_large_burst() {
+        // Linux holds the queue to net.core.somaxconn, 4096 by default since
+        // kernel 5.4 but lower on older systems.
+        if let Ok(max) = std::fs::read_to_string("/proc/sys/net/core/somaxconn")
+            && max.trim().parse::<u32>().is_ok_and(|max| max < 1000)
+        {
+            eprintln!("skipped: net.core.somaxconn is {}", max.trim());
+            return;
+        }
+        let listener = listen("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut waiting = Vec::new();
+        for _ in 0..1000 {
+            match TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
+                Ok(stream) => waiting.push(stream),
+                Err(e) => panic!("refused after {} connections: {e}", waiting.len()),
+            }
+        }
     }
 
     #[test]

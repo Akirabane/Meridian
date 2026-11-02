@@ -505,6 +505,7 @@ dependencies = [
  "meridian-config",
  "meridian-net",
  "meridian-testkit",
+ "socket2",
 ]
 
 [[package]]

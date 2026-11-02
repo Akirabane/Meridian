@@ -16,7 +16,6 @@ use args::Command;
 use log::{error, info, warning};
 use meridian_config::{Config, ConfigError};
 use state::Proxy;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -84,7 +83,7 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let listener = match TcpListener::bind(config.listen) {
+    let listener = match serve::listen(config.listen) {
         Ok(listener) => listener,
         Err(e) => {
             error!("cannot listen on {}: {e}", config.listen);

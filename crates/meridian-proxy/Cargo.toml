@@ -16,6 +16,8 @@ ctrlc = "3.4"
 horizon-protocol.workspace = true
 meridian-config.workspace = true
 meridian-net.workspace = true
+# The listener's queue length, which std sets to 128; see serve::listen.
+socket2 = "0.6"
 
 [dev-dependencies]
 meridian-testkit.workspace = true
