@@ -1,0 +1,27 @@
+[package]
+name = "meridian-bench"
+description = "Measures the proxy on one machine: added latency, throughput, CPU, memory and logins, against a direct connection."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "meridian-bench"
+path = "src/main.rs"
+
+[dependencies]
+# A run stops cleanly on Ctrl+C, and the proxy it started stops with it.
+ctrlc = "3.4"
+horizon-protocol.workspace = true
+meridian-testkit.workspace = true
+# The proxy process's CPU and memory, and the machine named in the report.
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+meridian-net.workspace = true
+
+[lints]
+workspace = true
