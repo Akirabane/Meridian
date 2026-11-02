@@ -352,7 +352,7 @@ pub(crate) fn serve(
         return;
     };
     // Counted as online in the server list from now until the session ends.
-    let _seat = client::Seat::take();
+    let _seat = client::Seat::take(&name, uuid);
     let auth = route_auth(session.auth);
     let retry = Duration::from_secs(config.backend_retry_seconds);
     let candidates = match route::candidates(config, session.virtual_host.as_deref(), auth) {
