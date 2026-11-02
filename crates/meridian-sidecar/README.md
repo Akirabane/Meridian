@@ -8,9 +8,10 @@ requests of a switch (DESIGN.md section 6, decision 8):
 | --- | --- | --- |
 | `expect` (`seconds`) | `player-expect <uuid> [seconds]` | holds the player when they log in through the proxy within that time (10 s by default, 60 at most) |
 | `export` (`freeze`) | `player-export <uuid> [freeze]` | gives the player's record, to move to another backend; with `freeze`, stops acting on the player's own inputs until a release |
-| `import` (`record`, `parts`, `announce`) | `player-import <uuid> {"record":…,"parts":[…],"announce":…}` | puts the record on the held player, whole or in parts, and lets them into the world |
+| `import` (`record`, `parts`, `announce`, `place`) | `player-import <uuid> {"record":…,"parts":[…],"announce":…,"place":…}` | puts the record on the held player, whole or in parts, and lets them into the world; with `place` false the player stays held, and the reply's `placed` says which |
+| `confirm` | `player-confirm <uuid>` | places a held player whose record was imported with `place` false (refused when no player is held, or its record was not imported) |
 | `release` (`moved` with `announce`, or `abort`) | `player-release <uuid> moved [announce]`, `player-release <uuid> abort` | ends a switch: the player has gone for good, or stays |
-| `drop` | `player-drop <uuid>` | forgets an expected or held player |
+| `drop` | `player-drop <uuid>` | forgets an expected or held player; after an import with `place` false, cancels the arrival without a word to anyone |
 
 The lines are those of Horizon's held-player work (its `docs/server.md`, "Players
 arriving from another server"). A request names the player by a unique id of 32
@@ -22,11 +23,16 @@ request that cannot become a well-formed line (an id that is not one, a time of
 is refused by the sidecar and never reaches the backend. The backend's answer comes
 back as it is: `{"ok": true, ...}`, or a refusal with its `error`.
 
+A hand-over that may still be cancelled imports with `place` false, then either
+confirms the player once the proxy has moved its client, or drops it, which leaves
+the backend as it was.
+
 A request from the proxy is one JSON object with an `op`, for example:
 
 ```json
 {"op": "export", "uuid": "123e4567-e89b-12d3-a456-426614174000", "freeze": true}
-{"op": "import", "uuid": "123e4567e89b12d3a456426614174000", "record": {...}, "parts": ["inventory"], "announce": false}
+{"op": "import", "uuid": "123e4567e89b12d3a456426614174000", "record": {...}, "parts": ["inventory"], "announce": false, "place": false}
+{"op": "confirm", "uuid": "123e4567-e89b-12d3-a456-426614174000"}
 {"op": "release", "uuid": "123e4567-e89b-12d3-a456-426614174000", "outcome": "moved", "announce": true}
 ```
 
