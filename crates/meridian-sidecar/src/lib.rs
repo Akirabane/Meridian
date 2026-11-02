@@ -6,9 +6,15 @@
 //! - [`wire`] is the signed exchange between the proxy and a sidecar.
 //! - [`request`] holds the player requests and the endpoint command each becomes.
 //! - [`endpoint`] talks to the backend's local control endpoint.
+//! - [`server`] serves the proxy's requests; [`client`] is the proxy's side.
+pub mod client;
 pub mod endpoint;
 pub mod request;
+pub mod server;
 pub mod wire;
+
+#[cfg(test)]
+mod tests;
 
 use std::fmt;
 use std::io;
