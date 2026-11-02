@@ -1,0 +1,15 @@
+[package]
+name = "meridian-net"
+description = "The connections of the proxy: players on one side, backends on the other."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+horizon-protocol.workspace = true
+meridian-config.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "meridian-proxy"
+description = "The Meridian proxy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "meridian"
+path = "src/main.rs"
+
+[dependencies]
+meridian-config.workspace = true
+meridian-net.workspace = true
+
+[lints]
+workspace = true
