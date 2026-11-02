@@ -35,6 +35,8 @@ pub enum ConfigError {
     NegativeCacheLonger { positive: u64, negative: u64 },
     /// `[auth] lookups-per-minute` is zero.
     ZeroLookupsPerMinute,
+    /// `status-sample` is above [`crate::MAX_STATUS_SAMPLE`].
+    StatusSampleTooLarge(u32),
     /// `forwarding-secret` is empty while backends are configured.
     MissingForwardingSecret,
     /// A setting names a backend that is not configured. `setting` says where,
@@ -130,6 +132,11 @@ impl fmt::Display for ConfigError {
                 "[auth] negative-cache-seconds = {negative} is longer than lookup-cache-seconds = \
                  {positive}: a free name can become an account's at any time, so \"no account\" \
                  is remembered for less time than \"account\""
+            ),
+            ConfigError::StatusSampleTooLarge(n) => write!(
+                f,
+                "status-sample = {n} is too large: the server list shows at most {} names",
+                crate::MAX_STATUS_SAMPLE
             ),
             ConfigError::ZeroLookupsPerMinute => {
                 write!(f, "[auth] lookups-per-minute must be at least 1")

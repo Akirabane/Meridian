@@ -138,6 +138,32 @@ pub struct Config {
     pub routes: Vec<Route>,
     /// How the hybrid mode looks names up (`[auth]` in the file).
     pub auth: AuthSettings,
+    /// What happens when a player who is already connected logs in again.
+    pub on_duplicate: OnDuplicate,
+    /// Connections one address may open in a minute, counted before the
+    /// handshake; 0 means no limit.
+    pub connections_per_minute: u32,
+    /// Seconds a backend that failed to take a player is passed over, so the
+    /// next players go straight to the next candidate; 0 never passes one over.
+    pub backend_retry_seconds: u64,
+    /// How many player names the server list shows.
+    pub status_sample: u32,
+}
+
+/// The most names the server list may show. The client only draws a short list,
+/// and every name is sent to whoever asks for the status.
+pub const MAX_STATUS_SAMPLE: u32 = 100;
+
+/// What a second login of a connected player does: the same unique id for a
+/// verified player, the same name whatever its case for an unverified one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnDuplicate {
+    /// The new login is refused and the session already open goes on.
+    #[default]
+    Refuse,
+    /// The session already open ends and the new login goes on.
+    Replace,
 }
 
 impl Default for Config {
@@ -158,6 +184,10 @@ impl Default for Config {
             groups: Vec::new(),
             routes: Vec::new(),
             auth: AuthSettings::default(),
+            on_duplicate: OnDuplicate::Refuse,
+            connections_per_minute: 20,
+            backend_retry_seconds: 10,
+            status_sample: 12,
         }
     }
 }
@@ -182,6 +212,10 @@ impl std::fmt::Debug for Config {
             groups,
             routes,
             auth,
+            on_duplicate,
+            connections_per_minute,
+            backend_retry_seconds,
+            status_sample,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -204,6 +238,10 @@ impl std::fmt::Debug for Config {
             .field("groups", groups)
             .field("routes", routes)
             .field("auth", auth)
+            .field("on_duplicate", on_duplicate)
+            .field("connections_per_minute", connections_per_minute)
+            .field("backend_retry_seconds", backend_retry_seconds)
+            .field("status_sample", status_sample)
             .finish()
     }
 }
@@ -233,6 +271,10 @@ struct File {
     routes: Vec<FileRoute>,
     #[serde(default)]
     auth: FileAuth,
+    on_duplicate: Option<OnDuplicate>,
+    connections_per_minute: Option<u32>,
+    backend_retry_seconds: Option<u64>,
+    status_sample: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -342,6 +384,14 @@ impl Config {
                 })
                 .collect(),
             auth: file.auth.into_settings(),
+            on_duplicate: file.on_duplicate.unwrap_or(defaults.on_duplicate),
+            connections_per_minute: file
+                .connections_per_minute
+                .unwrap_or(defaults.connections_per_minute),
+            backend_retry_seconds: file
+                .backend_retry_seconds
+                .unwrap_or(defaults.backend_retry_seconds),
+            status_sample: file.status_sample.unwrap_or(defaults.status_sample),
         };
         config.validate()?;
         Ok(config)
@@ -405,6 +455,9 @@ impl Config {
         self.validate_groups()?;
         self.validate_routes()?;
         self.auth.validate()?;
+        if self.status_sample > MAX_STATUS_SAMPLE {
+            return Err(ConfigError::StatusSampleTooLarge(self.status_sample));
+        }
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
         }

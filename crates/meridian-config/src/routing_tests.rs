@@ -488,3 +488,46 @@ fn bad_routes_are_refused() {
         "{e}"
     );
 }
+
+// The core settings: duplicates, the connection limit, backend retries and the
+// server list's sample.
+
+#[test]
+fn core_settings_have_their_defaults() {
+    let config = load("");
+    assert_eq!(config.on_duplicate, OnDuplicate::Refuse);
+    assert_eq!(config.connections_per_minute, 20);
+    assert_eq!(config.backend_retry_seconds, 10);
+    assert_eq!(config.status_sample, 12);
+}
+
+#[test]
+fn core_settings_are_read() {
+    let config = load(
+        "on-duplicate = \"replace\"\nconnections-per-minute = 0\n\
+         backend-retry-seconds = 0\nstatus-sample = 0",
+    );
+    assert_eq!(config.on_duplicate, OnDuplicate::Replace);
+    assert_eq!(config.connections_per_minute, 0);
+    assert_eq!(config.backend_retry_seconds, 0);
+    assert_eq!(config.status_sample, 0);
+}
+
+#[test]
+fn the_status_sample_has_a_ceiling() {
+    assert_eq!(load("status-sample = 100").status_sample, 100);
+    let e = refused("status-sample = 101");
+    assert!(matches!(e, ConfigError::StatusSampleTooLarge(101)), "{e}");
+}
+
+#[test]
+fn bad_core_values_are_refused() {
+    for extra in [
+        "on-duplicate = \"kick\"",
+        "connections-per-minute = -1",
+        "backend-retry-seconds = -5",
+        "status-sample = \"12\"",
+    ] {
+        assert!(matches!(refused(extra), ConfigError::Parse(_)), "{extra}");
+    }
+}
