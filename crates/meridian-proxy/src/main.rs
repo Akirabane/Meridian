@@ -1,5 +1,6 @@
 //! The Meridian proxy.
 mod args;
+mod commands;
 mod console;
 mod health;
 mod log;

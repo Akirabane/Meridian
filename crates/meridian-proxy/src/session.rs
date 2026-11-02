@@ -2,6 +2,7 @@
 //! login there with the player information forwarding, then the relay until either
 //! side leaves. [`Sessions`] keeps every session being relayed: who the player
 //! is, where they are, and the handle that ends the session.
+use crate::commands;
 use crate::health::Health;
 use crate::log::{debug, info, warning};
 use crate::route::{self, Full};
@@ -15,8 +16,8 @@ use meridian_net::{
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How the proxy reaches a backend: [`meridian_net::backend::connect`] when it
@@ -399,8 +400,17 @@ pub(crate) fn serve(
         refuse(session.connection, &cannot_reach(&candidates));
         return;
     };
+    // The commands the proxy answers in game, for this player on this backend.
+    let commands = commands::hook(
+        Arc::new(config.clone()),
+        commands::Typist {
+            name: name.clone(),
+            auth,
+            backend: backend.name.clone(),
+        },
+    );
     let (relay, handle) = match Relay::new(session, link) {
-        Ok(relay) => relay,
+        Ok((relay, handle)) => (relay.with_commands(commands), handle),
         Err(e) => {
             warning!("{peer}: {name}: cannot set up the session: {e}");
             return;
@@ -1271,6 +1281,69 @@ pub(crate) mod tests {
         assert!(reason, "told of the login elsewhere");
         assert!(relay_ended);
         drop(open);
+    }
+
+    /// A relayed player types `/server`: the proxy answers in the chat and the
+    /// backend never sees it. A command of the backend's reaches it unchanged.
+    #[test]
+    fn the_proxy_answers_server_in_game_and_passes_other_commands_on() {
+        use horizon_protocol::packets::play;
+        use ids::{configuration as cfg, play as ids_play};
+        let payload = |body: Vec<u8>| body[1..].to_vec();
+        let command = |text: &str| {
+            payload(
+                play::Serverbound::ChatCommand(play::ChatCommand {
+                    command: text.into(),
+                })
+                .encode(),
+            )
+        };
+        let chat = |text: &str| {
+            payload(
+                play::Clientbound::SystemChat(play::SystemChat {
+                    content: text::literal(text),
+                    overlay: false,
+                })
+                .encode(),
+            )
+        };
+        let backend = FakeBackend {
+            forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+            after_login: vec![
+                finish_configuration(),
+                Step::Expect {
+                    id: cfg::serverbound::FINISH_CONFIGURATION,
+                },
+                Step::expect_exactly(ids_play::serverbound::CHAT_COMMAND, command("tell Bob hi")),
+                Step::Close,
+            ],
+            ..FakeBackend::default()
+        };
+        let (connect, seen) = connector(backend, Recorder::new());
+        let (session, player) = logged_in("Alex", client::AuthKind::Offline, None);
+        let player = meridian_testkit::peer::spawn(
+            player,
+            vec![
+                Step::Expect {
+                    id: cfg::clientbound::FINISH_CONFIGURATION,
+                },
+                acknowledge_configuration(),
+                Step::send(ids_play::serverbound::CHAT_COMMAND, command("server")),
+                Step::expect_exactly(
+                    ids_play::clientbound::SYSTEM_CHAT,
+                    chat("Servers: lobby (default). You are on lobby."),
+                ),
+                Step::send(ids_play::serverbound::CHAT_COMMAND, command("tell Bob hi")),
+                Step::ExpectClose,
+            ],
+            Dir::ToClient,
+            Recorder::new(),
+        );
+        let sessions = Sessions::default();
+        serve(session, peer(), &config(), &*connect, &sessions);
+        player.join().unwrap().unwrap();
+        let (_, _, backend) = seen.lock().unwrap().take().unwrap();
+        backend.join().unwrap().unwrap();
     }
 
     /// None of the candidates answers: the player is told which were tried.
