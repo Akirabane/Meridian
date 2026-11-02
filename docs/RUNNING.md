@@ -49,7 +49,7 @@ Write `meridian.toml` (every key is described in `meridian.example.toml`):
 ```toml
 listen = "127.0.0.1:25565"
 motd = "A Meridian proxy"
-online-mode = false              # a test setting; the default, true, checks accounts
+auth-mode = "offline"             # a test setting; the default, "online", checks accounts
 connect-timeout-ms = 5000
 forwarding-secret = "the same text as in forwarding.secret"
 default-backend = "main"
@@ -65,6 +65,14 @@ Check it, then run it:
 meridian --check meridian.toml
 meridian meridian.toml
 ```
+
+The proxy has gained settings since the run of section 5: a fallback list (`try`),
+a player limit (`max-players`), routing by the host name a player typed
+(`[[forced-host]]`), the login modes `online`, `offline` and `hybrid` (`auth-mode`,
+which replaces the older `online-mode`, still read), and groups of backends with a
+route for each kind of player (`[[group]]`, `[[route]]`). `meridian.example.toml`
+shows each of them. A configuration needs `forwarding-secret` as soon as it has a
+backend, and the same value must be in the backend's `forwarding.secret`.
 
 `MERIDIAN_LOG` sets the level (`error`, `warn`, `info`, `debug`). Ctrl+C stops the
 proxy: it closes the sessions and logs `all connections are closed` and `stopped`.
@@ -92,6 +100,12 @@ keep-alives and entity packets. It compares ids, not contents. The program print
 a `RESULT` line and exits with 0 only when the player stayed its time and left.
 
 ## 5. What was seen
+
+This run dates from commit `ced4163`, which is before the proxy had its console,
+its routing and the hybrid login. The proxy has changed a great deal since, so
+the table below describes that commit, not today's proxy. The tests of the
+repository (relay, login, routing) are run in CI on every change; this run has not
+been repeated against a real server since.
 
 One run on Windows 11, with Horizon's Nightly of 2026-11-01 (commit `4aa6854`) and
 a proxy built in the debug profile from commit `ced4163` (the main branch at
