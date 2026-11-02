@@ -1,0 +1,184 @@
+# Testing Meridian on this machine
+
+A step-by-step guide to try Meridian with three Horizon servers on one Windows 11
+machine, with the panel (`meridian-panel`). The commands are for Windows PowerShell
+5.1: run them one line at a time, as written.
+
+## What you can test today, and what you cannot
+
+Moving a player from one server to another is not built yet: the proxy's `send`, the
+in-game `/server <name>`, `/hub` and `/lobby` all answer "transfer not available yet"
+and move nobody. Until that work is merged, a test covers:
+
+- joining the proxy with the Horizon client and landing on the lobby;
+- the three servers and the proxy online in the panel, with their CPU and memory;
+- the proxy's console: `list`, `servers`, `kick`, `reload`;
+- the in-game `/server`, which lists the servers.
+
+## What it costs
+
+Each Horizon server takes about 1.5 GB of memory when idle, so the bench takes about
+4.5 GB, plus a little for the proxy and the panel. The three worlds take a few hundred
+megabytes of disk once generated. Close what you can spare before starting the bench.
+
+## The paths on this machine
+
+| What | Where |
+| --- | --- |
+| Meridian's programs | `D:\disque\dev\meridian-bench-out\bin\` (`meridian.exe`, `meridian-panel.exe`; `COMMIT.txt` says which commit they come from) |
+| The bench, made in step A | `D:\disque\dev\meridian-bench-out\banc\` |
+| Horizon's Nightly, installed by the launcher | `C:\Users\Akirabane\AppData\Roaming\horizon-launcher\versions\nightly-2026-11-01-4aa6854\` |
+| Its prepared game files (650 MB) | the Nightly's `.local\horizon-client\26.3\` |
+
+The three servers read the game files from the Nightly's folder through
+`[engine] resources` in their `server.toml`: nothing is copied. The Nightly's own
+`horizon-server.exe config` reads such a `server.toml` without complaint (checked).
+The game opens these files to read them; that three servers can share them while
+they run is what the first run will confirm.
+
+Open PowerShell and set three names for the rest of the guide:
+
+```powershell
+$bin = "D:\disque\dev\meridian-bench-out\bin"
+$nightly = "C:\Users\Akirabane\AppData\Roaming\horizon-launcher\versions\nightly-2026-11-01-4aa6854"
+$banc = "D:\disque\dev\meridian-bench-out\banc"
+```
+
+If you open another PowerShell window later, set them again there.
+
+## A. Make the bench
+
+```powershell
+& "$bin\meridian-panel.exe" init --dir $banc --horizon-server "$nightly\horizon-server.exe" --meridian "$bin\meridian.exe" --resources "$nightly\.local\horizon-client\26.3"
+```
+
+It writes, in `banc`:
+
+- `bench.toml`: the four processes for the panel;
+- `proxy\meridian.toml`: the proxy on `127.0.0.1:25565`, in offline login (nobody's
+  account is checked, which suits a bench on one machine), with the three servers;
+- `lobby\`, `game1\`, `game2\`: each a `server.toml` (ports 25601, 25602, 25603, on
+  `127.0.0.1` only, online mode off) and a `forwarding.secret` holding the proxy's
+  secret.
+
+It ends by printing the EULA command of step B. You can check what it wrote:
+
+```powershell
+& "$bin\meridian.exe" --check "$banc\proxy\meridian.toml"
+& "$nightly\horizon-server.exe" config --dir "$banc\lobby"
+```
+
+The first says `valid, 3 backends, default backend "lobby"`; the second lists the
+lobby's settings, with `server.port = 25601` and `server.online_mode = false`.
+
+## B. Accept the Minecraft EULA, yourself
+
+A Horizon server does not start until the person who runs it has accepted the
+[Minecraft EULA](https://aka.ms/MinecraftEULA). The panel never does it for you.
+Read it, and if you agree, run:
+
+```powershell
+& "$bin\meridian-panel.exe" accept-eula --dir $banc --i-accept-the-minecraft-eula
+```
+
+It writes `eula=true` in `lobby`, `game1` and `game2`, and says so for each. Without
+it, the panel refuses to start a server and its message gives this command.
+
+## C. Run the panel
+
+```powershell
+& "$bin\meridian-panel.exe" "$banc\bench.toml"
+```
+
+Leave this window open: the panel runs in it. Open
+[http://127.0.0.1:8140/](http://127.0.0.1:8140/) in your browser. The page carries
+the access token of this run by itself; there is nothing to type. Opened in another
+way, or after the panel restarted, reload the page.
+
+You see four cards: proxy, lobby, game1, game2, all stopped.
+
+Click **Start all**. The servers start first; each card goes from `starting` to
+`online` when its server accepts connections. The first start generates each world,
+which takes a while; the panel then starts the proxy. Once all four are online, each
+card shows its CPU (100 % is one processor core) and memory, with a curve over the
+last minutes. A server's figures include the game process it starts.
+
+Click a card's **Console** to see its output. A server's console shows the line
+`Velocity player information forwarding is on (forwarding.secret)`: it trusts only
+the proxy.
+
+## D. Join with the Horizon client
+
+Start Horizon from its launcher as usual, then in the game: **Multiplayer**, then
+**Direct Connection**, address `localhost:25565`. The server list shows
+`Meridian test bench`. From the launcher's command line, the same:
+
+```powershell
+horizon-launcher play --server localhost:25565
+```
+
+You join with your account's name. The proxy is in offline login, so it checks
+nothing and gives you the unique id an offline server would. You land on the lobby.
+
+Joining a server directly, at `localhost:25601`, is refused with `This server is
+behind a proxy: join through the proxy.`: that is the forwarding at work.
+
+## E. What to try, and what you should see
+
+In the panel:
+
+| Do | You should see |
+| --- | --- |
+| **Show players** | `1 player online:` and a line with your name on `lobby` |
+| Proxy console: `servers` | each server `answers in N ms`, and `1 player` on lobby |
+| Proxy console: `list` | the same as **Show players** |
+| A player name, then **Send to game1** | `transfer not available yet: <name> would move to game1`. Nobody moves: this is the part not built yet |
+| Lobby console: `say hello` | `hello` in your game's chat |
+| Proxy console: `reload` | `reloaded: nothing changed` (edit `proxy\meridian.toml`, for example the `motd`, and `reload` again: it says what changed) |
+| Proxy console: `kick <name> testing` | `kicked <name> from lobby: testing`; your game shows the reason `testing` |
+
+In the game, in the chat:
+
+| Type | You should see |
+| --- | --- |
+| `/server` | `Servers: lobby (default), game1, game2. You are on lobby.` |
+| `/server game1` | `transfer not available yet: <name> would move to game1` |
+| `/hub` or `/lobby` | `You are already on lobby.` |
+| Any other command, such as `/time set day` | It goes to the lobby as usual |
+
+The proxy's own log lines appear in its console marked `[stderr]`: that is where the
+proxy writes its log, not an error. Each time the panel checks that the proxy is up,
+the proxy logs `Connection closed by the server`; that line is the check, nothing
+else.
+
+## F. Stop everything and clean up
+
+1. Leave the game.
+2. In the panel, click **Stop all**: the servers stop first, saving their worlds,
+   then the proxy. Wait until the four cards say `stopped`.
+3. Close the panel with Ctrl+C in its window. Ctrl+C also reaches anything the panel
+   started, which stops as on its own Ctrl+C; if the panel window was closed another
+   way while servers ran, end them in the Task Manager (`horizon-server.exe`,
+   `horizon-client.exe`, `meridian.exe`).
+
+To start again later, run step C again: the bench and its worlds stay.
+
+To remove the bench and its worlds, once everything is stopped:
+
+```powershell
+Remove-Item -Recurse -Force "D:\disque\dev\meridian-bench-out\banc"
+```
+
+This removes only the bench folder: the Nightly and its game files are not touched.
+`D:\disque\dev\meridian-bench-out\bin` can stay for the next test.
+
+## If something goes wrong
+
+| What you see | What it means |
+| --- | --- |
+| A server card stays `starting` | It has not opened its port yet: look at its console. A first start generates the world |
+| `the Minecraft EULA is not accepted` | Step B was not done for that bench |
+| `no prepared game files` in a server's console | `--resources` in step A did not point at the Nightly's `.local\horizon-client\26.3`, or the Nightly was removed |
+| `Cannot reach the server "lobby" right now` in the game | The lobby is not online: start it, or wait for it |
+| `cannot listen on 127.0.0.1:8140` | Another panel is running; close it first |
+| The page says the panel does not answer | The panel was closed: run step C again and reload the page |

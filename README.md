@@ -184,6 +184,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 - [docs/DESIGN.md](docs/DESIGN.md): how the proxy and the seamless switch work, and
   the milestones.
 - [docs/RUNNING.md](docs/RUNNING.md): running the proxy in front of a Horizon server.
+- [docs/TESTING.md](docs/TESTING.md): trying the proxy with three Horizon servers and
+  the panel, step by step, on Windows.
 - [docs/CONFIG.md](docs/CONFIG.md): every setting.
 - [docs/BUILD.md](docs/BUILD.md): building and testing.
 - [crates/meridian-panel](crates/meridian-panel/README.md): a local panel to try the
