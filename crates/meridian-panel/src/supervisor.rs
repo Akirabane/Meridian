@@ -564,7 +564,9 @@ fn port_answers(port: u16) -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
 }
 
-/// Takes one sample of each running process.
+/// Takes one sample of each running process, with the processes it started: a
+/// Horizon server's `horizon-server run` is a small supervisor, and the game
+/// runs in a child of it.
 fn measure(supervisor: &Supervisor, system: &mut sysinfo::System) {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
     let pids: Vec<(usize, Pid)> = supervisor
@@ -581,26 +583,122 @@ fn measure(supervisor: &Supervisor, system: &mut sysinfo::System) {
     if pids.is_empty() {
         return;
     }
-    let only: Vec<Pid> = pids.iter().map(|(_, pid)| *pid).collect();
     system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&only),
+        ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing().with_cpu().with_memory(),
     );
+    let links: Vec<Link> = system
+        .processes()
+        .iter()
+        .map(|(pid, p)| Link {
+            pid: pid.as_u32(),
+            parent: p.parent().map(Pid::as_u32),
+            started: p.start_time(),
+        })
+        .collect();
     let at = supervisor.born.elapsed().as_secs_f64();
     for (i, pid) in pids {
-        let Some(found) = system.process(pid) else {
+        if system.process(pid).is_none() {
             continue;
-        };
+        }
+        let (mut cpu, mut memory) = (0.0f32, 0u64);
+        for member in tree(pid.as_u32(), &links) {
+            if let Some(p) = system.process(Pid::from_u32(member)) {
+                cpu += p.cpu_usage();
+                memory += p.memory();
+            }
+        }
         let sample = Sample {
             at,
-            cpu: found.cpu_usage(),
-            memory_mb: found.memory() as f64 / (1024.0 * 1024.0),
+            cpu,
+            memory_mb: memory as f64 / (1024.0 * 1024.0),
         };
         let mut history = supervisor.processes[i].history();
         if history.len() == HISTORY {
             history.pop_front();
         }
         history.push_back(sample);
+    }
+}
+
+/// A process as the tree of a bench process sees it.
+#[derive(Clone, Copy, Debug)]
+pub struct Link {
+    pub pid: u32,
+    pub parent: Option<u32>,
+    /// When it started, in seconds since the epoch.
+    pub started: u64,
+}
+
+/// `root` and every process it started, directly or not. A process counts as a
+/// child only if it started after its parent, so a process whose parent's id was
+/// later reused by `root` is not taken in.
+pub fn tree(root: u32, links: &[Link]) -> Vec<u32> {
+    let started = |pid: u32| links.iter().find(|l| l.pid == pid).map(|l| l.started);
+    let mut out = vec![root];
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i];
+        let parent_started = started(parent).unwrap_or(0);
+        for link in links {
+            if link.parent == Some(parent)
+                && link.started >= parent_started
+                && !out.contains(&link.pid)
+            {
+                out.push(link.pid);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(pid: u32, parent: Option<u32>, started: u64) -> Link {
+        Link {
+            pid,
+            parent,
+            started,
+        }
+    }
+
+    #[test]
+    fn the_tree_holds_the_root_and_every_descendant() {
+        let links = [
+            link(10, Some(1), 100),
+            link(11, Some(10), 101),
+            link(12, Some(11), 102),
+            link(13, Some(10), 103),
+            link(20, Some(1), 100),
+        ];
+        let mut found = tree(10, &links);
+        found.sort_unstable();
+        assert_eq!(found, [10, 11, 12, 13]);
+        assert_eq!(tree(20, &links), [20]);
+        // A root the list does not know is still itself.
+        assert_eq!(tree(99, &links), [99]);
+    }
+
+    #[test]
+    fn a_process_older_than_its_parent_is_not_its_child() {
+        // 30 says its parent is 10, but it started before 10: 10 is a reused id.
+        let links = [
+            link(10, None, 200),
+            link(30, Some(10), 150),
+            link(31, Some(10), 250),
+        ];
+        assert_eq!(tree(10, &links), [10, 31]);
+    }
+
+    #[test]
+    fn a_loop_of_parents_ends() {
+        let links = [link(1, Some(2), 0), link(2, Some(1), 0)];
+        let mut found = tree(1, &links);
+        found.sort_unstable();
+        assert_eq!(found, [1, 2]);
     }
 }
