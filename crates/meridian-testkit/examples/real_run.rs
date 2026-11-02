@@ -94,7 +94,8 @@ fn run(args: &[String]) -> ExitCode {
 
 /// Compares two files written by `run`. The configuration phase must match
 /// packet for packet, and the world's first burst up to the end of the first chunk
-/// batch too; what follows (keep-alives, time, mobs) is only counted.
+/// batch too, leaving out the packets that depend on timing or on the mobs that
+/// happened to be around; what follows is only counted.
 fn compare(a: &str, b: &str) -> ExitCode {
     let read = |path: &str| -> Result<Vec<(i32, usize)>, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -126,8 +127,46 @@ fn compare(a: &str, b: &str) -> ExitCode {
             .map_or(t.len(), |n| finish + 1 + n + 1)
     };
     let (ha, hb) = (head(&ta), head(&tb));
-    let ids_a: Vec<i32> = ta[..ha].iter().map(|p| p.0).collect();
-    let ids_b: Vec<i32> = tb[..hb].iter().map(|p| p.0).collect();
+    // Packets that depend on timing or on what happened to be in the world are
+    // left out of the comparison: the time of day, pings, keep-alives and the
+    // entities that come and go.
+    use ids::play::clientbound as play;
+    let volatile = [
+        play::SET_TIME,
+        play::PING,
+        play::KEEP_ALIVE,
+        play::ADD_ENTITY,
+        play::REMOVE_ENTITIES,
+        play::SET_ENTITY_DATA,
+        play::SET_ENTITY_MOTION,
+        play::MOVE_ENTITY_POS,
+        play::MOVE_ENTITY_POS_ROT,
+        play::MOVE_ENTITY_ROT,
+        play::ROTATE_HEAD,
+        play::TELEPORT_ENTITY,
+        play::SET_EQUIPMENT,
+    ];
+    let keep = |t: &[(i32, usize)]| -> Vec<i32> {
+        t.iter()
+            .map(|p| p.0)
+            .filter(|id| !volatile.contains(id))
+            .collect()
+    };
+    // The configuration phase is not touched by the filter: its ids are
+    // different packets.
+    let cfg_end = |t: &[(i32, usize)]| {
+        t.iter()
+            .position(|(id, _)| *id == ids::configuration::clientbound::FINISH_CONFIGURATION)
+            .map_or(0, |n| n + 1)
+    };
+    let split = |t: &[(i32, usize)], h: usize| -> Vec<i32> {
+        let c = cfg_end(t).min(h);
+        let mut v: Vec<i32> = t[..c].iter().map(|p| p.0).collect();
+        v.extend(keep(&t[c..h]));
+        v
+    };
+    let ids_a = split(&ta, ha);
+    let ids_b = split(&tb, hb);
     println!(
         "compared the first {} and {} packets (up to the first chunk batch); {} and {} in all",
         ha,

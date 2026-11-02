@@ -100,6 +100,16 @@ impl FakeClient {
                         name: p.profile.name,
                     });
                 }
+                // A request on a channel the client does not know is answered with
+                // "not understood", as a vanilla client does.
+                login::Clientbound::CustomQuery(q) => send(
+                    connection,
+                    login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
+                        transaction: q.transaction,
+                        payload: None,
+                    })
+                    .encode(),
+                )?,
                 login::Clientbound::Disconnect(p) => {
                     return Err(format!("refused at login: {}", p.reason_json));
                 }
