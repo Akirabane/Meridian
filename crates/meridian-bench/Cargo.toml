@@ -20,8 +20,23 @@ meridian-testkit.workspace = true
 # The proxy process's CPU and memory, and the machine named in the report.
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
+# The processor cycles of a process, which Windows counts exactly; see src/cpu.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
 [dev-dependencies]
 meridian-net.workspace = true
 
-[lints]
-workspace = true
+# The workspace's lints, except that unsafe code is denied instead of forbidden:
+# src/cpu.rs, and only it, allows it for the Windows calls it makes.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

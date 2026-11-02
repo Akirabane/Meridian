@@ -472,6 +472,7 @@ dependencies = [
  "meridian-net",
  "meridian-testkit",
  "sysinfo",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 //! `meridian-bench`: measures a Meridian proxy on one machine, over 127.0.0.1,
 //! against a direct connection to the same stand-in backend. See docs/BENCH.md.
 mod backend;
+mod cpu;
 mod echo;
 mod player;
 mod proxy;
@@ -242,6 +243,7 @@ fn context() -> report::Context {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .unwrap_or_else(|| "unknown".to_owned());
     report::Context {
+        cpu: cpu::method(),
         command: std::env::args().collect::<Vec<_>>().join(" "),
         date: utc_now(),
         machine,

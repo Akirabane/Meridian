@@ -1,6 +1,7 @@
 //! One phase of a run: N players against one address, the direct backend or the
 //! proxy, with the same packets at the same rate, and what the machine and the
 //! proxy process did during the measured window.
+use crate::cpu;
 use crate::player::{self, Failure, Plan};
 use crate::stats::Summary;
 use std::net::SocketAddr;
@@ -83,17 +84,10 @@ pub fn phase(target: SocketAddr, load: Load, proxy: Option<Pid>, stop: &Arc<Atom
     start.wait();
     let logins_took = began.elapsed();
     let me = sysinfo::get_current_pid().ok();
-    let mut system = System::new();
     let watched: Vec<Pid> = me.into_iter().chain(proxy).collect();
-    let refresh = |system: &mut System| {
-        system.refresh_cpu_usage();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&watched),
-            true,
-            ProcessRefreshKind::nothing().with_cpu().with_memory(),
-        );
-    };
-    refresh(&mut system);
+    let mut system = System::new();
+    system.refresh_cpu_usage();
+    let meter = cpu::Meter::start(&watched);
     let window_began = Instant::now();
     let mut phase = Phase {
         logins_took,
@@ -134,15 +128,12 @@ pub fn phase(target: SocketAddr, load: Load, proxy: Option<Pid>, stop: &Arc<Atom
         let _ = f.join();
     }
     phase.window = window_began.elapsed();
-    refresh(&mut system);
+    let mut usage = meter.read().into_iter();
+    phase.bench_cpu = me.and_then(|_| usage.next().flatten()).unwrap_or(0.0);
+    phase.proxy_cpu = proxy.and_then(|_| usage.next().flatten());
+    system.refresh_cpu_usage();
     phase.machine_cpu = system.global_cpu_usage() * system.cpus().len() as f32;
-    phase.bench_cpu = me
-        .and_then(|pid| system.process(pid))
-        .map_or(0.0, |p| p.cpu_usage());
-    if let Some(process) = proxy.and_then(|pid| system.process(pid)) {
-        phase.proxy_cpu = Some(process.cpu_usage());
-        phase.proxy_memory = Some(process.memory());
-    }
+    phase.proxy_memory = proxy.and_then(memory_of);
     phase.login = Summary::of(logins);
     phase.round_trip = Summary::of(round_trips);
     phase

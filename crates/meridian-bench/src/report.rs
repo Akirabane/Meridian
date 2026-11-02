@@ -15,6 +15,8 @@ pub struct Context {
     pub machine: String,
     pub commit: String,
     pub build: &'static str,
+    /// How processor time is read on this system.
+    pub cpu: String,
 }
 
 /// One step of the run: the same load directly and through the proxy.
@@ -66,14 +68,14 @@ pub fn header(context: &Context, load: &Load, steps: &[usize]) -> String {
          backend, then through the proxy, the real `meridian` program run as a child process. \
          A player sends one packet, waits for its echo and times it, then waits for its next \
          turn. The added latency is the difference between the two distributions of round \
-         trips, both shown. CPU is each process's own time over the measured window, in percent \
-         of one core; Windows counts it in scheduler ticks of about 15.6 ms, so over a window \
-         of W seconds a figure under 1.56 / W % of a core reads as 0. The proxy's memory is its \
-         resident size. All the players of a step connect at once, so the login figures are \
-         those of a burst of logins, not of players arriving one by one. The players and the \
-         backend run \
-         in this program, on the same cores as the proxy: their load is shown, and what the \
-         rest of the machine did is the difference."
+         trips, both shown. All the players of a step connect at once, so the login figures \
+         are those of a burst of logins, not of players arriving one by one; each phase starts \
+         after a random pause under 100 ms.\n\n\
+         CPU is each process's own use over the measured window, in percent of one core. {} \
+         The players and the backend run in this program, on the same cores as the proxy: \
+         their load is shown, and what the rest of the machine did is the difference. The \
+         proxy's memory is its resident size.",
+        context.cpu
     );
     let _ = writeln!(
         out,
@@ -245,6 +247,7 @@ mod tests {
             machine: "a test machine".into(),
             commit: "abc1234".into(),
             build: "release",
+            cpu: "It is counted.".into(),
         };
         let text = header(&context, &load(), &[10, 100]);
         let first_lines: Vec<&str> = text.lines().take(3).collect();
