@@ -1,4 +1,110 @@
 //! The Meridian proxy.
-fn main() {
-    println!("meridian {}", env!("CARGO_PKG_VERSION"));
+mod args;
+mod log;
+mod serve;
+
+use args::Command;
+use log::{error, info};
+use meridian_config::{Config, ConfigError};
+use std::net::TcpListener;
+use std::path::Path;
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+fn main() -> ExitCode {
+    log::init_from_env();
+    let command = match args::parse(std::env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!("meridian: {message}\n\n{}", args::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+    match command {
+        Command::Help => {
+            println!("{}", args::USAGE);
+            ExitCode::SUCCESS
+        }
+        Command::Version => {
+            println!("meridian {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        Command::Check { config } => match load(&config) {
+            Some(loaded) => {
+                println!(
+                    "{}: valid, {}, default backend \"{}\"",
+                    config.display(),
+                    backend_count(loaded.backends.len()),
+                    loaded.default_backend
+                );
+                ExitCode::SUCCESS
+            }
+            None => ExitCode::FAILURE,
+        },
+        Command::Run { config } => match load(&config) {
+            Some(loaded) => run(loaded),
+            None => ExitCode::FAILURE,
+        },
+    }
+}
+
+/// Loads the configuration, or logs why it cannot be used.
+fn load(path: &Path) -> Option<Config> {
+    match Config::load(path) {
+        Ok(config) => Some(config),
+        // A read error already names the file.
+        Err(e @ ConfigError::Read { .. }) => {
+            error!("{e}");
+            None
+        }
+        Err(e) => {
+            error!("{}: {e}", path.display());
+            None
+        }
+    }
+}
+
+fn run(config: Config) -> ExitCode {
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        if let Err(e) = ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed)) {
+            error!("cannot watch for Ctrl+C: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let listener = match TcpListener::bind(config.listen) {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!("cannot listen on {}: {e}", config.listen);
+            return ExitCode::FAILURE;
+        }
+    };
+    info!(
+        "meridian {} listening on {}, {}, default backend \"{}\"",
+        env!("CARGO_PKG_VERSION"),
+        config.listen,
+        backend_count(config.backends.len()),
+        config.default_backend
+    );
+    match serve::serve(listener, Arc::new(config), &stop) {
+        Ok(()) => {
+            info!("stopped");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            error!("the proxy stopped: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// "1 backend", "2 backends".
+fn backend_count(n: usize) -> String {
+    if n == 1 {
+        "1 backend".to_owned()
+    } else {
+        format!("{n} backends")
+    }
 }
