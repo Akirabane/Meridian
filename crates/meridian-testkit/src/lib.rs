@@ -9,8 +9,11 @@
 //!   compression and the player information forwarding, then runs a script.
 //! - [`client`] logs in as an offline vanilla client does, then runs a script.
 //! - [`live`] is a quiet player for a real server, over TCP.
+//! - [`held`] is a source world and a fake target answering as Horizon's held
+//!   player, for switch tests.
 pub mod backend;
 pub mod client;
+pub mod held;
 pub mod live;
 pub mod peer;
 pub mod trace;
