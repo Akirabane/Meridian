@@ -39,7 +39,14 @@
 //! - **Chunk columns** that the client holds with the same blocks but reached by
 //!   other packets are sent again: equal blocks are not recognised, only equal
 //!   packets.
-//! - **Not kept yet**: the recipe book, advancements, map data, resource packs and
+//! - **Player list entries** whose profile differs, or on which the ghost saw an
+//!   action the target never sent, are removed and added again. The client then
+//!   takes the profile again for that player's skin; whether that shows on a
+//!   player in view is not verified.
+//! - **Lists through a Respawn**: Login clears the player list, boss bars and
+//!   scoreboard in the ghost; Respawn keeps them. Whether the client keeps its
+//!   scoreboard through a Respawn is not verified.
+//! - **Not kept**: the recipe book, advancements, map data, resource packs and
 //!   the server's command tree.
 mod bossbars;
 mod chunks;
