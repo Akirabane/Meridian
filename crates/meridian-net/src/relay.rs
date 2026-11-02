@@ -9,12 +9,16 @@
 //! which of those two phases the player's client is in, from the packets it sends
 //! it, so that a [`Handle`] can tell the player why the session ends.
 //!
+//! A [`CommandHook`] may answer some of the commands the player types: those are
+//! not passed to the backend, and the player gets the answer in the chat.
+//!
 //! When either side closes, the other is closed too, and both threads end.
 use crate::{Result, backend::BackendLink, client::ClientSession};
 use horizon_protocol::{
     connection::{Closer, ConnReader, ConnWriter},
     ids,
     packets::{configuration, play},
+    text,
 };
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 
@@ -43,6 +47,11 @@ pub enum Phase {
     Play,
 }
 
+/// Answers a command the player typed in the play phase, given without its
+/// slash: `Some(text)` when the proxy answers it, and the command then never
+/// reaches the backend; `None` to pass it on as it is.
+pub type CommandHook = dyn Fn(&str) -> Option<String> + Send + Sync;
+
 /// Relays the session until either side closes it.
 pub fn run(client: ClientSession, backend: BackendLink) -> Result<()> {
     run_counting(client, backend).map(|_| ())
@@ -61,6 +70,7 @@ pub struct Relay {
     backend_reader: ConnReader,
     backend_writer: ConnWriter,
     shared: Arc<Shared>,
+    commands: Option<Arc<CommandHook>>,
 }
 
 /// Ends a relayed session from another thread. It can be cloned and kept after the
@@ -101,8 +111,15 @@ impl Relay {
             backend_reader,
             backend_writer,
             shared,
+            commands: None,
         };
         Ok((relay, handle))
+    }
+
+    /// Lets `hook` answer the commands the player types in the play phase.
+    pub fn with_commands(mut self, hook: Arc<CommandHook>) -> Self {
+        self.commands = Some(hook);
+        self
     }
 
     /// Relays the session until either side closes it, and says what it carried.
@@ -116,6 +133,7 @@ impl Relay {
             backend_reader,
             backend_writer,
             shared,
+            commands,
         } = self;
         let (done, ended) = mpsc::channel();
         let to_client = {
@@ -127,11 +145,12 @@ impl Relay {
                 })?
         };
         let to_backend = {
-            let done = done.clone();
+            let (done, shared) = (done.clone(), Arc::clone(&shared));
             std::thread::Builder::new()
                 .name("relay-to-backend".to_owned())
                 .spawn(move || {
-                    let _ = done.send((Side::ToBackend, copy(client_reader, backend_writer)));
+                    let end = copy_to_backend(client_reader, backend_writer, &shared, commands);
+                    let _ = done.send((Side::ToBackend, end));
                 })?
         };
         drop(done);
@@ -212,23 +231,85 @@ enum End {
     Broken(horizon_protocol::Error),
 }
 
-/// Copies the player's packets to the backend until reading or writing fails.
-fn copy(mut from: ConnReader, mut to: ConnWriter) -> (Flow, End) {
+/// Copies the player's packets to the backend until reading or writing fails,
+/// and lets `commands` answer the commands the player types.
+///
+/// The ids of the two phases overlap, so the phase the player sends in is
+/// followed from the packets that end one: the client is in the play phase once
+/// it has sent Finish Configuration, and back in the configuration phase once it
+/// has acknowledged a return to it.
+fn copy_to_backend(
+    mut from: ConnReader,
+    mut to: ConnWriter,
+    shared: &Shared,
+    commands: Option<Arc<CommandHook>>,
+) -> (Flow, End) {
     let mut flow = Flow::default();
     let mut body = Vec::new();
+    let mut sending = Phase::Configuration;
     loop {
         let (id, payload) = match from.recv() {
             Ok(packet) => packet,
             Err(e) if e.is_end_of_stream() => return (flow, End::Closed),
             Err(e) => return (flow, End::Broken(e)),
         };
+        if sending == Phase::Play {
+            if let Some(hook) = &commands {
+                if answer_command(id, &payload, hook.as_ref(), shared) {
+                    continue;
+                }
+            }
+        }
         encode(&mut body, id, &payload);
         // A write fails only when the side written to has gone away.
         if to.send(&body).is_err() {
             return (flow, End::Closed);
         }
+        sending = match (sending, id) {
+            (Phase::Configuration, ids::configuration::serverbound::FINISH_CONFIGURATION) => {
+                Phase::Play
+            }
+            (Phase::Play, ids::play::serverbound::CONFIGURATION_ACKNOWLEDGED) => {
+                Phase::Configuration
+            }
+            (phase, _) => phase,
+        };
         flow.add(&body);
     }
+}
+
+/// When the play packet `id` is a command the hook answers, sends the player the
+/// answer and returns `true`: the command is not passed on. A signed command is
+/// answered the same way; its signature is only for the backend, which never
+/// gets it.
+fn answer_command(id: i32, payload: &[u8], hook: &CommandHook, shared: &Shared) -> bool {
+    if id != ids::play::serverbound::CHAT_COMMAND
+        && id != ids::play::serverbound::CHAT_COMMAND_SIGNED
+    {
+        return false;
+    }
+    let command = match play::Serverbound::decode(id, payload) {
+        Ok(play::Serverbound::ChatCommand(c)) => c.command,
+        Ok(play::Serverbound::ChatCommandSigned(c)) => c.command,
+        // A packet the proxy cannot read is the backend's to judge.
+        _ => return false,
+    };
+    let Some(reply) = hook(&command) else {
+        return false;
+    };
+    let mut client = shared.client();
+    // The client reads a chat message only in the play phase; while the backend
+    // takes it back to configuration, the command goes on to the backend.
+    if client.phase != Phase::Play {
+        return false;
+    }
+    let message = play::Clientbound::SystemChat(play::SystemChat {
+        content: text::literal(&reply),
+        overlay: false,
+    });
+    // A player who has gone cannot be told; the reader sees the close next.
+    let _ = client.writer.send(&message.encode());
+    true
 }
 
 /// Copies the backend's packets to the player, and follows the phase the
@@ -535,6 +616,212 @@ mod tests {
             assert!(relay.join().unwrap().is_ok());
             server.join().unwrap().unwrap();
         }
+    }
+
+    /// The payload of an encoded packet whose id takes one byte.
+    fn payload_of(body: Vec<u8>) -> Vec<u8> {
+        assert!(body[0] < 0x80, "the ids here take one byte");
+        body[1..].to_vec()
+    }
+
+    fn command(text: &str) -> Vec<u8> {
+        payload_of(
+            play::Serverbound::ChatCommand(play::ChatCommand {
+                command: text.into(),
+            })
+            .encode(),
+        )
+    }
+
+    fn signed_command(text: &str) -> Vec<u8> {
+        payload_of(
+            play::Serverbound::ChatCommandSigned(play::ChatCommandSigned {
+                command: text.into(),
+                timestamp: 1_700_000_000_000,
+                salt: 7,
+                arguments: vec![("message".into(), vec![9; 256])],
+                last_seen: play::LastSeenUpdate {
+                    offset: 0,
+                    acknowledged: [0, 0, 0],
+                    checksum: 0,
+                },
+            })
+            .encode(),
+        )
+    }
+
+    fn chat(text: &str) -> Vec<u8> {
+        payload_of(
+            play::Clientbound::SystemChat(play::SystemChat {
+                content: text::literal(text),
+                overlay: false,
+            })
+            .encode(),
+        )
+    }
+
+    /// Answers `server` and `server <anything>`, nothing else.
+    fn server_hook() -> Arc<CommandHook> {
+        Arc::new(|command: &str| {
+            (command == "server" || command.starts_with("server "))
+                .then(|| format!("proxy answers /{command}"))
+        })
+    }
+
+    /// Runs a session with `hook`: the backend and the player follow their
+    /// scripts, and the backend closes at the end.
+    fn with_hook(
+        hook: Option<Arc<CommandHook>>,
+        backend_script: Vec<Step>,
+        player_script: Vec<Step>,
+    ) {
+        let (client, backend, player, server) = sides(-1, -1);
+        let (mut relay, _handle) = Relay::new(client, backend).unwrap();
+        if let Some(hook) = hook {
+            relay = relay.with_commands(hook);
+        }
+        let recorder = Recorder::new();
+        let server = peer::spawn(server, backend_script, Dir::ToServer, recorder.clone());
+        let player = peer::spawn(player, player_script, Dir::ToClient, recorder);
+        relay.run().unwrap();
+        server.join().unwrap().unwrap();
+        player.join().unwrap().unwrap();
+    }
+
+    /// In the play phase the proxy answers the commands its hook knows, in the
+    /// chat, and passes every other command to the backend unchanged.
+    #[test]
+    fn the_proxy_answers_its_commands_and_passes_the_others_on() {
+        use ids::{configuration as cfg, play as ids_play};
+        let backend_script = vec![
+            finish_configuration(),
+            Step::Expect {
+                id: cfg::serverbound::FINISH_CONFIGURATION,
+            },
+            // Only the command the proxy does not answer arrives, as it was sent.
+            Step::expect_exactly(ids_play::serverbound::CHAT_COMMAND, command("tell Bob hi")),
+            Step::expect_exactly(ids_play::serverbound::CHAT_COMMAND, command("servers")),
+            Step::Close,
+        ];
+        let player_script = vec![
+            Step::Expect {
+                id: cfg::clientbound::FINISH_CONFIGURATION,
+            },
+            acknowledge_configuration(),
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("server")),
+            Step::expect_exactly(
+                ids_play::clientbound::SYSTEM_CHAT,
+                chat("proxy answers /server"),
+            ),
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("server east")),
+            Step::expect_exactly(
+                ids_play::clientbound::SYSTEM_CHAT,
+                chat("proxy answers /server east"),
+            ),
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("tell Bob hi")),
+            // A command that only starts like one of the proxy's is not one.
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("servers")),
+            Step::ExpectClose,
+        ];
+        with_hook(Some(server_hook()), backend_script, player_script);
+    }
+
+    /// A signed command the proxy answers is not passed on either.
+    #[test]
+    fn a_signed_command_of_the_proxy_is_answered_too() {
+        use ids::{configuration as cfg, play as ids_play};
+        let backend_script = vec![
+            finish_configuration(),
+            Step::Expect {
+                id: cfg::serverbound::FINISH_CONFIGURATION,
+            },
+            Step::expect_exactly(ids_play::serverbound::KEEP_ALIVE, 5u64.to_be_bytes()),
+            Step::Close,
+        ];
+        let player_script = vec![
+            Step::Expect {
+                id: cfg::clientbound::FINISH_CONFIGURATION,
+            },
+            acknowledge_configuration(),
+            Step::send(
+                ids_play::serverbound::CHAT_COMMAND_SIGNED,
+                signed_command("server"),
+            ),
+            Step::expect_exactly(
+                ids_play::clientbound::SYSTEM_CHAT,
+                chat("proxy answers /server"),
+            ),
+            Step::send(ids_play::serverbound::KEEP_ALIVE, 5u64.to_be_bytes()),
+            Step::ExpectClose,
+        ];
+        with_hook(Some(server_hook()), backend_script, player_script);
+    }
+
+    /// Before the play phase the same ids are other packets: nothing is answered
+    /// and everything reaches the backend.
+    #[test]
+    fn nothing_is_answered_in_the_configuration_phase() {
+        use ids::play as ids_play;
+        let id = ids_play::serverbound::CHAT_COMMAND;
+        let backend_script = vec![Step::expect_exactly(id, command("server")), Step::Close];
+        let player_script = vec![Step::send(id, command("server")), Step::ExpectClose];
+        with_hook(Some(server_hook()), backend_script, player_script);
+    }
+
+    /// Back in the configuration phase after the play phase, nothing is answered
+    /// either.
+    #[test]
+    fn nothing_is_answered_after_a_return_to_configuration() {
+        use ids::{configuration as cfg, play as ids_play};
+        let id = ids_play::serverbound::CHAT_COMMAND;
+        let backend_script = vec![
+            finish_configuration(),
+            Step::Expect {
+                id: cfg::serverbound::FINISH_CONFIGURATION,
+            },
+            Step::send(ids_play::clientbound::START_CONFIGURATION, []),
+            Step::Expect {
+                id: ids_play::serverbound::CONFIGURATION_ACKNOWLEDGED,
+            },
+            Step::expect_exactly(id, command("server")),
+            Step::Close,
+        ];
+        let player_script = vec![
+            Step::Expect {
+                id: cfg::clientbound::FINISH_CONFIGURATION,
+            },
+            acknowledge_configuration(),
+            Step::Expect {
+                id: ids_play::clientbound::START_CONFIGURATION,
+            },
+            Step::send(ids_play::serverbound::CONFIGURATION_ACKNOWLEDGED, []),
+            Step::send(id, command("server")),
+            Step::ExpectClose,
+        ];
+        with_hook(Some(server_hook()), backend_script, player_script);
+    }
+
+    /// Without a hook, every command reaches the backend.
+    #[test]
+    fn without_a_hook_every_command_is_passed_on() {
+        use ids::{configuration as cfg, play as ids_play};
+        let backend_script = vec![
+            finish_configuration(),
+            Step::Expect {
+                id: cfg::serverbound::FINISH_CONFIGURATION,
+            },
+            Step::expect_exactly(ids_play::serverbound::CHAT_COMMAND, command("server")),
+            Step::Close,
+        ];
+        let player_script = vec![
+            Step::Expect {
+                id: cfg::clientbound::FINISH_CONFIGURATION,
+            },
+            acknowledge_configuration(),
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("server")),
+            Step::ExpectClose,
+        ];
+        with_hook(None, backend_script, player_script);
     }
 
     /// Closing ends the session without a packet to the player.
