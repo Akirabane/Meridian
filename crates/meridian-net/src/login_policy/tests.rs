@@ -88,6 +88,32 @@ fn a_name_is_an_account_whatever_its_case() {
     );
 }
 
+#[test]
+fn a_config_built_with_online_mode_alone_is_still_obeyed() {
+    // Tests and older code set online_mode and leave auth_mode at its default.
+    let lookup = FakeLookup::with_accounts(&["Notch"]);
+    let policy = LoginPolicy::new();
+    let off = Config {
+        online_mode: false,
+        ..Config::default()
+    };
+    assert_eq!(
+        policy.auth_for(&off, "Notch", &lookup, Some(PEER)),
+        Ok(AuthKind::Offline)
+    );
+    // Online and offline at once is read as online, the side that checks.
+    let mixed = Config {
+        online_mode: true,
+        auth_mode: AuthMode::Offline,
+        ..Config::default()
+    };
+    assert_eq!(
+        policy.auth_for(&mixed, "Steve", &lookup, Some(PEER)),
+        Ok(AuthKind::Premium)
+    );
+    assert_eq!(lookup.calls(), 0);
+}
+
 // The cache.
 
 #[test]

@@ -202,7 +202,7 @@ impl LoginPolicy {
         peer: Option<IpAddr>,
         now: Instant,
     ) -> Result<AuthKind, Refusal> {
-        match config.auth_mode {
+        match effective_mode(config) {
             AuthMode::Online => Ok(AuthKind::Premium),
             AuthMode::Offline => Ok(AuthKind::Offline),
             AuthMode::Hybrid => {
@@ -284,6 +284,19 @@ impl LoginPolicy {
         }
         *count += 1;
         Ok(())
+    }
+}
+
+/// The mode a configuration asks for. A loaded configuration keeps `online_mode`
+/// and `auth_mode` in step; one built in code may set only `online_mode`, the
+/// older switch, so `online_mode = false` means offline whatever `auth_mode`
+/// says, and the hybrid mode needs `online_mode = true` as a loaded file gives it.
+/// A configuration that says online and offline at once is treated as online.
+fn effective_mode(config: &Config) -> AuthMode {
+    match (config.online_mode, config.auth_mode) {
+        (false, _) => AuthMode::Offline,
+        (true, AuthMode::Hybrid) => AuthMode::Hybrid,
+        (true, _) => AuthMode::Online,
     }
 }
 
