@@ -119,15 +119,15 @@ struct Log {
 }
 
 impl Log {
-    fn push(&mut self, text: String) {
+    /// Adds a line and returns its number.
+    fn push(&mut self, text: String) -> u64 {
         if self.lines.len() == LOG_LINES {
             self.lines.pop_front();
         }
-        self.lines.push_back(Line {
-            seq: self.next,
-            text,
-        });
+        let seq = self.next;
+        self.lines.push_back(Line { seq, text });
         self.next += 1;
+        seq
     }
 }
 
@@ -372,25 +372,34 @@ impl Supervisor {
 
     /// Writes `line` to the console of `name`.
     pub fn send(&self, name: &str, line: &str) -> Result<(), String> {
+        self.send_numbered(name, line).map(|_| ())
+    }
+
+    /// [`Supervisor::send`], returning the number of the line that echoes the
+    /// command in the log. The echo is logged before the command is written, so
+    /// whatever the process prints in answer comes after it, however fast.
+    fn send_numbered(&self, name: &str, line: &str) -> Result<u64, String> {
         let process = self.process(name)?;
         let line = line.trim_end_matches(['\r', '\n']);
         if line.contains(['\r', '\n']) {
             return Err("one line at a time".to_owned());
         }
-        {
-            let mut inner = process.lock();
-            let stdin = inner
-                .running
-                .as_mut()
-                .and_then(|r| r.stdin.as_mut())
-                .ok_or_else(|| format!("{name} is not running"))?;
-            stdin
-                .write_all(format!("{line}\n").as_bytes())
-                .and_then(|()| stdin.flush())
-                .map_err(|e| format!("{name}: cannot write to its console: {e}"))?;
-        }
-        process.log().push(format!("> {line}"));
-        Ok(())
+        let mut inner = process.lock();
+        let stdin = inner
+            .running
+            .as_mut()
+            .and_then(|r| r.stdin.as_mut())
+            .ok_or_else(|| format!("{name} is not running"))?;
+        let echo = process.log().push(format!("> {line}"));
+        stdin
+            .write_all(format!("{line}\n").as_bytes())
+            .and_then(|()| stdin.flush())
+            .map_err(|e| {
+                let why = format!("{name}: cannot write to its console: {e}");
+                process.log().push(format!("[panel] {why}"));
+                why
+            })?;
+        Ok(echo)
     }
 
     /// Writes `line` to the console of `name` and returns the lines it printed:
@@ -400,12 +409,11 @@ impl Supervisor {
     /// server, still has its lines given back to it rather than to the next one.
     pub fn ask(&self, name: &str, line: &str, wait: Duration) -> Result<Vec<String>, String> {
         let process = self.process(name)?;
-        let from = process.log().next;
-        self.send(name, line)?;
+        let echo = self.send_numbered(name, line)?;
         let started = Instant::now();
-        // The echo of the line is the first new line; an answer comes after it.
-        let echoed = from + 1;
-        let mut seen = process.log().next;
+        // The answer is what comes after the echo; a line logged before it, such
+        // as the end of an earlier answer, is not part of it.
+        let mut seen = echo + 1;
         let mut changed = started;
         loop {
             thread::sleep(POLL_ANSWER);
@@ -414,7 +422,8 @@ impl Supervisor {
                 seen = next;
                 changed = Instant::now();
             }
-            let done = if seen > echoed {
+            let answered = seen > echo + 1;
+            let done = if answered {
                 changed.elapsed() >= QUIET
             } else {
                 started.elapsed() >= SILENT
@@ -427,7 +436,7 @@ impl Supervisor {
             .log()
             .lines
             .iter()
-            .filter(|l| l.seq > from)
+            .filter(|l| l.seq > echo)
             .map(|l| l.text.clone())
             .collect())
     }

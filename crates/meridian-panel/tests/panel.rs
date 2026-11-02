@@ -75,6 +75,16 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// Waits until the stand-in `name` is online and both its startup lines are in
+/// its log, so that nothing it prints at startup can arrive during a question.
+fn ready(supervisor: &Supervisor, name: &str) {
+    wait_for("online", || state_of(supervisor, name) == State::Online);
+    wait_for("the startup lines", || {
+        let log = log_text(supervisor, name);
+        log.contains("fake process ready") && log.contains("[stderr] fake process warning")
+    });
+}
+
 fn state_of(supervisor: &Supervisor, name: &str) -> State {
     supervisor
         .snapshots()
@@ -101,7 +111,7 @@ fn a_slow_answer_stays_with_its_command() {
     let (bench, _) = bench(&dir, &[], &[]);
     let supervisor = Supervisor::new(&bench);
     supervisor.start("proxy").unwrap();
-    wait_for("online", || state_of(&supervisor, "proxy") == State::Online);
+    ready(&supervisor, "proxy");
     let slow = supervisor
         .ask("proxy", "slow", Duration::from_secs(8))
         .unwrap();
@@ -141,14 +151,12 @@ fn a_process_starts_answers_its_console_and_stops_with_its_command() {
     );
 
     // Both outputs are kept, stderr marked.
-    wait_for("output", || {
-        log_text(&supervisor, "lobby").contains("[stderr] fake process warning")
-    });
-    assert!(log_text(&supervisor, "lobby").contains("fake process ready"));
+    ready(&supervisor, "lobby");
 
-    // The console: a line in, the answer out.
+    // The console: a line in, the answer out. The limit is the panel's own; the
+    // answer is back once the output has been quiet for a moment.
     let answer = supervisor
-        .ask("lobby", "say hello", Duration::from_millis(800))
+        .ask("lobby", "say hello", Duration::from_secs(8))
         .unwrap();
     assert_eq!(answer, ["got: say hello"]);
     assert!(supervisor.send("lobby", "two\nlines").is_err());
@@ -441,9 +449,7 @@ fn the_api_drives_the_bench_by_name_only() {
         .0,
         200
     );
-    wait_for("online", || {
-        state_of(&panel.supervisor, "proxy") == State::Online
-    });
+    ready(&panel.supervisor, "proxy");
 
     // The test buttons go through the proxy's console.
     let (_, players, _) = request(&panel, "POST", "/api/test/players", t, "{}");
