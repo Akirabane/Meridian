@@ -242,11 +242,7 @@ fn client_after_switch(player: &mut Connection) -> (Vec<String>, C) {
             break;
         }
     }
-    send(
-        player,
-        horizon_protocol::ids::play::serverbound::ACCEPT_TELEPORTATION,
-        &varint(2),
-    );
+    accept(player, 2, [41.0, 70.0, 41.0]);
     loop {
         let (id, payload) = player.recv().unwrap();
         lines.extend(chat(id, &payload));

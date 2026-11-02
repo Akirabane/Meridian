@@ -179,8 +179,8 @@ pub fn join_source(player: &mut Connection, source: &mut Connection) {
         send(source, id, &payload);
         assert_eq!(expect(player, id).unwrap(), payload);
     }
-    send(player, ps::ACCEPT_TELEPORTATION, &varint(1));
-    assert_eq!(expect(source, ps::ACCEPT_TELEPORTATION).unwrap(), varint(1));
+    accept(player, 1, [8.0, 70.0, 8.0]);
+    assert_eq!(accepted(source).unwrap(), (1, [8.0, 70.0, 8.0]));
 }
 
 /// How the fake target differs from the source.
@@ -262,7 +262,8 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
         send_typed(&mut c, &add_entity(CLIENT_ID, 500));
         send(&mut c, pc::COMMANDS, &[0, 0]);
         send(&mut c, pc::CHUNK_BATCH_FINISHED, &varint(9));
-        if expect(&mut c, ps::ACCEPT_TELEPORTATION)? != varint(1) {
+        // A whole answer, with the place: a server cannot read one without it.
+        if accepted(&mut c)? != (1, [40.0, 70.0, 40.0]) {
             return Err("the proxy confirmed another teleport".into());
         }
         expect(&mut c, ps::CHUNK_BATCH_RECEIVED)?;
@@ -281,7 +282,7 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
         // stays held.
         send_typed(&mut c, &position(2, 41.0));
         // The client's confirmation, not the proxy's.
-        if expect(&mut c, ps::ACCEPT_TELEPORTATION)? != varint(2) {
+        if accepted(&mut c)?.0 != 2 {
             return Err("the client confirmed another teleport".into());
         }
         next("confirm")?;
@@ -305,9 +306,35 @@ pub fn after_switch(player: &mut Connection) -> Vec<(i32, Vec<u8>)> {
             break;
         }
     }
-    send(player, ps::ACCEPT_TELEPORTATION, &varint(2));
+    accept(player, 2, [41.0, 70.0, 41.0]);
     packets.push(player.recv().unwrap());
     packets
+}
+
+/// The client confirms the teleport `id`, which put it at `at`, as a 26.3
+/// client does: the id, then where it now is and how it looks.
+pub fn accept(player: &mut Connection, id: i32, at: [f64; 3]) {
+    let answer = play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
+        id,
+        x: at[0],
+        y: at[1],
+        z: at[2],
+        yaw: 0.0,
+        pitch: 0.0,
+    });
+    player.send(&answer.encode()).unwrap();
+}
+
+/// The next packet, which must be a whole Accept Teleportation: its id and the
+/// place it gives.
+pub fn accepted(connection: &mut Connection) -> Result<(i32, [f64; 3]), String> {
+    let payload = expect(connection, ps::ACCEPT_TELEPORTATION)?;
+    match play::Serverbound::decode(ps::ACCEPT_TELEPORTATION, &payload) {
+        Ok(play::Serverbound::AcceptTeleportation(a)) => Ok((a.id, [a.x, a.y, a.z])),
+        _ => Err(format!(
+            "an Accept Teleportation a server cannot read: {payload:?}"
+        )),
+    }
 }
 
 /// The client attacks the entity it knows as `id`.

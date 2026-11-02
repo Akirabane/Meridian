@@ -7,7 +7,7 @@ use horizon_protocol::{
     buf::{Reader, Writer, write_varint},
     connection::ConnWriter,
     ids::play::{clientbound as c, serverbound as s},
-    packets::play::Clientbound as C,
+    packets::play::{self, Clientbound as C, Serverbound},
 };
 use meridian_ghost::{Packet, View};
 use meridian_rewrite::Swap;
@@ -43,6 +43,8 @@ pub(crate) struct Preparing {
     pub answered: Vec<i32>,
     /// The id of the target's last Player Position, and how many it sent.
     pub last_teleport: Option<i32>,
+    /// Where the target last put the player, for the answers to its teleports.
+    pose: Pose,
     pub positions: u32,
     pub batches: u32,
     pub last_batch: Option<Instant>,
@@ -70,6 +72,7 @@ impl Target {
                 answer_teleports: true,
                 answered: Vec::new(),
                 last_teleport: None,
+                pose: Pose::default(),
                 positions: 0,
                 batches: 0,
                 last_batch: None,
@@ -100,10 +103,16 @@ impl Target {
     }
 
     /// The target's connection is over.
-    pub fn closed(&self) {
-        self.lock()
-            .ended
-            .get_or_insert_with(|| "the target closed the connection".to_owned());
+    /// The target's connection is over: `broken` is the error that ended it, or
+    /// `None` when the target closed it. A server closes a connection without a
+    /// word on a packet it cannot read, so a close is worth naming as such.
+    pub fn closed(&self, broken: Option<&horizon_protocol::Error>) {
+        self.lock().ended.get_or_insert_with(|| match broken {
+            Some(e) => format!("the connection to the target broke: {e}"),
+            None => "the target closed the connection (a server does that, without a word, \
+                     on a packet it cannot read)"
+                .to_owned(),
+        });
         self.changed.notify_all();
     }
 
@@ -165,10 +174,19 @@ impl Preparing {
             }
             c::PLAYER_POSITION => {
                 if let Ok(C::PlayerPosition(p)) = C::decode(id, payload) {
+                    let (at, yaw, pitch) = self.pose.placed(&p);
                     if self.answer_teleports {
-                        let mut body = Vec::new();
-                        write_varint(&mut body, p.teleport);
-                        send(writer, s::ACCEPT_TELEPORTATION, &body);
+                        // The answer says where the player now is, as the client's
+                        // does; a server cannot read one without it.
+                        let answer = Serverbound::AcceptTeleportation(play::AcceptTeleportation {
+                            id: p.teleport,
+                            x: at[0],
+                            y: at[1],
+                            z: at[2],
+                            yaw,
+                            pitch,
+                        });
+                        send_body(writer, &answer.encode());
                         self.answered.push(p.teleport);
                     }
                     self.last_teleport = Some(p.teleport);
@@ -247,6 +265,42 @@ fn send(writer: &Mutex<ConnWriter>, id: i32, payload: &[u8]) {
     let mut body = Vec::with_capacity(payload.len() + 2);
     write_varint(&mut body, id);
     body.extend_from_slice(payload);
+    send_body(writer, &body);
+}
+
+fn send_body(writer: &Mutex<ConnWriter>, body: &[u8]) {
     // A target that has gone is seen by its reader.
-    let _ = lock(writer).send(&body);
+    let _ = lock(writer).send(body);
+}
+
+/// Where the target last put the player, and how they look.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Pose {
+    at: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+}
+
+impl Pose {
+    /// Applies Player Position, absolute or relative to the pose for the parts its
+    /// flags name, and returns the new pose.
+    pub fn placed(&mut self, p: &play::PlayerPosition) -> ([f64; 3], f32, f32) {
+        use play::relative;
+        let pick = |flag: i32, new: f64, old: f64| {
+            if p.relatives & flag != 0 {
+                old + new
+            } else {
+                new
+            }
+        };
+        for (i, flag) in [relative::X, relative::Y, relative::Z]
+            .into_iter()
+            .enumerate()
+        {
+            self.at[i] = pick(flag, p.position[i], self.at[i]);
+        }
+        self.yaw = pick(relative::Y_ROT, f64::from(p.yaw), f64::from(self.yaw)) as f32;
+        self.pitch = pick(relative::X_ROT, f64::from(p.pitch), f64::from(self.pitch)) as f32;
+        (self.at, self.yaw, self.pitch)
+    }
 }
