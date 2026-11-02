@@ -86,6 +86,8 @@ pub(crate) struct Down {
     /// The first backend's configuration phase, as the client got it.
     digest: DigestBuilder,
     pub config_digest: Option<Digest>,
+    /// Packets the ghost could not read, for the log of the next switch.
+    pub unreadable: Vec<String>,
     pub flow: Flow,
 }
 
@@ -153,6 +155,7 @@ impl Session {
                 secure_chat: None,
                 digest: DigestBuilder::default(),
                 config_digest: None,
+                unreadable: Vec::new(),
                 flow: Flow::default(),
             }),
             up: Mutex::new(Up {
@@ -397,8 +400,11 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
                 }
                 follow(&mut down, id, &payload);
                 let packet = Packet { id, payload };
-                // A packet the ghost cannot read leaves it as it was.
-                let _ = down.ghost.apply(&packet);
+                // A packet the ghost cannot read leaves it as it was; it is noted
+                // for the log of the next switch.
+                if let Err(e) = down.ghost.apply(&packet) {
+                    crate::prepare::note_unreadable(&mut down.unreadable, id, &e);
+                }
                 if id == ids::play::clientbound::PLAYER_POSITION
                     && let Ok(play::Clientbound::PlayerPosition(p)) = packet.decode()
                 {

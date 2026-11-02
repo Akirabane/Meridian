@@ -56,9 +56,9 @@ fn a_player_is_switched_to_the_target() {
         },
     )
     .unwrap();
-    // Each step is told, in order.
-    let steps: Vec<String> = steps
-        .lines()
+    // Each step is told, in order, with what the delta goes from and to.
+    let lines = steps.lines();
+    let steps: Vec<String> = lines
         .iter()
         .map(|line| line.split(':').next().unwrap().to_owned())
         .collect();
@@ -73,8 +73,15 @@ fn a_player_is_switched_to_the_target() {
             "hand over",
             "hand over",
             "hand over",
+            "hand over",
             "commit"
         ]
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with(
+            "hand over: the client holds inventory none, held slot none, experience none"
+        )),
+        "{lines:?}"
     );
     assert_eq!(
         log.lines(),

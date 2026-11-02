@@ -573,6 +573,25 @@ pub fn switch(
             run.abort();
             return Err(run.fail(Step::HandOver, too_long()));
         }
+        // What the delta goes from and to, for the log: a wrong inventory or
+        // experience after a switch shows here first.
+        note(&format!(
+            "hand over: the client holds {}; the target holds {}",
+            down.ghost.player_summary(),
+            s.view.player_summary()
+        ));
+        let unread = [
+            ("the client's", std::mem::take(&mut down.unreadable)),
+            ("the target's", std::mem::take(&mut s.unreadable)),
+        ];
+        for (whose, list) in unread {
+            if !list.is_empty() {
+                note(&format!(
+                    "hand over: packets {whose} view could not read, left as they were: {}",
+                    list.join("; ")
+                ));
+            }
+        }
         let packets = delta(&down.ghost, &s.view);
         let extras = std::mem::take(&mut s.extras);
         let mut body = Vec::new();

@@ -57,6 +57,18 @@ pub(crate) struct Preparing {
     pub extras: Vec<Packet>,
     /// Why the target stopped, when it did.
     pub ended: Option<String>,
+    /// Packets the view could not read, for the log.
+    pub unreadable: Vec<String>,
+}
+
+/// The most unreadable packets kept for the log, per view.
+const UNREADABLE_KEPT: usize = 8;
+
+/// Notes a packet a view could not read: its id and why.
+pub(crate) fn note_unreadable(list: &mut Vec<String>, id: i32, e: &horizon_protocol::Error) {
+    if list.len() < UNREADABLE_KEPT {
+        list.push(format!("packet {id}: {e}"));
+    }
 }
 
 impl Target {
@@ -80,6 +92,7 @@ impl Target {
                 loaded: false,
                 extras: Vec::new(),
                 ended: None,
+                unreadable: Vec::new(),
             }),
             changed: Condvar::new(),
         }
@@ -256,8 +269,10 @@ impl Preparing {
 
     fn apply(&mut self, id: i32, payload: &[u8]) {
         let payload = self.swapped(id, payload);
-        // A packet the view cannot read leaves it as it was.
-        let _ = self.view.apply(&Packet { id, payload });
+        // A packet the view cannot read leaves it as it was; it is noted for the log.
+        if let Err(e) = self.view.apply(&Packet { id, payload }) {
+            note_unreadable(&mut self.unreadable, id, &e);
+        }
     }
 }
 
