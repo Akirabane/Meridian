@@ -1,8 +1,11 @@
-//! The accept loop: one thread per player, until asked to stop.
+//! The accept loop: one thread per player, until asked to stop. A stop closes
+//! the sessions still being relayed, both sides, so that every backend sees its
+//! player leave and saves them, then waits for the players' threads to end.
 use crate::log::{debug, info, warning};
+use crate::session::{self, Connect, Sessions};
 use horizon_protocol::connection::Connection;
 use meridian_config::Config;
-use meridian_net::client;
+use meridian_net::backend;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -15,15 +18,32 @@ const POLL: Duration = Duration::from_millis(50);
 /// How long a stop waits for players' threads to finish.
 const DRAIN: Duration = Duration::from_secs(5);
 
-/// Accepts players on `listener` until `stop` is set, then waits up to
-/// [`DRAIN`] for the players' threads to end.
+/// Accepts players on `listener` until `stop` is set, then closes the sessions
+/// being relayed and waits up to [`DRAIN`] for the players' threads to end.
 pub fn serve(listener: TcpListener, config: Arc<Config>, stop: &AtomicBool) -> io::Result<()> {
+    let connect: Arc<Connect> = Arc::new(backend::connect);
+    serve_with(listener, config, connect, stop)
+}
+
+/// [`serve`], reaching the backends with `connect`.
+fn serve_with(
+    listener: TcpListener,
+    config: Arc<Config>,
+    connect: Arc<Connect>,
+    stop: &AtomicBool,
+) -> io::Result<()> {
     // A blocking accept could not see the stop flag, so the listener polls.
     listener.set_nonblocking(true)?;
     let active = Arc::new(AtomicUsize::new(0));
+    let sessions = Arc::new(Sessions::default());
+    let shared = Shared {
+        config,
+        connect,
+        sessions: Arc::clone(&sessions),
+    };
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok((stream, peer)) => start_player(stream, peer, &config, &active),
+            Ok((stream, peer)) => start_player(stream, peer, &shared, &active),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
@@ -34,29 +54,37 @@ pub fn serve(listener: TcpListener, config: Arc<Config>, stop: &AtomicBool) -> i
         }
     }
     info!("stopping: no new connections are accepted");
+    match sessions.close_all() {
+        0 => {}
+        1 => info!("closing 1 session"),
+        n => info!("closing {n} sessions"),
+    }
     drain(&active);
     Ok(())
 }
 
-fn start_player(
-    stream: TcpStream,
-    peer: SocketAddr,
-    config: &Arc<Config>,
-    active: &Arc<AtomicUsize>,
-) {
+/// What every player's thread shares.
+#[derive(Clone)]
+struct Shared {
+    config: Arc<Config>,
+    connect: Arc<Connect>,
+    sessions: Arc<Sessions>,
+}
+
+fn start_player(stream: TcpStream, peer: SocketAddr, shared: &Shared, active: &Arc<AtomicUsize>) {
     debug!("{peer}: connected");
     // On some systems an accepted socket inherits the listener's non-blocking mode.
     if let Err(e) = stream.set_nonblocking(false) {
         warning!("{peer}: cannot set up the connection: {e}");
         return;
     }
-    let config = Arc::clone(config);
+    let shared = shared.clone();
     let guard = Active::enter(active);
     let spawned = thread::Builder::new()
         .name(format!("player {peer}"))
         .spawn(move || {
             let _guard = guard;
-            handle(stream, peer, &config);
+            handle(stream, peer, &shared);
         });
     if let Err(e) = spawned {
         warning!("{peer}: cannot start a thread for the connection: {e}");
@@ -64,7 +92,7 @@ fn start_player(
 }
 
 /// One player's connection, from the first byte to the close.
-fn handle(stream: TcpStream, peer: SocketAddr, config: &Config) {
+fn handle(stream: TcpStream, peer: SocketAddr, shared: &Shared) {
     let connection = match Connection::from_stream(stream) {
         Ok(connection) => connection,
         Err(e) => {
@@ -72,18 +100,14 @@ fn handle(stream: TcpStream, peer: SocketAddr, config: &Config) {
             return;
         }
     };
-    match client::accept(connection, config) {
-        Ok(Some(session)) => {
-            // Relaying to a backend is a later step; until then the session ends here.
-            info!(
-                "{peer}: {} logged in; relaying is not available yet, closing",
-                session.profile.name
-            );
-        }
-        Ok(None) => debug!("{peer}: status answered"),
-        Err(e) => warning!("{peer}: {e}; closing the connection"),
-    }
-    // The connection is dropped here, which closes the socket.
+    session::handle(
+        connection,
+        peer,
+        &shared.config,
+        &*shared.connect,
+        &shared.sessions,
+    );
+    // The connections are dropped here, which closes the sockets.
 }
 
 /// Waits for the players' threads, up to [`DRAIN`].
