@@ -246,4 +246,4 @@ use before each run. No player failed in any run.
 
 A login through the proxy is two logins, the player's and the proxy's to the backend,
 so it stays slower than a direct one. The round trips did not change: the relay
-added 72 to 108 µs to the median in every run.
+added 70 to 108 µs to the median from 100 to 1,000 players, in every run.
