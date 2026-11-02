@@ -2,9 +2,13 @@
 //! the limits it applies. [`Config::load`] reads it from a TOML file, fills in the
 //! defaults and checks it; `meridian.example.toml` at the root of the repository
 //! shows every setting.
+mod auth;
 mod error;
 
+pub use auth::{AuthSettings, OnLookupFailure};
 pub use error::ConfigError;
+
+use auth::FileAuth;
 
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -132,6 +136,8 @@ pub struct Config {
     /// Which group each kind of player is sent to. When empty, every player uses
     /// the default backend and `try_backends`.
     pub routes: Vec<Route>,
+    /// How the hybrid mode looks names up (`[auth]` in the file).
+    pub auth: AuthSettings,
 }
 
 impl Default for Config {
@@ -151,6 +157,7 @@ impl Default for Config {
             auth_mode: AuthMode::Online,
             groups: Vec::new(),
             routes: Vec::new(),
+            auth: AuthSettings::default(),
         }
     }
 }
@@ -174,6 +181,7 @@ impl std::fmt::Debug for Config {
             auth_mode,
             groups,
             routes,
+            auth,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -195,6 +203,7 @@ impl std::fmt::Debug for Config {
             .field("auth_mode", auth_mode)
             .field("groups", groups)
             .field("routes", routes)
+            .field("auth", auth)
             .finish()
     }
 }
@@ -222,6 +231,8 @@ struct File {
     groups: Vec<FileGroup>,
     #[serde(default, rename = "route")]
     routes: Vec<FileRoute>,
+    #[serde(default)]
+    auth: FileAuth,
 }
 
 #[derive(Deserialize)]
@@ -330,6 +341,7 @@ impl Config {
                     group: r.group,
                 })
                 .collect(),
+            auth: file.auth.into_settings(),
         };
         config.validate()?;
         Ok(config)
@@ -392,6 +404,7 @@ impl Config {
         }
         self.validate_groups()?;
         self.validate_routes()?;
+        self.auth.validate()?;
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
         }
@@ -605,3 +618,6 @@ mod tests;
 
 #[cfg(test)]
 mod routing_tests;
+
+#[cfg(test)]
+mod auth_tests;

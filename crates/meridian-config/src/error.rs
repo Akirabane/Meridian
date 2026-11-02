@@ -31,6 +31,10 @@ pub enum ConfigError {
     UnknownDefaultBackend(String),
     /// `connect-timeout-ms` is zero.
     ZeroConnectTimeout,
+    /// `[auth] negative-cache-seconds` is longer than `lookup-cache-seconds`.
+    NegativeCacheLonger { positive: u64, negative: u64 },
+    /// `[auth] lookups-per-minute` is zero.
+    ZeroLookupsPerMinute,
     /// `forwarding-secret` is empty while backends are configured.
     MissingForwardingSecret,
     /// A setting names a backend that is not configured. `setting` says where,
@@ -120,6 +124,15 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::ZeroConnectTimeout => {
                 write!(f, "connect-timeout-ms must be more than 0")
+            }
+            ConfigError::NegativeCacheLonger { positive, negative } => write!(
+                f,
+                "[auth] negative-cache-seconds = {negative} is longer than lookup-cache-seconds = \
+                 {positive}: a free name can become an account's at any time, so \"no account\" \
+                 is remembered for less time than \"account\""
+            ),
+            ConfigError::ZeroLookupsPerMinute => {
+                write!(f, "[auth] lookups-per-minute must be at least 1")
             }
             ConfigError::MissingForwardingSecret => {
                 write!(f, "forwarding-secret must be set: the backends check it")
