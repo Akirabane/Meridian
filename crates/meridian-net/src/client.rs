@@ -5,6 +5,7 @@
 //! The steps follow vanilla's server (`ServerHandshakePacketListenerImpl`,
 //! `ServerStatusPacketListenerImpl`, `ServerLoginPacketListenerImpl`), as Horizon's
 //! server does in `horizon-client/src/lan/conn.rs`.
+use crate::login_policy::{LoginPolicy, NameLookup, ProfileLookup, Refusal};
 use crate::{Error, Profile, Result};
 use horizon_protocol::{
     connection::Connection,
@@ -14,6 +15,7 @@ use horizon_protocol::{
 };
 use meridian_config::Config;
 use std::{
+    net::IpAddr,
     sync::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -71,15 +73,38 @@ pub enum AuthKind {
     Offline,
 }
 
-/// How the proxy checks the login of a player called `name`. It is decided from
-/// the name alone, before anything is asked of the client, so a mode that picks
-/// per player (premium names checked, the others let in offline) only has to
-/// change this function. For now the configuration decides for everyone.
-fn auth_for(config: &Config, _name: &str) -> AuthKind {
-    if config.online_mode {
-        AuthKind::Premium
-    } else {
-        AuthKind::Offline
+/// How the proxy checks the login of a player called `name`, decided from the
+/// name alone before anything is asked of the client ([`login_policy`]): the
+/// online mode verifies everyone, the offline mode nobody, and the hybrid mode
+/// looks the name up.
+fn auth_for(
+    config: &Config,
+    name: &str,
+    checks: &Checks<'_>,
+) -> std::result::Result<AuthKind, Refusal> {
+    checks
+        .policy
+        .auth_for(config, name, checks.lookup, checks.peer)
+}
+
+/// What a login asks besides the connection: the session service, the name
+/// lookup of the hybrid mode and its memory, and where the player connects from.
+struct Checks<'a> {
+    sessions: &'a dyn session::Sessions,
+    lookup: &'a dyn NameLookup,
+    policy: &'a LoginPolicy,
+    peer: Option<IpAddr>,
+}
+
+impl Checks<'static> {
+    /// The real services and the proxy's policy.
+    fn real(peer: Option<IpAddr>) -> Self {
+        Checks {
+            sessions: &session::SessionService,
+            lookup: &ProfileLookup,
+            policy: LoginPolicy::global(),
+            peer,
+        }
     }
 }
 
@@ -116,15 +141,29 @@ pub fn players_online() -> usize {
 /// A session is returned once the client has acknowledged the login: the
 /// connection is then in the configuration phase, as a backend link is, and
 /// carries the compression and the encryption the login set up.
+///
+/// The player's address is not known here, so in the hybrid mode every player
+/// accepted this way shares one limit of name lookups; [`accept_from`] gives each
+/// address its own.
 pub fn accept(connection: Connection, config: &Config) -> Result<Option<ClientSession>> {
-    accept_with(connection, config, &session::SessionService)
+    accept_with(connection, config, &Checks::real(None))
 }
 
-/// [`accept`], asking `sessions` who an online player is.
+/// [`accept`] for a player connecting from `peer`, which the hybrid mode's limit
+/// of name lookups counts by.
+pub fn accept_from(
+    connection: Connection,
+    config: &Config,
+    peer: IpAddr,
+) -> Result<Option<ClientSession>> {
+    accept_with(connection, config, &Checks::real(Some(peer)))
+}
+
+/// [`accept`], with `checks` to ask who a player is.
 fn accept_with(
     mut connection: Connection,
     config: &Config,
-    sessions: &dyn session::Sessions,
+    checks: &Checks<'_>,
 ) -> Result<Option<ClientSession>> {
     connection.reader.set_read_timeout(Some(LOGIN_TIMEOUT))?;
     let (id, payload) = connection.recv()?;
@@ -144,7 +183,7 @@ fn accept_with(
         handshake::LOGIN => log_in(
             connection,
             config,
-            sessions,
+            checks,
             intention.protocol,
             virtual_host(&intention.host),
         ),
@@ -174,7 +213,7 @@ struct Joined {
 fn log_in(
     mut connection: Connection,
     config: &Config,
-    sessions: &dyn session::Sessions,
+    checks: &Checks<'_>,
     protocol: i32,
     virtual_host: Option<String>,
 ) -> Result<Option<ClientSession>> {
@@ -214,9 +253,15 @@ fn log_in(
         );
         return Ok(None);
     }
-    let auth = auth_for(config, &hello.name);
+    let auth = match auth_for(config, &hello.name, checks) {
+        Ok(auth) => auth,
+        Err(refusal) => {
+            disconnect(&mut connection, &refusal.reason_json());
+            return Ok(None);
+        }
+    };
     let joined = match auth {
-        AuthKind::Premium => match authenticate(&mut connection, &hello.name, sessions)? {
+        AuthKind::Premium => match authenticate(&mut connection, &hello.name, checks.sessions)? {
             Some(joined) => joined,
             None => return Ok(None),
         },
@@ -585,6 +630,7 @@ fn protocol_error(message: String) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::login_policy::FakeLookup;
 
     #[test]
     fn the_virtual_host_is_the_bare_host_in_lower_case() {
@@ -883,10 +929,33 @@ mod tests {
 
     #[test]
     fn the_configuration_decides_how_every_login_is_checked() {
+        let sessions = FakeSessions {
+            answer: Answer::NotJoined,
+            asked: Asked::default(),
+        };
+        let lookup = FakeLookup::with_accounts(&["Notch"]);
+        let policy = LoginPolicy::new();
+        let checks = Checks {
+            sessions: &sessions,
+            lookup: &lookup,
+            policy: &policy,
+            peer: None,
+        };
         for name in ["Steve", "Notch"] {
-            assert_eq!(auth_for(&offline(-1), name), AuthKind::Offline);
-            assert_eq!(auth_for(&Config::default(), name), AuthKind::Premium);
+            assert_eq!(auth_for(&offline(-1), name, &checks), Ok(AuthKind::Offline));
+            assert_eq!(
+                auth_for(&Config::default(), name, &checks),
+                Ok(AuthKind::Premium)
+            );
         }
+        // Only the hybrid mode looks names up.
+        assert_eq!(lookup.calls(), 0);
+        let hybrid = Config {
+            auth_mode: meridian_config::AuthMode::Hybrid,
+            ..Config::default()
+        };
+        assert_eq!(auth_for(&hybrid, "Notch", &checks), Ok(AuthKind::Premium));
+        assert_eq!(auth_for(&hybrid, "Steve", &checks), Ok(AuthKind::Offline));
     }
 
     #[test]
@@ -959,10 +1028,154 @@ mod tests {
             compression_threshold: 256,
             ..Config::default()
         };
+        let (client, accepted) = checked_proxy(config, sessions, FakeLookup::with_accounts(&[]));
+        (client, accepted, asked)
+    }
+
+    /// A proxy that asks `sessions` and `lookup`, with a policy of its own.
+    fn checked_proxy(
+        config: Config,
+        sessions: FakeSessions,
+        lookup: FakeLookup,
+    ) -> (Connection, JoinHandle<Result<Option<ClientSession>>>) {
         let (client, server) = Pipe::pair();
-        let accepted =
-            std::thread::spawn(move || accept_with(Connection::local(server), &config, &sessions));
-        (Connection::local(client), accepted, asked)
+        let accepted = std::thread::spawn(move || {
+            let policy = LoginPolicy::new();
+            let checks = Checks {
+                sessions: &sessions,
+                lookup: &lookup,
+                policy: &policy,
+                peer: None,
+            };
+            accept_with(Connection::local(server), &config, &checks)
+        });
+        (Connection::local(client), accepted)
+    }
+
+    /// A hybrid proxy that knows `accounts`, or whose lookups fail when `None`.
+    fn hybrid_proxy(
+        accounts: Option<&[&str]>,
+    ) -> (Connection, JoinHandle<Result<Option<ClientSession>>>) {
+        let config = Config {
+            auth_mode: meridian_config::AuthMode::Hybrid,
+            compression_threshold: -1,
+            ..Config::default()
+        };
+        let sessions = FakeSessions {
+            answer: Answer::NotJoined,
+            asked: Asked::default(),
+        };
+        let lookup = match accounts {
+            Some(accounts) => FakeLookup::with_accounts(accounts),
+            None => FakeLookup::unavailable(),
+        };
+        checked_proxy(config, sessions, lookup)
+    }
+
+    #[test]
+    fn hybrid_mode_lets_a_name_without_an_account_in_unverified() {
+        let (mut client, accepted) = hybrid_proxy(Some(&["Notch"]));
+        start_login(&mut client, "Steve");
+        let login::Clientbound::LoginFinished(finished) = login_reply(&mut client) else {
+            panic!("expected the finished login, without encryption");
+        };
+        assert_eq!(finished.profile.uuid, crypto::offline_uuid("Steve"));
+        acknowledge(&mut client);
+        let session = accepted.join().unwrap().unwrap().expect("a session");
+        assert_eq!(session.auth, AuthKind::Offline);
+    }
+
+    #[test]
+    fn hybrid_mode_asks_an_account_name_to_authenticate() {
+        let (mut client, accepted) = hybrid_proxy(Some(&["Notch"]));
+        start_login(&mut client, "notch");
+        // The encryption request: nobody gets an account's name without the account.
+        assert!(matches!(
+            login_reply(&mut client),
+            login::Clientbound::Hello(_)
+        ));
+        drop(client);
+        assert!(accepted.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn hybrid_mode_refuses_when_the_lookup_fails() {
+        let (mut client, accepted) = hybrid_proxy(None);
+        start_login(&mut client, "Steve");
+        let json = reason(login_reply(&mut client));
+        assert_eq!(json["translate"], "multiplayer.disconnect.authservers_down");
+        assert!(accepted.join().unwrap().unwrap().is_none());
+    }
+
+    /// A hybrid login of `name` from `peer`, through a policy and a lookup shared
+    /// between logins as the proxy shares them. Returns the proxy's first reply.
+    fn hybrid_login_from(
+        policy: &std::sync::Arc<LoginPolicy>,
+        lookup: &std::sync::Arc<FakeLookup>,
+        peer: IpAddr,
+        name: &str,
+    ) -> login::Clientbound {
+        let config = Config {
+            auth_mode: meridian_config::AuthMode::Hybrid,
+            compression_threshold: -1,
+            auth: meridian_config::AuthSettings {
+                lookups_per_minute: 1,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let (client, server) = Pipe::pair();
+        let (policy, lookup) = (policy.clone(), lookup.clone());
+        let accepted = std::thread::spawn(move || {
+            let sessions = FakeSessions {
+                answer: Answer::NotJoined,
+                asked: Asked::default(),
+            };
+            let checks = Checks {
+                sessions: &sessions,
+                lookup: &*lookup,
+                policy: &policy,
+                peer: Some(peer),
+            };
+            accept_with(Connection::local(server), &config, &checks)
+        });
+        let mut client = Connection::local(client);
+        start_login(&mut client, name);
+        let reply = login_reply(&mut client);
+        if matches!(reply, login::Clientbound::LoginFinished(_)) {
+            acknowledge(&mut client);
+        }
+        accepted.join().unwrap().unwrap();
+        reply
+    }
+
+    #[test]
+    fn each_address_has_its_own_limit_of_lookups() {
+        let policy = std::sync::Arc::new(LoginPolicy::new());
+        let lookup = std::sync::Arc::new(FakeLookup::with_accounts(&[]));
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        let second: IpAddr = "192.0.2.2".parse().unwrap();
+        let finished =
+            |reply: &login::Clientbound| matches!(reply, login::Clientbound::LoginFinished(_));
+
+        // One lookup a minute: the first address uses its own.
+        assert!(finished(&hybrid_login_from(
+            &policy, &lookup, first, "Alpha"
+        )));
+        // A second new name from the same address is refused before any lookup.
+        let refused = reason(hybrid_login_from(&policy, &lookup, first, "Bravo"));
+        assert!(
+            refused["text"]
+                .as_str()
+                .unwrap()
+                .contains("Too many logins"),
+            "{refused}"
+        );
+        // Another address still has its lookup.
+        assert!(finished(&hybrid_login_from(
+            &policy, &lookup, second, "Charlie"
+        )));
+        assert_eq!(lookup.calls(), 2);
     }
 
     /// The client's half of the encryption, as vanilla's

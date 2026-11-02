@@ -102,6 +102,7 @@ fn the_example_file_is_valid() {
     assert_eq!(config.connect_timeout_ms, defaults.connect_timeout_ms);
     assert_eq!(config.max_players, defaults.max_players);
     assert_eq!(config.auth_mode, defaults.auth_mode);
+    assert_eq!(config.auth, defaults.auth);
     // The example's secret is a placeholder that says so.
     assert!(config.forwarding_secret.starts_with("replace-me"));
     // The lists and tables are examples, one of each.

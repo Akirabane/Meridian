@@ -101,3 +101,18 @@ backends = ["lobby", "east"]
 [[route]]
 auth = "verified"
 group = "accounts"
+
+# How the hybrid mode looks names up. Only auth-mode = "hybrid" reads this table.
+[auth]
+# Seconds a name found to be an account's is remembered.
+lookup-cache-seconds = 3600
+# Seconds a name found to be no account's is remembered. A free name can become
+# an account's at any time, so this may not be longer than lookup-cache-seconds.
+negative-cache-seconds = 300
+# What happens when the account service does not answer: "refuse" the login
+# (recommended, since the name might be an account's) or let the player in as
+# "unverified".
+on-lookup-failure = "refuse"
+# Lookups one address may cause in a minute; names already remembered do not
+# count. An address over the limit is refused until the minute is over.
+lookups-per-minute = 10
