@@ -463,3 +463,38 @@ fn a_player_who_leaves_during_the_freeze_is_saved_on_the_target() {
     );
     run.join().unwrap().unwrap();
 }
+
+/// The source took so long to export that the freeze would run out: the switch
+/// gives up while it can still let the source go on.
+#[test]
+fn a_freeze_that_lasts_too_long_is_given_up() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).on("export", || {
+            std::thread::sleep(Duration::from_millis(300));
+        }),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            freeze_limit: Duration::from_millis(200),
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+    assert!(failure.reason.contains("frozen for 200 ms"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "source release Abort announce=false",
+            "target drop",
+        ]
+    );
+    still_on_source(&mut bench);
+}

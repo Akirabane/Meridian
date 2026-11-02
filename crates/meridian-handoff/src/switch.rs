@@ -110,6 +110,10 @@ pub struct Settings {
     pub settle: Duration,
     /// How long the target has, after the import, to send the player's position.
     pub import_timeout: Duration,
+    /// How long the player may stay frozen before the switch is given up. Horizon
+    /// lets a freeze go by itself after ten seconds; the switch gives up before,
+    /// so that it can still let the source go on (`player-release abort`).
+    pub freeze_limit: Duration,
     /// The target's players are told the player came (join line, list entry).
     pub announce_arrival: bool,
     /// The source's players get the "left the game" line.
@@ -123,6 +127,7 @@ impl Default for Settings {
             prepare_timeout: Duration::from_secs(8),
             settle: Duration::from_millis(200),
             import_timeout: Duration::from_secs(3),
+            freeze_limit: Duration::from_secs(8),
             announce_arrival: true,
             announce_departure: true,
         }
@@ -403,7 +408,15 @@ pub fn switch(
     }
     let prepared = Instant::now();
 
-    // Freeze.
+    // Freeze. From the export on, the switch must hand the player over, or give up
+    // and let the source go on, before the source lets the freeze go by itself.
+    let thaw = prepared + settings.freeze_limit;
+    let too_long = || {
+        format!(
+            "the player stayed frozen for {} ms without being handed over",
+            settings.freeze_limit.as_millis()
+        )
+    };
     let record = match run.source.export(&run.uuid, true) {
         Ok(record) => record,
         Err(e) => {
@@ -439,6 +452,10 @@ pub fn switch(
         s.answer_teleports = false;
         s.positions
     };
+    if Instant::now() >= thaw {
+        run.abort();
+        return Err(run.fail(Step::Freeze, too_long()));
+    }
     if let Err(e) = run.target.import(
         &run.uuid,
         record,
@@ -453,11 +470,18 @@ pub fn switch(
         ));
     }
     // What the import sends includes a position for the client to confirm.
-    let imported = state.wait(
-        Instant::now() + settings.import_timeout,
-        "the target did not send the player's position after the import",
-        |s| (s.positions > positions).then_some(()),
-    );
+    let late = Instant::now() + settings.import_timeout;
+    let imported = if late < thaw {
+        state.wait(
+            late,
+            "the target did not send the player's position after the import",
+            |s| (s.positions > positions).then_some(()),
+        )
+    } else {
+        state.wait(thaw, &too_long(), |s| {
+            (s.positions > positions).then_some(())
+        })
+    };
     if let Err(why) = imported {
         // The player is still held: the target forgets them, the source keeps them.
         run.abort();
@@ -474,6 +498,12 @@ pub fn switch(
             drop(down);
             drop(s);
             return Err(run.left(Step::HandOver, None, settings.announce_departure));
+        }
+        if Instant::now() >= thaw {
+            drop(down);
+            drop(s);
+            run.abort();
+            return Err(run.fail(Step::HandOver, too_long()));
         }
         let packets = delta(&down.ghost, &s.view);
         let extras = std::mem::take(&mut s.extras);
