@@ -1,14 +1,20 @@
 //! The Meridian proxy.
 mod args;
+mod console;
 mod log;
+// Used by the session once routing is wired in; until then only its tests call it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod route;
 mod serve;
 mod session;
+mod state;
 
 use args::Command;
-use log::{error, info};
+use log::{error, info, warning};
 use meridian_config::{Config, ConfigError};
+use state::Proxy;
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,8 +49,8 @@ fn main() -> ExitCode {
             }
             None => ExitCode::FAILURE,
         },
-        Command::Run { config } => match load(&config) {
-            Some(loaded) => run(loaded),
+        Command::Run { config: path } => match load(&path) {
+            Some(loaded) => run(loaded, path),
             None => ExitCode::FAILURE,
         },
     }
@@ -66,7 +72,7 @@ fn load(path: &Path) -> Option<Config> {
     }
 }
 
-fn run(config: Config) -> ExitCode {
+fn run(config: Config, path: PathBuf) -> ExitCode {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = Arc::clone(&stop);
@@ -89,7 +95,12 @@ fn run(config: Config) -> ExitCode {
         backend_count(config.backends.len()),
         config.default_backend
     );
-    match serve::serve(listener, Arc::new(config), &stop) {
+    let proxy = Arc::new(Proxy::new(config, path, stop));
+    // Without a console the proxy still runs: it then stops on Ctrl+C alone.
+    if let Err(e) = console::start(Arc::clone(&proxy)) {
+        warning!("cannot start the console: {e}");
+    }
+    match serve::serve(listener, &proxy) {
         Ok(()) => {
             info!("stopped");
             ExitCode::SUCCESS

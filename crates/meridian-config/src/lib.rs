@@ -2,9 +2,13 @@
 //! the limits it applies. [`Config::load`] reads it from a TOML file, fills in the
 //! defaults and checks it; `meridian.example.toml` at the root of the repository
 //! shows every setting.
+mod auth;
 mod error;
 
+pub use auth::{AuthSettings, OnLookupFailure};
 pub use error::ConfigError;
+
+use auth::FileAuth;
 
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -19,6 +23,79 @@ pub struct Backend {
     pub address: String,
 }
 
+/// A host name that sends the players who connect through it to one backend
+/// (`[[forced-host]]` in the file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForcedHost {
+    /// The host name the client puts in its handshake, in lower case.
+    pub host: String,
+    /// The backend it leads to.
+    pub backend: String,
+}
+
+/// How the proxy decides whether to check a player's account (`auth-mode`,
+/// DESIGN.md section 15.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Always check; a client that cannot answer is refused.
+    #[default]
+    Online,
+    /// Never check: every player is unverified. For closed networks only.
+    Offline,
+    /// Check names that belong to an account, let other names in unverified.
+    Hybrid,
+}
+
+impl AuthMode {
+    /// The name used in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            AuthMode::Online => "online",
+            AuthMode::Offline => "offline",
+            AuthMode::Hybrid => "hybrid",
+        }
+    }
+}
+
+/// What the proxy knows about a player's account (DESIGN.md section 15.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthKind {
+    /// The session service confirmed the account.
+    Verified,
+    /// The proxy let a name in without that check.
+    Unverified,
+}
+
+impl AuthKind {
+    /// The name used in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            AuthKind::Verified => "verified",
+            AuthKind::Unverified => "unverified",
+        }
+    }
+}
+
+/// Backends for one kind of player (`[[group]]` in the file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub name: String,
+    /// The kind of player this group is for.
+    pub auth: AuthKind,
+    /// The backends of the group, by name.
+    pub backends: Vec<String>,
+}
+
+/// Where players of one kind go (`[[route]]` in the file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub auth: AuthKind,
+    /// The group they are sent to.
+    pub group: String,
+}
+
 /// Everything the proxy reads from its configuration. Its `Debug` output hides
 /// the forwarding secret, so a configuration can be logged safely.
 #[derive(Clone, PartialEq, Eq)]
@@ -31,7 +108,9 @@ pub struct Config {
     pub default_backend: String,
     /// The line shown in the server list.
     pub motd: String,
-    /// Whether players are checked against the session service.
+    /// Whether players are checked against the session service. Kept for the code
+    /// that reads it today: it is `false` exactly when `auth_mode` is
+    /// [`AuthMode::Offline`], and [`Config::validate`] refuses any other pairing.
     pub online_mode: bool,
     /// Packets of at least this many bytes are compressed; a negative value turns
     /// compression off.
@@ -42,6 +121,23 @@ pub struct Config {
     /// really comes from the proxy (Velocity modern forwarding). Empty by default,
     /// and required as soon as a backend is configured.
     pub forwarding_secret: String,
+    /// Backends tried in this order when the default backend cannot be reached
+    /// (`try` in the file). Empty by default.
+    pub try_backends: Vec<String>,
+    /// The most players the proxy takes at once, shown in the server list; 0 means
+    /// no limit.
+    pub max_players: u32,
+    /// Host names that choose the backend, in place of the default backend.
+    pub forced_hosts: Vec<ForcedHost>,
+    /// How players are logged in. Online by default.
+    pub auth_mode: AuthMode,
+    /// Groups of backends, each for one kind of player.
+    pub groups: Vec<Group>,
+    /// Which group each kind of player is sent to. When empty, every player uses
+    /// the default backend and `try_backends`.
+    pub routes: Vec<Route>,
+    /// How the hybrid mode looks names up (`[auth]` in the file).
+    pub auth: AuthSettings,
 }
 
 impl Default for Config {
@@ -55,6 +151,13 @@ impl Default for Config {
             compression_threshold: 256,
             connect_timeout_ms: 5_000,
             forwarding_secret: String::new(),
+            try_backends: Vec::new(),
+            max_players: 20,
+            forced_hosts: Vec::new(),
+            auth_mode: AuthMode::Online,
+            groups: Vec::new(),
+            routes: Vec::new(),
+            auth: AuthSettings::default(),
         }
     }
 }
@@ -72,6 +175,13 @@ impl std::fmt::Debug for Config {
             compression_threshold,
             connect_timeout_ms,
             forwarding_secret,
+            try_backends,
+            max_players,
+            forced_hosts,
+            auth_mode,
+            groups,
+            routes,
+            auth,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -87,6 +197,13 @@ impl std::fmt::Debug for Config {
             .field("compression_threshold", compression_threshold)
             .field("connect_timeout_ms", connect_timeout_ms)
             .field("forwarding_secret", &format_args!("{secret}"))
+            .field("try_backends", try_backends)
+            .field("max_players", max_players)
+            .field("forced_hosts", forced_hosts)
+            .field("auth_mode", auth_mode)
+            .field("groups", groups)
+            .field("routes", routes)
+            .field("auth", auth)
             .finish()
     }
 }
@@ -104,6 +221,40 @@ struct File {
     compression_threshold: Option<i32>,
     connect_timeout_ms: Option<u64>,
     forwarding_secret: Option<String>,
+    #[serde(default, rename = "try")]
+    try_backends: Vec<String>,
+    max_players: Option<u32>,
+    #[serde(default, rename = "forced-host")]
+    forced_hosts: Vec<FileForcedHost>,
+    auth_mode: Option<AuthMode>,
+    #[serde(default, rename = "group")]
+    groups: Vec<FileGroup>,
+    #[serde(default, rename = "route")]
+    routes: Vec<FileRoute>,
+    #[serde(default)]
+    auth: FileAuth,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileGroup {
+    name: String,
+    auth: AuthKind,
+    backends: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRoute {
+    auth: AuthKind,
+    group: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileForcedHost {
+    host: String,
+    backend: String,
 }
 
 #[derive(Deserialize)]
@@ -147,12 +298,13 @@ impl Config {
             Some(name) => name,
             None => backends.first().map(|b| b.name.clone()).unwrap_or_default(),
         };
+        let auth_mode = auth_mode(file.online_mode, file.auth_mode)?;
         let config = Config {
             listen,
             backends,
             default_backend,
             motd: file.motd.unwrap_or(defaults.motd),
-            online_mode: file.online_mode.unwrap_or(defaults.online_mode),
+            online_mode: auth_mode != AuthMode::Offline,
             compression_threshold: file
                 .compression_threshold
                 .unwrap_or(defaults.compression_threshold),
@@ -160,6 +312,36 @@ impl Config {
                 .connect_timeout_ms
                 .unwrap_or(defaults.connect_timeout_ms),
             forwarding_secret: file.forwarding_secret.unwrap_or(defaults.forwarding_secret),
+            try_backends: file.try_backends,
+            max_players: file.max_players.unwrap_or(defaults.max_players),
+            // Host names do not depend on case.
+            forced_hosts: file
+                .forced_hosts
+                .into_iter()
+                .map(|f| ForcedHost {
+                    host: f.host.to_ascii_lowercase(),
+                    backend: f.backend,
+                })
+                .collect(),
+            auth_mode,
+            groups: file
+                .groups
+                .into_iter()
+                .map(|g| Group {
+                    name: g.name,
+                    auth: g.auth,
+                    backends: g.backends,
+                })
+                .collect(),
+            routes: file
+                .routes
+                .into_iter()
+                .map(|r| Route {
+                    auth: r.auth,
+                    group: r.group,
+                })
+                .collect(),
+            auth: file.auth.into_settings(),
         };
         config.validate()?;
         Ok(config)
@@ -167,8 +349,9 @@ impl Config {
 
     /// Checks what the types alone cannot: there is at least one backend, names
     /// are unique and not empty, addresses are `host:port`, the default backend
-    /// exists, the connect timeout is not zero and the forwarding secret is set. The first problem found is
-    /// returned.
+    /// exists, the fallback list names other backends once each, the connect
+    /// timeout is not zero, the player limit fits the server list and the
+    /// forwarding secret is set. The first problem found is returned.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.backends.is_empty() {
             return Err(ConfigError::NoBackend);
@@ -191,8 +374,43 @@ impl Config {
                 self.default_backend.clone(),
             ));
         }
+        for (i, name) in self.try_backends.iter().enumerate() {
+            self.known_backend("try", name)?;
+            if *name == self.default_backend {
+                return Err(ConfigError::DefaultInTry(name.clone()));
+            }
+            if self.try_backends[..i].contains(name) {
+                return Err(ConfigError::DuplicateTry(name.clone()));
+            }
+        }
+        for (i, forced) in self.forced_hosts.iter().enumerate() {
+            check_host(&forced.host).map_err(|reason| ConfigError::InvalidForcedHost {
+                host: forced.host.clone(),
+                reason,
+            })?;
+            if self.forced_hosts[..i]
+                .iter()
+                .any(|f| f.host.eq_ignore_ascii_case(&forced.host))
+            {
+                return Err(ConfigError::DuplicateForcedHost(forced.host.clone()));
+            }
+            self.known_backend(&format!("forced-host \"{}\"", forced.host), &forced.backend)?;
+        }
+        if self.online_mode != (self.auth_mode != AuthMode::Offline) {
+            return Err(ConfigError::AuthModeConflict {
+                online_mode: self.online_mode,
+                auth_mode: self.auth_mode,
+            });
+        }
+        self.validate_groups()?;
+        self.validate_routes()?;
+        self.auth.validate()?;
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
+        }
+        // The server list carries the limit as a signed 32-bit number.
+        if i32::try_from(self.max_players).is_err() {
+            return Err(ConfigError::MaxPlayersTooLarge(self.max_players));
         }
         if self.forwarding_secret.is_empty() {
             return Err(ConfigError::MissingForwardingSecret);
@@ -204,6 +422,164 @@ impl Config {
     pub fn backend(&self, name: &str) -> Option<&Backend> {
         self.backends.iter().find(|b| b.name == name)
     }
+
+    /// The group of this name.
+    pub fn group(&self, name: &str) -> Option<&Group> {
+        self.groups.iter().find(|g| g.name == name)
+    }
+
+    /// The group players of this kind are routed to, when routes are configured.
+    pub fn route_group(&self, auth: AuthKind) -> Option<&Group> {
+        let route = self.routes.iter().find(|r| r.auth == auth)?;
+        self.group(&route.group)
+    }
+
+    /// Groups have unique names, list configured backends once each, and never
+    /// share a backend with a group of the other kind: a verified and an
+    /// unverified player have different unique ids for the same name, so one
+    /// server would keep two files for them (DESIGN.md section 15.3).
+    fn validate_groups(&self) -> Result<(), ConfigError> {
+        for (i, group) in self.groups.iter().enumerate() {
+            if group.name.trim().is_empty() {
+                return Err(ConfigError::EmptyGroupName);
+            }
+            if self.groups[..i].iter().any(|g| g.name == group.name) {
+                return Err(ConfigError::DuplicateGroup(group.name.clone()));
+            }
+            if group.backends.is_empty() {
+                return Err(ConfigError::EmptyGroup(group.name.clone()));
+            }
+            for (j, backend) in group.backends.iter().enumerate() {
+                self.known_backend(&format!("group \"{}\"", group.name), backend)?;
+                if group.backends[..j].contains(backend) {
+                    return Err(ConfigError::DuplicateInGroup {
+                        group: group.name.clone(),
+                        backend: backend.clone(),
+                    });
+                }
+                let other = self.groups[..i]
+                    .iter()
+                    .find(|g| g.auth != group.auth && g.backends.contains(backend));
+                if let Some(other) = other {
+                    let (verified, unverified) = match group.auth {
+                        AuthKind::Verified => (group, other),
+                        AuthKind::Unverified => (other, group),
+                    };
+                    return Err(ConfigError::MixedAuthBackend {
+                        backend: backend.clone(),
+                        verified_group: verified.name.clone(),
+                        unverified_group: unverified.name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Each route leads to a group of its own kind, each kind has one route at
+    /// most, and once routes are written every kind the login mode lets in has
+    /// one. The hybrid mode lets in both kinds, so it needs both routes even when
+    /// none is written: otherwise the two kinds would meet on the default backend.
+    fn validate_routes(&self) -> Result<(), ConfigError> {
+        for (i, route) in self.routes.iter().enumerate() {
+            if self.routes[..i].iter().any(|r| r.auth == route.auth) {
+                return Err(ConfigError::DuplicateRoute(route.auth));
+            }
+            let Some(group) = self.group(&route.group) else {
+                return Err(ConfigError::UnknownRouteGroup {
+                    auth: route.auth,
+                    group: route.group.clone(),
+                });
+            };
+            if group.auth != route.auth {
+                return Err(ConfigError::RouteAuthMismatch {
+                    auth: route.auth,
+                    group: group.name.clone(),
+                    group_auth: group.auth,
+                });
+            }
+        }
+        let needed: &[AuthKind] = match self.auth_mode {
+            AuthMode::Online => &[AuthKind::Verified],
+            AuthMode::Offline => &[AuthKind::Unverified],
+            AuthMode::Hybrid => &[AuthKind::Verified, AuthKind::Unverified],
+        };
+        if !self.routes.is_empty() || self.auth_mode == AuthMode::Hybrid {
+            for &auth in needed {
+                if !self.routes.iter().any(|r| r.auth == auth) {
+                    return Err(ConfigError::MissingRoute {
+                        auth,
+                        mode: self.auth_mode,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The backend forced for the host name a client put in its handshake, if any.
+    /// Case does not matter, and a final dot is ignored.
+    pub fn forced_backend(&self, host: &str) -> Option<&str> {
+        let host = host.strip_suffix('.').unwrap_or(host);
+        self.forced_hosts
+            .iter()
+            .find(|f| f.host.eq_ignore_ascii_case(host))
+            .map(|f| f.backend.as_str())
+    }
+
+    /// Refuses a reference to a backend that is not configured; `setting` says
+    /// where the reference was written.
+    fn known_backend(&self, setting: &str, name: &str) -> Result<(), ConfigError> {
+        match self.backend(name) {
+            Some(_) => Ok(()),
+            None => Err(ConfigError::UnknownBackend {
+                setting: setting.to_owned(),
+                name: name.to_owned(),
+            }),
+        }
+    }
+}
+
+/// The login mode from the two settings that can give it. `auth-mode` is the
+/// setting to use; `online-mode` is the older one and stays accepted: alone, `true`
+/// means online and `false` offline. When both are written they must agree, and
+/// `online-mode` cannot be written with `hybrid`.
+fn auth_mode(
+    online_mode: Option<bool>,
+    auth_mode: Option<AuthMode>,
+) -> Result<AuthMode, ConfigError> {
+    match (online_mode, auth_mode) {
+        (None, None) => Ok(AuthMode::default()),
+        (Some(true), None) => Ok(AuthMode::Online),
+        (Some(false), None) => Ok(AuthMode::Offline),
+        (None, Some(mode)) => Ok(mode),
+        (Some(true), Some(AuthMode::Online)) => Ok(AuthMode::Online),
+        (Some(false), Some(AuthMode::Offline)) => Ok(AuthMode::Offline),
+        (Some(online_mode), Some(auth_mode)) => Err(ConfigError::AuthModeConflict {
+            online_mode,
+            auth_mode,
+        }),
+    }
+}
+
+/// Checks a forced host: a bare host name, without a port or a path.
+fn check_host(host: &str) -> Result<(), &'static str> {
+    if host.is_empty() {
+        return Err("it is empty");
+    }
+    if host.chars().any(char::is_whitespace) {
+        return Err("it contains a space");
+    }
+    if host.contains(':') {
+        return Err("it has a port: the port players use does not choose the backend");
+    }
+    if host.contains('/') {
+        return Err("it has a path: write the host name alone");
+    }
+    if host.ends_with('.') {
+        return Err("it ends with a dot: write it without the final dot");
+    }
+    Ok(())
 }
 
 /// Checks that `address` is `host:port` without resolving the host: the host is
@@ -239,3 +615,9 @@ fn check_address(address: &str) -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod routing_tests;
+
+#[cfg(test)]
+mod auth_tests;

@@ -6,6 +6,7 @@ members = [
     "crates/meridian-net",
     "crates/meridian-testkit",
     "crates/meridian-proxy",
+    "crates/meridian-rewrite",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ horizon-protocol = { git = "https://github.com/horizon-rust/horizon", rev = "f69
 
 meridian-config = { path = "crates/meridian-config" }
 meridian-net = { path = "crates/meridian-net" }
+meridian-rewrite = { path = "crates/meridian-rewrite" }
 meridian-testkit = { path = "crates/meridian-testkit" }
 
 [workspace.lints.rust]

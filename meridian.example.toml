@@ -1,6 +1,7 @@
 # An example configuration for the Meridian proxy. Copy it to meridian.toml and
-# change what you need. Every setting except the backends can be left out; the
-# value shown here is then the default.
+# change what you need. Every setting except the backends and the forwarding
+# secret can be left out. For the single settings below, the value shown is the
+# default; the lists and tables at the end are examples, and are empty by default.
 
 # The address players connect to.
 listen = "0.0.0.0:25565"
@@ -8,9 +9,21 @@ listen = "0.0.0.0:25565"
 # The line shown in the server list.
 motd = "A Meridian proxy"
 
-# Whether the proxy checks players against the session service. Backends never
-# do it themselves: they trust the proxy.
-online-mode = true
+# The most players the proxy takes at once, also shown in the server list.
+# 0 means no limit.
+max-players = 20
+
+# How players log in. Backends never check accounts themselves: they trust the
+# proxy.
+#   "online"   checks every player's account with the session service. A client
+#              that cannot answer is refused.
+#   "offline"  checks nobody: every player is unverified. Only for a closed
+#              network, such as a LAN or private tests.
+#   "hybrid"   checks the names that belong to an account and lets other names in
+#              unverified. It needs a [[route]] for each kind of player.
+# The older setting online-mode = true or false is still read, but write only one
+# of the two.
+auth-mode = "online"
 
 # Packets of at least this many bytes are compressed. A negative value turns
 # compression off.
@@ -25,9 +38,27 @@ connect-timeout-ms = 5000
 # with a long random string and keep it out of version control.
 forwarding-secret = "replace-me-with-a-long-random-secret"
 
+# How a player's backend is chosen when they log in, once the proxy has room for
+# them (otherwise they are told "The server is full"):
+#
+#   1. the backend of the forced host they typed, if there is one;
+#   2. otherwise, when routes are set, the backends of the group the route for
+#      their kind of player leads to, in the group's order;
+#   3. otherwise the default backend;
+#   4. then the backends of `try`, in order.
+#
+# A backend in a group for the other kind of player is never tried. The proxy
+# tries each backend in turn, waiting up to connect-timeout-ms for each, and sends
+# the player to the first that answers. If none answers, the player is told which
+# servers could not be reached.
+
 # The backend players are sent to when they log in. When it is left out, the
 # first backend below is used.
 default-backend = "lobby"
+
+# Backends tried in this order when the default backend cannot be reached. Do not
+# list the default backend here: it is always tried first.
+try = ["east"]
 
 # The servers behind the proxy. Each one has a unique name and an address as
 # host:port. An IPv6 host goes in brackets, as "[::1]:25567". Backends should
@@ -39,3 +70,49 @@ address = "127.0.0.1:25566"
 [[backends]]
 name = "east"
 address = "127.0.0.1:25567"
+
+# A host name that sends players straight to one backend. The host is the name
+# players type in their server list, without a port; case does not matter.
+[[forced-host]]
+host = "east.example.com"
+backend = "east"
+
+# Groups of backends, each for one kind of player: "verified" (the session
+# service confirmed the account) or "unverified" (a name the proxy let in without
+# that check). A backend may not be in groups of both kinds: the two kinds get
+# different unique ids for the same name, so the server would keep two files.
+[[group]]
+name = "accounts"
+auth = "verified"
+backends = ["lobby", "east"]
+
+# Where each kind of player goes. With auth-mode = "online" only verified players
+# exist, so one route is enough. With "hybrid", add a group of unverified backends
+# and a route for them, for example:
+#
+#   [[group]]
+#   name = "guests"
+#   auth = "unverified"
+#   backends = ["guest-lobby"]
+#
+#   [[route]]
+#   auth = "unverified"
+#   group = "guests"
+[[route]]
+auth = "verified"
+group = "accounts"
+
+# How the hybrid mode looks names up. Only auth-mode = "hybrid" reads this table.
+[auth]
+# Seconds a name found to be an account's is remembered.
+lookup-cache-seconds = 3600
+# Seconds a name found to be no account's is remembered. A free name can become
+# an account's at any time, so this may not be longer than lookup-cache-seconds.
+negative-cache-seconds = 300
+# What happens when the account service does not answer: "refuse" the login
+# (recommended, since the name might be an account's) or let the player in as
+# "unverified".
+on-lookup-failure = "refuse"
+# Lookups one address may cause in a minute; names already remembered do not
+# count. An address over the limit is refused until the minute is over.
+lookups-per-minute = 10

@@ -13,10 +13,50 @@
 //! numbers them. Translating them into the client's numbering is the job of the
 //! rewriting layer (`meridian-rewrite`, DESIGN.md section 7), which does not exist
 //! yet; the delta goes through it before it reaches the client.
+//!
+//! # Known limits
+//!
+//! - **Teleport Entity with the rotate-delta flag** (`ROTATE_DELTA`): the turn it
+//!   gives the entity's velocity is not modelled. The ghost's velocity can then
+//!   differ from the client's, which costs one Teleport Entity too many in the
+//!   delta. For which entities a server sends the flag is not verified.
+//! - **Values that cannot be unset.** Synced data, equipment and attributes can be
+//!   set by a packet but not removed. An entity whose ghost has an entry the target
+//!   lacks is removed and made again. The player cannot be made again: attributes
+//!   the ghost has and the target lacks stay on the client, and the ghost then
+//!   differs from the target. How often a server sends attributes to one player and
+//!   not the other is not verified.
+//! - **The player's own synced data** (Set Entity Data for the player's id) is not
+//!   kept.
+//! - **Times as last sent.** Effect durations, cooldowns, the border's size change
+//!   and the time of day are kept as the packet gave them, not counted down. The
+//!   delta sends the target's values as they were last sent.
+//! - **Respawn** is modelled as a new player in an empty level that keeps the view
+//!   distance and the world values. Which world values the client keeps through a
+//!   Respawn is not verified; the delta never sends one.
+//! - **A column's hash** is 64 bits. Two different columns with the same hash would
+//!   leave the old one in place; the odds are about one in 2^64 a pair.
+//! - **Chunk columns** that the client holds with the same blocks but reached by
+//!   other packets are sent again: equal blocks are not recognised, only equal
+//!   packets.
+//! - **Player list entries** whose profile differs, or on which the ghost saw an
+//!   action the target never sent, are removed and added again. The client then
+//!   takes the profile again for that player's skin; whether that shows on a
+//!   player in view is not verified.
+//! - **Lists through a Respawn**: Login clears the player list, boss bars and
+//!   scoreboard in the ghost; Respawn keeps them. Whether the client keeps its
+//!   scoreboard through a Respawn is not verified.
+//! - **Not kept**: the recipe book, advancements, map data, resource packs and
+//!   the server's command tree.
+mod bossbars;
 mod chunks;
 mod delta;
 mod entities;
+mod player;
+mod scoreboard;
+mod tab;
 mod view;
+mod world;
 
 pub use delta::{BUNDLE_LIMIT, delta};
 pub use view::View;

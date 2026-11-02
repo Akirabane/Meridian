@@ -11,15 +11,24 @@ pub const BUNDLE_LIMIT: usize = 4096;
 ///
 /// The order, after DESIGN.md sections 4 and 8:
 ///
-/// 1. the entities that must go: those the target does not have, and those it has
+/// 1. the container the player has open is closed;
+/// 2. the entities that must go: those the target does not have, and those it has
 ///    under the same id as another entity (another UUID or type), which are made
 ///    again further down;
-/// 2. the chunk cache's radius and centre, then the target's chunks nearest to the
+/// 3. the world values that differ: difficulty, simulation distance, border, time,
+///    weather, default spawn, tick rate;
+/// 4. the chunk cache's radius and centre, then the target's chunks nearest to the
 ///    player first, skipping those the client already holds; the player's position
 ///    comes once the columns next to the player are there;
-/// 3. the old chunks the target does not have;
-/// 4. the target's entities, made or updated, then the rides and leads between
-///    them.
+/// 5. the old chunks the target does not have;
+/// 6. the player list: entries that go, then those added or changed, before the
+///    entities, since a player's entity takes its profile from its entry;
+/// 7. the target's entities, made or updated, then the rides and leads between
+///    them;
+/// 8. the player's own state that differs: health, experience, abilities, held
+///    slot, game mode, effects, attributes, cooldowns, inventory and cursor, and
+///    the target's open container if it has one;
+/// 9. boss bars, then the scoreboard: objectives, scores, display slots and teams.
 ///
 /// The client applies a bundle in one go, so no half-switched world is drawn. A
 /// delta of more than [`BUNDLE_LIMIT`] packets (a full view at a large view
@@ -32,12 +41,19 @@ pub const BUNDLE_LIMIT: usize = 4096;
 pub fn delta(from: &View, to: &View) -> Vec<Packet> {
     debug_assert!(to.complete(), "the target view must keep its packets");
     let mut out = Vec::new();
+    // The open container closes first, so the player's screen does too.
+    let mut player = from.player.clone();
+    if let Some(close) = from.player.close() {
+        out.push(close);
+        player.open = None;
+    }
     let removed = from.entities.to_remove(&to.entities);
     if !removed.is_empty() {
         out.push(Packet::of(&C::RemoveEntities(play::RemoveEntities {
             ids: removed.clone(),
         })));
     }
+    from.world.delta(&to.world, &mut out);
     let around = to.placed.as_ref().map_or(to.chunks.center, |p| {
         (column(p.position[0]), column(p.position[2]))
     });
@@ -56,7 +72,13 @@ pub fn delta(from: &View, to: &View) -> Vec<Packet> {
                 })));
             }
         });
+    // A player's entity needs its list entry, for its profile and skin.
+    let unlisted = from.tab.to_remove(&to.tab);
+    from.tab.delta(&to.tab, &unlisted, &mut out);
     from.entities.delta(&to.entities, &removed, &mut out);
+    player.delta(&to.player, to.player_id(), &mut out);
+    from.bossbars.delta(&to.bossbars, &mut out);
+    from.scoreboard.delta(&to.scoreboard, &mut out);
     // Built only from packets that can never be forbidden; this is the last line
     // of defence if that ever changes.
     out.retain(|p| !forbidden(p));
