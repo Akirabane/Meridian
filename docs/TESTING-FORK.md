@@ -2,7 +2,7 @@
 
 A step-by-step guide to a second bench, `banc-fork`, whose three servers run the
 Horizon fork that can hold a player and hand them over (`feat/held-player`, commit
-`d963bd6ef`). It is the bench the seamless switch is tested on. The commands are for
+`df961f5d2`). It is the bench the seamless switch is tested on. The commands are for
 Windows PowerShell 5.1 on this machine: run them one line at a time, in a classic
 Windows PowerShell window.
 
@@ -30,13 +30,13 @@ stop the first bench (TESTING.md, step F) before starting this one.
 | What | Where |
 | --- | --- |
 | Meridian's programs | `D:\disque\dev\meridian-bench-out\bin\` (`meridian.exe`, `meridian-sidecar.exe`, `meridian-panel.exe`; `COMMIT.txt` gives their commit) |
-| The fork's programs | `D:\disque\dev\horizon-fork-out\bin-d963bd6ef\` (`horizon-server.exe` and the `horizon-client.exe` it starts; `COMMIT.txt` gives their commit) |
+| The fork's programs | `D:\disque\dev\horizon-fork-out\bin-df961f5d2\` (`horizon-server.exe` and the `horizon-client.exe` it starts; `COMMIT.txt` gives their commit). It replaces `bin-d963bd6ef\`, the build of commit `d963bd6ef`, which logs none of the requests below and freezes a player for 10 s instead of 30 s |
 | The prepared game files | the Nightly's `.local\horizon-client\26.3`, which the fork accepts (same game version and world data version) |
 | This bench, made in step A | `D:\disque\dev\meridian-bench-out\banc-fork\` |
 
 ```powershell
 $bin = "D:\disque\dev\meridian-bench-out\bin"
-$fork = "D:\disque\dev\horizon-fork-out\bin-d963bd6ef"
+$fork = "D:\disque\dev\horizon-fork-out\bin-df961f5d2"
 $nightly = "C:\Users\Akirabane\AppData\Roaming\horizon-launcher\versions\nightly-2026-11-01-4aa6854"
 $banc = "D:\disque\dev\meridian-bench-out\banc-fork"
 ```
@@ -160,6 +160,38 @@ For each switch, note in a few lines:
 5. anything else: a stutter, a sound cut, chunks loading in front of you, the hand or
    the held item changing.
 
+### In the servers' logs
+
+Each server writes `logs\latest.log` in its folder (`$banc\lobby`, `$banc\game1`,
+`$banc\game2`). For a switch of `Alex` from lobby to game1, look for these lines, in
+this order.
+
+On the target (`$banc\game1\logs\latest.log`):
+
+```
+player-expect Alex (<uuid>): ok, expected for 10 s
+Alex is held: it arrives from another server
+player-import Alex (<uuid>): ok, parts ..., placed false, announced true, recentered false
+Alex placed: it has arrived from another server
+```
+
+The held line comes right after the login line, and is not followed by "joined the
+game". `recentered true` instead of `false` means the new place is in another chunk
+than the one your view was built around: the chunks around you then come with the
+next ticks. If the switch fails before you are placed, the target logs
+`Alex was dropped while held: <reason>` instead of the placed line.
+
+On the source (`$banc\lobby\logs\latest.log`):
+
+```
+player-release Alex (<uuid>): ok, moved ..., was frozen true
+Alex lost connection: moved to another server
+```
+
+`was frozen false` means the freeze (30 s at most) ran out before the hand-over
+ended. A refused request logs a `WARN` line with `refused:` and the reason. No line
+ever shows the player's record. Copy these lines into your notes for the switch.
+
 ## F. Collecting the logs for a bug report
 
 Each card's **Console** in the panel keeps the last 2,000 lines of that process's
@@ -169,7 +201,8 @@ output. For a report, from the panel page:
    to the last, copy, and paste it into a text file;
 2. do the same for the sidecar of the source server and of the target server
    (`lobby-sidecar`, `game1-sidecar`, `game2-sidecar`), and for the two servers;
-3. add your notes from section E and the times of the switch.
+3. add your notes from section E, the times of the switch, and the `player-` and
+   `held`/`placed` lines of the two servers' `logs\latest.log`.
 
 The proxy writes its log with the time of each line, so the lines around the time of
 the switch are the ones that matter. The consoles only keep what they have shown since
