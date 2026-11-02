@@ -3,18 +3,19 @@
 //! side leaves. [`Sessions`] keeps every session being relayed: who the player
 //! is, where they are, and the handle that ends the session.
 use crate::log::{debug, info, warning};
+use crate::route::{self, Full};
 use horizon_protocol::{connection::Connection, packets::configuration, text};
 use meridian_config::Config;
 use meridian_net::{
     Profile,
     backend::{BackendLink, BackendOptions},
-    client,
+    client::{self, ClientSession},
     relay::{Handle, Relay},
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// How the proxy reaches a backend: [`meridian_net::backend::connect`] when it
@@ -45,9 +46,47 @@ pub struct Sessions {
     next: AtomicU64,
     closing: AtomicBool,
     open: Mutex<HashMap<u64, (Player, Handle)>>,
+    /// The players let in, from the check of the player limit to the end of
+    /// their session, including those still being sent to a backend.
+    admitted: AtomicUsize,
+}
+
+/// A place taken under the player limit, given back when it is dropped.
+pub(crate) struct Admission<'a>(&'a AtomicUsize);
+
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Sessions {
+    /// Takes a place for one more player under `max_players` (0: no limit). The
+    /// check and the count are one step, so two players logging in at once cannot
+    /// both take the last place.
+    pub(crate) fn admit(&self, max_players: u32) -> Result<Admission<'_>, Full> {
+        let mut now = self.admitted.load(Ordering::Relaxed);
+        loop {
+            route::admit(max_players, now)?;
+            match self.admitted.compare_exchange_weak(
+                now,
+                now + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(Admission(&self.admitted)),
+                // Another login took or gave back a place: check again.
+                Err(actual) => now = actual,
+            }
+        }
+    }
+
+    /// How many players hold a place under the limit.
+    #[cfg(test)]
+    pub fn admitted(&self) -> usize {
+        self.admitted.load(Ordering::Relaxed)
+    }
+
     /// Counts a session in. `None` once the proxy is stopping: the session must
     /// end at once.
     pub(crate) fn open(&self, player: Player, handle: Handle) -> Option<Open<'_>> {
@@ -136,53 +175,82 @@ pub fn handle(
     connect: &Connect,
     sessions: &Sessions,
 ) {
-    let session = match client::accept(connection, config) {
-        Ok(Some(session)) => session,
-        Ok(None) => {
-            debug!("{peer}: status answered, or login refused");
-            return;
-        }
-        Err(e) => {
-            warning!("{peer}: {e}; closing the connection");
-            return;
-        }
+    match client::accept(connection, config) {
+        Ok(Some(session)) => serve(session, peer, config, connect, sessions),
+        Ok(None) => debug!("{peer}: status answered, or login refused"),
+        Err(e) => warning!("{peer}: {e}; closing the connection"),
+    }
+}
+
+/// The kind of player the routes know, from how the login was checked.
+pub fn route_auth(auth: client::AuthKind) -> meridian_config::AuthKind {
+    match auth {
+        client::AuthKind::Premium => meridian_config::AuthKind::Verified,
+        client::AuthKind::Offline => meridian_config::AuthKind::Unverified,
+    }
+}
+
+/// A player who has logged in to the proxy: a place under the player limit, the
+/// first backend that answers among the ones the routes allow, then the relay.
+pub(crate) fn serve(
+    session: ClientSession,
+    peer: SocketAddr,
+    config: &Config,
+    connect: &Connect,
+    sessions: &Sessions,
+) {
+    let name = session.profile.name.clone();
+    let uuid = session.profile.uuid;
+    let Ok(_admission) = sessions.admit(config.max_players) else {
+        info!(
+            "{peer}: {name} ({}) refused: the proxy has its {} players",
+            hyphenated(uuid),
+            config.max_players
+        );
+        refuse(session.connection, Full::MESSAGE);
+        return;
     };
     // Counted as online in the server list from now until the session ends.
     let _seat = client::Seat::take();
-    let name = session.profile.name.clone();
-    let uuid = session.profile.uuid;
-    let Some(backend) = config.backend(&config.default_backend) else {
-        // The configuration's check makes this impossible; refuse rather than panic.
-        warning!(
-            "{peer}: {name}: the default backend \"{}\" is not configured",
-            config.default_backend
-        );
-        refuse(session.connection, "There is no server to join right now.");
-        return;
+    let auth = route_auth(session.auth);
+    let candidates = match route::candidates(config, session.virtual_host.as_deref(), auth) {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            warning!(
+                "{peer}: {name} ({}): no backend to send them to: {e}",
+                hyphenated(uuid)
+            );
+            refuse(session.connection, "There is no server to join right now.");
+            return;
+        }
     };
     let options = BackendOptions {
         forwarding_secret: config.forwarding_secret.as_bytes().to_vec(),
         connect_timeout: Duration::from_millis(config.connect_timeout_ms),
         player_address: peer.ip(),
     };
-    let link = match connect(&backend.address, &session.profile, &options) {
-        Ok(link) => link,
-        Err(e) => {
-            warning!(
+    // Each candidate in turn, with the connect timeout for each.
+    let mut joined = None;
+    for candidate in &candidates {
+        let Some(backend) = config.backend(candidate) else {
+            continue;
+        };
+        match connect(&backend.address, &session.profile, &options) {
+            Ok(link) => {
+                joined = Some((backend, link));
+                break;
+            }
+            Err(e) => warning!(
                 "{peer}: {name} ({}) cannot join backend \"{}\" at {}: {e}",
                 hyphenated(uuid),
                 backend.name,
                 backend.address
-            );
-            refuse(
-                session.connection,
-                &format!(
-                    "Cannot reach the server \"{}\" right now. Try again in a moment.",
-                    backend.name
-                ),
-            );
-            return;
+            ),
         }
+    }
+    let Some((backend, link)) = joined else {
+        refuse(session.connection, &cannot_reach(&candidates));
+        return;
     };
     let (relay, handle) = match Relay::new(session, link) {
         Ok(relay) => relay,
@@ -228,6 +296,18 @@ pub fn handle(
             hyphenated(uuid),
             backend.name,
             started.elapsed().as_secs_f64()
+        ),
+    }
+}
+
+/// What a player is told when none of the backends tried answers.
+fn cannot_reach(tried: &[String]) -> String {
+    let names: Vec<String> = tried.iter().map(|n| format!("\"{n}\"")).collect();
+    match names.as_slice() {
+        [one] => format!("Cannot reach the server {one} right now. Try again in a moment."),
+        many => format!(
+            "Cannot reach the servers {} right now. Try again in a moment.",
+            many.join(", ")
         ),
     }
 }
@@ -634,5 +714,309 @@ pub(crate) mod tests {
             drop((player, server));
             assert!(relay.join().unwrap().is_ok());
         }
+    }
+
+    /// A player already logged in to the proxy: the session the proxy holds, and
+    /// the player's own end, in the configuration phase.
+    fn logged_in(
+        name: &str,
+        auth: client::AuthKind,
+        host: Option<&str>,
+    ) -> (ClientSession, Connection) {
+        let (proxy_end, player) = pipe();
+        let session = ClientSession {
+            profile: Profile {
+                name: name.to_owned(),
+                uuid: offline_uuid(name).to_be_bytes(),
+                properties: Vec::new(),
+            },
+            auth,
+            virtual_host: host.map(str::to_owned),
+            connection: proxy_end,
+        };
+        (session, player)
+    }
+
+    /// The backends of the routing tests: lobby, east and west, an offline proxy.
+    fn routed() -> Config {
+        let backend = |name: &str, port: u16| Backend {
+            name: name.into(),
+            address: format!("127.0.0.1:{port}"),
+        };
+        Config {
+            backends: vec![
+                backend("lobby", 25601),
+                backend("east", 25602),
+                backend("west", 25603),
+            ],
+            default_backend: "lobby".into(),
+            online_mode: false,
+            auth_mode: meridian_config::AuthMode::Offline,
+            forwarding_secret: SECRET.into(),
+            ..Config::default()
+        }
+    }
+
+    /// Backends reached through pipes, by address: `None` is one that does not
+    /// answer. Keeps the addresses tried, in order, and the backends' threads.
+    struct Reachable {
+        tried: Arc<Mutex<Vec<String>>>,
+        threads: Arc<Mutex<Vec<BackendThread>>>,
+    }
+
+    fn reachable(backends: Vec<(&str, bool)>) -> (Arc<Connect>, Reachable) {
+        let answering: HashMap<String, Option<FakeBackend>> = backends
+            .into_iter()
+            .map(|(address, answers)| {
+                let backend = answers.then(|| FakeBackend {
+                    forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                    after_login: vec![Step::Close],
+                    ..FakeBackend::default()
+                });
+                (address.to_owned(), backend)
+            })
+            .collect();
+        let answering = Mutex::new(answering);
+        let kept = Reachable {
+            tried: Arc::new(Mutex::new(Vec::new())),
+            threads: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (tried, threads) = (Arc::clone(&kept.tried), Arc::clone(&kept.threads));
+        let connect: Arc<Connect> = Arc::new(move |address, profile, options| {
+            tried.lock().unwrap().push(address.to_owned());
+            let fake = answering
+                .lock()
+                .unwrap()
+                .get_mut(address)
+                .and_then(Option::take);
+            let Some(fake) = fake else {
+                return Err(meridian_net::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "refused",
+                )));
+            };
+            let (proxy_end, server_end) = pipe();
+            threads
+                .lock()
+                .unwrap()
+                .push(fake.spawn(server_end, Recorder::new()));
+            backend::login(proxy_end, "127.0.0.1", 25601, profile, options)
+        });
+        (connect, kept)
+    }
+
+    /// Runs one logged-in player through the routing. The player's end runs
+    /// `script`; returns the addresses tried and what the player received.
+    fn route_one(
+        config: &Config,
+        sessions: &Sessions,
+        connect: &Connect,
+        reachable: &Reachable,
+        session: (ClientSession, Connection),
+        script: Vec<Step>,
+    ) -> (Vec<String>, Trace) {
+        let (session, player) = session;
+        let recorder = Recorder::new();
+        let player = meridian_testkit::peer::spawn(player, script, Dir::ToClient, recorder.clone());
+        serve(session, peer(), config, connect, sessions);
+        player.join().unwrap().unwrap();
+        for thread in reachable.threads.lock().unwrap().drain(..) {
+            thread.join().unwrap().unwrap();
+        }
+        let tried = std::mem::take(&mut *reachable.tried.lock().unwrap());
+        (tried, recorder.trace())
+    }
+
+    /// The reason of the configuration-phase Disconnect a player received.
+    fn refusal(trace: &Trace) -> String {
+        let packet = &trace.packets[0];
+        let configuration::Clientbound::Disconnect(d) =
+            configuration::Clientbound::decode(packet.id, &packet.payload).unwrap()
+        else {
+            panic!("not a disconnect");
+        };
+        text::plain(&d.reason, &Default::default())
+    }
+
+    fn refused() -> Vec<Step> {
+        vec![
+            Step::Expect {
+                id: ids::configuration::clientbound::DISCONNECT,
+            },
+            Step::Close,
+        ]
+    }
+
+    #[test]
+    fn the_route_knows_both_kinds_of_login() {
+        use meridian_config::AuthKind;
+        assert_eq!(route_auth(client::AuthKind::Premium), AuthKind::Verified);
+        assert_eq!(route_auth(client::AuthKind::Offline), AuthKind::Unverified);
+    }
+
+    /// A host name forced to east sends the player there, not to the default.
+    #[test]
+    fn a_forced_host_chooses_the_backend() {
+        let config = Config {
+            forced_hosts: vec![meridian_config::ForcedHost {
+                host: "east.example.com".into(),
+                backend: "east".into(),
+            }],
+            ..routed()
+        };
+        let sessions = Sessions::default();
+        let (connect, backends) =
+            reachable(vec![("127.0.0.1:25601", true), ("127.0.0.1:25602", true)]);
+        let (tried, _) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Alex", client::AuthKind::Offline, Some("east.example.com")),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(tried, ["127.0.0.1:25602"]);
+        assert_eq!(sessions.admitted(), 0, "the place is given back at the end");
+    }
+
+    /// The default backend is down: the player goes to the next in `try`.
+    #[test]
+    fn a_player_falls_back_when_the_first_backend_is_down() {
+        let config = Config {
+            try_backends: vec!["east".into()],
+            ..routed()
+        };
+        let sessions = Sessions::default();
+        let (connect, backends) =
+            reachable(vec![("127.0.0.1:25601", false), ("127.0.0.1:25602", true)]);
+        let (tried, _) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Alex", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(tried, ["127.0.0.1:25601", "127.0.0.1:25602"]);
+    }
+
+    /// None of the candidates answers: the player is told which were tried.
+    #[test]
+    fn a_player_is_told_when_no_candidate_answers() {
+        let config = Config {
+            try_backends: vec!["east".into()],
+            ..routed()
+        };
+        let sessions = Sessions::default();
+        let (connect, backends) =
+            reachable(vec![("127.0.0.1:25601", false), ("127.0.0.1:25602", false)]);
+        let (tried, trace) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Alex", client::AuthKind::Offline, None),
+            refused(),
+        );
+        assert_eq!(tried, ["127.0.0.1:25601", "127.0.0.1:25602"]);
+        assert_eq!(
+            refusal(&trace),
+            "Cannot reach the servers \"lobby\", \"east\" right now. Try again in a moment."
+        );
+        assert_eq!(sessions.admitted(), 0);
+    }
+
+    /// At the player limit, a player is refused before any backend is tried.
+    #[test]
+    fn a_full_proxy_refuses_the_player() {
+        let config = Config {
+            max_players: 1,
+            ..routed()
+        };
+        let sessions = Sessions::default();
+        let held = sessions.admit(1).unwrap();
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        let (tried, trace) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Steve", client::AuthKind::Offline, None),
+            refused(),
+        );
+        assert!(tried.is_empty());
+        assert_eq!(refusal(&trace), "The server is full");
+        assert_eq!(sessions.admitted(), 1, "only the place already held");
+        drop(held);
+        assert_eq!(sessions.admitted(), 0);
+    }
+
+    /// The limit counts places as they are taken, not sessions as they open.
+    #[test]
+    fn the_last_place_is_taken_once() {
+        let sessions = Sessions::default();
+        let first = sessions.admit(2).unwrap();
+        let second = sessions.admit(2).unwrap();
+        assert!(sessions.admit(2).is_err());
+        drop(first);
+        let third = sessions.admit(2).unwrap();
+        assert!(sessions.admit(0).is_ok(), "0 is no limit");
+        drop((second, third));
+    }
+
+    /// The hybrid mode: a verified player goes to the verified group's backend,
+    /// an unverified one to the other group's, each never to the other's.
+    #[test]
+    fn the_hybrid_mode_sends_each_kind_to_its_group() {
+        use meridian_config::{AuthKind, AuthMode, Group, Route};
+        let config = Config {
+            online_mode: true,
+            auth_mode: AuthMode::Hybrid,
+            groups: vec![
+                Group {
+                    name: "premium".into(),
+                    auth: AuthKind::Verified,
+                    backends: vec!["lobby".into()],
+                },
+                Group {
+                    name: "cracked".into(),
+                    auth: AuthKind::Unverified,
+                    backends: vec!["east".into()],
+                },
+            ],
+            routes: vec![
+                Route {
+                    auth: AuthKind::Verified,
+                    group: "premium".into(),
+                },
+                Route {
+                    auth: AuthKind::Unverified,
+                    group: "cracked".into(),
+                },
+            ],
+            ..routed()
+        };
+        config.validate().unwrap();
+        let sessions = Sessions::default();
+        let (connect, backends) =
+            reachable(vec![("127.0.0.1:25601", true), ("127.0.0.1:25602", true)]);
+        let (tried, _) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Notch", client::AuthKind::Premium, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(tried, ["127.0.0.1:25601"]);
+        let (tried, _) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("guest", client::AuthKind::Offline, None),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(tried, ["127.0.0.1:25602"]);
     }
 }
