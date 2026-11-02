@@ -2,6 +2,7 @@
 mod args;
 mod log;
 mod serve;
+mod session;
 
 use args::Command;
 use log::{error, info};

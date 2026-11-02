@@ -7,7 +7,9 @@
 //! - [`peer`] runs a script of packets to send and to expect on one end.
 //! - [`backend`] takes a player through the login as a Horizon server does, with
 //!   compression and the player information forwarding, then runs a script.
+//! - [`client`] logs in as an offline vanilla client does, then runs a script.
 pub mod backend;
+pub mod client;
 pub mod peer;
 pub mod trace;
 

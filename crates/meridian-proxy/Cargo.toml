@@ -17,5 +17,8 @@ horizon-protocol.workspace = true
 meridian-config.workspace = true
 meridian-net.workspace = true
 
+[dev-dependencies]
+meridian-testkit.workspace = true
+
 [lints]
 workspace = true
