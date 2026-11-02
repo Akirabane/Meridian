@@ -333,10 +333,7 @@ fn state(supervisor: &Supervisor) -> Value {
             let last = s.history.last();
             json!({
                 "name": s.name,
-                "kind": match s.kind {
-                    crate::bench::Kind::Proxy => "proxy",
-                    crate::bench::Kind::Server => "server",
-                },
+                "kind": s.kind.name(),
                 "port": s.port,
                 "state": s.state.name(),
                 "exitCode": match s.state { State::Exited(code) => json!(code), _ => Value::Null },

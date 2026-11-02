@@ -11,11 +11,15 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// Stand-ins for the three programs, the sidecar beside `meridian` as a release
+/// puts it.
 fn programs(dir: &Path) -> (PathBuf, PathBuf) {
     let server = dir.join("horizon-server.exe");
     let meridian = dir.join("meridian.exe");
-    std::fs::write(&server, "").unwrap();
-    std::fs::write(&meridian, "").unwrap();
+    let sidecar = dir.join(format!("meridian-sidecar{}", std::env::consts::EXE_SUFFIX));
+    for program in [&server, &meridian, &sidecar] {
+        std::fs::write(program, "").unwrap();
+    }
     (server, meridian)
 }
 
@@ -29,12 +33,24 @@ fn init_writes_a_coherent_bench_without_accepting_the_eula() {
         horizon_server: server,
         meridian,
         resources: None,
+        sidecar: None,
     })
     .unwrap();
 
     let bench = Bench::load(&bench_dir.join("bench.toml")).unwrap();
     let names: Vec<&str> = bench.processes.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["proxy", "lobby", "game1", "game2"]);
+    assert_eq!(
+        names,
+        [
+            "proxy",
+            "lobby",
+            "game1",
+            "game2",
+            "lobby-sidecar",
+            "game1-sidecar",
+            "game2-sidecar"
+        ]
+    );
 
     // The proxy's configuration is valid and knows the three servers.
     let config =
@@ -58,10 +74,52 @@ fn init_writes_a_coherent_bench_without_accepting_the_eula() {
         assert!(toml.contains("bind = \"127.0.0.1\""));
         assert!(toml.contains("online_mode = false"));
     }
-    // The secret is in no file the panel shows, nor in what init prints.
+    // Each server has its sidecar, with a secret of its own that the proxy and
+    // the sidecar read from the same file.
+    let mut secrets = Vec::new();
+    for (name, port) in init::SIDECARS {
+        let sidecar = config.sidecars.iter().find(|s| s.backend == name).unwrap();
+        assert_eq!(sidecar.address, format!("127.0.0.1:{port}"));
+        let secret = sidecar.read_secret().unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.iter().all(u8::is_ascii_hexdigit));
+        assert_eq!(
+            std::fs::canonicalize(&sidecar.secret_file).unwrap(),
+            std::fs::canonicalize(bench_dir.join("secrets").join(format!("{name}.key"))).unwrap()
+        );
+        let process = bench.process(&format!("{name}-sidecar")).unwrap();
+        assert_eq!(process.kind, meridian_panel::bench::Kind::Sidecar);
+        assert_eq!(process.port, port);
+        assert_eq!(process.dir, bench_dir.join(name));
+        assert_eq!(
+            process.args,
+            [
+                "--listen".to_owned(),
+                format!("127.0.0.1:{port}"),
+                "--endpoint-file".to_owned(),
+                init::ENDPOINT_FILE.to_owned(),
+                "--secret-file".to_owned(),
+                format!("../secrets/{name}.key"),
+            ]
+        );
+        // The sidecar, run in the server's folder, finds the same file.
+        assert_eq!(
+            std::fs::canonicalize(process.dir.join(&process.args[5])).unwrap(),
+            std::fs::canonicalize(&sidecar.secret_file).unwrap()
+        );
+        assert_eq!(process.stop_command, None);
+        secrets.push(String::from_utf8(secret).unwrap());
+    }
+    secrets.sort();
+    secrets.dedup();
+    assert_eq!(secrets.len(), 3, "each sidecar has a secret of its own");
+
+    // No secret is in a file the panel shows, nor in what init prints.
     let bench_text = std::fs::read_to_string(bench_dir.join("bench.toml")).unwrap();
-    assert!(!bench_text.contains(&config.forwarding_secret));
-    assert!(!out.contains(&config.forwarding_secret));
+    for secret in secrets.iter().chain([&config.forwarding_secret]) {
+        assert!(!bench_text.contains(secret.as_str()));
+        assert!(!out.contains(secret.as_str()));
+    }
     // It says how the user accepts the EULA, and what the bench costs.
     assert!(out.contains("https://aka.ms/MinecraftEULA"));
     assert!(out.contains("--i-accept-the-minecraft-eula"));
@@ -74,8 +132,34 @@ fn init_writes_a_coherent_bench_without_accepting_the_eula() {
         horizon_server: server,
         meridian,
         resources: None,
+        sidecar: None,
     });
     assert!(again.unwrap_err().contains("already exists"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn init_needs_the_sidecar_program_beside_meridian_or_named() {
+    let dir = scratch("init-sidecar");
+    let (server, meridian) = programs(&dir);
+    std::fs::remove_file(dir.join(format!("meridian-sidecar{}", std::env::consts::EXE_SUFFIX)))
+        .unwrap();
+    let options = |sidecar| init::InitOptions {
+        dir: dir.join("bench"),
+        horizon_server: server.clone(),
+        meridian: meridian.clone(),
+        resources: None,
+        sidecar,
+    };
+    let e = init::init(&options(None)).unwrap_err();
+    assert!(e.starts_with("meridian-sidecar:"), "{e}");
+    assert!(!dir.join("bench").exists());
+    let elsewhere = dir.join("tools").join("sidecar.exe");
+    std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    std::fs::write(&elsewhere, "").unwrap();
+    init::init(&options(Some(elsewhere.clone()))).unwrap();
+    let bench = Bench::load(&dir.join("bench").join("bench.toml")).unwrap();
+    assert_eq!(bench.process("lobby-sidecar").unwrap().program, elsewhere);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -87,6 +171,7 @@ fn init_refuses_programs_that_are_not_there() {
         horizon_server: dir.join("nope.exe"),
         meridian: dir.join("nope2.exe"),
         resources: None,
+        sidecar: None,
     })
     .unwrap_err();
     assert!(e.contains("is not a file"));
@@ -105,6 +190,7 @@ fn accept_eula_needs_its_flag_and_writes_only_server_folders() {
         horizon_server: server,
         meridian,
         resources: None,
+        sidecar: None,
     })
     .unwrap();
     let refused = init::accept_eula(&bench_dir, false).unwrap_err();
