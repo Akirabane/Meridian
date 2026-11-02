@@ -69,6 +69,9 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
     let mut play_started = Instant::now();
     let mut next_move = Instant::now();
     let mut said = false;
+    // A move is sent only from a position the server gave: before that the
+    // client does not know where it stands, and a server would kick it for moving.
+    let mut positioned = false;
     let mut at = [0.5_f64, 64.0, 0.5];
     loop {
         if playing {
@@ -87,7 +90,7 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
                     return End::Closed;
                 }
             }
-            if Instant::now() >= next_move {
+            if positioned && Instant::now() >= next_move {
                 next_move = Instant::now() + Duration::from_secs(1);
                 let body = play::Serverbound::MovePlayerPosRot(play::MovePlayerPosRot {
                     x: at[0],
@@ -136,6 +139,7 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
                     match play::Clientbound::decode(id, &payload) {
                         Ok(play::Clientbound::PlayerPosition(p)) => {
                             at = p.position;
+                            positioned = true;
                             let accept =
                                 play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
                                     id: p.teleport,
