@@ -19,8 +19,9 @@ pub struct Backend {
     pub address: String,
 }
 
-/// Everything the proxy reads from its configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Everything the proxy reads from its configuration. Its `Debug` output hides
+/// the forwarding secret, so a configuration can be logged safely.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     /// The address players connect to.
     pub listen: SocketAddr,
@@ -55,6 +56,38 @@ impl Default for Config {
             connect_timeout_ms: 5_000,
             forwarding_secret: String::new(),
         }
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Taking every field apart makes a new field a compile error here, so it
+        // cannot be left out, or shown, by accident.
+        let Config {
+            listen,
+            backends,
+            default_backend,
+            motd,
+            online_mode,
+            compression_threshold,
+            connect_timeout_ms,
+            forwarding_secret,
+        } = self;
+        let secret = if forwarding_secret.is_empty() {
+            "<empty>"
+        } else {
+            "<hidden>"
+        };
+        f.debug_struct("Config")
+            .field("listen", listen)
+            .field("backends", backends)
+            .field("default_backend", default_backend)
+            .field("motd", motd)
+            .field("online_mode", online_mode)
+            .field("compression_threshold", compression_threshold)
+            .field("connect_timeout_ms", connect_timeout_ms)
+            .field("forwarding_secret", &format_args!("{secret}"))
+            .finish()
     }
 }
 
