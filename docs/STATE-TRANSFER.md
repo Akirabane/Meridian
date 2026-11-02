@@ -169,7 +169,7 @@ read it back, so a save on one server and a load on another keep it.
 | Food, saturation | guest | Yes (`playerdata.rs:159-160`) | |
 | Food exhaustion, food tick timer | body | **No.** `store` leaves them at the `Level` default and `player_tag` writes that (`save.rs:3727-3731`), so they reset to 0 | Small: a hungry player regains a little food time |
 | Air, fire ticks | body | Yes, through `SavedBody` (`playerdata.rs:181-196`, `lan/guest.rs:27-47`) | |
-| Freezing ticks | body | **No.** `SavedBody` has no field for them (`guest.rs:27-31`) | Small |
+| Freezing ticks | body | **No.** The body does freeze: `PlayerMotion.ticks_frozen` (`motion.rs:395-396` at `549d6b9cd`) rises by one a tick in powder snow (`:1606-1607`) and falls by two outside it (`:1291`, `:1451`). But `SavedBody` has no field for it (`guest.rs:27-31`), and nothing in `playerdata.rs`, `guest.rs` or `save.rs` writes it, where vanilla saves `TicksFrozen` for every entity, players included, when it is above 0 (`Entity.saveWithoutId`, javap) | Small |
 | Ticks of invulnerability after a hit | body | No (*not verified* whether vanilla saves them) | Small; can be dropped |
 | Active effects | guest | Yes, with the ticks left (`playerdata.rs:165`, `save.rs:3737-3754`) | Already relative, as DESIGN.md wants |
 | Attributes | body | Yes, the body's attribute map (`playerdata.rs:197-206`) | Whether modifiers that come from equipped items are left out: *not verified* |
@@ -181,7 +181,7 @@ read it back, so a save on one server and a load on another keep it.
 | Item cooldowns | play state | No. Vanilla does not save them either: no cooldown key in `Player.addAdditionalSaveData` (javap). Horizon keeps the shield cooldown per connection (`game/lan.rs:1155-1156`); other cooldowns for network players: *not verified* | Needs a field of its own if wanted |
 | Experience level, progress, total, seed | guest | Yes (`playerdata.rs:161-164`) | |
 | Game mode | guest | Yes (`playerdata.rs:166-167`) | |
-| Previous game mode | none | **No.** `store` never sets it, and `player_tag` drops the key unless it is set (`save.rs:3659`, `:3834-3836`) | Small: only F3+F4 and the respawn packet read it |
+| Previous game mode | single player's file only | **No** for a network player. The single player keeps it: `Level` reads it and writes it back (`save.rs:3912`, `:4198-4199` at `549d6b9cd`). A guest has no field for it: `store` never sets it, and `player_tag` drops the key unless it is set (`save.rs:3659`, `:3834-3836`), so it is lost at the guest's first save | Small: only F3+F4 and the respawn packet read it |
 | Abilities | guest, compound | Flying is carried (`playerdata.rs:168`). May fly, instant build and invulnerable follow the game mode (`save.rs:3688-3706`). Fly and walk speed are kept from the loaded compound (`save.rs:3707-3714`) | |
 | Respawn point, last death location | guest | Yes (`playerdata.rs:170-171`, `:175`) | |
 | Recipe book | guest | Yes (`playerdata.rs:207`) | |
