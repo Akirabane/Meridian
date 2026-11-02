@@ -4,6 +4,8 @@
 use super::*;
 use horizon_protocol::packets::play::{self, Clientbound as C};
 
+mod entities;
+
 /// A packet, as the test kit carries it.
 fn p(packet: C) -> Packet {
     Packet::of(&packet)
@@ -328,5 +330,5 @@ fn a_recorded_session_feeds_the_ghost() {
             .unwrap();
     }
     assert_eq!(ghost.player_id(), Some(3));
-    assert_eq!(ghost.counts().0, 1);
+    assert_eq!(ghost.counts(), (1, 1));
 }
