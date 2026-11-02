@@ -3,12 +3,15 @@
 //! defaults and checks it; `meridian.example.toml` at the root of the repository
 //! shows every setting.
 mod auth;
+mod commands;
 mod error;
 
 pub use auth::{AuthSettings, OnLookupFailure};
+pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
 
 use auth::FileAuth;
+use commands::FileCommands;
 
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -148,6 +151,8 @@ pub struct Config {
     pub backend_retry_seconds: u64,
     /// How many player names the server list shows.
     pub status_sample: u32,
+    /// The commands players type that the proxy answers (`[commands]`).
+    pub commands: CommandSettings,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -188,6 +193,7 @@ impl Default for Config {
             connections_per_minute: 20,
             backend_retry_seconds: 10,
             status_sample: 12,
+            commands: CommandSettings::default(),
         }
     }
 }
@@ -216,6 +222,7 @@ impl std::fmt::Debug for Config {
             connections_per_minute,
             backend_retry_seconds,
             status_sample,
+            commands,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -242,6 +249,7 @@ impl std::fmt::Debug for Config {
             .field("connections_per_minute", connections_per_minute)
             .field("backend_retry_seconds", backend_retry_seconds)
             .field("status_sample", status_sample)
+            .field("commands", commands)
             .finish()
     }
 }
@@ -275,6 +283,8 @@ struct File {
     connections_per_minute: Option<u32>,
     backend_retry_seconds: Option<u64>,
     status_sample: Option<u32>,
+    #[serde(default)]
+    commands: FileCommands,
 }
 
 #[derive(Deserialize)]
@@ -392,6 +402,7 @@ impl Config {
                 .backend_retry_seconds
                 .unwrap_or(defaults.backend_retry_seconds),
             status_sample: file.status_sample.unwrap_or(defaults.status_sample),
+            commands: file.commands.into_settings(),
         };
         config.validate()?;
         Ok(config)
@@ -458,6 +469,7 @@ impl Config {
         if self.status_sample > MAX_STATUS_SAMPLE {
             return Err(ConfigError::StatusSampleTooLarge(self.status_sample));
         }
+        self.commands.validate(self)?;
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
         }
@@ -674,3 +686,6 @@ mod routing_tests;
 
 #[cfg(test)]
 mod auth_tests;
+
+#[cfg(test)]
+mod commands_tests;
