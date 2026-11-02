@@ -1,0 +1,131 @@
+name: Release
+
+# A release is made by pushing a tag such as v0.1.0. The workflow builds the
+# meridian binary for Linux and Windows, checks each archive on a clean runner,
+# then attaches the archives and their SHA256SUMS to a draft GitHub release, with
+# a build provenance attestation. The draft is published by hand.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe: meridian
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: meridian.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p meridian-proxy --bin meridian --target ${{ matrix.target }}
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Package
+        shell: bash
+        run: |
+          dir="meridian-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir -p "dist/$dir"
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md LICENSE meridian.example.toml "dist/$dir/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$dir.zip" "$dir" > /dev/null
+          else
+            tar -czf "$dir.tar.gz" "$dir"
+          fi
+          rm -r "$dir"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  verify:
+    name: verify ${{ matrix.name }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            exe: meridian
+          - name: windows-x86_64
+            os: windows-latest
+            exe: meridian.exe
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+      - name: Unpack, check the example configuration and the version
+        shell: bash
+        run: |
+          dir="meridian-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          if [ -f "$dir.zip" ]; then 7z x "$dir.zip" > /dev/null; else tar -xzf "$dir.tar.gz"; fi
+          cd "$dir"
+          ./${{ matrix.exe }} --check meridian.example.toml
+          # The tag must be the version the binary reports: v0.1.0 for "meridian 0.1.0".
+          version="$(./${{ matrix.exe }} --version)"
+          echo "$version"
+          if [ "$version" != "meridian ${GITHUB_REF_NAME#v}" ]; then
+            echo "the tag ${GITHUB_REF_NAME} does not match the binary's version: $version"
+            exit 1
+          fi
+
+  release:
+    name: release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum meridian-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/meridian-*
+            dist/SHA256SUMS
+      - name: Attach to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \
+              --title "Meridian $GITHUB_REF_NAME" --generate-notes
+          fi
