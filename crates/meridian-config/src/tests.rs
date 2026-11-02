@@ -100,8 +100,39 @@ fn the_example_file_is_valid() {
     assert_eq!(config.online_mode, defaults.online_mode);
     assert_eq!(config.compression_threshold, defaults.compression_threshold);
     assert_eq!(config.connect_timeout_ms, defaults.connect_timeout_ms);
+    assert_eq!(config.max_players, defaults.max_players);
+    assert_eq!(config.auth_mode, defaults.auth_mode);
     // The example's secret is a placeholder that says so.
     assert!(config.forwarding_secret.starts_with("replace-me"));
+    // The lists and tables are examples, one of each.
+    assert_eq!(config.try_backends, ["east"]);
+    assert_eq!(config.forced_backend("east.example.com"), Some("east"));
+    assert_eq!(config.groups.len(), 1);
+    assert_eq!(
+        config.route_group(AuthKind::Verified).unwrap().name,
+        "accounts"
+    );
+}
+
+#[test]
+fn the_hybrid_example_in_the_example_file_is_valid() {
+    // Uncommenting the hybrid example, with its backend, must give a valid file.
+    let example = include_str!("../../../meridian.example.toml")
+        .replace("auth-mode = \"online\"", "auth-mode = \"hybrid\"");
+    let start = example.find("for example:\n").unwrap() + "for example:\n".len();
+    let end = start
+        + example[start..]
+            .find("[[route]]\nauth = \"verified\"")
+            .unwrap();
+    let uncommented = example[start..end].replace("#   ", "").replace("#\n", "\n");
+    let example = format!("{}{uncommented}{}", &example[..start], &example[end..]);
+    let text =
+        format!("{example}\n[[backends]]\nname = \"guest-lobby\"\naddress = \"127.0.0.1:25568\"\n");
+    let config = Config::from_toml_str(&text).unwrap();
+    assert_eq!(
+        config.route_group(AuthKind::Unverified).unwrap().name,
+        "guests"
+    );
 }
 
 #[test]
