@@ -38,6 +38,12 @@ connection state when it is told to transfer or to return to the configuration
 phase. Every ordinary proxy switches servers with one of those, which is exactly
 why the switch is visible.
 
+Login and Respawn are not the only ones. The proxy also holds back Start
+Configuration and Transfer, a Disconnect from the old server, and the game event
+that tells the client its world has started loading, which belongs to a Login or a
+Respawn. [PACKETS.md](PACKETS.md) lists every packet of the Configuration and Play
+states and what the proxy does with each.
+
 Meridian never sends them. From the moment a player finishes logging in until
 they leave, the client stays in the Play state, in the same world, with the same
 player entity. What changes at a switch is not the connection but the proxy's
@@ -90,6 +96,13 @@ compares digests when a backend is added and again before each switch. A mismatc
 makes the switch impossible, and the proxy refuses it or falls back to a visible
 transfer, depending on configuration. For two copies of the same map the digests
 should match, but that has to be checked, not assumed.
+
+The same goes for what a backend puts in its Login packet, because the client
+cannot change most of it later. Hardcore, the maximum number of players, whether
+the server is in online mode, whether it enforces signed chat, and the dimension
+type, the hashed seed and the flat and debug flags of the level can only be set by
+a Login or a Respawn. They are part of the digest. What can change later (view
+distance, simulation distance, game mode, immediate respawn) is sent in the delta.
 
 ## 4. The ghost
 
@@ -161,7 +174,8 @@ player's life without a visible seam:
   ticks, and active effects with the time they have left.
 - Attribute base values and modifiers that are not derived from items.
 - The inventory (main, armour, off hand), the held slot, the ender chest, the
-  cursor stack, and item cooldowns.
+  cursor stack. Item cooldowns are not saved by a vanilla server either, so they
+  move only if the record gets a field of its own.
 - Experience level, progress and total score.
 - Game mode, abilities (flying, may fly, speed), and the respawn point.
 - The recipe book and the advancements the player has.
@@ -171,20 +185,36 @@ and anything tied to something that exists only on the old server. Riding a
 vehicle, or being ridden, is refused in the first version: the switch waits until
 the player is on their own feet.
 
-The format is a small, versioned record, not a copy of the player file, so the two
-servers can differ in how they store it. Times are relative ("this effect has nine
-seconds left") and never absolute, because the two servers' clocks need not match.
+The record is a small versioned object that the proxy carries and mostly does not
+open. Its main part is the player compound that Horizon already builds when it
+saves a player, because both backends run the same Horizon version and that
+compound is the most complete form there is, with the code to write and read it
+already in place. Around it the record holds the few values the proxy checks for
+itself (dimension, position), the advancements, and the live values that the save
+path loses today. Times are relative ("this effect has nine seconds left") and
+never absolute, because the two servers' clocks need not match.
+[STATE-TRANSFER.md](STATE-TRANSFER.md) gives the field list, the gaps and the
+requests.
+
+The save path of a Horizon server has gaps that matter here: the velocity, the
+food exhaustion, the freezing ticks, the previous game mode and the cursor stack
+are not saved. A player who logs out and back in loses them as well, so they are
+worth fixing in Horizon whatever Meridian does.
 
 Transport is a control channel between the proxy and each backend, separate from
-any game connection: authenticated with a shared secret, over TLS, with a request
-to export a player, a request to import one into a held player, and a request to
-release it. Horizon's server already has a control protocol of this shape, and
-extending it is the likely route.
+any game connection, with a request to expect a player, one to export, one to
+import into a held player, and ones to release or drop. A Horizon server answers
+requests like these only on a local control endpoint, so the recommended shape is
+a small sidecar process next to each backend: it talks to the local endpoint and
+offers the same requests to the proxy over TLS with a shared secret. Horizon then
+needs no network change.
 
-This needs a feature in `horizon-server`: player export and import, a held state
-for a joining player, and the proxy-trusting login mode. It touches the server and
-should not be written there until it has been agreed. This document only
-describes the need.
+The work in Horizon is an export on demand, a held player, an import, the release
+requests and the login that trusts the proxy. It is estimated at thirteen to
+nineteen days, most of it in the held player, which every part of the server that
+shows, tracks, ticks or hurts players has to skip. It lives in the game itself,
+not in the supervisor, and should not be written until it has been agreed. This
+document only describes the need.
 
 ## 7. Rewriting
 
@@ -315,7 +345,9 @@ reach, and it is best effort. Artifacts that can show:
 ## 10. Crates
 
 One Rust workspace, with the protocol taken from `horizon-protocol` at a pinned
-commit. Both projects are MIT licensed.
+commit. Both projects are MIT licensed. The dependency is light: it brings in two
+Horizon crates and no system library, and a first check of the workspace takes
+about a minute (see [BUILD.md](BUILD.md)).
 
 | Crate | Role |
 | --- | --- |
@@ -325,6 +357,7 @@ commit. Both projects are MIT licensed.
 | `meridian-rewrite` | Entity id maps, teleport, container and sequence translation, and the rewriting of typed packets |
 | `meridian-handoff` | The player record, the control channel client, and the prepare, freeze, hand over and commit steps |
 | `meridian-ext` | The messages of the cooperative extension, shared with the Horizon client |
+| `meridian-sidecar` | A small process run next to each backend: it relays the proxy's player requests to the backend's local control endpoint over TLS |
 | `meridian-proxy` | The binary: wires the others together, runs the sessions, logs and metrics |
 | `meridian-testkit` | A scripted fake backend and client, and a recorder of packet traces, for tests that need no real game |
 
@@ -364,9 +397,19 @@ test kit.
 
 ## 12. Decisions that are not ours alone
 
-- **Changes in `horizon-server`**: player export and import, a held state for a
-  joining player, and a mode that trusts the proxy's identity. They are needed, and
-  they belong to the Horizon project, so they must be agreed first.
+- **Changes in Horizon's game**: player export and import, a held state for a
+  joining player, and a login mode that trusts the proxy's identity, about thirteen
+  to nineteen days of work in all. They are needed, and they belong to the Horizon
+  project, so they must be agreed first. The save gaps of section 6 can be fixed
+  first and on their own.
+- **Where the requests are served**: the sidecar of section 6 keeps Horizon free of
+  a remote surface; the alternative is to let the supervisor's HTTP interface
+  listen on a configured address, which is more work in Horizon.
+- **Whose file is the truth**: after a switch the old server keeps a stale file for
+  the player. Either the proxy is the only way in, or the release marks or removes
+  that file.
+- **A disconnect during a switch**: the record then exists only in the proxy, and
+  must be imported into the target as a normal save or written back to the source.
 - **A change in the Horizon client** for the cooperative extension, with the same
   caveat.
 - **The common map**: the recommendation is A first and then C. Whether C is built
@@ -377,4 +420,5 @@ test kit.
 - **Players seeing each other across servers**: out of scope here, but it changes
   how the target view is built if it comes later.
 - **Pinning the protocol crate**: Horizon has no stable protocol crate release, so
-  the dependency is a pinned commit and moves when the project's version does.
+  the dependency is a pinned commit and moves when the project's version does. It
+  starts pinned, and its build cost is small.
