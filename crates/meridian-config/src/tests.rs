@@ -111,6 +111,11 @@ fn the_example_file_is_valid() {
     assert_eq!(config.backend_retry_seconds, defaults.backend_retry_seconds);
     assert_eq!(config.status_sample, defaults.status_sample);
     assert_eq!(config.commands, defaults.commands);
+    assert_eq!(config.sidecar_timeout_ms, defaults.sidecar_timeout_ms);
+    assert!(
+        config.sidecars.is_empty(),
+        "the example's sidecars are commented out"
+    );
     // The example's secret is a placeholder that says so.
     assert!(config.forwarding_secret.starts_with("replace-me"));
     // The lists and tables are examples, one of each.

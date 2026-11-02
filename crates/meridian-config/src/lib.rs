@@ -5,17 +5,19 @@
 mod auth;
 mod commands;
 mod error;
+mod sidecar;
 
 pub use auth::{AuthSettings, OnLookupFailure};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
+pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
 
 use auth::FileAuth;
 use commands::FileCommands;
 
 use serde::Deserialize;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A server the proxy can send players to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +155,12 @@ pub struct Config {
     pub status_sample: u32,
     /// The commands players type that the proxy answers (`[commands]`).
     pub commands: CommandSettings,
+    /// The sidecars of the backends that have one (`sidecar` and
+    /// `sidecar-secret-file` in `[[backends]]`). A backend with none cannot be
+    /// switched to or from.
+    pub sidecars: Vec<Sidecar>,
+    /// Milliseconds allowed for a sidecar to answer.
+    pub sidecar_timeout_ms: u64,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -194,6 +202,8 @@ impl Default for Config {
             backend_retry_seconds: 10,
             status_sample: 12,
             commands: CommandSettings::default(),
+            sidecars: Vec::new(),
+            sidecar_timeout_ms: 5_000,
         }
     }
 }
@@ -223,6 +233,8 @@ impl std::fmt::Debug for Config {
             backend_retry_seconds,
             status_sample,
             commands,
+            sidecars,
+            sidecar_timeout_ms,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -250,6 +262,9 @@ impl std::fmt::Debug for Config {
             .field("backend_retry_seconds", backend_retry_seconds)
             .field("status_sample", status_sample)
             .field("commands", commands)
+            // The paths of the secret files only: the secrets are never kept.
+            .field("sidecars", sidecars)
+            .field("sidecar_timeout_ms", sidecar_timeout_ms)
             .finish()
     }
 }
@@ -285,6 +300,7 @@ struct File {
     status_sample: Option<u32>,
     #[serde(default)]
     commands: FileCommands,
+    sidecar_timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -310,10 +326,12 @@ struct FileForcedHost {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct FileBackend {
     name: String,
     address: String,
+    sidecar: Option<String>,
+    sidecar_secret_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -323,13 +341,21 @@ impl Config {
             path: path.to_owned(),
             source,
         })?;
-        Config::from_toml_str(&text)
+        let folder = path.parent().unwrap_or(Path::new(""));
+        Config::from_toml_str_in(&text, folder)
     }
 
     /// Reads, completes and checks a configuration written in TOML. A setting that
     /// is left out takes its value from [`Config::default`], and a missing
-    /// `default-backend` is the first backend.
+    /// `default-backend` is the first backend. Relative paths, such as a
+    /// sidecar's secret file, are taken from the current folder.
     pub fn from_toml_str(text: &str) -> Result<Config, ConfigError> {
+        Config::from_toml_str_in(text, Path::new(""))
+    }
+
+    /// [`Config::from_toml_str`], with relative paths taken from `folder`, the
+    /// folder of the configuration file.
+    pub fn from_toml_str_in(text: &str, folder: &Path) -> Result<Config, ConfigError> {
         let file: File = toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
         let defaults = Config::default();
         let listen = match file.listen {
@@ -338,6 +364,23 @@ impl Config {
                 .map_err(|_| ConfigError::InvalidListen(value))?,
             None => defaults.listen,
         };
+        let mut sidecars = Vec::new();
+        for b in &file.backends {
+            match (&b.sidecar, &b.sidecar_secret_file) {
+                (None, None) => {}
+                (Some(address), Some(secret_file)) => sidecars.push(Sidecar {
+                    backend: b.name.clone(),
+                    address: address.clone(),
+                    secret_file: sidecar::resolve(folder, secret_file),
+                }),
+                (Some(_), None) => {
+                    return Err(ConfigError::SidecarWithoutSecret(b.name.clone()));
+                }
+                (None, Some(_)) => {
+                    return Err(ConfigError::SecretWithoutSidecar(b.name.clone()));
+                }
+            }
+        }
         let backends: Vec<Backend> = file
             .backends
             .into_iter()
@@ -403,6 +446,10 @@ impl Config {
                 .unwrap_or(defaults.backend_retry_seconds),
             status_sample: file.status_sample.unwrap_or(defaults.status_sample),
             commands: file.commands.into_settings(),
+            sidecars,
+            sidecar_timeout_ms: file
+                .sidecar_timeout_ms
+                .unwrap_or(defaults.sidecar_timeout_ms),
         };
         config.validate()?;
         Ok(config)
@@ -470,6 +517,18 @@ impl Config {
             return Err(ConfigError::StatusSampleTooLarge(self.status_sample));
         }
         self.commands.validate(self)?;
+        for s in &self.sidecars {
+            if self.backend(&s.backend).is_none() {
+                return Err(ConfigError::UnknownBackend {
+                    setting: "a sidecar".to_owned(),
+                    name: s.backend.clone(),
+                });
+            }
+        }
+        sidecar::validate(&self.sidecars)?;
+        if self.sidecar_timeout_ms == 0 {
+            return Err(ConfigError::ZeroSidecarTimeout);
+        }
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
         }
@@ -649,7 +708,7 @@ fn check_host(host: &str) -> Result<(), &'static str> {
 
 /// Checks that `address` is `host:port` without resolving the host: the host is
 /// a name, an IPv4 address or a bracketed IPv6 address, and the port is 1 to 65535.
-fn check_address(address: &str) -> Result<(), &'static str> {
+pub(crate) fn check_address(address: &str) -> Result<(), &'static str> {
     if address.chars().any(char::is_whitespace) {
         return Err("it contains a space");
     }
@@ -689,3 +748,6 @@ mod auth_tests;
 
 #[cfg(test)]
 mod commands_tests;
+
+#[cfg(test)]
+mod sidecar_tests;
