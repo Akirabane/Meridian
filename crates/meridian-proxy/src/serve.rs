@@ -1,15 +1,15 @@
-//! The accept loop: one thread per player, until asked to stop. A stop closes
-//! the sessions still being relayed, both sides, so that every backend sees its
-//! player leave and saves them, then waits for the players' threads to end.
+//! The accept loop: one thread per player, until asked to stop. A stop ends the
+//! sessions still being relayed, telling each player the server closed, so that
+//! every backend sees its player leave and saves them, then waits for the
+//! players' threads to end.
 use crate::log::{debug, info, warning};
-use crate::session::{self, Connect, Sessions};
+use crate::session;
+use crate::state::Proxy;
 use horizon_protocol::connection::Connection;
-use meridian_config::Config;
-use meridian_net::backend;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,32 +18,15 @@ const POLL: Duration = Duration::from_millis(50);
 /// How long a stop waits for players' threads to finish.
 const DRAIN: Duration = Duration::from_secs(5);
 
-/// Accepts players on `listener` until `stop` is set, then closes the sessions
-/// being relayed and waits up to [`DRAIN`] for the players' threads to end.
-pub fn serve(listener: TcpListener, config: Arc<Config>, stop: &AtomicBool) -> io::Result<()> {
-    let connect: Arc<Connect> = Arc::new(backend::connect);
-    serve_with(listener, config, connect, stop)
-}
-
-/// [`serve`], reaching the backends with `connect`.
-fn serve_with(
-    listener: TcpListener,
-    config: Arc<Config>,
-    connect: Arc<Connect>,
-    stop: &AtomicBool,
-) -> io::Result<()> {
+/// Accepts players on `listener` until the proxy is asked to stop, then ends the
+/// sessions being relayed and waits up to [`DRAIN`] for the players' threads.
+pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
     // A blocking accept could not see the stop flag, so the listener polls.
     listener.set_nonblocking(true)?;
     let active = Arc::new(AtomicUsize::new(0));
-    let sessions = Arc::new(Sessions::default());
-    let shared = Shared {
-        config,
-        connect,
-        sessions: Arc::clone(&sessions),
-    };
-    while !stop.load(Ordering::Relaxed) {
+    while !proxy.stopping() {
         match listener.accept() {
-            Ok((stream, peer)) => start_player(stream, peer, &shared, &active),
+            Ok((stream, peer)) => start_player(stream, peer, proxy, &active),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
@@ -54,7 +37,7 @@ fn serve_with(
         }
     }
     info!("stopping: no new connections are accepted");
-    match sessions.close_all() {
+    match proxy.sessions.close_all() {
         0 => {}
         1 => info!("closing 1 session"),
         n => info!("closing {n} sessions"),
@@ -63,36 +46,34 @@ fn serve_with(
     Ok(())
 }
 
-/// What every player's thread shares.
-#[derive(Clone)]
-struct Shared {
-    config: Arc<Config>,
-    connect: Arc<Connect>,
-    sessions: Arc<Sessions>,
-}
-
-fn start_player(stream: TcpStream, peer: SocketAddr, shared: &Shared, active: &Arc<AtomicUsize>) {
+fn start_player(
+    stream: TcpStream,
+    peer: SocketAddr,
+    proxy: &Arc<Proxy>,
+    active: &Arc<AtomicUsize>,
+) {
     debug!("{peer}: connected");
     // On some systems an accepted socket inherits the listener's non-blocking mode.
     if let Err(e) = stream.set_nonblocking(false) {
         warning!("{peer}: cannot set up the connection: {e}");
         return;
     }
-    let shared = shared.clone();
+    let proxy = Arc::clone(proxy);
     let guard = Active::enter(active);
     let spawned = thread::Builder::new()
         .name(format!("player {peer}"))
         .spawn(move || {
             let _guard = guard;
-            handle(stream, peer, &shared);
+            handle(stream, peer, &proxy);
         });
     if let Err(e) = spawned {
         warning!("{peer}: cannot start a thread for the connection: {e}");
     }
 }
 
-/// One player's connection, from the first byte to the close.
-fn handle(stream: TcpStream, peer: SocketAddr, shared: &Shared) {
+/// One player's connection, from the first byte to the close. The configuration
+/// is read once here: a reload applies to the connections that come after it.
+fn handle(stream: TcpStream, peer: SocketAddr, proxy: &Proxy) {
     let connection = match Connection::from_stream(stream) {
         Ok(connection) => connection,
         Err(e) => {
@@ -100,13 +81,8 @@ fn handle(stream: TcpStream, peer: SocketAddr, shared: &Shared) {
             return;
         }
     };
-    session::handle(
-        connection,
-        peer,
-        &shared.config,
-        &*shared.connect,
-        &shared.sessions,
-    );
+    let config = proxy.config();
+    session::handle(connection, peer, &config, &*proxy.connect, &proxy.sessions);
     // The connections are dropped here, which closes the sockets.
 }
 
@@ -141,28 +117,34 @@ impl Drop for Active {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meridian_config::Backend;
+    use meridian_config::{Backend, Config};
     use std::io::Read;
+    use std::sync::atomic::AtomicBool;
 
-    fn config() -> Arc<Config> {
-        Arc::new(Config {
+    fn proxy() -> Arc<Proxy> {
+        let config = Config {
             backends: vec![Backend {
                 name: "lobby".into(),
                 address: "127.0.0.1:25566".into(),
             }],
             default_backend: "lobby".into(),
             ..Config::default()
-        })
+        };
+        Arc::new(Proxy::new(
+            config,
+            "meridian.toml".into(),
+            Arc::new(AtomicBool::new(false)),
+        ))
     }
 
     #[test]
     fn a_player_is_closed_cleanly_and_the_loop_stops_when_asked() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
+        let proxy = proxy();
         let server = {
-            let stop = Arc::clone(&stop);
-            thread::spawn(move || serve(listener, config(), &stop))
+            let proxy = Arc::clone(&proxy);
+            thread::spawn(move || serve(listener, &proxy))
         };
 
         // A player who closes before the handshake: the proxy gives up on the
@@ -175,7 +157,7 @@ mod tests {
         let mut rest = Vec::new();
         assert_eq!(player.read_to_end(&mut rest).unwrap(), 0);
 
-        stop.store(true, Ordering::Relaxed);
+        proxy.stop();
         server.join().unwrap().unwrap();
     }
 

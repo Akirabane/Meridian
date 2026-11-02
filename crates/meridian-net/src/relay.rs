@@ -5,12 +5,18 @@
 //! framing, compression and encryption of the connection it came from and written
 //! again with those of the other, so the two sides may compress differently. In this
 //! first version nothing is interpreted: keep-alives, the end of the configuration
-//! phase and a return to it all pass through as they are.
+//! phase and a return to it all pass through as they are. The relay only notes
+//! which of those two phases the player's client is in, from the packets it sends
+//! it, so that a [`Handle`] can tell the player why the session ends.
 //!
 //! When either side closes, the other is closed too, and both threads end.
 use crate::{Result, backend::BackendLink, client::ClientSession};
-use horizon_protocol::connection::{Closer, ConnReader, ConnWriter};
-use std::sync::mpsc;
+use horizon_protocol::{
+    connection::{Closer, ConnReader, ConnWriter},
+    ids,
+    packets::{configuration, play},
+};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 
 /// What went one way through the relay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,61 +36,165 @@ pub struct Report {
     pub to_backend: Flow,
 }
 
+/// The protocol phase the player's client reads packets in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Configuration,
+    Play,
+}
+
 /// Relays the session until either side closes it.
 pub fn run(client: ClientSession, backend: BackendLink) -> Result<()> {
     run_counting(client, backend).map(|_| ())
 }
 
 /// Relays the session until either side closes it, and says what it carried.
-///
-/// The session ends well when one side closes its connection, whichever it is. It
-/// ends with an error when a connection breaks in another way, for example on a
-/// packet that cannot be read.
 pub fn run_counting(client: ClientSession, backend: BackendLink) -> Result<Report> {
-    let (client_reader, client_writer) = client.connection.split();
-    let (backend_reader, backend_writer) = backend.connection.split();
-    let closers = [client_reader.closer()?, backend_reader.closer()?];
-    let (done, ended) = mpsc::channel();
-    let spawn = |name: &str, side: Side, from: ConnReader, to: ConnWriter| {
-        let done = done.clone();
-        std::thread::Builder::new()
-            .name(name.to_owned())
-            .spawn(move || {
-                let _ = done.send((side, copy(from, to)));
-            })
-    };
-    let to_client = spawn(
-        "relay-to-client",
-        Side::ToClient,
-        backend_reader,
-        client_writer,
-    )?;
-    let to_backend = spawn(
-        "relay-to-backend",
-        Side::ToBackend,
-        client_reader,
-        backend_writer,
-    )?;
-    drop(done);
-    // The first thread to stop says how the session ended; closing both
-    // connections then stops the other one, whose error is only the echo.
-    let mut first = None;
-    let mut report = Report::default();
-    for (side, (flow, end)) in ended.iter() {
-        if first.is_none() {
-            close(&closers);
-            first = Some(end);
+    let (relay, _handle) = Relay::new(client, backend)?;
+    relay.run()
+}
+
+/// A session ready to be relayed. [`Relay::new`] also gives the [`Handle`] that
+/// ends it from another thread.
+pub struct Relay {
+    client_reader: ConnReader,
+    backend_reader: ConnReader,
+    backend_writer: ConnWriter,
+    shared: Arc<Shared>,
+}
+
+/// Ends a relayed session from another thread. It can be cloned and kept after the
+/// session is over, when it does nothing.
+#[derive(Clone)]
+pub struct Handle(Arc<Shared>);
+
+struct Shared {
+    /// What the player is sent, with the phase it is read in: one lock, so a
+    /// disconnect is written in the phase of the packets before it.
+    client: Mutex<ToClient>,
+    closers: [Closer; 2],
+}
+
+struct ToClient {
+    writer: ConnWriter,
+    phase: Phase,
+}
+
+impl Relay {
+    /// Takes over both connections. The player's client is in the configuration
+    /// phase, as [`crate::client::accept`] and [`crate::backend::connect`] leave
+    /// both sides.
+    pub fn new(client: ClientSession, backend: BackendLink) -> Result<(Relay, Handle)> {
+        let (client_reader, client_writer) = client.connection.split();
+        let (backend_reader, backend_writer) = backend.connection.split();
+        let closers = [client_reader.closer()?, backend_reader.closer()?];
+        let shared = Arc::new(Shared {
+            client: Mutex::new(ToClient {
+                writer: client_writer,
+                phase: Phase::Configuration,
+            }),
+            closers,
+        });
+        let handle = Handle(Arc::clone(&shared));
+        let relay = Relay {
+            client_reader,
+            backend_reader,
+            backend_writer,
+            shared,
+        };
+        Ok((relay, handle))
+    }
+
+    /// Relays the session until either side closes it, and says what it carried.
+    ///
+    /// The session ends well when one side closes its connection, whichever it is,
+    /// or when a [`Handle`] ends it. It ends with an error when a connection breaks
+    /// in another way, for example on a packet that cannot be read.
+    pub fn run(self) -> Result<Report> {
+        let Relay {
+            client_reader,
+            backend_reader,
+            backend_writer,
+            shared,
+        } = self;
+        let (done, ended) = mpsc::channel();
+        let to_client = {
+            let (done, shared) = (done.clone(), Arc::clone(&shared));
+            std::thread::Builder::new()
+                .name("relay-to-client".to_owned())
+                .spawn(move || {
+                    let _ = done.send((Side::ToClient, copy_to_client(backend_reader, &shared)));
+                })?
+        };
+        let to_backend = {
+            let done = done.clone();
+            std::thread::Builder::new()
+                .name("relay-to-backend".to_owned())
+                .spawn(move || {
+                    let _ = done.send((Side::ToBackend, copy(client_reader, backend_writer)));
+                })?
+        };
+        drop(done);
+        // The first thread to stop says how the session ended; closing both
+        // connections then stops the other one, whose error is only the echo.
+        let mut first = None;
+        let mut report = Report::default();
+        for (side, (flow, end)) in ended.iter() {
+            if first.is_none() {
+                shared.close();
+                first = Some(end);
+            }
+            match side {
+                Side::ToClient => report.to_client = flow,
+                Side::ToBackend => report.to_backend = flow,
+            }
         }
-        match side {
-            Side::ToClient => report.to_client = flow,
-            Side::ToBackend => report.to_backend = flow,
+        let _ = to_client.join();
+        let _ = to_backend.join();
+        match first {
+            Some(End::Closed) | None => Ok(report),
+            Some(End::Broken(e)) => Err(e.into()),
         }
     }
-    let _ = to_client.join();
-    let _ = to_backend.join();
-    match first {
-        Some(End::Closed) | None => Ok(report),
-        Some(End::Broken(e)) => Err(e.into()),
+}
+
+impl Handle {
+    /// The phase the player's client is in, as far as the relay has sent it.
+    pub fn phase(&self) -> Phase {
+        self.0.client().phase
+    }
+
+    /// Tells the player why the session ends, with the disconnect packet of the
+    /// phase their client is in, then closes both sides. The reason is the same in
+    /// both phases: a text component, as `horizon_protocol::text` builds it.
+    pub fn disconnect(&self, reason: configuration::Disconnect) {
+        {
+            let mut client = self.0.client();
+            let body = match client.phase {
+                Phase::Configuration => configuration::Clientbound::Disconnect(reason).encode(),
+                Phase::Play => play::Clientbound::Disconnect(reason).encode(),
+            };
+            // A player who has already gone cannot be told; the close follows anyway.
+            let _ = client.writer.send(&body);
+        }
+        self.close();
+    }
+
+    /// Closes both sides without a word.
+    pub fn close(&self) {
+        self.0.close();
+    }
+}
+
+impl Shared {
+    fn client(&self) -> MutexGuard<'_, ToClient> {
+        self.client.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn close(&self) {
+        for closer in &self.closers {
+            closer.close();
+        }
     }
 }
 
@@ -102,7 +212,7 @@ enum End {
     Broken(horizon_protocol::Error),
 }
 
-/// Copies packets until reading or writing fails.
+/// Copies the player's packets to the backend until reading or writing fails.
 fn copy(mut from: ConnReader, mut to: ConnWriter) -> (Flow, End) {
     let mut flow = Flow::default();
     let mut body = Vec::new();
@@ -112,21 +222,54 @@ fn copy(mut from: ConnReader, mut to: ConnWriter) -> (Flow, End) {
             Err(e) if e.is_end_of_stream() => return (flow, End::Closed),
             Err(e) => return (flow, End::Broken(e)),
         };
-        body.clear();
-        horizon_protocol::buf::write_varint(&mut body, id);
-        body.extend_from_slice(&payload);
+        encode(&mut body, id, &payload);
         // A write fails only when the side written to has gone away.
         if to.send(&body).is_err() {
             return (flow, End::Closed);
         }
-        flow.packets += 1;
-        flow.bytes += body.len() as u64;
+        flow.add(&body);
     }
 }
 
-fn close(closers: &[Closer]) {
-    for closer in closers {
-        closer.close();
+/// Copies the backend's packets to the player, and follows the phase the
+/// player's client reads them in.
+fn copy_to_client(mut from: ConnReader, shared: &Shared) -> (Flow, End) {
+    let mut flow = Flow::default();
+    let mut body = Vec::new();
+    loop {
+        let (id, payload) = match from.recv() {
+            Ok(packet) => packet,
+            Err(e) if e.is_end_of_stream() => return (flow, End::Closed),
+            Err(e) => return (flow, End::Broken(e)),
+        };
+        encode(&mut body, id, &payload);
+        let mut client = shared.client();
+        if client.writer.send(&body).is_err() {
+            return (flow, End::Closed);
+        }
+        // The packet that ends a phase is the last one read in it.
+        client.phase = match (client.phase, id) {
+            (Phase::Configuration, ids::configuration::clientbound::FINISH_CONFIGURATION) => {
+                Phase::Play
+            }
+            (Phase::Play, ids::play::clientbound::START_CONFIGURATION) => Phase::Configuration,
+            (phase, _) => phase,
+        };
+        drop(client);
+        flow.add(&body);
+    }
+}
+
+fn encode(body: &mut Vec<u8>, id: i32, payload: &[u8]) {
+    body.clear();
+    horizon_protocol::buf::write_varint(body, id);
+    body.extend_from_slice(payload);
+}
+
+impl Flow {
+    fn add(&mut self, body: &[u8]) {
+        self.packets += 1;
+        self.bytes += body.len() as u64;
     }
 }
 
@@ -324,5 +467,98 @@ mod tests {
         drop(server);
         assert!(run(client, backend).is_ok());
         drop(player);
+    }
+
+    /// A disconnect is written in the phase the player's client reads: the
+    /// configuration phase's packet before Finish Configuration, the play phase's
+    /// after it, and the configuration phase's again after Start Configuration.
+    /// Both sides are closed after it, and the session ends well.
+    #[test]
+    fn a_disconnect_is_written_in_the_players_phase() {
+        use horizon_protocol::{packets::configuration, text};
+        use ids::{configuration as cfg, play};
+        let back_to_configuration = Step::send(play::clientbound::START_CONFIGURATION, []);
+        for (backend_sends, phase, disconnect) in [
+            (vec![], Phase::Configuration, cfg::clientbound::DISCONNECT),
+            (
+                vec![finish_configuration()],
+                Phase::Play,
+                play::clientbound::DISCONNECT,
+            ),
+            (
+                vec![finish_configuration(), back_to_configuration],
+                Phase::Configuration,
+                cfg::clientbound::DISCONNECT,
+            ),
+        ] {
+            let (client, backend, mut player, server) = sides(-1, -1);
+            let (relay, handle) = Relay::new(client, backend).unwrap();
+            let relay = std::thread::spawn(move || relay.run());
+            let expected: Vec<Step> = sent(&backend_sends)
+                .into_iter()
+                .map(|(id, payload)| Step::expect_exactly(id, payload))
+                .collect();
+            let mut backend_script = backend_sends;
+            backend_script.push(Step::ExpectClose);
+            let server = peer::spawn(server, backend_script, Dir::ToServer, Recorder::new());
+            let recorder = Recorder::new();
+            peer::run(&mut player, &expected, Dir::ToClient, &recorder).unwrap();
+            assert_eq!(handle.phase(), phase);
+            handle.disconnect(configuration::Disconnect {
+                reason: text::literal("bye"),
+            });
+            peer::run(
+                &mut player,
+                &[Step::Expect { id: disconnect }, Step::ExpectClose],
+                Dir::ToClient,
+                &recorder,
+            )
+            .unwrap();
+            let last = recorder.trace().packets.last().cloned().unwrap();
+            let reason = match phase {
+                Phase::Configuration => {
+                    match configuration::Clientbound::decode(last.id, &last.payload) {
+                        Ok(configuration::Clientbound::Disconnect(d)) => d.reason,
+                        other => panic!("{other:?}"),
+                    }
+                }
+                Phase::Play => match horizon_protocol::packets::play::Clientbound::decode(
+                    last.id,
+                    &last.payload,
+                ) {
+                    Ok(horizon_protocol::packets::play::Clientbound::Disconnect(d)) => d.reason,
+                    other => panic!("{other:?}"),
+                },
+            };
+            assert_eq!(text::plain(&reason, &Default::default()), "bye");
+            assert!(relay.join().unwrap().is_ok());
+            server.join().unwrap().unwrap();
+        }
+    }
+
+    /// Closing ends the session without a packet to the player.
+    #[test]
+    fn a_handle_closes_a_session_without_a_word() {
+        let (client, backend, player, server) = sides(-1, -1);
+        let (relay, handle) = Relay::new(client, backend).unwrap();
+        let relay = std::thread::spawn(move || relay.run());
+        let server = peer::spawn(
+            server,
+            vec![Step::ExpectClose],
+            Dir::ToServer,
+            Recorder::new(),
+        );
+        let player = peer::spawn(
+            player,
+            vec![Step::ExpectClose],
+            Dir::ToClient,
+            Recorder::new(),
+        );
+        handle.close();
+        assert!(relay.join().unwrap().is_ok());
+        server.join().unwrap().unwrap();
+        player.join().unwrap().unwrap();
+        // A handle kept after the session does nothing.
+        handle.close();
     }
 }
