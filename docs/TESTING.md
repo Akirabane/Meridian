@@ -176,6 +176,7 @@ This removes only the bench folder: the Nightly and its game files are not touch
 
 | What you see | What it means |
 | --- | --- |
+| A command prints nothing at all | Some terminals, such as the one built into another application, do not show what a program run with `&` prints. Check its result with `$LASTEXITCODE` (0 is success) and whether the bench folder exists, and use a classic Windows PowerShell window |
 | A server card stays `starting` | It has not opened its port yet: look at its console. A first start generates the world |
 | `the Minecraft EULA is not accepted` | Step B was not done for that bench |
 | `no prepared game files` in a server's console | `--resources` in step A did not point at the Nightly's `.local\horizon-client\26.3`, or the Nightly was removed |
