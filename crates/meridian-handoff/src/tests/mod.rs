@@ -131,6 +131,7 @@ impl PlayerControl for FakeControl {
         parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
+        arrival: Option<Arrival>,
     ) -> Result<Imported, String> {
         assert_eq!(record_dimension(&record), Some(OVERWORLD));
         let parts = match parts {
@@ -142,11 +143,13 @@ impl PlayerControl for FakeControl {
             }
             Some(parts) => parts.join(","),
         };
-        // Where the record puts the player, when it says.
-        let pose = match (record.get("position"), record.get("rotation")) {
-            (Some(at), Some(look)) => format!(" at={at} look={look}"),
-            _ => String::new(),
-        };
+        // Where the import puts the player, when it says.
+        let pose = arrival.map_or(String::new(), |a| {
+            format!(
+                " at={:?} look={:?} velocity={:?} ground={:?}",
+                a.position, a.rotation, a.velocity, a.on_ground
+            )
+        });
         self.answer(
             "import",
             format!("import parts={parts} announce={announce:?} place={place}{pose}"),

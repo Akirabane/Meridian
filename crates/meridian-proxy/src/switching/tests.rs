@@ -80,6 +80,7 @@ impl PlayerControl for FakeSidecar {
         _: Option<Vec<String>>,
         _: Option<bool>,
         place: bool,
+        _: Option<meridian_handoff::Arrival>,
     ) -> Result<Imported, String> {
         self.answer("import", format!("import place={place}"))
             .map(|()| Imported::default())

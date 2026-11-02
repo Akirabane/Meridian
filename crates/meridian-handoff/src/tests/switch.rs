@@ -379,7 +379,7 @@ fn a_carried_position_that_never_comes_cancels_the_import() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=all announce=Some(true) place=false at=[8.0,70.0,8.0] look=[0.0,0.0]",
+            "target import parts=all announce=Some(true) place=false at=[8.0, 70.0, 8.0] look=[0.0, 0.0] velocity=Some([0.0, 0.0, 0.0]) ground=None",
             "source release Abort announce=false",
             "target drop",
         ]
@@ -640,7 +640,8 @@ fn a_carried_position_is_where_the_client_stands() {
         assert_eq!(
             log.lines()[2],
             "target import parts=all announce=Some(true) place=false \
-             at=[12.5,71.0,-3.5] look=[45.0,10.0]",
+             at=[12.5, 71.0, -3.5] look=[45.0, 10.0] velocity=Some([0.0, 0.0, 0.0]) \
+             ground=Some(true)",
             "{recentered:?}"
         );
         // The nine columns of the join, and the two around the new place.
