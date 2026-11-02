@@ -13,7 +13,7 @@
 //! then what goes to the backend ([`Up`]), then a lane's writer.
 use crate::{
     configure::{ClientConfiguration, Digest, DigestBuilder},
-    prepare::Target,
+    prepare::{Pose, Target},
 };
 use horizon_protocol::{
     buf::{Reader, write_varint},
@@ -98,6 +98,8 @@ pub(crate) struct Up {
     pub teleports: Teleports,
     /// What the client sent on its own in its configuration phase.
     pub client: ClientConfiguration,
+    /// Where the client last said it stands and how it looks, from its moves.
+    pub client_pose: Option<Pose>,
     pub flow: Flow,
 }
 
@@ -163,6 +165,7 @@ impl Session {
                 swap: Swap::new(0, 0),
                 teleports: Teleports::default(),
                 client: ClientConfiguration::default(),
+                client_pose: None,
                 flow: Flow::default(),
             }),
             client_closer,
@@ -455,6 +458,13 @@ fn copy_to_backend(mut from: ConnReader, shared: &Shared) -> End {
         let mut up = shared.up();
         let payload = match sending {
             Phase::Play => {
+                if let Some(pose) = up
+                    .client_pose
+                    .unwrap_or_default()
+                    .sent_by_client(id, &payload)
+                {
+                    up.client_pose = Some(pose);
+                }
                 if id == s::ACCEPT_TELEPORTATION
                     && let Ok(teleport) = Reader::new(&payload).varint()
                     && !up.teleports.forward(teleport)

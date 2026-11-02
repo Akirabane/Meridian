@@ -379,7 +379,7 @@ fn a_carried_position_that_never_comes_cancels_the_import() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=all announce=Some(true) place=false",
+            "target import parts=all announce=Some(true) place=false at=[8.0,70.0,8.0] look=[0.0,0.0]",
             "source release Abort announce=false",
             "target drop",
         ]
@@ -590,5 +590,98 @@ fn a_busy_target_does_not_hold_the_hand_over() {
     }
     attack(&mut player, TARGET_ID);
     assert_eq!(target_thread.join().unwrap().unwrap().attacked, CLIENT_ID);
+    run.join().unwrap().unwrap();
+}
+
+/// With the position carried, the record goes to the target with the place and
+/// look the client last gave, not those of the export: nothing the client did is
+/// pulled back. The target moves the player, so the delta waits for the chunks
+/// around the new place, which the target view then holds.
+#[test]
+fn a_carried_position_is_where_the_client_stands() {
+    for recentered in [None, Some(true)] {
+        let Bench {
+            handle,
+            run,
+            mut player,
+            mut source,
+        } = bench();
+        // The client walks and turns after joining.
+        let moved = play::Serverbound::MovePlayerPosRot(play::MovePlayerPosRot {
+            x: 12.5,
+            y: 71.0,
+            z: -3.5,
+            yaw: 45.0,
+            pitch: 10.0,
+            flags: 1,
+        });
+        player.send(&moved.encode()).unwrap();
+        expect(&mut source, ps::MOVE_PLAYER_POS_ROT).unwrap();
+        let log = Log::default();
+        let (address, signal, target_thread) = target(TargetWorld {
+            recenter: true,
+            ..TargetWorld::default()
+        });
+        let done = switch(
+            &handle,
+            target_backend(&address, &options()),
+            &mut FakeControl::new("source", &log),
+            &mut FakeControl {
+                recentered,
+                ..target_control(&log, signal)
+            },
+            &Digests::default(),
+            &Settings {
+                carry_position: true,
+                ..settings()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            log.lines()[2],
+            "target import parts=all announce=Some(true) place=false \
+             at=[12.5,71.0,-3.5] look=[45.0,10.0]",
+            "{recentered:?}"
+        );
+        // The nine columns of the join, and the two around the new place.
+        assert_eq!(done.chunks, 11, "{recentered:?}");
+        after_switch(&mut player);
+        attack(&mut player, TARGET_ID);
+        target_thread.join().unwrap().unwrap();
+        run.join().unwrap().unwrap();
+    }
+}
+
+/// The target says the import kept the player in the same chunk: the delta does
+/// not wait for chunks that will not come.
+#[test]
+fn a_carried_position_in_the_same_chunk_waits_for_no_chunk() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut FakeControl {
+            recentered: Some(false),
+            ..target_control(&log, signal)
+        },
+        &Digests::default(),
+        &Settings {
+            carry_position: true,
+            import_timeout: Duration::from_millis(500),
+            ..settings()
+        },
+    )
+    .unwrap();
+    after_switch(&mut player);
+    attack(&mut player, TARGET_ID);
+    target_thread.join().unwrap().unwrap();
     run.join().unwrap().unwrap();
 }

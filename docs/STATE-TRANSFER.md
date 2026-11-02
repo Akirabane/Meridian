@@ -347,7 +347,14 @@ A JSON object:
   code to write and read it exists and is tested. The proxy never decodes it.
 - The fields above it are the ones the proxy reads for itself: it checks the
   dimension and the position against the target before it imports, and logs
-  them.
+  them.- With `switch-carry-position = true`, the proxy writes `position` and
+  `rotation` itself just before the import: where the player's client last said
+  it stands and how it looks (its moves, and its answers to teleports). The
+  client keeps moving while the source holds the player frozen; taking the
+  source's place of the export would pull the player back by what they did
+  meanwhile. Only the import of a carried position moves the player on the
+  target, so only then does the hand-over wait for the chunks around the new
+  place (the import's `recentered`, or the view's centre moving after it).
 - `live` holds what the compound loses today (section 3). Once Horizon's save
   path carries them, they move into the compound and `live` empties.
 - `advancements` is the JSON that `save_guest_records` writes.

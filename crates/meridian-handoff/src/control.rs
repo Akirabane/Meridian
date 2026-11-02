@@ -35,7 +35,7 @@ pub trait PlayerControl {
         parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
-    ) -> Result<(), String>;
+    ) -> Result<Imported, String>;
 
     /// Places a player imported without being placed, and announces them if the
     /// import said so.
@@ -72,10 +72,12 @@ impl PlayerControl for SidecarClient {
         parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
-    ) -> Result<(), String> {
-        SidecarClient::import(self, uuid, record, parts, announce, Some(place))
-            .map(drop)
-            .map_err(|e| e.to_string())
+    ) -> Result<Imported, String> {
+        let answer = SidecarClient::import(self, uuid, record, parts, announce, Some(place))
+            .map_err(|e| e.to_string())?;
+        Ok(Imported {
+            recentered: answer.get("recentered").and_then(Value::as_bool),
+        })
     }
 
     fn confirm(&mut self, uuid: &str) -> Result<(), String> {
@@ -97,6 +99,22 @@ impl PlayerControl for SidecarClient {
     }
 }
 
+/// What a target says of an import.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Imported {
+    /// Whether the import moved the player to another chunk, whose surroundings
+    /// the target is still to send; `None` when the target does not say.
+    pub recentered: Option<bool>,
+}
+
+/// Puts `at` and the look `yaw`, `pitch` in a record, as its `position` and
+/// `rotation`: where the player's client stands when the record is imported.
+pub fn set_pose(record: &mut Record, at: [f64; 3], yaw: f32, pitch: f32) {
+    if let Some(fields) = record.as_object_mut() {
+        fields.insert("position".into(), Value::from(at.to_vec()));
+        fields.insert("rotation".into(), Value::from(vec![yaw, pitch]));
+    }
+}
 /// A unique id as the requests take it: 32 hexadecimal digits.
 pub fn uuid_text(uuid: [u8; 16]) -> String {
     format!("{:032x}", u128::from_be_bytes(uuid))

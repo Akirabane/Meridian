@@ -76,6 +76,8 @@ struct FakeControl {
     refuse: HashMap<&'static str, String>,
     /// Run when a request comes, before its answer.
     hooks: HashMap<&'static str, Hook>,
+    /// What the import answers about the player's chunk.
+    recentered: Option<bool>,
 }
 
 impl FakeControl {
@@ -86,6 +88,7 @@ impl FakeControl {
             record: record(OVERWORLD),
             refuse: HashMap::new(),
             hooks: HashMap::new(),
+            recentered: None,
         }
     }
 
@@ -128,7 +131,7 @@ impl PlayerControl for FakeControl {
         parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
-    ) -> Result<(), String> {
+    ) -> Result<Imported, String> {
         assert_eq!(record_dimension(&record), Some(OVERWORLD));
         let parts = match parts {
             None => "all".to_owned(),
@@ -139,10 +142,18 @@ impl PlayerControl for FakeControl {
             }
             Some(parts) => parts.join(","),
         };
+        // Where the record puts the player, when it says.
+        let pose = match (record.get("position"), record.get("rotation")) {
+            (Some(at), Some(look)) => format!(" at={at} look={look}"),
+            _ => String::new(),
+        };
         self.answer(
             "import",
-            format!("import parts={parts} announce={announce:?} place={place}"),
+            format!("import parts={parts} announce={announce:?} place={place}{pose}"),
         )
+        .map(|()| Imported {
+            recentered: self.recentered,
+        })
     }
 
     fn confirm(&mut self, _: &str) -> Result<(), String> {

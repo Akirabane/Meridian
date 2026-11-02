@@ -48,6 +48,9 @@ pub(crate) struct Preparing {
     pub positions: u32,
     pub batches: u32,
     pub last_batch: Option<Instant>,
+    /// When the target last moved the centre of the player's view: an import that
+    /// moves the player does, before the chunks around the new place.
+    pub last_center: Option<Instant>,
     loaded: bool,
     /// Packets the view does not keep but the client needs from the target, sent
     /// after the delta: the command tree, recipes, advancements, the player's own
@@ -86,6 +89,7 @@ impl Target {
                 positions: 0,
                 batches: 0,
                 last_batch: None,
+                last_center: None,
                 loaded: false,
                 extras: Vec::new(),
                 ended: None,
@@ -217,6 +221,10 @@ impl Preparing {
                     self.loaded = true;
                 }
             }
+            c::SET_CHUNK_CACHE_CENTER => {
+                self.last_center = Some(Instant::now());
+                self.apply(id, payload);
+            }
             c::COOKIE_REQUEST => {
                 if let Ok(key) = Reader::new(payload).string(32767) {
                     let mut w = Writer::new();
@@ -287,12 +295,36 @@ fn send_body(writer: &Mutex<ConnWriter>, body: &[u8]) {
 /// Where the target last put the player, and how they look.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Pose {
-    at: [f64; 3],
-    yaw: f32,
-    pitch: f32,
+    pub at: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
 impl Pose {
+    /// The pose a client says it has, from a packet it sends in the play phase:
+    /// its moves, and its answers to teleports, which give where the teleport
+    /// put it. `None` for any other packet.
+    pub fn sent_by_client(&self, id: i32, payload: &[u8]) -> Option<Pose> {
+        use horizon_protocol::ids::play::serverbound as s;
+        if !matches!(
+            id,
+            s::MOVE_PLAYER_POS
+                | s::MOVE_PLAYER_POS_ROT
+                | s::MOVE_PLAYER_ROT
+                | s::ACCEPT_TELEPORTATION
+        ) {
+            return None;
+        }
+        let pose = |at, yaw, pitch| Some(Pose { at, yaw, pitch });
+        match Serverbound::decode(id, payload).ok()? {
+            Serverbound::MovePlayerPos(p) => pose([p.x, p.y, p.z], self.yaw, self.pitch),
+            Serverbound::MovePlayerPosRot(p) => pose([p.x, p.y, p.z], p.yaw, p.pitch),
+            Serverbound::MovePlayerRot(p) => pose(self.at, p.yaw, p.pitch),
+            Serverbound::AcceptTeleportation(p) => pose([p.x, p.y, p.z], p.yaw, p.pitch),
+            _ => None,
+        }
+    }
+
     /// Applies Player Position, absolute or relative to the pose for the parts its
     /// flags name, and returns the new pose.
     pub fn placed(&mut self, p: &play::PlayerPosition) -> ([f64; 3], f32, f32) {

@@ -128,6 +128,7 @@ pub fn switch(
         trace: Some(Arc::new(move |step: &str, at: Duration| {
             info!("{who}: switch to {to}: {step} (+{} ms)", at.as_millis());
         })),
+        carry_position: config.switch_carry_position,
         ..Settings::default()
     };
     info!("{name}: switch from {from} to {}: starting", backend.name);

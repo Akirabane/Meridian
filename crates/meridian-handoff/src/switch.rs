@@ -1,7 +1,7 @@
 //! The switch itself: prepare, freeze, hand over, commit (DESIGN.md section 5).
 use crate::{
     configure::{Digest, configure},
-    control::{Outcome, PlayerControl, Record, record_dimension, uuid_text},
+    control::{Outcome, PlayerControl, Record, record_dimension, set_pose, uuid_text},
     prepare::Target,
     session::{Lane, SessionHandle, Shared, add, encode, lock, spawn_lane},
 };
@@ -513,24 +513,50 @@ pub fn switch(
         run.abort();
         return Err(run.fail(Step::Freeze, too_long()));
     }
-    if let Err(e) = run.target.import(
+    // A carried position is where the client stands now, not where the source
+    // froze the player: what the client did since the export is kept, so it is
+    // not pulled back.
+    let mut record = record;
+    let client_pose = shared.up().client_pose;
+    if settings.carry_position
+        && let Some(pose) = client_pose
+    {
+        set_pose(&mut record, pose.at, pose.yaw, pose.pitch);
+    }
+    let imported = match run.target.import(
         &run.uuid,
         record,
         run.parts.clone(),
         Some(settings.announce_arrival),
         false,
     ) {
-        run.abort();
-        return Err(run.fail(
-            Step::HandOver,
-            format!("{} would not take the player's record: {e}", target.name),
-        ));
-    }
+        Ok(imported) => imported,
+        Err(e) => {
+            run.abort();
+            return Err(run.fail(
+                Step::HandOver,
+                format!("{} would not take the player's record: {e}", target.name),
+            ));
+        }
+    };
     let imported_at = Instant::now();
-    note(if settings.carry_position {
-        "hand over: the target took the record, position included"
-    } else {
-        "hand over: the target took the record, all but the position"
+    note(&match (settings.carry_position, client_pose) {
+        (false, _) => "hand over: the target took the record, all but the position".to_owned(),
+        (true, Some(pose)) => format!(
+            "hand over: the target took the record, at the client's place {:.2} {:.2} {:.2} \
+             (recentered: {})",
+            pose.at[0],
+            pose.at[1],
+            pose.at[2],
+            imported
+                .recentered
+                .map_or("not said".to_owned(), |r| r.to_string())
+        ),
+        (true, None) => {
+            "hand over: the target took the record, at the place of the export (the client \
+             never said where it stands)"
+                .to_owned()
+        }
     });
     // The import sends what it changed in one go, a position for the client to
     // confirm among it, whatever the parts: the delta waits for that position. A
@@ -541,12 +567,17 @@ pub fn switch(
     // Only the position and the chunk batches count. A busy target never stops
     // sending (mobs move, time passes), so waiting for it to be quiet would keep
     // the player frozen until the import timeout and abort the switch.
+    // Whether the player moved to another chunk: the target says so in its answer,
+    // or, when it does not, the centre of the view it sent after the import does.
     let carry = settings.carry_position;
     let settled = |s: &crate::prepare::Preparing| {
         if s.positions <= positions {
             return None;
         }
-        if !carry {
+        let recentered = imported
+            .recentered
+            .unwrap_or_else(|| s.last_center.is_some_and(|at| at > imported_at));
+        if !carry || !recentered {
             return Some(());
         }
         s.last_batch

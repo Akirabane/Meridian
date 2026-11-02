@@ -106,7 +106,9 @@ mod session;
 mod switch;
 
 pub use configure::{ClientConfiguration, Digest, DigestBuilder, configure};
-pub use control::{Outcome, PlayerControl, Record, record_dimension, uuid_text};
+pub use control::{
+    Imported, Outcome, PlayerControl, Record, record_dimension, set_pose, uuid_text,
+};
 pub use session::{Session, SessionHandle};
 pub use switch::{
     After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,
