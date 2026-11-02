@@ -497,6 +497,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridian-rewrite"
+version = "0.1.0"
+dependencies = [
+ "horizon-protocol",
+]
+
+[[package]]
 name = "meridian-testkit"
 version = "0.1.0"
 dependencies = [
