@@ -288,3 +288,50 @@ The categories follow [DESIGN.md](DESIGN.md): the ghost (section 4), switching (
 | 66 | `use_item_on` | `game.ServerboundUseItemOnPacket` | `hand`, `hitResult`, `sequence` | typed | 3 | `sequence` is answered by Block Changed Ack. |
 | 67 | `use_item` | `game.ServerboundUseItemPacket` | `hand`, `sequence`, `yRot`, `xRot` | typed | 3 | `sequence` is answered by Block Changed Ack. |
 | 68 | `custom_click_action` | `common.ServerboundCustomClickActionPacket` | `id`, `payload` | typed | 4 |  |
+
+## Switch checklist
+
+### Packets the proxy holds back (category 5)
+
+These packets would show the switch to the player. During a switch the proxy drops them or answers them itself:
+
+- **Login** (`play/clientbound` 50): the client builds a new world and waits for it to load (`ClientPacketListener.handleLogin`). Only the first Login of the client's session reaches the client.
+- **Respawn** (`play/clientbound` 84): the client builds a new world and waits for it to load (`ClientPacketListener.handleRespawn`).
+- **Start Configuration** (`play/clientbound` 120): the client clears its world and shows the reconfiguration screen (`ClientPacketListener.handleConfigurationStart`). This means the whole Configuration state is out of reach during a switch. The two servers must therefore send the same registries, tags and enabled features (Registry Data, Update Tags, Update Enabled Features, Select Known Packs), because the client cannot receive new ones without a visible reconfiguration.
+- **Game Event 13** `LEVEL_CHUNKS_LOAD_START` (`play/clientbound` 39): part of a world load (`ClientPacketListener.handleGameEvent`). Other Game Events (weather, game mode) still pass.
+- **Transfer** (`play/clientbound` 132, `configuration/clientbound` 12): the client disconnects and opens the connect screen (`ClientCommonPacketListenerImpl.handleTransfer`).
+- **Disconnect** (`play/clientbound` 32, `configuration/clientbound` 2) from the old server: the client stays connected to the proxy.
+- **Finish Configuration** and **Configuration Acknowledged**: they only appear around a configuration phase, which a switch never starts.
+
+### Entity ids to rewrite (category 1)
+
+Clientbound packets with an entity id: Add Entity (and its `data` for projectile owners), Animate, Block Destruction, Damage Event, Debug Entity Value, Entity Event, Entity Position Sync, Hurt Animation, Login (`playerId`), Mount Screen Open, the three Move Entity packets, Move Minecart Along Track, Player Combat Kill, Player Look At, Projectile Power, Remove Entities, Remove Mob Effect, Rotate Head, Set Camera, Set Entity Data (and some metadata values), Set Entity Link, Set Entity Motion, Set Equipment, Set Passengers, Sound Entity, Swing Animation, Take Item Entity, Teleport Entity, Update Attributes, Update Mob Effect.
+
+Serverbound packets with an entity id: Attack, Entity Tag Query, Interact, Pick Item From Entity, Player Command, Set Command Minecart, Spectator Action.
+
+Packets that name entities by UUID (Boss Event, Player Info, Teleport To Entity, Waypoint) or by name (Set Player Team, Set Score) need no id rewrite.
+
+### State in the ghost (category 2)
+
+Every category 2 packet the proxy forwards updates the ghost. During the prepare phase of a switch (DESIGN.md section 5), the target's category 2 packets go into the target view and are not forwarded. At the commit, the delta is sent as one bundle. For this inventory that means:
+
+- removals come from the packets that already exist for them: Remove Entities, Boss Event (remove), Player Info Remove, Set Objective (remove), Set Player Team (remove), Reset Score, Remove Mob Effect, Forget Level Chunk, Recipe Book Remove, Update Advancements;
+- additions and changes are sent with the same packets the target used, with entity ids rewritten: chunks, entities, inventory slots and cursor, held slot, health, food, XP, abilities, effects, attributes, time, weather (Game Event 1, 2, 7, 8), world border, spawn point, difficulty, tick rate, tab list, boss bars and scoreboard;
+- the player's position comes from a Player Position whose teleport id the proxy chooses;
+- an open container is closed by the switch in the first version (Container Close).
+
+Packets that need no ghost entry: titles, action bar, sounds, particles and level events. Whatever is playing finishes by itself.
+
+### Session state (category 3)
+
+These follow DESIGN.md section 7:
+
+- **Keep-alive** (both states) and **Ping/Pong**: the proxy keeps the client alive with its own ids and each backend separately. A client keep-alive is never forwarded.
+- **Teleport ids** (Player Position, Accept Teleportation): the proxy numbers them and routes each answer to the backend that asked. An answer to an old id is dropped after a switch.
+- **Block-change sequences** (Player Action, Use Item, Use Item On, Block Changed Ack): one counter for the client, mapped per backend. The proxy acknowledges the old server's pending sequences itself at the switch.
+- **Containers** (Open Screen, Container Set Content/Slot/Data, Container Click, Container Close, Merchant Offers, Place Ghost Recipe, Mount Screen Open): window ids and state ids are translated.
+- **Transaction ids** (Tag Query and the two tag queries, Command Suggestions): each answer goes back to the backend that asked.
+- **Chunk batches** (Chunk Batch Start/Finished, Chunk Batch Received): reports go to the active backend; the proxy answers the inactive one's batch markers.
+- **Bundles** (Bundle Delimiter): a bundle from a backend is never cut or mixed with another backend's packets.
+- **Signed chat** (Player Chat, Chat, Chat Command Signed, Chat Ack, Delete Chat, Chat Session Update): the first version needs backends that do not enforce signed chat. The proxy passes the player's Chat Session Update to the new backend.
+- **Player Loaded** (serverbound): the client sends it once a world finished loading, so it does not send it again after a hidden switch. Whether the target needs it before it treats the player as loaded is not verified.
