@@ -50,7 +50,7 @@ pub struct Sessions {
 impl Sessions {
     /// Counts a session in. `None` once the proxy is stopping: the session must
     /// end at once.
-    fn open(&self, player: Player, handle: Handle) -> Option<Open<'_>> {
+    pub(crate) fn open(&self, player: Player, handle: Handle) -> Option<Open<'_>> {
         let mut open = self.lock();
         // Checked under the lock, so a stop cannot miss a session opening now.
         if self.closing.load(Ordering::Relaxed) {
@@ -117,7 +117,7 @@ impl Sessions {
 }
 
 /// A session counted in [`Sessions`] until it is dropped.
-struct Open<'a> {
+pub(crate) struct Open<'a> {
     sessions: &'a Sessions,
     id: u64,
 }

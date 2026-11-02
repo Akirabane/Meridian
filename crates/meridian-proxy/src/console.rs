@@ -369,10 +369,13 @@ fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
             let on = players.iter().filter(|p| p.backend == b.name).count();
             lines.push(match on {
                 0 => format!("backend {} removed", b.name),
+                1 => format!(
+                    "backend {} removed; the player on it stays until they leave",
+                    b.name
+                ),
                 n => format!(
-                    "backend {} removed; {} on it stay until they leave",
-                    b.name,
-                    count(n, "player", "players")
+                    "backend {} removed; the {n} players on it stay until they leave",
+                    b.name
                 ),
             });
         }
@@ -412,4 +415,297 @@ fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
     }
     lines.insert(0, "reloaded:".to_owned());
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{Open, tests::idle_session};
+    use horizon_protocol::{
+        connection::Connection, crypto::offline_uuid, packets::configuration, text,
+    };
+    use meridian_config::Backend;
+    use std::sync::atomic::AtomicBool;
+    use std::thread::JoinHandle;
+    use std::time::Instant;
+
+    fn config() -> Config {
+        Config {
+            backends: vec![
+                Backend {
+                    name: "lobby".into(),
+                    address: "127.0.0.1:25601".into(),
+                },
+                Backend {
+                    name: "east".into(),
+                    address: "127.0.0.1:25602".into(),
+                },
+            ],
+            default_backend: "lobby".into(),
+            online_mode: false,
+            forwarding_secret: "secret".into(),
+            ..Config::default()
+        }
+    }
+
+    /// A proxy whose backend check says lobby answers in 3 ms and east refuses.
+    fn proxy() -> Proxy {
+        let mut proxy = Proxy::new(
+            config(),
+            "does-not-exist/meridian.toml".into(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        proxy.probe = Arc::new(|address, _| match address {
+            "127.0.0.1:25601" => Ok(Duration::from_millis(3)),
+            _ => Err("connection refused".to_owned()),
+        });
+        proxy
+    }
+
+    /// A player relayed between two idle pipes, counted in the proxy's sessions.
+    struct Joined<'a> {
+        _open: Open<'a>,
+        relay: JoinHandle<meridian_net::Result<meridian_net::relay::Report>>,
+        player: Connection,
+        _server: Connection,
+    }
+
+    fn join<'a>(proxy: &'a Proxy, name: &str, backend: &str) -> Joined<'a> {
+        let (relay, handle, player, server) = idle_session(name);
+        let open = proxy
+            .sessions
+            .open(
+                Player {
+                    name: name.into(),
+                    uuid: offline_uuid(name).to_be_bytes(),
+                    backend: backend.into(),
+                    address: "198.51.100.7:50123".parse().unwrap(),
+                    joined: Instant::now(),
+                },
+                handle,
+            )
+            .unwrap();
+        Joined {
+            _open: open,
+            relay: std::thread::spawn(move || relay.run()),
+            player,
+            _server: server,
+        }
+    }
+
+    fn run(proxy: &Proxy, line: &str) -> Vec<String> {
+        Commands::builtin().execute(proxy, line)
+    }
+
+    #[test]
+    fn help_lists_every_command_and_explains_one() {
+        let proxy = proxy();
+        let lines = run(&proxy, "help");
+        for name in ["help", "list", "servers", "send", "kick", "reload", "end"] {
+            assert!(
+                lines.iter().any(|l| l.starts_with(name)),
+                "{name} missing from {lines:?}"
+            );
+        }
+        assert_eq!(
+            run(&proxy, "HELP kick"),
+            ["kick <player> [reason]: disconnects a player, telling them why"]
+        );
+        assert!(run(&proxy, "help fly")[0].starts_with("unknown command fly"));
+        assert!(run(&proxy, "fly")[0].starts_with("unknown command fly"));
+        assert!(run(&proxy, "   ").is_empty());
+    }
+
+    #[test]
+    fn list_shows_who_is_where() {
+        let proxy = proxy();
+        assert_eq!(run(&proxy, "list"), ["no players online"]);
+        let _alex = join(&proxy, "Alex", "lobby");
+        let lines = run(&proxy, "list");
+        assert_eq!(lines[0], "1 player online:");
+        let uuid = crate::session::hyphenated(offline_uuid("Alex").to_be_bytes());
+        assert!(
+            lines[1].starts_with(&format!("  Alex ({uuid}) on lobby for ")),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].ends_with("from 198.51.100.7"), "{}", lines[1]);
+        assert_eq!(run(&proxy, "list now"), ["usage: list"]);
+    }
+
+    #[test]
+    fn servers_says_which_backends_answer_and_who_is_on_them() {
+        let proxy = proxy();
+        let _alex = join(&proxy, "Alex", "lobby");
+        assert_eq!(
+            run(&proxy, "servers"),
+            [
+                "  lobby (default) at 127.0.0.1:25601: answers in 3 ms, 1 player",
+                "  east at 127.0.0.1:25602: does not answer: connection refused, 0 players",
+            ]
+        );
+    }
+
+    #[test]
+    fn send_checks_its_arguments_and_says_the_transfer_is_not_there_yet() {
+        let proxy = proxy();
+        assert_eq!(run(&proxy, "send"), ["usage: send <player|all> <server>"]);
+        assert_eq!(
+            run(&proxy, "send Alex"),
+            ["usage: send <player|all> <server>"]
+        );
+        assert_eq!(run(&proxy, "send all east"), ["no players online"]);
+        let _alex = join(&proxy, "Alex", "lobby");
+        let _steve = join(&proxy, "Steve", "east");
+        assert_eq!(
+            run(&proxy, "send Alex west"),
+            ["there is no server called west; type servers for the list"]
+        );
+        assert_eq!(
+            run(&proxy, "send Herobrine east"),
+            ["Herobrine is not online"]
+        );
+        assert_eq!(run(&proxy, "send alex lobby"), ["already on lobby"]);
+        assert_eq!(
+            run(&proxy, "send alex east"),
+            ["transfer not available yet: Alex would move to east"]
+        );
+        // Steve is already on east, so only Alex would move.
+        assert_eq!(
+            run(&proxy, "send all east"),
+            ["transfer not available yet: Alex would move to east"]
+        );
+        // Nobody was moved or disconnected.
+        assert_eq!(proxy.sessions.players().len(), 2);
+    }
+
+    #[test]
+    fn kick_tells_the_player_why_and_ends_only_their_session() {
+        let proxy = proxy();
+        assert_eq!(run(&proxy, "kick"), ["usage: kick <player> [reason]"]);
+        assert_eq!(run(&proxy, "kick Herobrine"), ["Herobrine is not online"]);
+        let mut alex = join(&proxy, "Alex", "lobby");
+        let _steve = join(&proxy, "Steve", "lobby");
+        assert_eq!(
+            run(&proxy, "kick alex bad manners"),
+            ["kicked Alex from lobby: bad manners"]
+        );
+        let (id, payload) = alex.player.recv().unwrap();
+        let configuration::Clientbound::Disconnect(d) =
+            configuration::Clientbound::decode(id, &payload).unwrap()
+        else {
+            panic!("not a disconnect");
+        };
+        assert_eq!(text::plain(&d.reason, &Default::default()), "bad manners");
+        assert!(alex.relay.join().unwrap().is_ok());
+        assert!(proxy.sessions.find("Steve").is_some());
+    }
+
+    #[test]
+    fn a_kick_without_a_reason_says_who_kicked() {
+        let proxy = proxy();
+        let mut alex = join(&proxy, "Alex", "lobby");
+        assert_eq!(
+            run(&proxy, "kick Alex"),
+            ["kicked Alex from lobby: Kicked by an operator"]
+        );
+        let (_, payload) = alex.player.recv().unwrap();
+        let configuration::Clientbound::Disconnect(d) = configuration::Clientbound::decode(
+            horizon_protocol::ids::configuration::clientbound::DISCONNECT,
+            &payload,
+        )
+        .unwrap() else {
+            panic!("not a disconnect");
+        };
+        assert_eq!(
+            text::plain(&d.reason, &Default::default()),
+            "Kicked by an operator"
+        );
+    }
+
+    #[test]
+    fn end_asks_the_proxy_to_stop() {
+        let proxy = proxy();
+        assert_eq!(run(&proxy, "end now"), ["usage: end"]);
+        assert!(!proxy.stopping());
+        assert_eq!(run(&proxy, "end"), ["stopping"]);
+        assert!(proxy.stopping());
+    }
+
+    #[test]
+    fn a_reload_that_cannot_read_the_file_changes_nothing() {
+        let proxy = proxy();
+        let lines = run(&proxy, "reload");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("not reloaded"), "{}", lines[0]);
+        assert_eq!(*proxy.config(), config());
+    }
+
+    /// A reload applies what it can and says what needs a restart; the players
+    /// on a removed backend stay.
+    #[test]
+    fn a_reload_applies_what_it_can_and_names_what_needs_a_restart() {
+        let proxy = proxy();
+        let _steve = join(&proxy, "Steve", "east");
+        let new = Config::from_toml_str(
+            r#"
+            listen = "0.0.0.0:25570"
+            motd = "Welcome"
+            online-mode = false
+            forwarding-secret = "secret"
+            default-backend = "lobby"
+            [[backends]]
+            name = "lobby"
+            address = "127.0.0.1:25601"
+            [[backends]]
+            name = "west"
+            address = "127.0.0.1:25603"
+            "#,
+        )
+        .unwrap();
+        let lines = apply(&proxy, new.clone());
+        assert_eq!(
+            lines,
+            [
+                "reloaded:",
+                "motd: Welcome",
+                "backend west added at 127.0.0.1:25603",
+                "backend east removed; the player on it stays until they leave",
+                "listen 0.0.0.0:25570 needs a restart; the proxy still listens on 0.0.0.0:25565",
+            ]
+        );
+        assert_eq!(*proxy.config(), new);
+        assert!(proxy.sessions.find("Steve").is_some());
+        assert_eq!(apply(&proxy, new), ["reloaded: nothing changed"]);
+    }
+
+    #[test]
+    fn commands_can_be_added_but_not_twice() {
+        let proxy = proxy();
+        let mut commands = Commands::builtin();
+        let ping = || Command {
+            name: "ping",
+            usage: "ping",
+            help: "answers pong",
+            run: Box::new(|_, _, _| Ok(vec!["pong".to_owned()])),
+        };
+        commands.register(ping()).unwrap();
+        assert_eq!(commands.execute(&proxy, "ping"), ["pong"]);
+        assert!(commands.register(ping()).is_err());
+        assert!(
+            commands
+                .register(Command {
+                    name: "LIST",
+                    ..ping()
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(duration(Duration::from_secs(7)), "7 s");
+        assert_eq!(duration(Duration::from_secs(185)), "3 min 05 s");
+        assert_eq!(duration(Duration::from_secs(3720)), "1 h 02 min");
+    }
 }
