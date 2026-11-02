@@ -41,7 +41,33 @@ const MAX_PLAYERS_SHOWN: usize = 20;
 /// A player who has logged in to the proxy and is ready to be relayed.
 pub struct ClientSession {
     pub profile: Profile,
+    /// How the player proved who they are, which decides the servers they may
+    /// be sent to.
+    pub auth: AuthKind,
     pub connection: Connection,
+}
+
+/// How a player's login was checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthKind {
+    /// The session service vouched for the account: the UUID, the name and the
+    /// skin are the account's.
+    Premium,
+    /// Nobody checked the name: the UUID is derived from it, as vanilla does in
+    /// offline mode, and there is no skin.
+    Offline,
+}
+
+/// How the proxy checks the login of a player called `name`. It is decided from
+/// the name alone, before anything is asked of the client, so a mode that picks
+/// per player (premium names checked, the others let in offline) only has to
+/// change this function. For now the configuration decides for everyone.
+fn auth_for(config: &Config, _name: &str) -> AuthKind {
+    if config.online_mode {
+        AuthKind::Premium
+    } else {
+        AuthKind::Offline
+    }
 }
 
 /// The players the server list counts: one per live [`Seat`].
@@ -168,21 +194,21 @@ fn log_in(
         );
         return Ok(None);
     }
-    let joined = if config.online_mode {
-        match authenticate(&mut connection, &hello.name, sessions)? {
+    let auth = auth_for(config, &hello.name);
+    let joined = match auth {
+        AuthKind::Premium => match authenticate(&mut connection, &hello.name, sessions)? {
             Some(joined) => joined,
             None => return Ok(None),
-        }
-    } else {
+        },
         // UUIDUtil.createOfflineProfile: the UUID is derived from the name, and
         // the UUID the client sent is ignored.
-        Joined {
+        AuthKind::Offline => Joined {
             uuid: crypto::offline_uuid(&hello.name),
             name: hello.name,
             properties: Vec::new(),
-        }
+        },
     };
-    finish(connection, config, joined).map(Some)
+    finish(connection, config, joined, auth).map(Some)
 }
 
 /// The proxy's key pair (`MinecraftServer.initializeKeyPair`), made at the first
@@ -288,7 +314,7 @@ mod session {
                 url_encode(name),
                 url_encode(server_hash)
             );
-            match agent().get(&url).call() {
+            match http_client().get(&url).call() {
                 // No content: the player did not join.
                 Ok(response) => Ok(response
                     .into_string()
@@ -301,7 +327,7 @@ mod session {
         }
     }
 
-    fn agent() -> ureq::Agent {
+    fn http_client() -> ureq::Agent {
         ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(15))
             .user_agent(concat!("Meridian/", env!("CARGO_PKG_VERSION")))
@@ -315,7 +341,7 @@ mod session {
         if let Some(url) = URL.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(url);
         }
-        let document: serde_json::Value = agent()
+        let document: serde_json::Value = http_client()
             .get(DISCOVERY)
             .call()
             .ok()
@@ -394,7 +420,12 @@ mod session {
 }
 
 /// Compression, the finished login, and the client's acknowledgement.
-fn finish(mut connection: Connection, config: &Config, joined: Joined) -> Result<ClientSession> {
+fn finish(
+    mut connection: Connection,
+    config: &Config,
+    joined: Joined,
+    auth: AuthKind,
+) -> Result<ClientSession> {
     // Unlike vanilla, a connection over memory is compressed too: the proxy only
     // has those in tests, which should go through what players get.
     let threshold = config.compression_threshold;
@@ -438,6 +469,7 @@ fn finish(mut connection: Connection, config: &Config, joined: Joined) -> Result
             uuid: joined.uuid.to_be_bytes(),
             properties,
         },
+        auth,
         connection,
     })
 }
@@ -704,6 +736,7 @@ mod tests {
         acknowledge(&mut client);
 
         let session = accepted.join().unwrap().unwrap().expect("a session");
+        assert_eq!(session.auth, AuthKind::Offline);
         assert_eq!(
             session.profile,
             Profile {
@@ -802,6 +835,14 @@ mod tests {
             "multiplayer.disconnect.transfers_disabled"
         );
         assert!(accepted.join().unwrap().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_configuration_decides_how_every_login_is_checked() {
+        for name in ["Steve", "Notch"] {
+            assert_eq!(auth_for(&offline(-1), name), AuthKind::Offline);
+            assert_eq!(auth_for(&Config::default(), name), AuthKind::Premium);
+        }
     }
 
     #[test]
@@ -919,6 +960,7 @@ mod tests {
         acknowledge(&mut client);
 
         let session = accepted.join().unwrap().unwrap().expect("a session");
+        assert_eq!(session.auth, AuthKind::Premium);
         assert_eq!(
             asked.lock().unwrap().as_slice(),
             [("notch".into(), server_hash)]
