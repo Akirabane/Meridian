@@ -235,6 +235,16 @@ fn context() -> report::Context {
         system.cpus().len(),
         system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0
     );
+    // What else the machine was doing, over one second before the run.
+    std::thread::sleep(Duration::from_secs(1));
+    system.refresh_cpu_all();
+    system.refresh_memory();
+    let load = format!(
+        "{:.0} % of one core in use, out of {}, and {:.1} GiB of memory available",
+        system.global_cpu_usage() * system.cpus().len() as f32,
+        system.cpus().len() * 100,
+        system.available_memory() as f64 / 1024.0 / 1024.0 / 1024.0
+    );
     let commit = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -247,6 +257,7 @@ fn context() -> report::Context {
         command: std::env::args().collect::<Vec<_>>().join(" "),
         date: utc_now(),
         machine,
+        load,
         commit,
         build: if cfg!(debug_assertions) {
             "debug"

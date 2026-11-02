@@ -13,6 +13,8 @@ pub struct Context {
     pub command: String,
     pub date: String,
     pub machine: String,
+    /// What else the machine was doing just before the run.
+    pub load: String,
     pub commit: String,
     pub build: &'static str,
     /// How processor time is read on this system.
@@ -41,6 +43,7 @@ pub fn header(context: &Context, load: &Load, steps: &[usize]) -> String {
     let _ = writeln!(out, "- Command: `{}`", context.command);
     let _ = writeln!(out, "- Date: {}", context.date);
     let _ = writeln!(out, "- Machine: {}", context.machine);
+    let _ = writeln!(out, "- Machine load before the run: {}", context.load);
     let _ = writeln!(
         out,
         "- Commit: {} ({} build)",
@@ -245,6 +248,7 @@ mod tests {
             command: "meridian-bench --players 10".into(),
             date: "2026-11-03T05:00:00Z".into(),
             machine: "a test machine".into(),
+            load: "12 % of one core in use".into(),
             commit: "abc1234".into(),
             build: "release",
             cpu: "It is counted.".into(),
