@@ -52,10 +52,21 @@ pub fn run(args: &[String]) -> i32 {
                 // At once, as the proxy prints a command's lines.
                 let _ = out.write_all(b"2 players online:\n  Alex on lobby\n  Steve on game1\n");
             }
-            ["send", player, target] => {
+            // As the proxy's console answers a switch: the line of a player who
+            // moved, with its times, or the step at which it failed. Steve's
+            // switch fails, so the panel's test sees both.
+            ["send" | "switch", "Steve", target] => {
                 let _ = writeln!(
                     out,
-                    "transfer not available yet: {player} would move to {target}"
+                    "Steve could not move from game1 to {target}: check: game1 has no sidecar \
+                     in the configuration, so no player can be switched to or from it"
+                );
+            }
+            ["send" | "switch", player, target] => {
+                let _ = writeln!(
+                    out,
+                    "{player} moved from lobby to {target} in 412 ms (prepare 230 ms, freeze 61 ms, \
+                     hand over 74 ms, commit 47 ms): 1890 packets, 1210344 bytes (441 chunks, 23 entities)"
                 );
             }
             _ => {
