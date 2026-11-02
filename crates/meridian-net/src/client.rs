@@ -1107,6 +1107,77 @@ mod tests {
         assert!(accepted.join().unwrap().unwrap().is_none());
     }
 
+    /// A hybrid login of `name` from `peer`, through a policy and a lookup shared
+    /// between logins as the proxy shares them. Returns the proxy's first reply.
+    fn hybrid_login_from(
+        policy: &std::sync::Arc<LoginPolicy>,
+        lookup: &std::sync::Arc<FakeLookup>,
+        peer: IpAddr,
+        name: &str,
+    ) -> login::Clientbound {
+        let config = Config {
+            auth_mode: meridian_config::AuthMode::Hybrid,
+            compression_threshold: -1,
+            auth: meridian_config::AuthSettings {
+                lookups_per_minute: 1,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let (client, server) = Pipe::pair();
+        let (policy, lookup) = (policy.clone(), lookup.clone());
+        let accepted = std::thread::spawn(move || {
+            let sessions = FakeSessions {
+                answer: Answer::NotJoined,
+                asked: Asked::default(),
+            };
+            let checks = Checks {
+                sessions: &sessions,
+                lookup: &*lookup,
+                policy: &policy,
+                peer: Some(peer),
+            };
+            accept_with(Connection::local(server), &config, &checks)
+        });
+        let mut client = Connection::local(client);
+        start_login(&mut client, name);
+        let reply = login_reply(&mut client);
+        if matches!(reply, login::Clientbound::LoginFinished(_)) {
+            acknowledge(&mut client);
+        }
+        accepted.join().unwrap().unwrap();
+        reply
+    }
+
+    #[test]
+    fn each_address_has_its_own_limit_of_lookups() {
+        let policy = std::sync::Arc::new(LoginPolicy::new());
+        let lookup = std::sync::Arc::new(FakeLookup::with_accounts(&[]));
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        let second: IpAddr = "192.0.2.2".parse().unwrap();
+        let finished =
+            |reply: &login::Clientbound| matches!(reply, login::Clientbound::LoginFinished(_));
+
+        // One lookup a minute: the first address uses its own.
+        assert!(finished(&hybrid_login_from(
+            &policy, &lookup, first, "Alpha"
+        )));
+        // A second new name from the same address is refused before any lookup.
+        let refused = reason(hybrid_login_from(&policy, &lookup, first, "Bravo"));
+        assert!(
+            refused["text"]
+                .as_str()
+                .unwrap()
+                .contains("Too many logins"),
+            "{refused}"
+        );
+        // Another address still has its lookup.
+        assert!(finished(&hybrid_login_from(
+            &policy, &lookup, second, "Charlie"
+        )));
+        assert_eq!(lookup.calls(), 2);
+    }
+
     /// The client's half of the encryption, as vanilla's
     /// `ClientHandshakePacketListenerImpl.handleHello` does it: the server hash
     /// it would send to the session service.

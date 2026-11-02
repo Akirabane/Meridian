@@ -175,7 +175,8 @@ pub fn handle(
     connect: &Connect,
     sessions: &Sessions,
 ) {
-    match client::accept(connection, config) {
+    // The address lets the hybrid mode limit name lookups per address.
+    match client::accept_from(connection, config, peer.ip()) {
         Ok(Some(session)) => serve(session, peer, config, connect, sessions),
         Ok(None) => debug!("{peer}: status answered, or login refused"),
         Err(e) => warning!("{peer}: {e}; closing the connection"),
