@@ -1,5 +1,5 @@
 //! The `meridian-panel` program.
-use meridian_panel::{bench::Bench, init};
+use meridian_panel::{bench::Bench, fake, init};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -22,6 +22,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
+        Some("__fake-process") => ExitCode::from(fake::run(&args[1..]) as u8),
         Some("init") => report(parse_init(&args[1..]).and_then(|o| init::init(&o))),
         Some("accept-eula") => report(parse_accept(&args[1..])),
         Some("--check") => {
@@ -47,7 +48,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "meridian-panel: running the panel comes with the supervisor and the page
+                "meridian-panel: running the panel comes with the page
 
 {USAGE}"
             );
