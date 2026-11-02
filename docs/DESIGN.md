@@ -519,7 +519,12 @@ carries some blocks, resets others and takes the rest from the target, and each
 ends up as the profile says.
 
 **J7: extensions.** Named opaque blocks, messages between servers, the extension
-trait on the proxy, bans and richer permissions, and metrics.
+trait on the proxy, and bans and richer permissions.
+
+**J8: scale and release.** The baseline measurement, the targets set from it, the
+decision on the thread model, the metrics endpoint, hot reload, clean stop,
+hardening, documentation, and a tagged release with signed binaries for Linux and
+Windows. The criteria are those of section 17. *Test:* section 17.6.
 
 J4 and J5 depend on the Horizon features of section 16 (export, import and the held
 player). Until they exist, J4 is developed and tested against the scripted backends
@@ -774,7 +779,7 @@ forwarding was written. The milestones are those of section 11.
 | Messages between servers | Named channels carried through the proxy and the sidecars | J7 |
 | Ban lists at the proxy | Bans by name, unique id and address that apply before any backend | J7 |
 | Richer permissions | Groups and per-command permissions, through the extension API | J7 |
-| Metrics | Counters of players, switches and timings, in a text format | J7 |
+| Metrics | Counters and histograms of players, switches and timings, in a text format | J8 |
 
 ### Out of scope
 
@@ -915,3 +920,101 @@ The sidecar, the policy engine, the ghost and the proxy are Meridian's own and n
 nothing from Horizon beyond these. The compatibility of two servers is learned by a
 probe connection that reads their configuration and Login, so no request is needed
 for it.
+
+## 17. Definition of done
+
+Meridian is finished when it is fully functional, scales to a real network, and could
+be published for others to run. The first is the acceptance of milestones J1 to J7.
+The other two are J8, and are stated here as things that can be measured.
+
+### 17.1 The targets are measured, not promised
+
+No figure below is a result. Each is a target to be fixed, and each is tied to a
+measurement. The first step of J8 is a baseline: the harness of 17.2 is run, the
+numbers are written down, and the targets are set from them with a margin. A target
+is never raised on paper. Where this document gives a number, it is a proposal for
+the baseline to confirm or correct.
+
+### 17.2 What is measured, and how
+
+The load comes from the test kit's scripted clients and, for the larger runs,
+Horizon's bot crate, against scripted backends that answer instantly, so the proxy is
+measured and not a game server. A heavy run is planned before it is made, with its
+CPU, memory, disk and duration, and cleaned up after.
+
+| Criterion | How it is measured | Proposed target |
+| --- | --- | --- |
+| Simultaneous players on one proxy | N scripted sessions, each moving and chatting, held for several minutes | 1,000 on the reference machine without error; the limit found is written down |
+| Added latency of the relay | Time between a packet leaving the client and arriving at the backend (and back), on loopback, per packet | Median under one millisecond and p99 under five |
+| CPU per player | Proxy process CPU divided by sessions, at several values of N | A figure per player at idle and at moving, and it does not grow with N |
+| Memory per player | Resident memory divided by sessions, with and without the ghost | See 17.3 |
+| Switches | Switches per second the proxy sustains between two scripted backends, and the time of one switch (freeze to commit) | Freeze under three ticks, the sustained rate written down |
+| Login | Logins per second, in each login mode, with the lookup cache warm and cold | The rate written down; no failure under the rate limit |
+| Failure | Backend dies, client drops, slow client, flood of half-open connections | The proxy stays up and other players are not affected |
+
+The comparison with Velocity is made honestly. No figure published by the project
+or by anyone else is copied. If a comparison is made, both proxies are run on the
+same machine, in front of the same scripted backends, under the same load, and the
+method and numbers are published together. If it is not measured, no claim is made.
+
+### 17.3 The cost of the ghost
+
+The ghost is the part that grows with the number of players. A player keeps their
+view of the world, and a view of radius `r` is `(2r + 1)^2` chunks (section 8.1). At
+tens of kilobytes a chunk, a radius of 8 is several megabytes for one player, and a
+thousand players would be several gigabytes. Three things bring that down, and the
+baseline says which are needed:
+
+- chunks are kept as they were received, compressed, and never decoded;
+- identical chunks are stored once, shared by every player of the same backend by
+  their hash, so memory follows the number of distinct chunks and not the number of
+  players;
+- the arrival radius and a cap on the ghost per player are settings.
+
+### 17.4 The thread model
+
+Version 1 uses threads: two for each player, one for each direction, because the
+protocol crate Meridian builds on reads and writes through blocking sockets. That is
+simple and fast to write, and it holds a few thousand connections. Past that, memory
+for stacks (which can be set small) and the work of the scheduler grow, and the limit
+is a figure of the baseline, not a guess made here.
+
+Beyond that limit there are two ways. A pool of threads with non-blocking sockets
+and a state machine for each connection, or an asynchronous runtime. Both need the
+network layer rewritten: `meridian-net` would read and write frames through the
+protocol crate's functions on buffers, which do not depend on a blocking socket,
+instead of its connection type. The ghost, the rewriting, the policy and the sidecar
+client are plain code over packets and are not touched. So the cost of leaving threads
+is one crate, and the decision is taken from the baseline in J8, not before.
+
+### 17.5 The other things that make it done
+
+- **Metrics.** A text endpoint, off by default, bound to a local address, with
+  counters and histograms: players and sessions, logins by mode and outcome,
+  switches (done, refused, failed) and their duration, relay latency, bytes in and
+  out, backend health, and the memory of the ghost and the chunk store.
+- **Reload.** A changed configuration is applied without dropping a player; an invalid
+  one is rejected and the previous one stays.
+- **Clean stop.** On a stop signal the proxy stops accepting, tells the players, lets
+  sessions finish for a set time, then closes.
+- **Hardening.** Limits on connections per address, on pending logins, on packet and
+  frame sizes, and on the ghost per player; timeouts on every read and write,
+  including the handshake; the PROXY protocol for the real address; bounded queues so
+  a slow client cannot grow memory; fuzz tests on the packet decoders; a dependency
+  audit in CI. Unsafe code is already forbidden by the workspace lints.
+- **Documentation.** A complete README (what it is, why, a quick start, status), a
+  usage guide, a configuration reference with every key and its default, an
+  operations guide (running, stopping, reloading, metrics, troubleshooting), and a
+  note on which Horizon version each release was tested with.
+- **Release.** Binaries for Linux and Windows built by CI when a version is tagged,
+  with checksums and a signature made in CI, a changelog, and a security policy that
+  says how to report a problem. The licence is MIT, as it is now.
+
+### 17.6 Done means
+
+All of the following are true: the acceptance of J1 to J7 passes in CI; every
+criterion of 17.2 has a measured result and meets its target, or the target was
+changed with the measurement written next to it; the larger runs were made and
+cleaned up; the documentation of 17.5 exists and was followed from scratch by
+someone who had not written it; and a tagged release produced signed binaries for
+both systems.
