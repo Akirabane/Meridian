@@ -37,6 +37,10 @@ pub struct Config {
     pub compression_threshold: i32,
     /// Milliseconds allowed to reach a backend.
     pub connect_timeout_ms: u64,
+    /// The secret shared with the backends, which use it to check that a login
+    /// really comes from the proxy (Velocity modern forwarding). Empty by default,
+    /// and required as soon as a backend is configured.
+    pub forwarding_secret: String,
 }
 
 impl Default for Config {
@@ -49,6 +53,7 @@ impl Default for Config {
             online_mode: true,
             compression_threshold: 256,
             connect_timeout_ms: 5_000,
+            forwarding_secret: String::new(),
         }
     }
 }
@@ -65,6 +70,7 @@ struct File {
     online_mode: Option<bool>,
     compression_threshold: Option<i32>,
     connect_timeout_ms: Option<u64>,
+    forwarding_secret: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,8 +83,10 @@ struct FileBackend {
 impl Config {
     /// Reads, completes and checks the configuration file at `path`.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|source| ConfigError::Read { path: path.to_owned(), source })?;
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
         Config::from_toml_str(&text)
     }
 
@@ -89,13 +97,18 @@ impl Config {
         let file: File = toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
         let defaults = Config::default();
         let listen = match file.listen {
-            Some(value) => value.parse().map_err(|_| ConfigError::InvalidListen(value))?,
+            Some(value) => value
+                .parse()
+                .map_err(|_| ConfigError::InvalidListen(value))?,
             None => defaults.listen,
         };
         let backends: Vec<Backend> = file
             .backends
             .into_iter()
-            .map(|b| Backend { name: b.name, address: b.address })
+            .map(|b| Backend {
+                name: b.name,
+                address: b.address,
+            })
             .collect();
         let default_backend = match file.default_backend {
             Some(name) => name,
@@ -110,7 +123,10 @@ impl Config {
             compression_threshold: file
                 .compression_threshold
                 .unwrap_or(defaults.compression_threshold),
-            connect_timeout_ms: file.connect_timeout_ms.unwrap_or(defaults.connect_timeout_ms),
+            connect_timeout_ms: file
+                .connect_timeout_ms
+                .unwrap_or(defaults.connect_timeout_ms),
+            forwarding_secret: file.forwarding_secret.unwrap_or(defaults.forwarding_secret),
         };
         config.validate()?;
         Ok(config)
@@ -118,7 +134,7 @@ impl Config {
 
     /// Checks what the types alone cannot: there is at least one backend, names
     /// are unique and not empty, addresses are `host:port`, the default backend
-    /// exists and the connect timeout is not zero. The first problem found is
+    /// exists, the connect timeout is not zero and the forwarding secret is set. The first problem found is
     /// returned.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.backends.is_empty() {
@@ -138,10 +154,15 @@ impl Config {
             })?;
         }
         if self.backend(&self.default_backend).is_none() {
-            return Err(ConfigError::UnknownDefaultBackend(self.default_backend.clone()));
+            return Err(ConfigError::UnknownDefaultBackend(
+                self.default_backend.clone(),
+            ));
         }
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
+        }
+        if self.forwarding_secret.is_empty() {
+            return Err(ConfigError::MissingForwardingSecret);
         }
         Ok(())
     }
@@ -168,7 +189,10 @@ fn check_address(address: &str) -> Result<(), &'static str> {
         return Err("an IPv6 host must be written in brackets, as [::1]:25566");
     }
     if host.starts_with('[') {
-        if host[1..host.len() - 1].parse::<std::net::Ipv6Addr>().is_err() {
+        if host[1..host.len() - 1]
+            .parse::<std::net::Ipv6Addr>()
+            .is_err()
+        {
             return Err("the host in brackets is not an IPv6 address");
         }
     } else if host.contains(':') {

@@ -6,7 +6,10 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub enum ConfigError {
     /// The file could not be read.
-    Read { path: PathBuf, source: std::io::Error },
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// The file is not valid TOML, or a setting has the wrong type or an unknown
     /// name. The message comes from the TOML reader and gives the line.
     Parse(String),
@@ -19,11 +22,17 @@ pub enum ConfigError {
     /// Two backends have the same name.
     DuplicateBackend(String),
     /// A backend's address is not `host:port`.
-    InvalidAddress { backend: String, address: String, reason: &'static str },
+    InvalidAddress {
+        backend: String,
+        address: String,
+        reason: &'static str,
+    },
     /// `default-backend` names no configured backend.
     UnknownDefaultBackend(String),
     /// `connect-timeout-ms` is zero.
     ZeroConnectTimeout,
+    /// `forwarding-secret` is empty while backends are configured.
+    MissingForwardingSecret,
 }
 
 impl fmt::Display for ConfigError {
@@ -38,13 +47,20 @@ impl fmt::Display for ConfigError {
                 "listen = \"{value}\" is not an address with a port, such as \"0.0.0.0:25565\""
             ),
             ConfigError::NoBackend => {
-                write!(f, "no backend is configured: add at least one [[backends]] entry")
+                write!(
+                    f,
+                    "no backend is configured: add at least one [[backends]] entry"
+                )
             }
             ConfigError::EmptyBackendName => write!(f, "a backend has an empty name"),
             ConfigError::DuplicateBackend(name) => {
                 write!(f, "two backends are named \"{name}\": names must be unique")
             }
-            ConfigError::InvalidAddress { backend, address, reason } => write!(
+            ConfigError::InvalidAddress {
+                backend,
+                address,
+                reason,
+            } => write!(
                 f,
                 "backend \"{backend}\" has the address \"{address}\", which is not valid: {reason}"
             ),
@@ -54,6 +70,9 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::ZeroConnectTimeout => {
                 write!(f, "connect-timeout-ms must be more than 0")
+            }
+            ConfigError::MissingForwardingSecret => {
+                write!(f, "forwarding-secret must be set: the backends check it")
             }
         }
     }

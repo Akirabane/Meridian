@@ -19,6 +19,12 @@ compression-threshold = 256
 # Milliseconds allowed to reach a backend.
 connect-timeout-ms = 5000
 
+# The secret shared with the backends. They use it to check that a login really
+# comes from the proxy (Velocity modern forwarding), so it must be set, and set to
+# the same value on every backend. The value below is a placeholder: replace it
+# with a long random string and keep it out of version control.
+forwarding-secret = "replace-me-with-a-long-random-secret"
+
 # The backend players are sent to when they log in. When it is left out, the
 # first backend below is used.
 default-backend = "lobby"
