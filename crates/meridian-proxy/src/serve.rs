@@ -7,13 +7,14 @@ use crate::session;
 use crate::state::Proxy;
 use horizon_protocol::connection::Connection;
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// How often the loop looks at the stop flag while no one connects.
+/// How often the stop flag is looked at, and how long the loop waits after an
+/// error before accepting again.
 const POLL: Duration = Duration::from_millis(50);
 /// How long a stop waits for players' threads to finish.
 const DRAIN: Duration = Duration::from_secs(5);
@@ -21,11 +22,21 @@ const DRAIN: Duration = Duration::from_secs(5);
 /// Accepts players on `listener` until the proxy is asked to stop, then ends the
 /// sessions being relayed and waits up to [`DRAIN`] for the players' threads.
 pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
-    // A blocking accept could not see the stop flag, so the listener polls.
-    listener.set_nonblocking(true)?;
+    // The accept blocks, so a player is taken the moment they connect; a stop
+    // wakes it with a connection of its own (see `waker`). Without the waker
+    // nothing could wake it, and the loop polls the listener instead.
+    let ended = Arc::new(AtomicBool::new(false));
+    let waker = waker(wake_address(listener.local_addr()?), proxy, &ended);
+    listener.set_nonblocking(waker.is_none())?;
     let active = Arc::new(AtomicUsize::new(0));
-    while !proxy.stopping() {
-        match listener.accept() {
+    loop {
+        let accepted = listener.accept();
+        // A connection taken after a stop, the waker's or a player's, is
+        // closed unread: no new connections are accepted.
+        if proxy.stopping() {
+            break;
+        }
+        match accepted {
             Ok((stream, peer)) => {
                 let per_minute = proxy.config().connections_per_minute;
                 if proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
@@ -46,6 +57,8 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
             }
         }
     }
+    ended.store(true, Ordering::Relaxed);
+    let _ = waker.map(thread::JoinHandle::join);
     info!("stopping: no new connections are accepted");
     match proxy.sessions.close_all() {
         0 => {}
@@ -54,6 +67,55 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
     }
     drain(&active);
     Ok(())
+}
+
+/// Watches the stop flag, which Ctrl+C and the console set, and once it is set
+/// opens connections to the listener until the accept loop has ended, to wake
+/// its blocking accept. Watching the flag costs a player nothing, unlike the
+/// loop polling the listener, which made each login wait up to [`POLL`].
+fn waker(
+    address: SocketAddr,
+    proxy: &Arc<Proxy>,
+    ended: &Arc<AtomicBool>,
+) -> Option<thread::JoinHandle<()>> {
+    let (proxy, ended) = (Arc::clone(proxy), Arc::clone(ended));
+    let spawned = thread::Builder::new()
+        .name("accept waker".into())
+        .spawn(move || {
+            while !proxy.stopping() && !ended.load(Ordering::Relaxed) {
+                thread::sleep(POLL);
+            }
+            let mut warned = false;
+            while !ended.load(Ordering::Relaxed) {
+                if let Err(e) = TcpStream::connect_timeout(&address, Duration::from_secs(1))
+                    && !warned
+                {
+                    warning!("cannot wake the accept loop on {address} to stop: {e}");
+                    warned = true;
+                }
+                thread::sleep(POLL);
+            }
+        });
+    match spawned {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            warning!("cannot start the thread that stops the accept loop: {e}");
+            None
+        }
+    }
+}
+
+/// Where the waker connects: the listener's own address, on the loopback when
+/// it listens on every interface.
+fn wake_address(listening: SocketAddr) -> SocketAddr {
+    let mut address = listening;
+    if address.ip().is_unspecified() {
+        address.set_ip(match address {
+            SocketAddr::V4(_) => Ipv4Addr::LOCALHOST.into(),
+            SocketAddr::V6(_) => Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    address
 }
 
 fn start_player(
@@ -222,6 +284,44 @@ mod tests {
         drop(first);
         proxy.stop();
         server.join().unwrap().unwrap();
+    }
+
+    /// A stop wakes the blocking accept while no one connects, whether the proxy
+    /// listens on the loopback or on every interface, and the loop ends soon.
+    #[test]
+    fn a_stop_wakes_the_accept_loop_while_no_one_connects() {
+        for bind in ["127.0.0.1:0", "0.0.0.0:0"] {
+            let listener = TcpListener::bind(bind).unwrap();
+            let proxy = proxy();
+            let (done, ended) = std::sync::mpsc::channel();
+            {
+                let proxy = Arc::clone(&proxy);
+                thread::spawn(move || {
+                    let _ = done.send(serve(listener, &proxy));
+                });
+            }
+            // Long enough for the loop to be waiting in accept.
+            thread::sleep(Duration::from_millis(200));
+            proxy.stop();
+            let result = ended
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("the loop on {bind} did not stop"));
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn the_waker_connects_on_the_loopback_for_every_interface() {
+        let address = |text: &str| text.parse::<SocketAddr>().unwrap();
+        assert_eq!(
+            wake_address(address("0.0.0.0:25565")),
+            address("127.0.0.1:25565")
+        );
+        assert_eq!(wake_address(address("[::]:25565")), address("[::1]:25565"));
+        assert_eq!(
+            wake_address(address("192.168.1.2:25565")),
+            address("192.168.1.2:25565")
+        );
     }
 
     #[test]
