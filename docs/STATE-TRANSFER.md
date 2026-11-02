@@ -12,7 +12,9 @@ names a file and line in the `horizon-rust/horizon` repository at commit
 that could not be checked that way is marked *not verified*. Line numbers move
 with every commit; the names of the functions are the stable part.
 
-Paths below are relative to `crates/` in the Horizon repository.
+Paths are relative to `crates/horizon-client/src/` in the Horizon repository.
+A path that starts with `horizon-server/` or `horizon-protocol/` is relative to
+`crates/`.
 
 ## 1. How a Horizon server holds a player
 
@@ -20,22 +22,22 @@ A Horizon dedicated server is the game itself running with no local player.
 `horizon-server` starts the game binary with `--dedicated --nogui` and a control
 endpoint (`horizon-server/src/engine.rs:233-260`). The game then opens its world
 and serves the network through the same code that opens a single player world to
-the LAN (`horizon-client/src/game/dedicated.rs:842`, `lan_host`). Every connected
+the LAN (`game/dedicated.rs:842`, `lan_host`). Every connected
 player is a *guest* of that LAN host. The dedicated server explicitly drops the
 single player's own state, because players have their own files
-(`horizon-client/src/game/dedicated.rs:713-714`).
+(`game/dedicated.rs:713-714`).
 
 So the state of a connected player lives in three places:
 
-- **The guest** (`horizon-client/src/lan/guest.rs:63-306`, `struct Guest`):
+- **The guest** (`lan/guest.rs:63-306`, `struct Guest`):
   position, rotation, game mode, inventory, armour, off hand, cursor stack,
   ender chest, health, food, saturation, experience, effects, the open menu,
   the respawn point, the advancements in memory, the recipe book, and the
   untouched player compound read from disk (`saved`, line 285).
-- **The guest's body** (`motion: Option<Box<PlayerMotion>>`, `guest.rs:195`):
+- **The guest's body** (`motion: Option<Box<PlayerMotion>>`, `lan/guest.rs:195`):
   the simulated player, with velocity, fire ticks, air, fall distance, absorption
   and food exhaustion. The `lan status` request reads air, absorption and
-  exhaustion from it (`horizon-client/src/game/lan.rs:1166-1173`).
+  exhaustion from it (`game/lan.rs:1166-1173`).
 - **The host's per-connection play state** (`host.play`, keyed by connection):
   the statistics (`game/lan.rs:1454-1457`), the shield cooldown and the item in
   use (`game/lan.rs:1155-1159`), and the open crafting table or workstation
@@ -45,14 +47,14 @@ So the state of a connected player lives in three places:
 
 ### 2.1 A complete save and load of the player compound
 
-`horizon-client/src/lan/playerdata.rs` saves and loads a guest in the vanilla
+`lan/playerdata.rs` saves and loads a guest in the vanilla
 player compound, through the same code that saves the single player:
 
 - `store` (`playerdata.rs:148-229`) copies a live guest into the player fields
   of a `Level`. `save` (`:134-145`) then writes `players/data/<uuid>.dat`.
 - `load` (`:42-56`) reads that file and `apply` (`:59-131`) gives its state to a
   guest.
-- `Level::player_tag` (`horizon-client/src/save.rs:3645-3870`) builds the
+- `Level::player_tag` (`save.rs:3645-3870`) builds the
   compound by starting from the compound that was loaded and writing Horizon's
   own fields over it, so keys Horizon does not model survive a load and a save.
   `Level::read_player` (`save.rs:3510-3643`) is the reverse.
@@ -64,7 +66,7 @@ Advancements and statistics are separate JSON files, written by
 
 This is most of an export and an import already. What is missing is a way to
 run it on demand, for one player, without the player leaving, and to take the
-result from memory instead of a file (section 4).
+result from memory instead of a file (section 5).
 
 ### 2.2 A join that can take its state from memory
 
@@ -89,7 +91,7 @@ workstation back into their inventory (`lan_crafting_left`,
 ### 2.4 A local control endpoint
 
 The game answers text requests on a control endpoint. A request is one line,
-the answer one JSON line (`horizon-client/src/control.rs:1-11`, `serve` at
+the answer one JSON line (`control.rs:1-11`, `serve` at
 `:344-365`). On Windows, or when the path ends in `.json`, it is TCP on
 `127.0.0.1` with a random token that the first line must present
 (`control.rs:191-211`, `authenticate` at `:301-324`). `horizon-server` always
@@ -103,7 +105,7 @@ sees the world at a tick boundary.
 
 `horizon-server` itself has an HTTP API with a bearer token, also bound to
 `127.0.0.1` (`horizon-server/src/api.rs:442-483`), whose `POST /api/v1/command`
-forwards to `console` above (`api.rs:512-527`).
+forwards to `console` above (`horizon-server/src/api.rs:512-527`).
 
 Both are local only. A proxy on another machine cannot reach either of them
 today.
@@ -130,15 +132,13 @@ forwarding of the real UUID and profile properties, and nothing in `NetConfig`
 for it (`lan/mod.rs:147-189`). A server behind a proxy in offline mode would
 give each player an offline UUID instead of their account's and lose their
 skin.
-</content>
-</invoke>
 
 ## 3. Field by field
 
 What section 6 of DESIGN.md asks for, against what the save path carries today.
 "Carried" means `store` and `player_tag` write it and `read_player` and `apply`
 read it back, so a save on one server and a load on another keep it.
-`playerdata.rs` is `horizon-client/src/lan/playerdata.rs`.
+`playerdata.rs` is `lan/playerdata.rs`; `guest.rs` is `lan/guest.rs`.
 
 | State | Where it lives | Carried today | Note for a switch |
 | --- | --- | --- | --- |
@@ -201,7 +201,7 @@ has, or be changeable by a later packet. Horizon's Login is built in
 | Level keys | The three vanilla levels, always (`lan/hub.rs:858-862`) | Nothing | Always equal |
 | Max players | `config.max_players` | Nothing | Must match, or the old value stays |
 | Chunk radius | `chunk_radius()` | `SetChunkCacheRadius` (`horizon-protocol/src/packets/play.rs:1987`) | |
-| Simulation distance | `config.simulation_distance` | `SetSimulationDistance` (`play.rs:2006`) | |
+| Simulation distance | `config.simulation_distance` | `SetSimulationDistance` (`horizon-protocol/src/packets/play.rs:2006`) | |
 | Reduced debug info | Always false (`lan/hub.rs:881`) | An entity event (*not verified* in Horizon) | Always equal |
 | Show death screen | `!immediate_respawn` | `GameEvent` 11, immediate respawn (`lan/hub.rs:49`, sent at `:565`) | |
 | Limited crafting | Always false (`lan/hub.rs:883`) | `GameEvent` 12 (javap, `ClientboundGameEventPacket`) | Always equal |
@@ -231,3 +231,176 @@ For Meridian this has three consequences:
   A held player must not be announced.
 - Everything after Login is something the ghost already knows how to diff, so
   the target view can be built from it as DESIGN.md describes.
+
+## 5. What is missing
+
+1. **An export on demand.** Nothing serialises one connected player while they
+   stay connected. The pieces exist (`store`, `player_tag`, the advancements
+   JSON), but they only run when a player leaves or the world saves, and they
+   miss the live values listed in section 3.
+2. **An import into a live player.** A join reads its state from a file, or, for
+   an integrated server's owner, from memory (section 2.2). There is no way to
+   hand a joining player a record that came from elsewhere.
+3. **A held player.** `place_new_player` announces the player to everyone and
+   adds them to the player list the moment they are placed (`lan/hub.rs:908-918`,
+   `:946`). There is no state in which a player is connected and receiving the
+   world but not simulated, not shown, not announced and not hurt.
+4. **A quiet release.** Removing a player always tells the others that they left
+   (`lan/hub.rs:1519-1528`). Whether the other players on the old server should
+   see that is a product choice, but the server should let the proxy choose.
+5. **A channel the proxy can reach.** Both control channels listen on
+   `127.0.0.1` only (section 2.4).
+6. **A login that trusts the proxy** (section 2.6).
+7. **The save gaps of section 3**: velocity, food exhaustion and tick timer,
+   freezing ticks, previous game mode, and the cursor stack.
+
+## 6. A minimal server API
+
+### 6.1 Where it goes
+
+The dedicated server is the game binary, so the work is in the `horizon-client` crate
+(`lan/` and `game/`), not in the `horizon-server` crate, which only
+supervises it. New server settings can be read the way Horizon already reads its
+own keys from `server.properties` (`props.raw`, as for `max_view_distance` at
+`game/dedicated.rs:851-856`).
+
+The requests are new lines on the game's existing control endpoint, next to
+`server-status` and `console` (`game/dedicated/status.rs:42-56`). They run on
+the server thread between ticks, so an export sees one consistent tick and an
+import lands before the next one.
+
+The proxy does not talk to that endpoint directly, since it is local. The
+recommendation is a small sidecar process next to each backend: it reads
+`.horizon/engine.json`, connects to the endpoint locally, and offers the proxy
+the same requests over TLS with the shared secret DESIGN.md asks for. Horizon
+needs no network change for that. The alternative is to let `horizon-server`'s
+HTTP API listen on a configured address with TLS and forward the new requests,
+which is more work in Horizon and puts a remote surface in the server.
+
+### 6.2 Requests
+
+Each is one line; each answer is one JSON line, `{"ok": true, ...}` or
+`{"error": "..."}`.
+
+| Request | On | Does |
+| --- | --- | --- |
+| `player-expect <uuid> <ticket>` | target | The next login of `<uuid>` carrying `<ticket>` (section 6.4) joins as a held player. The ticket expires after a few seconds |
+| `player-export <uuid>` | source | Closes the player's menu as vanilla does (cursor stack and crafting grid back into the inventory), stops simulating them, and answers with the record (6.3). The player stays connected and frozen |
+| `player-import <uuid> <record>` | target | Checks the record's version and data version, applies it to the held player (body included), sends that player the resulting changes, then unholds them: simulated, shown, announced |
+| `player-release <uuid> moved` | source | Removes the frozen player without saving their file and, by default, without a "left the game" message. The proxy closes that backend connection |
+| `player-release <uuid> abort` | source | Unfreezes the player; nothing happened |
+| `player-drop <uuid>` | target | Removes a held player whose switch was abandoned, without saving anything |
+
+This follows the phases of DESIGN.md section 5: *prepare* is `player-expect`
+and the held login, *freeze* and *hand over* are `player-export` then
+`player-import`, *commit* is `player-release moved`, and a failure is
+`player-release abort` with `player-drop`.
+
+### 6.3 The record
+
+A JSON object:
+
+```json
+{
+  "version": 1,
+  "data_version": 0,
+  "uuid": "...",
+  "name": "...",
+  "dimension": "minecraft:overworld",
+  "position": [0.0, 64.0, 0.0],
+  "rotation": [0.0, 0.0],
+  "velocity": [0.0, 0.0, 0.0],
+  "game_mode": 0,
+  "player": "<base64 of the uncompressed player compound>",
+  "advancements": { },
+  "live": {
+    "food_exhaustion": 0.0,
+    "food_tick_timer": 0,
+    "ticks_frozen": 0,
+    "previous_game_mode": null,
+    "item_cooldowns": []
+  }
+}
+```
+
+- `player` is what `player_tag` builds (section 2.1). Both backends run the same
+  Horizon version, so the compound is the most complete form there is, and the
+  code to write and read it exists and is tested. The proxy never decodes it.
+- The fields above it are the ones the proxy reads for itself: it checks the
+  dimension and the position against the target before it imports, and logs
+  them.
+- `live` holds what the compound loses today (section 3). Once Horizon's save
+  path carries them, they move into the compound and `live` empties.
+- `advancements` is the JSON that `save_guest_records` writes.
+- `data_version` is the world data version; an import with another one is
+  refused.
+- Effect durations are already the ticks left. Nothing in the record is an
+  absolute time.
+
+This keeps DESIGN.md's rule in spirit (a small, versioned record the proxy owns)
+while not writing a second serialisation of a player in Horizon. The numbers in
+the example are placeholders.
+
+### 6.4 Login from the proxy
+
+A setting such as `meridian-secret` in `server.properties`. When it is set, the
+server refuses a login that does not carry a statement signed with it. The
+statement holds the name, the UUID, the profile properties (the skin), the
+address of the real client and, for a switch, the ticket of `player-expect`.
+The login phase already has the packets for an exchange like this
+(`CUSTOM_QUERY` and its answer, `horizon-protocol/src/ids.rs:34`, `:49`), and
+the place to check it is where online and offline mode pick the profile today
+(`lan/conn.rs:717-734`). Online mode is off on such a server: the proxy has
+already authenticated the player.
+
+### 6.5 A stopgap that needs no Horizon change
+
+For a first test of the switch, the source can be read with
+`console data get entity <name>` (section 2.5), and the target set up with
+ordinary commands (`tp`, `item replace`, `effect`, `xp`, `gamemode`). It is slow,
+lossy and announces the player like any join, so it can show the idea but not a
+seamless switch. It is not a basis for J3.
+
+## 7. Estimate of the work in Horizon
+
+For someone who already knows the code, with tests:
+
+| Piece | Days |
+| --- | --- |
+| Save gaps of section 3 (velocity, exhaustion and tick timer, freezing ticks, previous game mode, cursor stack on leave), each with a test | 1 |
+| `player-export`: close the menu, freeze, build the record | 1 to 2 |
+| Held player: the state in the hub (not announced, not tracked by the others, not simulated, not hurt) and `player-expect` | 4 to 6 |
+| `player-import` into the held player, including the body, then unhold | 2 to 3 |
+| `player-release` and `player-drop` | 1 |
+| Signed login from the proxy | 2 to 3 |
+| Two-server test of the whole exchange | 2 to 3 |
+| **Total** | **13 to 19** |
+
+The held player is the largest and the riskiest piece: it has to be skipped by
+every place that iterates over the guests to show, track, tick or hurt them, and
+there are many (the player list, entity tracking, the tick, explosions, mob
+targeting). Which of them already filter on `placed` is *not verified*.
+
+The save gaps are worth doing first and on their own: they are bugs for any
+player who logs out and back in, and they make the record smaller.
+
+## 8. Open questions
+
+- **Whose file is the truth.** After a switch the source server has a stale
+  file for the player, and the target a fresh one. If the player later connects
+  to the source without the proxy, they get the stale state. Either the proxy is
+  the only way in (DESIGN.md says backends are private), or the release also
+  deletes or marks the source's file.
+- **A disconnect during a switch.** If the client drops between export and
+  import, the record exists only in the proxy. It should be imported into the
+  target as a normal save, or written back to the source with
+  `player-release abort`.
+- **Dimensions.** A dedicated server can place a player in a level that is not
+  the one in memory (`game/lan.rs:2009-2016`). A switch between the same
+  dimension on two servers is in scope; between dimensions is not (DESIGN.md
+  section 1).
+- **Statistics and advancements across servers.** Statistics stay per server.
+  Advancements move with the record, but two servers whose advancement trees
+  differ drop unknown entries at load (`game/lan.rs:1479-1482`).
+- **Upstream.** Every change here belongs to Horizon and has to be agreed there
+  before it is written (DESIGN.md section 12).
