@@ -1,0 +1,17 @@
+[package]
+name = "meridian-ghost"
+description = "What the client holds, read from the packets it was sent, and the packets that turn it into another server's view."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+horizon-protocol.workspace = true
+
+[dev-dependencies]
+meridian-testkit.workspace = true
+
+[lints]
+workspace = true
