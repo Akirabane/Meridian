@@ -46,6 +46,11 @@ pub enum ConfigError {
     InvalidForcedHost { host: String, reason: &'static str },
     /// Two forced hosts have the same host name.
     DuplicateForcedHost(String),
+    /// `online-mode` and `auth-mode` say different things.
+    AuthModeConflict {
+        online_mode: bool,
+        auth_mode: crate::AuthMode,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -102,6 +107,15 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidForcedHost { host, reason } => {
                 write!(f, "forced-host \"{host}\" is not valid: {reason}")
             }
+            ConfigError::AuthModeConflict {
+                online_mode,
+                auth_mode,
+            } => write!(
+                f,
+                "online-mode = {online_mode} and auth-mode = \"{}\" disagree: online-mode is \
+                 the older setting, so remove it and keep auth-mode",
+                auth_mode.name()
+            ),
             ConfigError::DuplicateForcedHost(host) => write!(
                 f,
                 "two [[forced-host]] entries have the host \"{host}\": each host leads to one backend"

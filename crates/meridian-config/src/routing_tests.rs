@@ -166,3 +166,90 @@ fn a_host_cannot_be_forced_twice() {
         "{e}"
     );
 }
+
+#[test]
+fn the_login_mode_is_online_by_default() {
+    let config = load("");
+    assert_eq!(config.auth_mode, AuthMode::Online);
+    assert!(config.online_mode);
+    assert_eq!(Config::default().auth_mode, AuthMode::Online);
+}
+
+#[test]
+fn auth_mode_is_read_and_keeps_online_mode_in_step() {
+    for (text, mode, online) in [
+        ("online", AuthMode::Online, true),
+        ("offline", AuthMode::Offline, false),
+        // Hybrid asks accounts to authenticate, so code that only knows
+        // online-mode keeps encrypting until hybrid logins are written.
+        ("hybrid", AuthMode::Hybrid, true),
+    ] {
+        let config = load(&format!("auth-mode = \"{text}\""));
+        assert_eq!(config.auth_mode, mode, "{text}");
+        assert_eq!(config.online_mode, online, "{text}");
+    }
+}
+
+#[test]
+fn online_mode_alone_still_works() {
+    let on = load("online-mode = true");
+    assert_eq!((on.auth_mode, on.online_mode), (AuthMode::Online, true));
+    let off = load("online-mode = false");
+    assert_eq!((off.auth_mode, off.online_mode), (AuthMode::Offline, false));
+}
+
+#[test]
+fn online_mode_and_auth_mode_may_agree() {
+    assert_eq!(
+        load("online-mode = true\nauth-mode = \"online\"").auth_mode,
+        AuthMode::Online
+    );
+    assert_eq!(
+        load("online-mode = false\nauth-mode = \"offline\"").auth_mode,
+        AuthMode::Offline
+    );
+}
+
+#[test]
+fn online_mode_and_auth_mode_may_not_disagree() {
+    for extra in [
+        "online-mode = true\nauth-mode = \"offline\"",
+        "online-mode = false\nauth-mode = \"online\"",
+        "online-mode = true\nauth-mode = \"hybrid\"",
+        "online-mode = false\nauth-mode = \"hybrid\"",
+    ] {
+        let e = refused(extra);
+        assert!(
+            matches!(e, ConfigError::AuthModeConflict { .. }),
+            "{extra}: {e}"
+        );
+        assert!(
+            e.to_string().contains("remove it and keep auth-mode"),
+            "{e}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_auth_mode_is_refused() {
+    assert!(matches!(
+        refused("auth-mode = \"cracked\""),
+        ConfigError::Parse(_)
+    ));
+    assert!(matches!(
+        refused("auth-mode = \"Online\""),
+        ConfigError::Parse(_)
+    ));
+}
+
+#[test]
+fn a_config_built_in_code_must_keep_the_two_settings_in_step() {
+    let mut config = load("");
+    config.online_mode = false;
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::AuthModeConflict { .. })
+    ));
+    config.auth_mode = AuthMode::Offline;
+    assert!(config.validate().is_ok());
+}

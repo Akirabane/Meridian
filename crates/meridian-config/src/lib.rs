@@ -29,6 +29,31 @@ pub struct ForcedHost {
     pub backend: String,
 }
 
+/// How the proxy decides whether to check a player's account (`auth-mode`,
+/// DESIGN.md section 15.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Always check; a client that cannot answer is refused.
+    #[default]
+    Online,
+    /// Never check: every player is unverified. For closed networks only.
+    Offline,
+    /// Check names that belong to an account, let other names in unverified.
+    Hybrid,
+}
+
+impl AuthMode {
+    /// The name used in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            AuthMode::Online => "online",
+            AuthMode::Offline => "offline",
+            AuthMode::Hybrid => "hybrid",
+        }
+    }
+}
+
 /// Everything the proxy reads from its configuration. Its `Debug` output hides
 /// the forwarding secret, so a configuration can be logged safely.
 #[derive(Clone, PartialEq, Eq)]
@@ -41,7 +66,9 @@ pub struct Config {
     pub default_backend: String,
     /// The line shown in the server list.
     pub motd: String,
-    /// Whether players are checked against the session service.
+    /// Whether players are checked against the session service. Kept for the code
+    /// that reads it today: it is `false` exactly when `auth_mode` is
+    /// [`AuthMode::Offline`], and [`Config::validate`] refuses any other pairing.
     pub online_mode: bool,
     /// Packets of at least this many bytes are compressed; a negative value turns
     /// compression off.
@@ -60,6 +87,8 @@ pub struct Config {
     pub max_players: u32,
     /// Host names that choose the backend, in place of the default backend.
     pub forced_hosts: Vec<ForcedHost>,
+    /// How players are logged in. Online by default.
+    pub auth_mode: AuthMode,
 }
 
 impl Default for Config {
@@ -76,6 +105,7 @@ impl Default for Config {
             try_backends: Vec::new(),
             max_players: 20,
             forced_hosts: Vec::new(),
+            auth_mode: AuthMode::Online,
         }
     }
 }
@@ -96,6 +126,7 @@ impl std::fmt::Debug for Config {
             try_backends,
             max_players,
             forced_hosts,
+            auth_mode,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -114,6 +145,7 @@ impl std::fmt::Debug for Config {
             .field("try_backends", try_backends)
             .field("max_players", max_players)
             .field("forced_hosts", forced_hosts)
+            .field("auth_mode", auth_mode)
             .finish()
     }
 }
@@ -136,6 +168,7 @@ struct File {
     max_players: Option<u32>,
     #[serde(default, rename = "forced-host")]
     forced_hosts: Vec<FileForcedHost>,
+    auth_mode: Option<AuthMode>,
 }
 
 #[derive(Deserialize)]
@@ -186,12 +219,13 @@ impl Config {
             Some(name) => name,
             None => backends.first().map(|b| b.name.clone()).unwrap_or_default(),
         };
+        let auth_mode = auth_mode(file.online_mode, file.auth_mode)?;
         let config = Config {
             listen,
             backends,
             default_backend,
             motd: file.motd.unwrap_or(defaults.motd),
-            online_mode: file.online_mode.unwrap_or(defaults.online_mode),
+            online_mode: auth_mode != AuthMode::Offline,
             compression_threshold: file
                 .compression_threshold
                 .unwrap_or(defaults.compression_threshold),
@@ -210,6 +244,7 @@ impl Config {
                     backend: f.backend,
                 })
                 .collect(),
+            auth_mode,
         };
         config.validate()?;
         Ok(config)
@@ -264,6 +299,12 @@ impl Config {
             }
             self.known_backend(&format!("forced-host \"{}\"", forced.host), &forced.backend)?;
         }
+        if self.online_mode != (self.auth_mode != AuthMode::Offline) {
+            return Err(ConfigError::AuthModeConflict {
+                online_mode: self.online_mode,
+                auth_mode: self.auth_mode,
+            });
+        }
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
         }
@@ -302,6 +343,28 @@ impl Config {
                 name: name.to_owned(),
             }),
         }
+    }
+}
+
+/// The login mode from the two settings that can give it. `auth-mode` is the
+/// setting to use; `online-mode` is the older one and stays accepted: alone, `true`
+/// means online and `false` offline. When both are written they must agree, and
+/// `online-mode` cannot be written with `hybrid`.
+fn auth_mode(
+    online_mode: Option<bool>,
+    auth_mode: Option<AuthMode>,
+) -> Result<AuthMode, ConfigError> {
+    match (online_mode, auth_mode) {
+        (None, None) => Ok(AuthMode::default()),
+        (Some(true), None) => Ok(AuthMode::Online),
+        (Some(false), None) => Ok(AuthMode::Offline),
+        (None, Some(mode)) => Ok(mode),
+        (Some(true), Some(AuthMode::Online)) => Ok(AuthMode::Online),
+        (Some(false), Some(AuthMode::Offline)) => Ok(AuthMode::Offline),
+        (Some(online_mode), Some(auth_mode)) => Err(ConfigError::AuthModeConflict {
+            online_mode,
+            auth_mode,
+        }),
     }
 }
 
