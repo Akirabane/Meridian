@@ -275,6 +275,11 @@ impl SessionHandle {
         let _ = down.writer.send(&packet.encode());
     }
 
+    /// Whether a switch of this player is under way.
+    pub fn is_switching(&self) -> bool {
+        self.0.switching.load(Ordering::SeqCst)
+    }
+
     /// Whether the session is over for the client: it left, or was closed.
     pub fn is_over(&self) -> bool {
         self.0.client_gone.load(Ordering::SeqCst)

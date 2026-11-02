@@ -530,8 +530,11 @@ dependencies = [
  "ctrlc",
  "horizon-protocol",
  "meridian-config",
+ "meridian-handoff",
  "meridian-net",
+ "meridian-sidecar",
  "meridian-testkit",
+ "serde_json",
  "socket2",
 ]
 

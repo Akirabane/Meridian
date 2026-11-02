@@ -1,8 +1,7 @@
 //! The commands players type in game that the proxy answers itself (`[commands]`):
-//! `/server` lists the backends, `/server <name>` asks to move to one, and `/hub`
-//! or `/lobby` ask to move to the hub backend. Moving is not there yet, so a move
-//! is answered the way the console's `send` answers it. Any other command, or one
-//! of these that is turned off, goes to the backend.
+//! `/server` lists the backends, `/server <name>` moves the player to one, and
+//! `/hub` or `/lobby` to the hub backend. Any other command, or one of these that
+//! is turned off, goes to the backend.
 use crate::route;
 use meridian_config::{AuthKind, Config, ProxyCommand};
 use meridian_net::relay::CommandHook;
@@ -11,35 +10,54 @@ use std::sync::Arc;
 /// Who typed a command, and where they are.
 #[derive(Clone, Debug)]
 pub struct Typist {
-    pub name: String,
     pub auth: AuthKind,
     /// The backend they are on.
     pub backend: String,
 }
 
-/// The hook the relay asks about each command `typist` types.
-pub fn hook(config: Arc<Config>, typist: Typist) -> Arc<CommandHook> {
-    Arc::new(move |command: &str| answer(&config, &typist, command))
+/// What the proxy does with a command it answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// Shows the player this line.
+    Say(String),
+    /// Moves the player to this backend.
+    Move(String),
+}
+
+/// The hook the session asks about each command its player types. `typist`
+/// says who they are and where they are now; `mover` starts a move and returns
+/// the line the player sees at once.
+pub fn hook(
+    config: Arc<Config>,
+    typist: impl Fn() -> Typist + Send + Sync + 'static,
+    mover: impl Fn(&str) -> String + Send + Sync + 'static,
+) -> Arc<CommandHook> {
+    Arc::new(
+        move |command: &str| match answer(&config, &typist(), command)? {
+            Answer::Say(line) => Some(line),
+            Answer::Move(target) => Some(mover(&target)),
+        },
+    )
 }
 
 /// The proxy's answer to `command` (without its slash), or `None` when the
 /// command is the backend's.
-pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<String> {
+pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer> {
     let mut words = command.split_whitespace();
     let first = words.next()?;
     let rest: Vec<&str> = words.collect();
     let settings = &config.commands;
     if settings.is_enabled(ProxyCommand::Server) && ProxyCommand::Server.words().contains(&first) {
         return Some(match rest.as_slice() {
-            [] => list(config, typist),
+            [] => Answer::Say(list(config, typist)),
             [name] => move_to(config, typist, name),
-            _ => "Usage: /server [name]".to_owned(),
+            _ => Answer::Say("Usage: /server [name]".to_owned()),
         });
     }
     if settings.is_enabled(ProxyCommand::Hub) && ProxyCommand::Hub.words().contains(&first) {
         return Some(match rest.as_slice() {
             [] => move_to(config, typist, config.hub_backend()),
-            _ => format!("Usage: /{first}"),
+            _ => Answer::Say(format!("Usage: /{first}")),
         });
     }
     None
@@ -74,18 +92,14 @@ fn list(config: &Config, typist: &Typist) -> String {
     )
 }
 
-fn move_to(config: &Config, typist: &Typist, target: &str) -> String {
+fn move_to(config: &Config, typist: &Typist, target: &str) -> Answer {
     if !open_to(config, target, typist) {
-        return format!("There is no server called {target}.");
+        return Answer::Say(format!("There is no server called {target}."));
     }
     if target == typist.backend {
-        return format!("You are already on {target}.");
+        return Answer::Say(format!("You are already on {target}."));
     }
-    // The same answer as the console's send until moving players is there.
-    format!(
-        "transfer not available yet: {} would move to {target}",
-        typist.name
-    )
+    Answer::Move(target.to_owned())
 }
 
 #[cfg(test)]
