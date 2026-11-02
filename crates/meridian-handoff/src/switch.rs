@@ -544,6 +544,9 @@ pub fn switch(
     // froze the player: what the client did since the export is kept, so it is
     // not pulled back.
     let arrival = run.arrival();
+    // Taken before the request: the target can send the new view's centre and
+    // chunks before its answer reaches us, and they count as after the import.
+    let import_sent = Instant::now();
     let imported = match run.target.import(
         &run.uuid,
         record,
@@ -561,7 +564,6 @@ pub fn switch(
             ));
         }
     };
-    let imported_at = Instant::now();
     note(&match (settings.carry_position, arrival) {
         (false, _) => "hand over: the target took the record, all but the position".to_owned(),
         (true, Some(arrival)) => format!(
@@ -598,12 +600,12 @@ pub fn switch(
         }
         let recentered = imported
             .recentered
-            .unwrap_or_else(|| s.last_center.is_some_and(|at| at > imported_at));
+            .unwrap_or_else(|| s.last_center.is_some_and(|at| at >= import_sent));
         if !carry || !recentered {
             return Some(());
         }
         s.last_batch
-            .filter(|at| *at > imported_at && at.elapsed() >= settle)
+            .filter(|at| *at >= import_sent && at.elapsed() >= settle)
             .map(|_| ())
     };
     let late = Instant::now() + settings.import_timeout;
