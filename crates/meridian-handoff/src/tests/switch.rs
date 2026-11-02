@@ -1,5 +1,18 @@
 use super::*;
 
+/// The target's control, which tells the fake target's connection of the import
+/// and of the confirmation.
+fn target_control(log: &Log, signal: Signal) -> FakeControl {
+    let confirmed = signal.clone();
+    FakeControl::new("target", log)
+        .on("import", move || {
+            let _ = signal.send("import");
+        })
+        .on("confirm", move || {
+            let _ = confirmed.send("confirm");
+        })
+}
+
 /// The client's packets after a switch, up to the last of the target's extras (its
 /// command tree); then the client confirms the position, and the target's first
 /// live packet (an effect on the player) follows.
@@ -40,9 +53,7 @@ fn a_player_is_switched_to_the_target() {
             send(&mut source.lock().unwrap(), pc::DISCONNECT, &[10, 0]);
         })
     };
-    let mut target_control = FakeControl::new("target", &log).on("import", move || {
-        imported.send(()).unwrap();
-    });
+    let mut target_control = target_control(&log, imported);
     let digests = Digests::default();
     let done = switch(
         &handle,
@@ -62,7 +73,8 @@ fn a_player_is_switched_to_the_target() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(true)",
+            "target import parts=None announce=Some(true) place=false",
+            "target confirm",
             "source release Moved announce=true",
         ]
     );
@@ -316,12 +328,99 @@ fn a_refused_import_lets_the_source_go_on() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(true)",
+            "target import parts=None announce=Some(true) place=false",
             "source release Abort announce=false",
             "target drop",
         ]
     );
     still_on_source(&mut bench);
+}
+
+/// The import went through but the target sends no position: the player is still
+/// held, so the target forgets them and the source keeps them.
+#[test]
+fn an_import_without_a_position_is_cancelled() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld {
+        import_sends_position: false,
+        ..TargetWorld::default()
+    });
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            import_timeout: Duration::from_millis(300),
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Stayed)
+    );
+    assert!(failure.reason.contains("position"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=None announce=Some(true) place=false",
+            "source release Abort announce=false",
+            "target drop",
+        ]
+    );
+    still_on_source(&mut bench);
+}
+
+/// The client has the target's world, but the target will not place the player:
+/// the player is told and disconnected, the target forgets them and the source
+/// keeps them.
+#[test]
+fn a_refused_confirmation_disconnects_the_player() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal).refusing("confirm", "the player is not held"),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Disconnected)
+    );
+    assert!(failure.reason.contains("not held"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=None announce=Some(true) place=false",
+            "target confirm",
+            "source release Abort announce=false",
+            "target drop",
+        ]
+    );
+    // The delta, then the disconnect, then the end.
+    let mut last = 0;
+    while let Ok((id, _)) = player.recv() {
+        last = id;
+    }
+    assert_eq!(last, pc::DISCONNECT);
+    run.join().unwrap().unwrap();
 }
 
 /// The player leaves while the source exports them: their record goes into the
@@ -342,9 +441,7 @@ fn a_player_who_leaves_during_the_freeze_is_saved_on_the_target() {
         drop(player.take());
         wait_for(|| watched.is_over());
     });
-    let mut target_control = FakeControl::new("target", &log).on("import", move || {
-        let _ = imported.send(());
-    });
+    let mut target_control = target_control(&log, imported);
     let failure = switch(
         &handle,
         target_backend(&address, &options()),
@@ -360,7 +457,7 @@ fn a_player_who_leaves_during_the_freeze_is_saved_on_the_target() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(false)",
+            "target import parts=None announce=Some(false) place=true",
             "source release Moved announce=true",
         ]
     );

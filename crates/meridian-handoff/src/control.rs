@@ -24,15 +24,22 @@ pub trait PlayerControl {
     /// until a release.
     fn export(&mut self, uuid: &str, freeze: bool) -> Result<Record, String>;
 
-    /// Puts `record` on the held player and places them in the world: every part
-    /// of it, or only `parts`.
+    /// Puts `record` on the held player: every part of it, or only `parts`. With
+    /// `place`, the player is placed in the world at once; without, they stay held
+    /// until [`PlayerControl::confirm`], and a [`PlayerControl::drop_player`] still
+    /// cancels the arrival with nothing saved or said.
     fn import(
         &mut self,
         uuid: &str,
         record: Record,
         parts: Option<Vec<String>>,
         announce: Option<bool>,
+        place: bool,
     ) -> Result<(), String>;
+
+    /// Places a player imported without being placed, and announces them if the
+    /// import said so.
+    fn confirm(&mut self, uuid: &str) -> Result<(), String>;
 
     /// Ends the hand-over of a frozen player: they have moved away, or they stay.
     fn release(&mut self, uuid: &str, outcome: Outcome, announce: bool) -> Result<(), String>;
@@ -64,10 +71,18 @@ impl PlayerControl for SidecarClient {
         record: Record,
         parts: Option<Vec<String>>,
         announce: Option<bool>,
+        place: bool,
     ) -> Result<(), String> {
+        if !place {
+            return Err(NO_TWO_STEPS.into());
+        }
         SidecarClient::import(self, uuid, record, parts, announce)
             .map(drop)
             .map_err(|e| e.to_string())
+    }
+
+    fn confirm(&mut self, _: &str) -> Result<(), String> {
+        Err(NO_TWO_STEPS.into())
     }
 
     fn release(&mut self, uuid: &str, outcome: Outcome, announce: bool) -> Result<(), String> {
@@ -82,6 +97,11 @@ impl PlayerControl for SidecarClient {
             .map_err(|e| e.to_string())
     }
 }
+
+/// Why the sidecar cannot be asked for an import in two steps: its requests do
+/// not carry `place` or `player-confirm` yet.
+const NO_TWO_STEPS: &str = "this sidecar cannot import a player without placing them, or confirm \
+                            an import, yet";
 
 /// A unique id as the requests take it: 32 hexadecimal digits.
 pub fn uuid_text(uuid: [u8; 16]) -> String {

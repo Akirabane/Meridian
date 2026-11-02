@@ -20,20 +20,26 @@
 //!    other followed for a short while.
 //! 2. **Freeze.** The source freezes the player and gives their record
 //!    (`player-export freeze`). The client still gets the source's packets.
-//! 3. **Hand over.** The target takes the record (`player-import`), places the
-//!    player, and sends a position for the client to confirm. Then, in one go
-//!    under the session's locks: the delta from the ghost to the target view goes
-//!    to the client, then the target's command tree, recipes, advancements and the
-//!    player's own synced data; the target becomes the active backend.
+//! 3. **Hand over.** The target takes the record without placing the player
+//!    (`player-import` with `"place": false`) and sends the held player's
+//!    connection what the import changes, a position to confirm among it: the
+//!    target view becomes the world after the import. Then, in one go under the
+//!    session's locks: the delta from the ghost to the target view goes to the
+//!    client, then the target's command tree, recipes, advancements and the
+//!    player's own synced data; the target becomes the active backend. Last, the
+//!    target places the player (`player-confirm`).
 //! 4. **Commit.** The source lets the player go (`player-release moved`) and its
 //!    connection closes. Its last packets, the disconnect among them, never reach
 //!    the client.
 //!
 //! Before the first packet of the delta, any failure leaves the player where they
-//! were: the target forgets them (`player-drop`), the source lets them go on
-//! (`player-release abort`) if it froze them, and the client saw nothing. A player
-//! who leaves once their record is out of the source has it imported into the
-//! target as a normal save (decision 10).
+//! were: the target forgets them (`player-drop`, which also cancels an import not
+//! yet confirmed, with nothing saved or said), the source lets them go on
+//! (`player-release abort`) if it froze them, and the client saw nothing. If the
+//! target will not place the player after the delta, the client already holds the
+//! target's world: the player is disconnected with a message, and the source keeps
+//! them. A player who leaves once their record is out of the source has it saved
+//! on the target as a normal save (decision 10).
 //!
 //! # The digest is checked on the prepare connection itself
 //!
@@ -63,17 +69,14 @@
 //! Horizon lets a freeze go after ten seconds, and a held player nobody takes
 //! after a minute; `player-expect` holds a place for 60 seconds at most. The
 //! freeze, the import and the hand-over to the client must fit in the first of
-//! these: the world is fetched before the freeze, so what is left is two requests
+//! these: the world is fetched before the freeze, so what is left is three requests
 //! and the delta.
 //!
 //! # Known limits
 //!
-//! - **A failure after the import and before the delta.** Horizon forgets only an
-//!   expected or held player, not one it has placed. If the target does not send
-//!   the player's position after the import, the source keeps the player
-//!   (`player-release abort`) and the target's connection is closed, which saves
-//!   the player there too. Whether Horizon will take `player-drop` or
-//!   `player-release` for a player just imported is an open question.
+//! - **A player who leaves after the import** is placed on the target
+//!   (`player-confirm`) so that it saves them; its players see them arrive and
+//!   leave at once when the arrival is announced.
 //! - **The client's packets in flight.** Between the hand-over and the moment the
 //!   client reads the delta, what the client sends goes to the target. Moves are
 //!   ignored there until the client confirms the position of the delta; other

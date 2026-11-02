@@ -243,12 +243,17 @@ impl PlayerControl for FakeControl {
         record: Record,
         parts: Option<Vec<String>>,
         announce: Option<bool>,
+        place: bool,
     ) -> Result<(), String> {
         assert_eq!(record_dimension(&record), Some(OVERWORLD));
         self.answer(
             "import",
-            format!("import parts={parts:?} announce={announce:?}"),
+            format!("import parts={parts:?} announce={announce:?} place={place}"),
         )
+    }
+
+    fn confirm(&mut self, _: &str) -> Result<(), String> {
+        self.answer("confirm", "confirm".into())
     }
 
     fn release(&mut self, _: &str, outcome: Outcome, announce: bool) -> Result<(), String> {
@@ -344,6 +349,8 @@ fn bench() -> Bench {
 struct TargetWorld {
     registry: Vec<u8>,
     dimension: &'static str,
+    /// Whether the import sends the held player a position to confirm.
+    import_sends_position: bool,
 }
 
 impl Default for TargetWorld {
@@ -351,9 +358,14 @@ impl Default for TargetWorld {
         TargetWorld {
             registry: REGISTRY.to_vec(),
             dimension: OVERWORLD,
+            import_sends_position: true,
         }
     }
 }
+
+/// What the fake target control tells the fake target's connection: "import" or
+/// "confirm".
+type Signal = mpsc::Sender<&'static str>;
 
 /// What the fake target saw of the player once they were placed.
 #[derive(Debug)]
@@ -363,18 +375,18 @@ struct TargetSaw {
 }
 
 /// A fake target on a TCP port of its own. It logs the player in, configures them,
-/// sends them its world, and waits for the import (`imported`) before sending the
-/// position the client must confirm.
-fn target(
-    world: TargetWorld,
-) -> (
-    String,
-    mpsc::Sender<()>,
-    JoinHandle<Result<TargetSaw, String>>,
-) {
+/// and sends them its world. On the import (told through the [`Signal`]) it sends
+/// the position the client must confirm; once the client confirmed it and the
+/// player is placed ("confirm"), its first live packet.
+fn target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<TargetSaw, String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
-    let (imported, import) = mpsc::channel();
+    let (signal, signals) = mpsc::channel();
+    let next = move |expected: &str| match signals.recv_timeout(WAIT) {
+        Ok(got) if got == expected => Ok(()),
+        Ok(got) => Err(format!("expected {expected}, got {got}")),
+        Err(_) => Err(format!("no {expected}")),
+    };
     let thread = std::thread::spawn(move || {
         let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
         let mut c = Connection::from_stream(stream).map_err(|e| e.to_string())?;
@@ -414,21 +426,26 @@ fn target(
         if expect(&mut c, ps::KEEP_ALIVE)? != 12u64.to_be_bytes() {
             return Err("the proxy answered the keep-alive wrongly".into());
         }
-        import
-            .recv_timeout(WAIT)
-            .map_err(|_| "no import".to_owned())?;
-        // The import places the player and sends a position to confirm.
+        next("import")?;
+        if !world.import_sends_position {
+            // Silent, with the connection open, until the control is dropped.
+            let _ = next("confirm");
+            return Err("told not to send the position".into());
+        }
+        // What the import changes, a position to confirm among it; the player
+        // stays held.
         send_typed(&mut c, &position(2, 41.0));
         // The client's confirmation, not the proxy's.
         if expect(&mut c, ps::ACCEPT_TELEPORTATION)? != varint(2) {
             return Err("the client confirmed another teleport".into());
         }
+        next("confirm")?;
         send_typed(&mut c, &effect(TARGET_ID));
         let attack = expect(&mut c, ps::ATTACK)?;
         let attacked = Reader::new(&attack).varint().map_err(|e| e.to_string())?;
         Ok(TargetSaw { attacked })
     });
-    (address, imported, thread)
+    (address, signal, thread)
 }
 
 fn options() -> BackendOptions {

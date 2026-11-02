@@ -54,6 +54,9 @@ pub enum After {
     /// The player left during the switch. Once their record was out of the
     /// source, it was imported into the target as a normal save (decision 10).
     Left,
+    /// The client had the target's world, but the target would not place the
+    /// player: the player was disconnected, and the source keeps them.
+    Disconnected,
 }
 
 /// Why a switch did not happen.
@@ -70,6 +73,9 @@ impl fmt::Display for Failure {
         match self.after {
             After::Stayed => f.write_str(" (the player stays where they were)"),
             After::Left => f.write_str(" (the player left during the switch)"),
+            After::Disconnected => {
+                f.write_str(" (the player was disconnected and stays where they were)")
+            }
         }
     }
 }
@@ -158,12 +164,15 @@ impl Drop for Switching<'_> {
     }
 }
 
-/// The two sides' controls, the player's id, and the target lane once it exists.
+/// The two sides' controls, the player's id, and both lanes.
 struct Run<'a> {
     shared: &'a Shared,
     source: &'a mut dyn PlayerControl,
     target: &'a mut dyn PlayerControl,
     uuid: String,
+    /// The source's lane, as it was when the switch began.
+    source_lane: Arc<Lane>,
+    /// The target's lane, once it exists.
     lane: Option<Arc<Lane>>,
 }
 
@@ -196,29 +205,32 @@ impl Run<'_> {
 
     /// The player left once their record was out of the source (decision 10): the
     /// record goes into the target as a normal save, and the source lets them go.
+    /// `record` is the record still to import; `None` when it was imported already,
+    /// without placing the player.
     fn left(&mut self, step: Step, record: Option<Record>, announce: bool) -> Failure {
-        let source_lane = Arc::clone(&self.shared.up().lane);
-        let imported = match record {
+        // A placed player is saved by the target when its connection closes.
+        let placed = match record {
             Some(record) => self
                 .target
-                .import(&self.uuid, record, None, Some(false))
+                .import(&self.uuid, record, None, Some(false), true)
                 .is_ok(),
-            // Already imported.
-            None => true,
+            None => self.target.confirm(&self.uuid).is_ok(),
         };
-        // Closing the target's connection makes it save the player as they are.
+        if !placed {
+            let _ = self.target.drop_player(&self.uuid);
+        }
         if let Some(lane) = &self.lane {
             lane.closer.close();
         }
-        let reason = if imported {
+        let reason = if placed {
             let _ = self.source.release(&self.uuid, Outcome::Moved, announce);
             "the player left during the switch; their record was saved on the target"
         } else {
             let _ = self.source.release(&self.uuid, Outcome::Abort, false);
-            "the player left during the switch; the target refused their record, so the \
-             source keeps them"
+            "the player left during the switch; the target would not take their record, so \
+             the source keeps them"
         };
-        source_lane.closer.close();
+        self.source_lane.closer.close();
         Failure {
             step,
             reason: reason.to_owned(),
@@ -247,6 +259,7 @@ pub fn switch(
         source,
         target: target_control,
         uuid: uuid_text(shared.profile.uuid),
+        source_lane: Arc::clone(&shared.up().lane),
         lane: None,
     };
     if shared.switching.swap(true, Ordering::SeqCst) {
@@ -418,39 +431,42 @@ pub fn switch(
     }
     let frozen = Instant::now();
 
-    // Hand over: the import.
+    // Hand over: the import, without placing the player. The target sends what it
+    // changes to the held player's connection, so the target view is the world
+    // after the import before the client is sent anything.
     let positions = {
         let mut s = state.lock();
         s.answer_teleports = false;
         s.positions
     };
-    if let Err(e) = run
-        .target
-        .import(&run.uuid, record, None, Some(settings.announce_arrival))
-    {
+    if let Err(e) = run.target.import(
+        &run.uuid,
+        record,
+        None,
+        Some(settings.announce_arrival),
+        false,
+    ) {
         run.abort();
         return Err(run.fail(
             Step::HandOver,
             format!("{} would not take the player's record: {e}", target.name),
         ));
     }
-    // The import ends with a position for the client to confirm.
-    let placed = state.wait(
+    // What the import sends includes a position for the client to confirm.
+    let imported = state.wait(
         Instant::now() + settings.import_timeout,
-        "the target did not place the player after the import",
+        "the target did not send the player's position after the import",
         |s| (s.positions > positions).then_some(()),
     );
-    if let Err(why) = placed {
-        // The target has placed the player and may not forget them: closing its
-        // connection saves them there as they are. The source keeps them.
-        let _ = run.source.release(&run.uuid, Outcome::Abort, false);
-        lane.closer.close();
+    if let Err(why) = imported {
+        // The player is still held: the target forgets them, the source keeps them.
+        run.abort();
         return Err(run.fail(Step::HandOver, why));
     }
 
     // Hand over: the client. From the first packet of the delta, the player is on
     // the target.
-    let source_lane;
+    let source_lane = Arc::clone(&run.source_lane);
     let (delta_packets, delta_bytes, extras, chunks, entities) = {
         let mut s = state.lock();
         let mut down = shared.down();
@@ -481,7 +497,7 @@ pub fn switch(
         down.dimension = s.dimension.clone();
         {
             let mut up = shared.up();
-            source_lane = std::mem::replace(&mut up.lane, Arc::clone(&lane));
+            up.lane = Arc::clone(&lane);
             up.swap = swap;
             up.teleports.switched();
             // The client confirms the position of the delta; if the proxy did
@@ -498,21 +514,26 @@ pub fn switch(
         if !sent {
             drop(down);
             drop(s);
-            let _ = run
-                .source
-                .release(&run.uuid, Outcome::Moved, settings.announce_departure);
-            source_lane.closer.close();
-            lane.closer.close();
-            return Err(Failure {
-                step: Step::HandOver,
-                reason: "the player left while the switch was sent to them; they are saved on \
-                         the target"
-                    .into(),
-                after: After::Left,
-            });
+            return Err(run.left(Step::HandOver, None, settings.announce_departure));
         }
         (packets.len(), bytes, extras.len(), chunks, entities)
     };
+    // The client has the target's world: the target places the player.
+    if let Err(e) = run.target.confirm(&run.uuid) {
+        session.disconnect(horizon_protocol::packets::configuration::Disconnect {
+            reason: horizon_protocol::text::literal(&format!(
+                "The switch to {} failed; join again to go on where you were.",
+                target.name
+            )),
+        });
+        run.abort();
+        source_lane.closer.close();
+        return Err(Failure {
+            step: Step::HandOver,
+            reason: format!("{} would not place the player: {e}", target.name),
+            after: After::Disconnected,
+        });
+    }
     let handed = Instant::now();
 
     // Commit.
