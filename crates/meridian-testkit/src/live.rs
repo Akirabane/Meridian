@@ -207,10 +207,12 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
     }
 }
 
-/// The text of a disconnect packet's reason, as the protocol crate shows it.
+/// The text of a disconnect packet's reason.
 fn disconnect_text(payload: &[u8]) -> String {
     match configuration::Clientbound::decode(ids::configuration::clientbound::DISCONNECT, payload) {
-        Ok(configuration::Clientbound::Disconnect(d)) => format!("{:?}", d.reason),
+        Ok(configuration::Clientbound::Disconnect(d)) => {
+            horizon_protocol::text::plain(&d.reason, &std::collections::HashMap::new())
+        }
         _ => format!("{} undecoded bytes", payload.len()),
     }
 }
