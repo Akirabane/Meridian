@@ -269,3 +269,24 @@ fn backends_without_a_forwarding_secret_are_refused() {
 fn the_forwarding_secret_is_empty_by_default() {
     assert!(Config::default().forwarding_secret.is_empty());
 }
+
+#[test]
+fn debug_output_hides_the_forwarding_secret() {
+    let config = Config::from_toml_str(&format!(
+        "forwarding-secret = \"s3cr3t-value\"\n{}",
+        MINIMAL.replace("forwarding-secret = \"test-secret\"\n", "")
+    ))
+    .unwrap();
+    assert_eq!(config.forwarding_secret, "s3cr3t-value");
+    for shown in [format!("{config:?}"), format!("{config:#?}")] {
+        assert!(!shown.contains("s3cr3t-value"), "{shown}");
+        assert!(shown.contains("forwarding_secret: <hidden>"), "{shown}");
+        // The other settings are still shown.
+        assert!(shown.contains("127.0.0.1:25566"), "{shown}");
+    }
+}
+
+#[test]
+fn debug_output_says_when_the_secret_is_empty() {
+    assert!(format!("{:?}", Config::default()).contains("forwarding_secret: <empty>"));
+}
