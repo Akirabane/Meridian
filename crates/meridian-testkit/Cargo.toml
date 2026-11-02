@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 horizon-protocol.workspace = true
+# HMAC-SHA256 for the fake backend's own check of the forwarding signature.
+sha2 = "0.10"
 
 [lints]
 workspace = true
