@@ -364,8 +364,9 @@ these is still open (section 12):
 - *fallback*: send the player to a server listed as the fallback instead.
 
 Each value above has its own setting: `require` (must be equal), `warn` (switch
-and log) or `ignore`. The recommended defaults are `require` for everything that is
-not tolerable or cosmetic-but-wrong, and `ignore` for the hashed seed.
+and log) or `ignore`. The defaults, decided in section 12, are `require` for the registries, the
+dimension and the signed-chat setting, and `ignore` for the hashed seed, hardcore,
+the sea level and the flat flag.
 
 ### 8.3 Sharing a map as an optimisation
 
@@ -518,7 +519,12 @@ carries some blocks, resets others and takes the rest from the target, and each
 ends up as the profile says.
 
 **J7: extensions.** Named opaque blocks, messages between servers, the extension
-trait on the proxy, bans and richer permissions, and metrics.
+trait on the proxy, and bans and richer permissions.
+
+**J8: scale and release.** The baseline measurement, the targets set from it, the
+decision on the thread model, the metrics endpoint, hot reload, clean stop,
+hardening, documentation, and a tagged release with signed binaries for Linux and
+Windows. The criteria are those of section 17. *Test:* section 17.6.
 
 J4 and J5 depend on the Horizon features of section 16 (export, import and the held
 player). Until they exist, J4 is developed and tested against the scripted backends
@@ -527,48 +533,49 @@ only step that needs two servers and a client running together, and its cost is
 planned before it is run. J1 to J4 need one or two servers, or none with the test
 kit.
 
-## 12. Decisions that are not ours alone
+## 12. Decisions
 
-- **Changes in Horizon's game**: player export and import (with a partial import),
-  a held state for a joining player, and hook points for named blocks, about eleven
-  to sixteen days of work in all. The login that trusts the proxy exists already
-  (forwarding, section 3). The new work is needed, and it belongs to the Horizon
-  project, so it must be agreed there first (section 16). The save gaps of section 6
-  can be fixed first and on their own. The switch itself, with no new connection and
-  no Login, is the part nothing in Horizon provides today.
-- **A change in the Horizon client** for the cooperative extension, with the same
-  caveat.
-- **What to do when a switch is impossible**: refuse it (*stay*), fall back to a
-  visible transfer (*visible*), or send the player to a server listed as the
-  fallback. The configuration allows each, per route, and a default has to be chosen
-  (section 8.2).
-- **Which client-visible differences are tolerated**: the recommendation is to
-  require equal registries, dimension type and key, signed-chat setting, and to allow
-  a different hashed seed. Hardcore, sea level and the flat flag are open.
-- **What is kept by default** (section 13): the proposal is to carry inventory,
-  ender chest, experience, health, food and effects, and to take game mode,
-  position, advancements and statistics from the target. Whether unknown named
-  blocks are kept or dropped by default is open.
-- **The form of the proxy's extension point**: a Rust trait first (recommended),
-  a local socket for other languages later, no dynamic libraries.
-- **Which login modes ship**: `online` is the default. Whether the `offline` and
-  `hybrid` modes are included at all, and with what wording in the documentation, is
-  the operator-facing choice of section 15.
-- **Where the requests are served**: the sidecar of section 6 keeps Horizon free of
-  a remote surface; the alternative is to let the supervisor's HTTP interface
-  listen on a configured address, which is more work in Horizon.
-- **Whose file is the truth**: after a switch the old server keeps a stale file for
-  the player. Either the proxy is the only way in, or the release marks or removes
-  that file.
-- **A disconnect during a switch**: the record then exists only in the proxy, and
-  must be imported into the target as a normal save or written back to the source.
-- **A shared map** is now an optimisation, and whether C (replication of changes) is
-  built at all, and where, is open.
-- **Players seeing each other across servers**: out of scope here, but it changes
-  how the target view is built if it comes later.
-- **Pinning the protocol crate**: Horizon has no stable protocol crate release, so
-  the dependency is a pinned commit and moves when the project's version does. It
-  starts pinned, and its build cost is small.
+These were open questions for the project's owner. They were answered on
+2026-11-02, accepting the recommendation of this document for each. A decision can be
+reopened; until then it is the rule.
+
+1. **Changes in Horizon's game** (export and import of a player, a held state, hook
+   points; section 16). *Decided 2026-11-02:* the work is done in Horizon only if
+   its maintainers accept it. A question to them is open as
+   horizon-rust/horizon#7484. The save gaps of section 6 can be fixed first and on
+   their own. The login that trusts the proxy exists already (forwarding,
+   section 3).
+2. **A change in the Horizon client** for the cooperative extension. *Decided
+   2026-11-02:* later, after the switch works with plain packets.
+3. **When a switch is impossible.** *Decided 2026-11-02:* *stay* (refuse the switch
+   and tell the player), settable per route to *visible* or *fallback*
+   (section 8.2).
+4. **Which client-visible differences are tolerated.** *Decided 2026-11-02:* the
+   registries, the dimension (type and key) and the signed-chat setting must be
+   equal. A different hashed seed, hardcore, sea level and flat flag are tolerated.
+5. **What is kept by default** (section 13). *Decided 2026-11-02:* inventory, ender
+   chest, experience, health, food and effects are carried; game mode, position,
+   advancements and statistics are taken from the target; unknown named blocks are
+   kept in the proxy's copy.
+6. **The form of the proxy's extension point.** *Decided 2026-11-02:* a Rust trait
+   first, a local socket later if asked, no dynamic libraries.
+7. **Login modes** (section 15). *Decided 2026-11-02:* `online` is the default;
+   `offline` and `hybrid` are included; the documentation says *verified* and
+   *unverified*.
+8. **Where the player requests are served.** *Decided 2026-11-02:* a sidecar next to
+   each backend (section 6).
+9. **Whose file is the truth after a switch.** *Decided 2026-11-02:* the proxy is the
+   only way in; backends are private, so a stale file on the old server is never read
+   without the proxy.
+10. **A disconnect during a switch.** *Decided 2026-11-02:* the record is imported
+    into the target as a normal save.
+11. **A shared map** (section 8.3, option C). *Decided 2026-11-02:* not built for
+    now.
+12. **Players seeing each other across servers.** *Decided 2026-11-02:* not
+    supported; players on different backends do not see each other.
+
+One earlier decision stands with them: the protocol crate is a pinned commit of
+Horizon (section 10), kept pinned because its build cost is small.
 
 ## 13. What is kept
 
@@ -772,7 +779,7 @@ forwarding was written. The milestones are those of section 11.
 | Messages between servers | Named channels carried through the proxy and the sidecars | J7 |
 | Ban lists at the proxy | Bans by name, unique id and address that apply before any backend | J7 |
 | Richer permissions | Groups and per-command permissions, through the extension API | J7 |
-| Metrics | Counters of players, switches and timings, in a text format | J7 |
+| Metrics | Counters and histograms of players, switches and timings, in a text format | J8 |
 
 ### Out of scope
 
@@ -893,8 +900,9 @@ J1; the hybrid mode and the groups come in J2.
 
 Several things in this design would have to exist in Horizon's own code. Each is
 listed here as a proposal, as a unit that could become an issue of its own. None
-has been opened, and none has been accepted by the Horizon project. If one is taken
-up, it follows that project's way of working (an issue, a claim through its
+has been opened as an issue, and none has been accepted by the Horizon project.
+A question to its maintainers about whether they would take this work is open as
+horizon-rust/horizon#7484. If one is taken up, it follows that project's way of working (an issue, a claim through its
 maintainers, and its own pull request conventions), not the rules of this
 repository.
 
@@ -912,3 +920,101 @@ The sidecar, the policy engine, the ghost and the proxy are Meridian's own and n
 nothing from Horizon beyond these. The compatibility of two servers is learned by a
 probe connection that reads their configuration and Login, so no request is needed
 for it.
+
+## 17. Definition of done
+
+Meridian is finished when it is fully functional, scales to a real network, and could
+be published for others to run. The first is the acceptance of milestones J1 to J7.
+The other two are J8, and are stated here as things that can be measured.
+
+### 17.1 The targets are measured, not promised
+
+No figure below is a result. Each is a target to be fixed, and each is tied to a
+measurement. The first step of J8 is a baseline: the harness of 17.2 is run, the
+numbers are written down, and the targets are set from them with a margin. A target
+is never raised on paper. Where this document gives a number, it is a proposal for
+the baseline to confirm or correct.
+
+### 17.2 What is measured, and how
+
+The load comes from the test kit's scripted clients and, for the larger runs,
+Horizon's bot crate, against scripted backends that answer instantly, so the proxy is
+measured and not a game server. A heavy run is planned before it is made, with its
+CPU, memory, disk and duration, and cleaned up after.
+
+| Criterion | How it is measured | Proposed target |
+| --- | --- | --- |
+| Simultaneous players on one proxy | N scripted sessions, each moving and chatting, held for several minutes | 1,000 on the reference machine without error; the limit found is written down |
+| Added latency of the relay | Time between a packet leaving the client and arriving at the backend (and back), on loopback, per packet | Median under one millisecond and p99 under five |
+| CPU per player | Proxy process CPU divided by sessions, at several values of N | A figure per player at idle and at moving, and it does not grow with N |
+| Memory per player | Resident memory divided by sessions, with and without the ghost | See 17.3 |
+| Switches | Switches per second the proxy sustains between two scripted backends, and the time of one switch (freeze to commit) | Freeze under three ticks, the sustained rate written down |
+| Login | Logins per second, in each login mode, with the lookup cache warm and cold | The rate written down; no failure under the rate limit |
+| Failure | Backend dies, client drops, slow client, flood of half-open connections | The proxy stays up and other players are not affected |
+
+The comparison with Velocity is made honestly. No figure published by the project
+or by anyone else is copied. If a comparison is made, both proxies are run on the
+same machine, in front of the same scripted backends, under the same load, and the
+method and numbers are published together. If it is not measured, no claim is made.
+
+### 17.3 The cost of the ghost
+
+The ghost is the part that grows with the number of players. A player keeps their
+view of the world, and a view of radius `r` is `(2r + 1)^2` chunks (section 8.1). At
+tens of kilobytes a chunk, a radius of 8 is several megabytes for one player, and a
+thousand players would be several gigabytes. Three things bring that down, and the
+baseline says which are needed:
+
+- chunks are kept as they were received, compressed, and never decoded;
+- identical chunks are stored once, shared by every player of the same backend by
+  their hash, so memory follows the number of distinct chunks and not the number of
+  players;
+- the arrival radius and a cap on the ghost per player are settings.
+
+### 17.4 The thread model
+
+Version 1 uses threads: two for each player, one for each direction, because the
+protocol crate Meridian builds on reads and writes through blocking sockets. That is
+simple and fast to write, and it holds a few thousand connections. Past that, memory
+for stacks (which can be set small) and the work of the scheduler grow, and the limit
+is a figure of the baseline, not a guess made here.
+
+Beyond that limit there are two ways. A pool of threads with non-blocking sockets
+and a state machine for each connection, or an asynchronous runtime. Both need the
+network layer rewritten: `meridian-net` would read and write frames through the
+protocol crate's functions on buffers, which do not depend on a blocking socket,
+instead of its connection type. The ghost, the rewriting, the policy and the sidecar
+client are plain code over packets and are not touched. So the cost of leaving threads
+is one crate, and the decision is taken from the baseline in J8, not before.
+
+### 17.5 The other things that make it done
+
+- **Metrics.** A text endpoint, off by default, bound to a local address, with
+  counters and histograms: players and sessions, logins by mode and outcome,
+  switches (done, refused, failed) and their duration, relay latency, bytes in and
+  out, backend health, and the memory of the ghost and the chunk store.
+- **Reload.** A changed configuration is applied without dropping a player; an invalid
+  one is rejected and the previous one stays.
+- **Clean stop.** On a stop signal the proxy stops accepting, tells the players, lets
+  sessions finish for a set time, then closes.
+- **Hardening.** Limits on connections per address, on pending logins, on packet and
+  frame sizes, and on the ghost per player; timeouts on every read and write,
+  including the handshake; the PROXY protocol for the real address; bounded queues so
+  a slow client cannot grow memory; fuzz tests on the packet decoders; a dependency
+  audit in CI. Unsafe code is already forbidden by the workspace lints.
+- **Documentation.** A complete README (what it is, why, a quick start, status), a
+  usage guide, a configuration reference with every key and its default, an
+  operations guide (running, stopping, reloading, metrics, troubleshooting), and a
+  note on which Horizon version each release was tested with.
+- **Release.** Binaries for Linux and Windows built by CI when a version is tagged,
+  with checksums and a signature made in CI, a changelog, and a security policy that
+  says how to report a problem. The licence is MIT, as it is now.
+
+### 17.6 Done means
+
+All of the following are true: the acceptance of J1 to J7 passes in CI; every
+criterion of 17.2 has a measured result and meets its target, or the target was
+changed with the measurement written next to it; the larger runs were made and
+cleaned up; the documentation of 17.5 exists and was followed from scratch by
+someone who had not written it; and a tagged release produced signed binaries for
+both systems.
