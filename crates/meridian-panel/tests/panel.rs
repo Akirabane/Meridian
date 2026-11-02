@@ -18,19 +18,27 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// A port nobody listens on right now.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A port nobody listens on right now, and not one of `taken`. The system can
+/// give the same free port twice in a row, so a bench's ports are kept apart here.
+fn free_port(taken: &mut Vec<u16>) -> u16 {
+    loop {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if !taken.contains(&port) {
+            taken.push(port);
+            return port;
+        }
+    }
 }
 
 /// A bench of stand-ins in `dir`: `servers` servers and a proxy, each in its own
 /// folder, with a short stop timeout.
 fn bench(dir: &Path, servers: &[&str], extra_args: &[&str]) -> (Bench, Vec<u16>) {
-    let mut text = format!("panel-port = {}\n", free_port());
+    let mut taken = Vec::new();
+    let mut text = format!("panel-port = {}\n", free_port(&mut taken));
     let mut ports = Vec::new();
     // A name ending in "-sidecar" is a sidecar; the others are servers.
     let kind_of = |name: &str| {
@@ -45,7 +53,7 @@ fn bench(dir: &Path, servers: &[&str], extra_args: &[&str]) -> (Bench, Vec<u16>)
         .map(|s| (*s, kind_of(s)))
         .chain(std::iter::once(("proxy", "proxy")))
     {
-        let port = free_port();
+        let port = free_port(&mut taken);
         ports.push(port);
         std::fs::create_dir_all(dir.join(name)).unwrap();
         let mut args = vec![
