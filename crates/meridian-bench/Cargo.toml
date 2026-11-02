@@ -1,0 +1,42 @@
+[package]
+name = "meridian-bench"
+description = "Measures the proxy on one machine: added latency, throughput, CPU, memory and logins, against a direct connection."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "meridian-bench"
+path = "src/main.rs"
+
+[dependencies]
+# A run stops cleanly on Ctrl+C, and the proxy it started stops with it.
+ctrlc = "3.4"
+horizon-protocol.workspace = true
+meridian-testkit.workspace = true
+# The proxy process's CPU and memory, and the machine named in the report.
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
+
+# The processor cycles of a process, which Windows counts exactly; see src/cpu.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
+[dev-dependencies]
+meridian-net.workspace = true
+
+# The workspace's lints, except that unsafe code is denied instead of forbidden:
+# src/cpu.rs, and only it, allows it for the Windows calls it makes.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
