@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/meridian-config",
+    "crates/meridian-ghost",
     "crates/meridian-net",
     "crates/meridian-testkit",
     "crates/meridian-proxy",
