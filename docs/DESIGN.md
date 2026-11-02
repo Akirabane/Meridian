@@ -364,8 +364,9 @@ these is still open (section 12):
 - *fallback*: send the player to a server listed as the fallback instead.
 
 Each value above has its own setting: `require` (must be equal), `warn` (switch
-and log) or `ignore`. The recommended defaults are `require` for everything that is
-not tolerable or cosmetic-but-wrong, and `ignore` for the hashed seed.
+and log) or `ignore`. The defaults, decided in section 12, are `require` for the registries, the
+dimension and the signed-chat setting, and `ignore` for the hashed seed, hardcore,
+the sea level and the flat flag.
 
 ### 8.3 Sharing a map as an optimisation
 
@@ -527,48 +528,49 @@ only step that needs two servers and a client running together, and its cost is
 planned before it is run. J1 to J4 need one or two servers, or none with the test
 kit.
 
-## 12. Decisions that are not ours alone
+## 12. Decisions
 
-- **Changes in Horizon's game**: player export and import (with a partial import),
-  a held state for a joining player, and hook points for named blocks, about eleven
-  to sixteen days of work in all. The login that trusts the proxy exists already
-  (forwarding, section 3). The new work is needed, and it belongs to the Horizon
-  project, so it must be agreed there first (section 16). The save gaps of section 6
-  can be fixed first and on their own. The switch itself, with no new connection and
-  no Login, is the part nothing in Horizon provides today.
-- **A change in the Horizon client** for the cooperative extension, with the same
-  caveat.
-- **What to do when a switch is impossible**: refuse it (*stay*), fall back to a
-  visible transfer (*visible*), or send the player to a server listed as the
-  fallback. The configuration allows each, per route, and a default has to be chosen
-  (section 8.2).
-- **Which client-visible differences are tolerated**: the recommendation is to
-  require equal registries, dimension type and key, signed-chat setting, and to allow
-  a different hashed seed. Hardcore, sea level and the flat flag are open.
-- **What is kept by default** (section 13): the proposal is to carry inventory,
-  ender chest, experience, health, food and effects, and to take game mode,
-  position, advancements and statistics from the target. Whether unknown named
-  blocks are kept or dropped by default is open.
-- **The form of the proxy's extension point**: a Rust trait first (recommended),
-  a local socket for other languages later, no dynamic libraries.
-- **Which login modes ship**: `online` is the default. Whether the `offline` and
-  `hybrid` modes are included at all, and with what wording in the documentation, is
-  the operator-facing choice of section 15.
-- **Where the requests are served**: the sidecar of section 6 keeps Horizon free of
-  a remote surface; the alternative is to let the supervisor's HTTP interface
-  listen on a configured address, which is more work in Horizon.
-- **Whose file is the truth**: after a switch the old server keeps a stale file for
-  the player. Either the proxy is the only way in, or the release marks or removes
-  that file.
-- **A disconnect during a switch**: the record then exists only in the proxy, and
-  must be imported into the target as a normal save or written back to the source.
-- **A shared map** is now an optimisation, and whether C (replication of changes) is
-  built at all, and where, is open.
-- **Players seeing each other across servers**: out of scope here, but it changes
-  how the target view is built if it comes later.
-- **Pinning the protocol crate**: Horizon has no stable protocol crate release, so
-  the dependency is a pinned commit and moves when the project's version does. It
-  starts pinned, and its build cost is small.
+These were open questions for the project's owner. They were answered on
+2026-11-02, accepting the recommendation of this document for each. A decision can be
+reopened; until then it is the rule.
+
+1. **Changes in Horizon's game** (export and import of a player, a held state, hook
+   points; section 16). *Decided 2026-11-02:* the work is done in Horizon only if
+   its maintainers accept it. A question to them is open as
+   horizon-rust/horizon#7484. The save gaps of section 6 can be fixed first and on
+   their own. The login that trusts the proxy exists already (forwarding,
+   section 3).
+2. **A change in the Horizon client** for the cooperative extension. *Decided
+   2026-11-02:* later, after the switch works with plain packets.
+3. **When a switch is impossible.** *Decided 2026-11-02:* *stay* (refuse the switch
+   and tell the player), settable per route to *visible* or *fallback*
+   (section 8.2).
+4. **Which client-visible differences are tolerated.** *Decided 2026-11-02:* the
+   registries, the dimension (type and key) and the signed-chat setting must be
+   equal. A different hashed seed, hardcore, sea level and flat flag are tolerated.
+5. **What is kept by default** (section 13). *Decided 2026-11-02:* inventory, ender
+   chest, experience, health, food and effects are carried; game mode, position,
+   advancements and statistics are taken from the target; unknown named blocks are
+   kept in the proxy's copy.
+6. **The form of the proxy's extension point.** *Decided 2026-11-02:* a Rust trait
+   first, a local socket later if asked, no dynamic libraries.
+7. **Login modes** (section 15). *Decided 2026-11-02:* `online` is the default;
+   `offline` and `hybrid` are included; the documentation says *verified* and
+   *unverified*.
+8. **Where the player requests are served.** *Decided 2026-11-02:* a sidecar next to
+   each backend (section 6).
+9. **Whose file is the truth after a switch.** *Decided 2026-11-02:* the proxy is the
+   only way in; backends are private, so a stale file on the old server is never read
+   without the proxy.
+10. **A disconnect during a switch.** *Decided 2026-11-02:* the record is imported
+    into the target as a normal save.
+11. **A shared map** (section 8.3, option C). *Decided 2026-11-02:* not built for
+    now.
+12. **Players seeing each other across servers.** *Decided 2026-11-02:* not
+    supported; players on different backends do not see each other.
+
+One earlier decision stands with them: the protocol crate is a pinned commit of
+Horizon (section 10), kept pinned because its build cost is small.
 
 ## 13. What is kept
 
@@ -893,8 +895,9 @@ J1; the hybrid mode and the groups come in J2.
 
 Several things in this design would have to exist in Horizon's own code. Each is
 listed here as a proposal, as a unit that could become an issue of its own. None
-has been opened, and none has been accepted by the Horizon project. If one is taken
-up, it follows that project's way of working (an issue, a claim through its
+has been opened as an issue, and none has been accepted by the Horizon project.
+A question to its maintainers about whether they would take this work is open as
+horizon-rust/horizon#7484. If one is taken up, it follows that project's way of working (an issue, a claim through its
 maintainers, and its own pull request conventions), not the rules of this
 repository.
 
