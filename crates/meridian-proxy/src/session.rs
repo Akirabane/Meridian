@@ -559,6 +559,7 @@ pub(crate) mod tests {
                 properties: Vec::new(),
             },
             auth: client::AuthKind::Offline,
+            virtual_host: None,
             connection: proxy_client,
         };
         let backend = BackendLink {
