@@ -16,7 +16,9 @@
 mod chunks;
 mod delta;
 mod entities;
+mod player;
 mod view;
+mod world;
 
 pub use delta::{BUNDLE_LIMIT, delta};
 pub use view::View;

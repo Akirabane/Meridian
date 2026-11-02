@@ -5,6 +5,8 @@ use super::*;
 use horizon_protocol::packets::play::{self, Clientbound as C};
 
 mod entities;
+mod player;
+mod world;
 
 /// A packet, as the test kit carries it.
 fn p(packet: C) -> Packet {
@@ -99,9 +101,42 @@ fn switch(old: &[Packet], new: &[Packet]) -> (View, Vec<Packet>) {
         "a forbidden packet in the delta"
     );
     check_bundles(&delta);
-    let after = view(ghost, &delta);
+    // The rewriting layer gives the player's own packets the client's id.
+    let delivered: Vec<Packet> = delta
+        .iter()
+        .map(|p| as_client(p, target.player_id(), ghost.player_id()))
+        .collect();
+    let after = view(ghost, &delivered);
     assert_eq!(after, target, "the ghost after the delta is not the target");
     (after, delta)
+}
+
+/// `packet` with the target's id for the player replaced by the client's, as the
+/// rewriting layer will do.
+fn as_client(packet: &Packet, target: Option<i32>, client: Option<i32>) -> Packet {
+    let (Some(target), Some(client)) = (target, client) else {
+        return packet.clone();
+    };
+    let own = |id: &mut i32| {
+        if *id == target {
+            *id = client;
+        }
+    };
+    match packet.decode() {
+        Ok(C::UpdateMobEffect(mut p)) => {
+            own(&mut p.id);
+            Packet::of(&C::UpdateMobEffect(p))
+        }
+        Ok(C::RemoveMobEffect(mut p)) => {
+            own(&mut p.id);
+            Packet::of(&C::RemoveMobEffect(p))
+        }
+        Ok(C::UpdateAttributes(mut p)) => {
+            own(&mut p.id);
+            Packet::of(&C::UpdateAttributes(p))
+        }
+        _ => packet.clone(),
+    }
 }
 
 fn check_bundles(delta: &[Packet]) {

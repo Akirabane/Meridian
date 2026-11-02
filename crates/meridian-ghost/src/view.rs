@@ -1,5 +1,5 @@
 //! A view: the state one side of a switch describes, read from its packets.
-use crate::{Packet, chunks::Chunks, entities::Entities, ids};
+use crate::{Packet, chunks::Chunks, entities::Entities, ids, player::Player, world::World};
 use horizon_protocol::{
     buf::Reader,
     packets::play::{self, Clientbound as C, relative},
@@ -30,6 +30,8 @@ pub struct View {
     pub(crate) placed: Option<Placed>,
     pub(crate) chunks: Chunks,
     pub(crate) entities: Entities,
+    pub(crate) player: Player,
+    pub(crate) world: World,
 }
 
 impl View {
@@ -51,6 +53,8 @@ impl View {
             placed: None,
             chunks: Chunks::default(),
             entities: Entities::default(),
+            player: Player::default(),
+            world: World::default(),
         }
     }
 
@@ -93,9 +97,19 @@ impl View {
                 self.chunks = Chunks::default();
                 self.chunks.set_radius(p.chunk_radius);
                 self.entities = Entities::default();
+                self.player = Player {
+                    game_mode: Some(p.spawn.game_type),
+                    ..Player::default()
+                };
+                self.world = World::default();
             }
-            C::Respawn(_) => {
+            // A new player in a new level; the world values the server sends again.
+            C::Respawn(p) => {
                 let radius = self.chunks.radius;
+                self.player = Player {
+                    game_mode: Some(p.spawn.game_type),
+                    ..Player::default()
+                };
                 self.placed = None;
                 self.chunks = Chunks {
                     radius,
@@ -107,6 +121,8 @@ impl View {
             other => {
                 self.chunks.apply(other, packet, self.keep);
                 self.entities.apply(other);
+                self.player.apply(other, self.player_id);
+                self.world.apply(other);
             }
         }
         Ok(())
@@ -150,12 +166,14 @@ impl View {
 
 impl PartialEq for View {
     /// Two views are equal when a client would hold the same: the same chunks,
-    /// entities and position. Whether packets were kept, and the player's own id,
+    /// entities, position, player state and world values. Whether packets were kept, and the player's own id,
     /// which each server numbers its own way, do not count.
     fn eq(&self, other: &Self) -> bool {
         self.placed == other.placed
             && self.chunks == other.chunks
             && self.entities == other.entities
+            && self.player == other.player
+            && self.world == other.world
     }
 }
 
@@ -190,5 +208,29 @@ fn read(id: i32) -> bool {
             | ids::REMOVE_MOB_EFFECT
             | ids::SET_PASSENGERS
             | ids::SET_ENTITY_LINK
+            | ids::SET_HEALTH
+            | ids::SET_EXPERIENCE
+            | ids::PLAYER_ABILITIES
+            | ids::SET_HELD_SLOT
+            | ids::GAME_EVENT
+            | ids::COOLDOWN
+            | ids::CONTAINER_SET_CONTENT
+            | ids::CONTAINER_SET_SLOT
+            | ids::SET_PLAYER_INVENTORY
+            | ids::SET_CURSOR_ITEM
+            | ids::OPEN_SCREEN
+            | ids::CONTAINER_CLOSE
+            | ids::SET_TIME
+            | ids::INITIALIZE_BORDER
+            | ids::SET_BORDER_CENTER
+            | ids::SET_BORDER_LERP_SIZE
+            | ids::SET_BORDER_SIZE
+            | ids::SET_BORDER_WARNING_DELAY
+            | ids::SET_BORDER_WARNING_DISTANCE
+            | ids::CHANGE_DIFFICULTY
+            | ids::SET_DEFAULT_SPAWN_POSITION
+            | ids::TICKING_STATE
+            | ids::TICKING_STEP
+            | ids::SET_SIMULATION_DISTANCE
     )
 }
