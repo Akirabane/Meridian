@@ -186,6 +186,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 - [docs/RUNNING.md](docs/RUNNING.md): running the proxy in front of a Horizon server.
 - [docs/CONFIG.md](docs/CONFIG.md): every setting.
 - [docs/BUILD.md](docs/BUILD.md): building and testing.
+- [crates/meridian-panel](crates/meridian-panel/README.md): a local panel to try the
+  proxy with three Horizon servers on one machine.
 - [docs/PACKETS.md](docs/PACKETS.md), [docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md),
   [docs/TEST-RIG.md](docs/TEST-RIG.md): reference material for the switch.
 
