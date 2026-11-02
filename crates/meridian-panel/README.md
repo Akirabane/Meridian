@@ -94,8 +94,17 @@ is not built in Meridian yet, so for now the proxy answers that the transfer is 
 available.
 
 `meridian-panel --check BENCH/bench.toml` checks a bench file without running
-anything. Ctrl+C in the panel's terminal ends the panel, and reaches the processes
-it started too, which stop as they do on Ctrl+C.
+anything. Ctrl+C in the panel's terminal ends the panel. It reaches the processes
+it started too, which stop as they do on Ctrl+C; the panel waits for them (their
+longest stop timeout at most, or until a second Ctrl+C), then ends what is left.
+
+On Windows, each process the panel starts is in a job object of its own, with
+everything it starts, such as a server's engine (`horizon-client.exe`). A kill at
+the stop timeout ends the whole tree, and so does the system when the panel ends,
+however it ends (Ctrl+C, its window closed, killed): no engine is left holding its
+world. A server whose world is still held by an engine of an earlier run is not
+started; its console says `another engine still holds the world: pid N`, and the
+panel leaves that engine alone for you to end.
 
 ## Safety
 

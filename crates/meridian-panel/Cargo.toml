@@ -12,14 +12,33 @@ name = "meridian-panel"
 path = "src/main.rs"
 
 [dependencies]
+# Ctrl+C, or the window closed: the panel waits for its processes, then ends them.
+ctrlc = "3.4"
 serde = { version = "1.0.200", features = ["derive"] }
 serde_json = "1"
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 # CPU and memory of each process the panel started.
 sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 
+# A job object for each process the panel starts, so its children end with it;
+# see src/tree.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 meridian-config.workspace = true
 
-[lints]
-workspace = true
+# The workspace's lints, except that unsafe code is denied instead of forbidden:
+# src/tree.rs, and only it, allows it for the Windows calls it makes.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
