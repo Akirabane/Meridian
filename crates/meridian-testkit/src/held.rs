@@ -190,6 +190,9 @@ pub struct TargetWorld {
     pub dimension: &'static str,
     /// Whether the import sends the held player a position to confirm.
     pub import_sends_position: bool,
+    /// How long the target keeps sending after the import, a packet every 20 ms,
+    /// as a busy server does (mobs moving): it is never quiet meanwhile.
+    pub chatter: Duration,
 }
 
 impl Default for TargetWorld {
@@ -198,6 +201,7 @@ impl Default for TargetWorld {
             registry: REGISTRY.to_vec(),
             dimension: OVERWORLD,
             import_sends_position: true,
+            chatter: Duration::ZERO,
         }
     }
 }
@@ -281,6 +285,12 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
         // What the import changes, a position to confirm among it; the player
         // stays held.
         send_typed(&mut c, &position(2, 41.0));
+        let chatter = std::time::Instant::now();
+        while chatter.elapsed() < world.chatter {
+            // An entity's swing: a packet the views do not keep.
+            send(&mut c, pc::ANIMATE, &[30, 0]);
+            std::thread::sleep(Duration::from_millis(20));
+        }
         // The client's confirmation, not the proxy's.
         if accepted(&mut c)?.0 != 2 {
             return Err("the client confirmed another teleport".into());
