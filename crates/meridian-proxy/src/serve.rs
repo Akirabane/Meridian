@@ -141,12 +141,13 @@ mod tests {
             thread::spawn(move || serve(listener, config(), &stop))
         };
 
-        // Accepting a player is not written yet, so the proxy closes the
-        // connection: the client reads the end of the stream.
+        // A player who closes before the handshake: the proxy gives up on the
+        // connection and closes it, and the client reads the end of the stream.
         let mut player = TcpStream::connect(address).unwrap();
         player
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
+        player.shutdown(std::net::Shutdown::Write).unwrap();
         let mut rest = Vec::new();
         assert_eq!(player.read_to_end(&mut rest).unwrap(), 0);
 

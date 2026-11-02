@@ -164,6 +164,7 @@ mod tests {
                 uuid: [1; 16],
                 properties: Vec::new(),
             },
+            auth: crate::client::AuthKind::Offline,
             connection: proxy_client,
         };
         (
