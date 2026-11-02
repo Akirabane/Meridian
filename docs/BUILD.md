@@ -20,6 +20,7 @@ The same three checks (format, clippy, tests) run in CI on Linux and on Windows.
 | `meridian-net` | Player and backend connections, and the relay between them |
 | `meridian-testkit` | Scripted client and backend, and a packet recorder, for tests |
 | `meridian-proxy` | The `meridian` binary |
+| `meridian-panel` | A local panel to run a test bench of the proxy and three Horizon servers |
 
 Only the root `Cargo.toml` and the CI workflow are shared; each crate has its own
 files.
