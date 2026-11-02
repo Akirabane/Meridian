@@ -79,6 +79,20 @@ fn every_setting_is_read() {
 }
 
 #[test]
+fn the_example_file_is_valid() {
+    let config = Config::from_toml_str(include_str!("../../../meridian.example.toml")).unwrap();
+    assert_eq!(config.default_backend, "lobby");
+    assert_eq!(config.backends.len(), 2);
+    // The example documents the defaults, so it must agree with them.
+    let defaults = Config::default();
+    assert_eq!(config.listen, defaults.listen);
+    assert_eq!(config.motd, defaults.motd);
+    assert_eq!(config.online_mode, defaults.online_mode);
+    assert_eq!(config.compression_threshold, defaults.compression_threshold);
+    assert_eq!(config.connect_timeout_ms, defaults.connect_timeout_ms);
+}
+
+#[test]
 fn a_file_is_loaded_from_disk() {
     let path = std::env::temp_dir().join(format!("meridian-config-{}.toml", std::process::id()));
     std::fs::write(&path, MINIMAL).unwrap();

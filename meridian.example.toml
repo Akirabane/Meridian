@@ -1,0 +1,35 @@
+# An example configuration for the Meridian proxy. Copy it to meridian.toml and
+# change what you need. Every setting except the backends can be left out; the
+# value shown here is then the default.
+
+# The address players connect to.
+listen = "0.0.0.0:25565"
+
+# The line shown in the server list.
+motd = "A Meridian proxy"
+
+# Whether the proxy checks players against the session service. Backends never
+# do it themselves: they trust the proxy.
+online-mode = true
+
+# Packets of at least this many bytes are compressed. A negative value turns
+# compression off.
+compression-threshold = 256
+
+# Milliseconds allowed to reach a backend.
+connect-timeout-ms = 5000
+
+# The backend players are sent to when they log in. When it is left out, the
+# first backend below is used.
+default-backend = "lobby"
+
+# The servers behind the proxy. Each one has a unique name and an address as
+# host:port. An IPv6 host goes in brackets, as "[::1]:25567". Backends should
+# only be reachable from the proxy.
+[[backends]]
+name = "lobby"
+address = "127.0.0.1:25566"
+
+[[backends]]
+name = "east"
+address = "127.0.0.1:25567"
