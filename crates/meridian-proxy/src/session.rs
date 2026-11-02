@@ -215,6 +215,264 @@ fn hyphenated(uuid: [u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_protocol::{crypto::offline_uuid, ids};
+    use meridian_config::Backend;
+    use meridian_net::backend;
+    use meridian_testkit::{
+        backend::{FakeBackend, Forwarded, Login, acknowledge_configuration, finish_configuration},
+        client::FakeClient,
+        peer::Step,
+        pipe,
+        trace::{Dir, Recorder, Trace},
+    };
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+
+    const SECRET: &str = "a shared secret";
+
+    fn config() -> Config {
+        Config {
+            backends: vec![Backend {
+                name: "lobby".into(),
+                address: "127.0.0.1:25601".into(),
+            }],
+            default_backend: "lobby".into(),
+            online_mode: false,
+            compression_threshold: 256,
+            forwarding_secret: SECRET.into(),
+            ..Config::default()
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "198.51.100.7:50123".parse().unwrap()
+    }
+
+    type BackendThread = JoinHandle<Result<(Login, Connection), String>>;
+
+    /// What the connector was asked for: the address, the options, and the fake
+    /// backend's thread.
+    type Seen = Arc<Mutex<Option<(String, BackendOptions, BackendThread)>>>;
+
+    /// A connector that joins the proxy to `backend` through a pipe instead of a
+    /// socket, keeps what it was asked for, and hands the backend's thread back.
+    fn connector(backend: FakeBackend, recorder: Recorder) -> (Arc<Connect>, Seen) {
+        let seen = Arc::new(Mutex::new(None));
+        let kept = Arc::clone(&seen);
+        let backend = Mutex::new(Some(backend));
+        let connect: Arc<Connect> = Arc::new(move |address, profile, options| {
+            let (proxy_end, server_end) = pipe();
+            let fake = backend.lock().unwrap().take().expect("one connection");
+            let thread = fake.spawn(server_end, recorder.clone());
+            *kept.lock().unwrap() = Some((address.to_owned(), options.clone(), thread));
+            backend::login(proxy_end, "127.0.0.1", 25601, profile, options)
+        });
+        (connect, seen)
+    }
+
+    /// The configuration phase, keep-alives both ways, the play phase, and the
+    /// backend closing: the two scripts mirror each other.
+    fn scripts() -> (Vec<Step>, Vec<Step>) {
+        use ids::{configuration as cfg, play};
+        let backend = vec![
+            Step::send(cfg::clientbound::REGISTRY_DATA, vec![5; 700]),
+            Step::send(cfg::clientbound::KEEP_ALIVE, 11u64.to_be_bytes()),
+            Step::expect_exactly(cfg::serverbound::KEEP_ALIVE, 11u64.to_be_bytes()),
+            finish_configuration(),
+            Step::Expect {
+                id: cfg::serverbound::FINISH_CONFIGURATION,
+            },
+            Step::send(play::clientbound::LOGIN, vec![6; 60]),
+            Step::send(play::clientbound::KEEP_ALIVE, 12u64.to_be_bytes()),
+            Step::expect_exactly(play::serverbound::KEEP_ALIVE, 12u64.to_be_bytes()),
+            Step::Close,
+        ];
+        let client = vec![
+            Step::expect_exactly(cfg::clientbound::REGISTRY_DATA, vec![5; 700]),
+            Step::expect_exactly(cfg::clientbound::KEEP_ALIVE, 11u64.to_be_bytes()),
+            Step::send(cfg::serverbound::KEEP_ALIVE, 11u64.to_be_bytes()),
+            Step::Expect {
+                id: cfg::clientbound::FINISH_CONFIGURATION,
+            },
+            acknowledge_configuration(),
+            Step::expect_exactly(play::clientbound::LOGIN, vec![6; 60]),
+            Step::expect_exactly(play::clientbound::KEEP_ALIVE, 12u64.to_be_bytes()),
+            Step::send(play::serverbound::KEEP_ALIVE, 12u64.to_be_bytes()),
+            Step::ExpectClose,
+        ];
+        (backend, client)
+    }
+
+    /// The packets after the login, which is where a direct session and a
+    /// relayed one must agree: what the client received, then what the backend
+    /// received once its `login_packets` login packets are left out.
+    fn after_login(trace: &Trace, login_packets: usize) -> Trace {
+        let to_client = trace.packets(Dir::ToClient).cloned();
+        let to_server = trace.packets(Dir::ToServer).skip(login_packets).cloned();
+        Trace {
+            packets: to_client.chain(to_server).collect(),
+        }
+    }
+
+    /// J1's proof in memory: a player logs in to the proxy, which logs them in to
+    /// the backend with the forwarding and relays the session. Both sides see
+    /// exactly what they see when the player joins the backend directly.
+    #[test]
+    fn a_player_is_relayed_to_the_backend_as_if_joined_directly() {
+        let (backend_script, client_script) = scripts();
+
+        // Directly: the client logs in to the backend itself.
+        let direct = Recorder::new();
+        let (client_end, server_end) = pipe();
+        let server = FakeBackend {
+            compression: Some(64),
+            after_login: backend_script.clone(),
+            ..FakeBackend::default()
+        }
+        .spawn(server_end, direct.clone());
+        let client = FakeClient {
+            after_login: client_script.clone(),
+            ..FakeClient::named("Alex")
+        }
+        .spawn(client_end, direct.clone());
+        client.join().unwrap().unwrap();
+        server.join().unwrap().unwrap();
+
+        // Through the proxy.
+        let relayed = Recorder::new();
+        let (connect, seen) = connector(
+            FakeBackend {
+                compression: Some(64),
+                forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                after_login: backend_script,
+                ..FakeBackend::default()
+            },
+            relayed.clone(),
+        );
+        let (player_end, proxy_end) = pipe();
+        let sessions = Arc::new(Sessions::default());
+        let proxy = {
+            let sessions = Arc::clone(&sessions);
+            std::thread::spawn(move || handle(proxy_end, peer(), &config(), &*connect, &sessions))
+        };
+        let client = FakeClient {
+            after_login: client_script,
+            ..FakeClient::named("Alex")
+        }
+        .spawn(player_end, relayed.clone());
+        let (welcome, _) = client.join().unwrap().unwrap();
+        proxy.join().unwrap();
+        let (address, options, server) = seen.lock().unwrap().take().unwrap();
+        let (login, _) = server.join().unwrap().unwrap();
+
+        // Direct: handshake, Login Start and Login Acknowledged before the script.
+        // Relayed: the forwarding answer too.
+        assert_eq!(
+            after_login(&relayed.trace(), 4),
+            after_login(&direct.trace(), 3)
+        );
+        assert_eq!(welcome.compression, Some(256), "the proxy's own threshold");
+        assert_eq!(address, "127.0.0.1:25601");
+        assert_eq!(
+            options,
+            BackendOptions {
+                forwarding_secret: SECRET.as_bytes().to_vec(),
+                connect_timeout: Duration::from_millis(5_000),
+                player_address: peer().ip(),
+            }
+        );
+        assert_eq!(
+            login.forwarded,
+            Some(Forwarded {
+                version: 1,
+                address: "198.51.100.7".into(),
+                uuid: offline_uuid("Alex"),
+                name: "Alex".into(),
+                properties: Vec::new(),
+            })
+        );
+        assert_eq!(sessions.count(), 0, "the session is counted out at the end");
+    }
+
+    /// A backend that cannot be reached: the player is told so in the
+    /// configuration phase, and nothing hangs.
+    #[test]
+    fn a_player_is_told_when_the_backend_cannot_be_reached() {
+        let connect: Arc<Connect> = Arc::new(|_, _, _| {
+            Err(meridian_net::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            )))
+        });
+        let (player_end, proxy_end) = pipe();
+        let proxy = std::thread::spawn(move || {
+            handle(
+                proxy_end,
+                peer(),
+                &config(),
+                &*connect,
+                &Sessions::default(),
+            )
+        });
+        let recorder = Recorder::new();
+        let client = FakeClient {
+            after_login: vec![
+                Step::Expect {
+                    id: ids::configuration::clientbound::DISCONNECT,
+                },
+                Step::Close,
+            ],
+            ..FakeClient::named("Alex")
+        }
+        .spawn(player_end, recorder.clone());
+        client.join().unwrap().unwrap();
+        proxy.join().unwrap();
+        let trace = recorder.trace();
+        let packet = &trace.packets[0];
+        let configuration::Clientbound::Disconnect(disconnect) =
+            configuration::Clientbound::decode(packet.id, &packet.payload).unwrap()
+        else {
+            panic!("not a disconnect");
+        };
+        let reason = text::plain(&disconnect.reason, &Default::default());
+        assert!(reason.contains("\"lobby\""), "{reason}");
+    }
+
+    /// A stop closes a session being relayed on both sides.
+    #[test]
+    fn a_stop_closes_the_sessions_being_relayed() {
+        let recorder = Recorder::new();
+        let (connect, seen) = connector(
+            FakeBackend {
+                forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                after_login: vec![Step::ExpectClose],
+                ..FakeBackend::default()
+            },
+            recorder.clone(),
+        );
+        let (player_end, proxy_end) = pipe();
+        let sessions = Arc::new(Sessions::default());
+        let proxy = {
+            let sessions = Arc::clone(&sessions);
+            std::thread::spawn(move || handle(proxy_end, peer(), &config(), &*connect, &sessions))
+        };
+        let client = FakeClient {
+            after_login: vec![Step::ExpectClose],
+            ..FakeClient::named("Alex")
+        }
+        .spawn(player_end, recorder);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while sessions.count() == 0 {
+            assert!(Instant::now() < deadline, "the session never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(sessions.close_all(), 1);
+        client.join().unwrap().unwrap();
+        proxy.join().unwrap();
+        let (_, _, server) = seen.lock().unwrap().take().unwrap();
+        server.join().unwrap().unwrap();
+        assert_eq!(sessions.count(), 0);
+    }
 
     #[test]
     fn a_unique_id_is_written_with_hyphens() {

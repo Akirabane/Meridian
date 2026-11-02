@@ -485,6 +485,7 @@ dependencies = [
  "horizon-protocol",
  "meridian-config",
  "meridian-net",
+ "meridian-testkit",
 ]
 
 [[package]]
