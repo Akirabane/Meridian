@@ -502,3 +502,32 @@ fn a_freeze_that_lasts_too_long_is_given_up() {
     );
     still_on_source(&mut bench);
 }
+
+/// The answer to a teleport gives where the player now is: the position as sent,
+/// or added to the last one for the parts the flags call relative.
+#[test]
+fn a_teleport_answer_gives_the_place_it_led_to() {
+    use crate::prepare::Pose;
+    use horizon_protocol::packets::play::relative;
+    let mut pose = Pose::default();
+    let at = |position: [f64; 3], yaw: f32, relatives: i32| play::PlayerPosition {
+        teleport: 1,
+        position,
+        delta: [0.0; 3],
+        yaw,
+        pitch: 10.0,
+        relatives,
+    };
+    assert_eq!(
+        pose.placed(&at([8.0, 70.0, 8.0], 90.0, 0)),
+        ([8.0, 70.0, 8.0], 90.0, 10.0)
+    );
+    assert_eq!(
+        pose.placed(&at(
+            [1.0, 0.0, -2.0],
+            45.0,
+            relative::X | relative::Z | relative::Y_ROT
+        )),
+        ([9.0, 0.0, 6.0], 135.0, 10.0)
+    );
+}

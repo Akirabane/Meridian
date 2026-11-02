@@ -334,7 +334,10 @@ pub(crate) fn spawn_lane(shared: &Arc<Shared>, lane: Arc<Lane>, reader: ConnRead
         .spawn(move || {
             let end = copy_from_backend(reader, &lane, &shared);
             if let Some(target) = &lane.target {
-                target.closed();
+                target.closed(match &end {
+                    End::Broken(e) => Some(e),
+                    End::Closed => None,
+                });
             }
             if let Some(events) = events {
                 let _ = events.send(Event::Lane(lane.id, end));
