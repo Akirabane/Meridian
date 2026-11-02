@@ -21,11 +21,14 @@ pub const BUNDLE_LIMIT: usize = 4096;
 ///    player first, skipping those the client already holds; the player's position
 ///    comes once the columns next to the player are there;
 /// 5. the old chunks the target does not have;
-/// 6. the target's entities, made or updated, then the rides and leads between
+/// 6. the player list: entries that go, then those added or changed, before the
+///    entities, since a player's entity takes its profile from its entry;
+/// 7. the target's entities, made or updated, then the rides and leads between
 ///    them;
-/// 7. the player's own state that differs: health, experience, abilities, held
+/// 8. the player's own state that differs: health, experience, abilities, held
 ///    slot, game mode, effects, attributes, cooldowns, inventory and cursor, and
-///    the target's open container if it has one.
+///    the target's open container if it has one;
+/// 9. boss bars, then the scoreboard: objectives, scores, display slots and teams.
 ///
 /// The client applies a bundle in one go, so no half-switched world is drawn. A
 /// delta of more than [`BUNDLE_LIMIT`] packets (a full view at a large view
@@ -69,8 +72,13 @@ pub fn delta(from: &View, to: &View) -> Vec<Packet> {
                 })));
             }
         });
+    // A player's entity needs its list entry, for its profile and skin.
+    let unlisted = from.tab.to_remove(&to.tab);
+    from.tab.delta(&to.tab, &unlisted, &mut out);
     from.entities.delta(&to.entities, &removed, &mut out);
     player.delta(&to.player, to.player_id(), &mut out);
+    from.bossbars.delta(&to.bossbars, &mut out);
+    from.scoreboard.delta(&to.scoreboard, &mut out);
     // Built only from packets that can never be forbidden; this is the last line
     // of defence if that ever changes.
     out.retain(|p| !forbidden(p));

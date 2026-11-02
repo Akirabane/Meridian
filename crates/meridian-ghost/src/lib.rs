@@ -39,12 +39,15 @@
 //! - **Chunk columns** that the client holds with the same blocks but reached by
 //!   other packets are sent again: equal blocks are not recognised, only equal
 //!   packets.
-//! - **Not kept yet**: the tab list, boss bars and the scoreboard (the next change),
-//!   and the recipe book, advancements, map data and resource packs.
+//! - **Not kept yet**: the recipe book, advancements, map data, resource packs and
+//!   the server's command tree.
+mod bossbars;
 mod chunks;
 mod delta;
 mod entities;
 mod player;
+mod scoreboard;
+mod tab;
 mod view;
 mod world;
 
