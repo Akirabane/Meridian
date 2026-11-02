@@ -4,6 +4,7 @@
 //! by its own change.
 pub mod backend;
 pub mod client;
+pub mod login_policy;
 pub mod relay;
 
 use std::fmt;
