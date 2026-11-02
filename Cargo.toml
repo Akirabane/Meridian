@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/meridian-config",
+    "crates/meridian-net",
+    "crates/meridian-testkit",
+    "crates/meridian-proxy",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/Akirabane/Meridian"
+
+[workspace.dependencies]
+# The Minecraft protocol of Horizon, pinned to one commit. Moving the pin is a
+# deliberate change, made together with the version of Horizon the proxy runs against.
+horizon-protocol = { git = "https://github.com/horizon-rust/horizon", rev = "f696adc8996d7d4b11e7d50a863f2735a21c8000" }
+
+meridian-config = { path = "crates/meridian-config" }
+meridian-net = { path = "crates/meridian-net" }
+meridian-testkit = { path = "crates/meridian-testkit" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
