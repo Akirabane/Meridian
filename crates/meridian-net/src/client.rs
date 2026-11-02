@@ -10,6 +10,7 @@ use horizon_protocol::{
     connection::Connection,
     crypto,
     packets::{handshake, login, status},
+    rsa::RsaPrivateKey,
 };
 use meridian_config::Config;
 use std::{
@@ -76,7 +77,16 @@ pub fn players_online() -> usize {
 /// A session is returned once the client has acknowledged the login: the
 /// connection is then in the configuration phase, as a backend link is, and
 /// carries the compression and the encryption the login set up.
-pub fn accept(mut connection: Connection, config: &Config) -> Result<Option<ClientSession>> {
+pub fn accept(connection: Connection, config: &Config) -> Result<Option<ClientSession>> {
+    accept_with(connection, config, &session::SessionService)
+}
+
+/// [`accept`], asking `sessions` who an online player is.
+fn accept_with(
+    mut connection: Connection,
+    config: &Config,
+    sessions: &dyn session::Sessions,
+) -> Result<Option<ClientSession>> {
     connection.reader.set_read_timeout(Some(LOGIN_TIMEOUT))?;
     let (id, payload) = connection.recv()?;
     let intention = match handshake::Serverbound::decode(id, &payload)? {
@@ -92,7 +102,7 @@ pub fn accept(mut connection: Connection, config: &Config) -> Result<Option<Clie
             serve_status(&mut connection, config)?;
             Ok(None)
         }
-        handshake::LOGIN => log_in(connection, config, intention.protocol),
+        handshake::LOGIN => log_in(connection, config, sessions, intention.protocol),
         // The proxy is where players arrive; it takes no transfers from other
         // servers, as a vanilla server does by default (`accepts-transfers`).
         handshake::TRANSFER => {
@@ -107,6 +117,7 @@ pub fn accept(mut connection: Connection, config: &Config) -> Result<Option<Clie
 }
 
 /// Who the login says the player is.
+#[derive(Debug)]
 struct Joined {
     uuid: u128,
     name: String,
@@ -118,6 +129,7 @@ struct Joined {
 fn log_in(
     mut connection: Connection,
     config: &Config,
+    sessions: &dyn session::Sessions,
     protocol: i32,
 ) -> Result<Option<ClientSession>> {
     if protocol != horizon_protocol::PROTOCOL_VERSION {
@@ -156,17 +168,229 @@ fn log_in(
         );
         return Ok(None);
     }
-    if config.online_mode {
-        return Err(Error::NotImplemented("online mode"));
-    }
-    // UUIDUtil.createOfflineProfile: the UUID is derived from the name, and the
-    // UUID the client sent is ignored.
-    let joined = Joined {
-        uuid: crypto::offline_uuid(&hello.name),
-        name: hello.name,
-        properties: Vec::new(),
+    let joined = if config.online_mode {
+        match authenticate(&mut connection, &hello.name, sessions)? {
+            Some(joined) => joined,
+            None => return Ok(None),
+        }
+    } else {
+        // UUIDUtil.createOfflineProfile: the UUID is derived from the name, and
+        // the UUID the client sent is ignored.
+        Joined {
+            uuid: crypto::offline_uuid(&hello.name),
+            name: hello.name,
+            properties: Vec::new(),
+        }
     };
     finish(connection, config, joined).map(Some)
+}
+
+/// The proxy's key pair (`MinecraftServer.initializeKeyPair`), made at the first
+/// online login and kept for the life of the proxy.
+struct ProxyKey {
+    key: RsaPrivateKey,
+    /// The public key as X.509, sent in the encryption request.
+    public_der: Vec<u8>,
+}
+
+fn proxy_key() -> Result<&'static ProxyKey> {
+    static KEY: OnceLock<ProxyKey> = OnceLock::new();
+    if let Some(key) = KEY.get() {
+        return Ok(key);
+    }
+    // Two first logins at once may both make one; the second is dropped.
+    let key = RsaPrivateKey::generate(1024)?;
+    let public_der = key.public_der();
+    Ok(KEY.get_or_init(|| ProxyKey { key, public_der }))
+}
+
+/// `ServerLoginPacketListenerImpl.handleKey` and its authenticator: the
+/// encryption request, the client's answer, encryption on, and the session
+/// service's word on who the player is. `None` when the player is refused, after
+/// they were told why.
+fn authenticate(
+    connection: &mut Connection,
+    name: &str,
+    sessions: &dyn session::Sessions,
+) -> Result<Option<Joined>> {
+    let key = proxy_key()?;
+    let mut challenge = [0u8; 4];
+    crypto::random_bytes(&mut challenge)?;
+    let request = login::Clientbound::Hello(login::Hello {
+        server_id: String::new(),
+        public_key: key.public_der.clone(),
+        challenge: challenge.to_vec(),
+        should_authenticate: true,
+    });
+    connection.send(&request.encode())?;
+    let (id, payload) = connection.recv()?;
+    let answer = match login::Serverbound::decode(id, &payload)? {
+        login::Serverbound::Key(answer) => answer,
+        other => {
+            return Err(protocol_error(format!(
+                "expected the encryption answer, got packet {}",
+                other.id()
+            )));
+        }
+    };
+    // ServerboundKeyPacket.isChallengeValid and getSecretKey.
+    if key.key.decrypt(&answer.challenge).ok().as_deref() != Some(&challenge[..]) {
+        return Err(protocol_error(
+            "the encryption answer does not match the challenge".into(),
+        ));
+    }
+    let secret: [u8; 16] = key
+        .key
+        .decrypt(&answer.key)
+        .ok()
+        .and_then(|secret| secret.try_into().ok())
+        .ok_or_else(|| protocol_error("the shared secret is not 16 bytes".into()))?;
+    let server_hash = crypto::server_hash("", &secret, &key.public_der);
+    connection.enable_encryption(&secret);
+    let refusal = match sessions.has_joined(name, &server_hash) {
+        Ok(Some(joined)) => return Ok(Some(joined)),
+        Ok(None) => "multiplayer.disconnect.unverified_username",
+        Err(session::Unavailable) => "multiplayer.disconnect.authservers_down",
+    };
+    disconnect(connection, &translatable(refusal, &[]));
+    Ok(None)
+}
+
+/// Asking the session service whether a player joined.
+mod session {
+    use super::Joined;
+    use horizon_protocol::packets::login;
+    use std::{sync::Mutex, time::Duration};
+
+    /// The session service did not answer.
+    #[derive(Debug)]
+    pub(super) struct Unavailable;
+
+    /// Whether the player who says they are `name` told the session service they
+    /// were joining the server whose hash is `server_hash`, and who they are.
+    pub(super) trait Sessions {
+        fn has_joined(&self, name: &str, server_hash: &str) -> Result<Option<Joined>, Unavailable>;
+    }
+
+    /// Where the services list their endpoints. Vanilla's session service finds
+    /// `hasJoined` through it, and so does Horizon's server.
+    const DISCOVERY: &str = "https://discovery.minecraftservices.com/minecraft/client";
+
+    /// The session service on the internet.
+    pub(super) struct SessionService;
+
+    impl Sessions for SessionService {
+        fn has_joined(&self, name: &str, server_hash: &str) -> Result<Option<Joined>, Unavailable> {
+            let url = verify_url()?;
+            let separator = if url.contains('?') { '&' } else { '?' };
+            let url = format!(
+                "{url}{separator}username={}&serverId={}",
+                url_encode(name),
+                url_encode(server_hash)
+            );
+            match agent().get(&url).call() {
+                // No content: the player did not join.
+                Ok(response) => Ok(response
+                    .into_string()
+                    .ok()
+                    .and_then(|body| parse_joined(&body, name))),
+                Err(ureq::Error::Status(status, _)) if status >= 500 => Err(Unavailable),
+                Err(ureq::Error::Status(..)) => Ok(None),
+                Err(ureq::Error::Transport(_)) => Err(Unavailable),
+            }
+        }
+    }
+
+    fn agent() -> ureq::Agent {
+        ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(15))
+            .user_agent(concat!("Meridian/", env!("CARGO_PKG_VERSION")))
+            .build()
+    }
+
+    /// The `hasJoined` endpoint, read from the discovery document once; a failed
+    /// read is tried again at the next login.
+    fn verify_url() -> Result<String, Unavailable> {
+        static URL: Mutex<Option<String>> = Mutex::new(None);
+        if let Some(url) = URL.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Ok(url);
+        }
+        let document: serde_json::Value = agent()
+            .get(DISCOVERY)
+            .call()
+            .ok()
+            .and_then(|response| response.into_string().ok())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .ok_or(Unavailable)?;
+        let url = verify_endpoint(&document).ok_or(Unavailable)?;
+        *URL.lock().unwrap_or_else(|e| e.into_inner()) = Some(url.clone());
+        Ok(url)
+    }
+
+    pub(super) fn verify_endpoint(document: &serde_json::Value) -> Option<String> {
+        document
+            .pointer("/discovery/session/endpoints/verify/uri")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// `HasJoinedMinecraftServerResponse`: the id, the name and the properties.
+    /// No id is no profile. The name is the account's, in its own case; `asked`
+    /// stands in when the answer has none.
+    pub(super) fn parse_joined(body: &str, asked: &str) -> Option<Joined> {
+        let value: serde_json::Value = serde_json::from_str(body).ok()?;
+        let uuid = parse_uuid(value.get("id")?.as_str()?)?;
+        let name = value
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or(asked)
+            .to_owned();
+        let properties = value
+            .get("properties")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|p| {
+                Some(login::Property {
+                    name: p.get("name")?.as_str()?.to_owned(),
+                    value: p.get("value")?.as_str()?.to_owned(),
+                    signature: p
+                        .get("signature")
+                        .and_then(|s| s.as_str())
+                        .map(str::to_owned),
+                })
+            })
+            .collect();
+        Some(Joined {
+            uuid,
+            name,
+            properties,
+        })
+    }
+
+    /// A UUID as 32 hex digits, with or without dashes.
+    pub(super) fn parse_uuid(text: &str) -> Option<u128> {
+        let hex: String = text.chars().filter(|&c| c != '-').collect();
+        if hex.len() != 32 {
+            return None;
+        }
+        u128::from_str_radix(&hex, 16).ok()
+    }
+
+    /// `URLEncoder.encode(value, UTF-8)`.
+    pub(super) fn url_encode(text: &str) -> String {
+        let mut out = String::new();
+        for b in text.bytes() {
+            match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => {
+                    out.push(char::from(b));
+                }
+                b' ' => out.push('+'),
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
 }
 
 /// Compression, the finished login, and the client's acknowledgement.
@@ -589,5 +813,212 @@ mod tests {
         assert!(!valid_name(&"x".repeat(17)));
         assert!(!valid_name("no spaces"));
         assert!(!valid_name("é"));
+    }
+
+    /// What the fake session service says.
+    #[derive(Clone)]
+    enum Answer {
+        Joined,
+        NotJoined,
+        Down,
+    }
+
+    const ACCOUNT_UUID: u128 = 0x069a79f444e94726a5befca90e38aaf5;
+
+    /// A session service that answers as told and records what it was asked.
+    struct FakeSessions {
+        answer: Answer,
+        asked: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl session::Sessions for FakeSessions {
+        fn has_joined(
+            &self,
+            name: &str,
+            server_hash: &str,
+        ) -> std::result::Result<Option<Joined>, session::Unavailable> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), server_hash.to_owned()));
+            match self.answer {
+                Answer::Joined => Ok(Some(Joined {
+                    uuid: ACCOUNT_UUID,
+                    // The account's own case, not the one the client typed.
+                    name: "Notch".into(),
+                    properties: vec![login::Property {
+                        name: "textures".into(),
+                        value: "e30=".into(),
+                        signature: Some("c2lnbmVk".into()),
+                    }],
+                })),
+                Answer::NotJoined => Ok(None),
+                Answer::Down => Err(session::Unavailable),
+            }
+        }
+    }
+
+    type Asked = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+    /// An online proxy whose session service answers `answer`.
+    fn online_proxy(
+        answer: Answer,
+    ) -> (Connection, JoinHandle<Result<Option<ClientSession>>>, Asked) {
+        let asked = Asked::default();
+        let sessions = FakeSessions {
+            answer,
+            asked: asked.clone(),
+        };
+        let config = Config {
+            online_mode: true,
+            compression_threshold: 256,
+            ..Config::default()
+        };
+        let (client, server) = Pipe::pair();
+        let accepted =
+            std::thread::spawn(move || accept_with(Connection::local(server), &config, &sessions));
+        (Connection::local(client), accepted, asked)
+    }
+
+    /// The client's half of the encryption, as vanilla's
+    /// `ClientHandshakePacketListenerImpl.handleHello` does it: the server hash
+    /// it would send to the session service.
+    fn answer_encryption(client: &mut Connection) -> String {
+        let login::Clientbound::Hello(hello) = login_reply(client) else {
+            panic!("expected the encryption request");
+        };
+        assert!(hello.should_authenticate);
+        assert_eq!(hello.server_id, "");
+        let public = horizon_protocol::rsa::RsaPublicKey::from_der(&hello.public_key).unwrap();
+        let secret = [9u8; 16];
+        let key = login::Serverbound::Key(login::Key {
+            key: public.encrypt(&secret).unwrap(),
+            challenge: public.encrypt(&hello.challenge).unwrap(),
+        });
+        client.send(&key.encode()).unwrap();
+        client.enable_encryption(&secret);
+        crypto::server_hash("", &secret, &hello.public_key)
+    }
+
+    #[test]
+    fn an_online_login_is_encrypted_and_takes_the_account_profile() {
+        let (mut client, accepted, asked) = online_proxy(Answer::Joined);
+        start_login(&mut client, "notch");
+        let server_hash = answer_encryption(&mut client);
+        assert_eq!(
+            login_reply(&mut client),
+            login::Clientbound::Compression(login::Compression { threshold: 256 })
+        );
+        client.set_compression(256);
+        let login::Clientbound::LoginFinished(finished) = login_reply(&mut client) else {
+            panic!("expected the finished login");
+        };
+        assert_eq!(finished.profile.uuid, ACCOUNT_UUID);
+        assert_eq!(finished.profile.name, "Notch");
+        assert_eq!(finished.profile.properties.len(), 1);
+        acknowledge(&mut client);
+
+        let session = accepted.join().unwrap().unwrap().expect("a session");
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            [("notch".into(), server_hash)]
+        );
+        assert_eq!(
+            session.profile,
+            Profile {
+                name: "Notch".into(),
+                uuid: ACCOUNT_UUID.to_be_bytes(),
+                properties: vec![("textures".into(), "e30=".into(), "c2lnbmVk".into())],
+            }
+        );
+        // The session's connection is encrypted and compressed both ways.
+        let mut proxy_side = session.connection;
+        proxy_side.send(&[3, 1, 2]).unwrap();
+        assert_eq!(client.recv().unwrap(), (3, vec![1, 2]));
+        client.send(&[4, 5]).unwrap();
+        assert_eq!(proxy_side.recv().unwrap(), (4, vec![5]));
+    }
+
+    #[test]
+    fn a_player_the_session_service_does_not_know_is_refused() {
+        for (answer, key) in [
+            (
+                Answer::NotJoined,
+                "multiplayer.disconnect.unverified_username",
+            ),
+            (Answer::Down, "multiplayer.disconnect.authservers_down"),
+        ] {
+            let (mut client, accepted, _) = online_proxy(answer);
+            start_login(&mut client, "Steve");
+            answer_encryption(&mut client);
+            // The refusal is encrypted, as everything after the answer.
+            assert_eq!(reason(login_reply(&mut client))["translate"], key);
+            assert!(accepted.join().unwrap().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn a_wrong_challenge_is_an_error() {
+        let (mut client, accepted, asked) = online_proxy(Answer::Joined);
+        start_login(&mut client, "Steve");
+        let login::Clientbound::Hello(hello) = login_reply(&mut client) else {
+            panic!("expected the encryption request");
+        };
+        let public = horizon_protocol::rsa::RsaPublicKey::from_der(&hello.public_key).unwrap();
+        let key = login::Serverbound::Key(login::Key {
+            key: public.encrypt(&[9u8; 16]).unwrap(),
+            challenge: public.encrypt(b"nope").unwrap(),
+        });
+        client.send(&key.encode()).unwrap();
+        assert!(matches!(accepted.join().unwrap(), Err(Error::Protocol(_))));
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_session_service_answer_is_read_as_vanilla_reads_it() {
+        let body = r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch",
+            "properties":[{"name":"textures","value":"e30=","signature":"c2ln"},
+                          {"name":"plain","value":"v"}]}"#;
+        let joined = session::parse_joined(body, "notch").unwrap();
+        assert_eq!(joined.uuid, ACCOUNT_UUID);
+        assert_eq!(joined.name, "Notch");
+        assert_eq!(joined.properties.len(), 2);
+        assert_eq!(joined.properties[0].signature.as_deref(), Some("c2ln"));
+        assert_eq!(joined.properties[1].signature, None);
+        // No id, or no body at all: the player did not join.
+        assert!(session::parse_joined(r#"{"name":"Notch"}"#, "notch").is_none());
+        assert!(session::parse_joined("", "notch").is_none());
+        // A name missing from the answer falls back to the one asked.
+        let bare = session::parse_joined(r#"{"id":"069a79f4-44e9-4726-a5be-fca90e38aaf5"}"#, "x");
+        assert_eq!(bare.map(|j| j.name).as_deref(), Some("x"));
+    }
+
+    /// The real service, through the discovery document and TLS: nobody joined
+    /// with this hash, so it answers no rather than failing.
+    #[test]
+    #[ignore = "asks the session service on the internet"]
+    fn the_real_session_service_answers() {
+        use session::Sessions;
+        let answer = session::SessionService.has_joined("MeridianProbe", "-1a2b3c");
+        assert!(matches!(answer, Ok(None)), "{answer:?}");
+    }
+
+    #[test]
+    fn uuids_and_queries_are_written_as_the_services_expect() {
+        assert_eq!(
+            session::parse_uuid("069a79f4-44e9-4726-a5be-fca90e38aaf5"),
+            Some(ACCOUNT_UUID)
+        );
+        assert_eq!(session::parse_uuid("069a79f4"), None);
+        assert_eq!(session::url_encode("-1a2b_c d.*"), "-1a2b_c+d.*");
+        assert_eq!(session::url_encode("a&b=é"), "a%26b%3D%C3%A9");
+        let document = serde_json::json!({
+            "discovery": {"session": {"endpoints": {"verify": {"uri": "https://s/hasJoined"}}}}
+        });
+        assert_eq!(
+            session::verify_endpoint(&document).as_deref(),
+            Some("https://s/hasJoined")
+        );
+        assert_eq!(session::verify_endpoint(&serde_json::json!({})), None);
     }
 }
