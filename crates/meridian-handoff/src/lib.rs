@@ -26,8 +26,11 @@
 //!    default ([`Settings::carry_position`]): the player arrives where the target
 //!    put them, in the chunks it already sent. With it, the target moves the
 //!    player and streams the chunks around the new place over the next ticks. The
-//!    delta waits until the target has been quiet for [`Settings::settle`], so the
-//!    target view is the world after the import. Then, in one go under the
+//!    delta waits for the position the import sends, and with a carried position
+//!    for the chunk batches to stop for [`Settings::settle`], so the target view is
+//!    the world after the import. It never waits for the target to be quiet: a
+//!    busy server never is, and the player is frozen meanwhile. Then, in one go
+//!    under the
 //!    session's locks: the delta from the ghost to the target view goes to the
 //!    client, then the target's command tree, recipes, advancements and the
 //!    player's own synced data; the target becomes the active backend. Last, the

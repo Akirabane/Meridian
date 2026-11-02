@@ -124,10 +124,11 @@ pub struct Settings {
     pub expect_seconds: u64,
     /// How long the target has to configure the player and send their world.
     pub prepare_timeout: Duration,
-    /// The target's world is taken as sent once it sent nothing for this long
-    /// after a chunk batch: before the freeze, and again after the import.
+    /// The target's world is taken as sent once no chunk batch came for this
+    /// long: before the freeze, and after the import of a carried position.
     pub settle: Duration,
-    /// How long the target has, after the import, to settle.
+    /// How long the target has, after the import, to send the player's position
+    /// (and with a carried position, the chunks around it).
     pub import_timeout: Duration,
     /// How long the player may stay frozen before the switch is given up. Horizon
     /// lets a freeze go by itself after some seconds; the switch gives up before,
@@ -531,20 +532,37 @@ pub fn switch(
     } else {
         "hand over: the target took the record, all but the position"
     });
-    // The target sends what the import changed, and, when the player moved, the
-    // chunks around the new place on the next ticks: the delta waits until it has
-    // been quiet for a while. A carried position also comes with a position for
-    // the client to confirm.
+    // The import sends what it changed in one go, a position for the client to
+    // confirm among it, whatever the parts: the delta waits for that position. A
+    // carried position also moves the player, and the chunks around the new place
+    // come over the next ticks: then the delta waits for a chunk batch after the
+    // import, and for the batches to stop for the settle time.
+    //
+    // Only the position and the chunk batches count. A busy target never stops
+    // sending (mobs move, time passes), so waiting for it to be quiet would keep
+    // the player frozen until the import timeout and abort the switch.
     let carry = settings.carry_position;
     let settled = |s: &crate::prepare::Preparing| {
-        let quiet_since = s.last_packet.map_or(imported_at, |at| at.max(imported_at));
-        ((!carry || s.positions > positions) && quiet_since.elapsed() >= settle).then_some(())
+        if s.positions <= positions {
+            return None;
+        }
+        if !carry {
+            return Some(());
+        }
+        s.last_batch
+            .filter(|at| *at > imported_at && at.elapsed() >= settle)
+            .map(|_| ())
     };
     let late = Instant::now() + settings.import_timeout;
     let imported = if late < thaw {
         state.wait(
             late,
-            "the target did not settle after the import (no position, or chunks without end)",
+            if carry {
+                "the target did not send the player's position and the chunks around it \
+                 after the import"
+            } else {
+                "the target did not send the player's position after the import"
+            },
             settled,
         )
     } else {
