@@ -308,6 +308,7 @@ mod tests {
                 properties: Vec::new(),
             },
             auth: crate::client::AuthKind::Offline,
+            virtual_host: None,
             connection: proxy_client,
         };
         (
