@@ -212,3 +212,11 @@ fn bad_sidecar_settings_are_refused() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_switch_carries_the_position_only_when_asked() {
+    let config = Config::from_toml_str(&text("", "", "")).unwrap();
+    assert!(!config.switch_carry_position);
+    let config = Config::from_toml_str(&text("switch-carry-position = true", "", "")).unwrap();
+    assert!(config.switch_carry_position);
+}

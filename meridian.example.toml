@@ -54,6 +54,11 @@ backend-retry-seconds = 10
 # Milliseconds allowed for a backend's sidecar to answer (see sidecar below).
 sidecar-timeout-ms = 5000
 
+# Whether a switch to another server carries the player's position and look,
+# where their client stands at that moment. With false they arrive where that
+# server last had them, or at its spawn.
+switch-carry-position = false
+
 # The secret shared with the backends. They use it to check that a login really
 # comes from the proxy (Velocity modern forwarding), so it must be set, and set to
 # the same value on every backend. The value below is a placeholder: replace it
