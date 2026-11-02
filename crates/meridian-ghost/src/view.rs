@@ -77,6 +77,37 @@ impl View {
         (self.chunks.loaded.len(), self.entities.by_id.len())
     }
 
+    /// The player's own state in one line, for a log: the inventory (stacks
+    /// held and the state id), the held slot, experience, health, game mode and
+    /// effects, as the packets read so far give them.
+    pub fn player_summary(&self) -> String {
+        let p = &self.player;
+        let inventory = match &p.inventory {
+            Some(items) => format!(
+                "{} stacks (state {})",
+                items.iter().filter(|s| s.is_some()).count(),
+                p.inventory_state
+            ),
+            None => "none".to_owned(),
+        };
+        let or_none = |v: Option<String>| v.unwrap_or_else(|| "none".to_owned());
+        format!(
+            "inventory {inventory}, held slot {}, experience {}, health {}, game mode {}, \
+             {} effects",
+            or_none(p.held_slot.map(|s| s.to_string())),
+            or_none(
+                p.experience
+                    .map(|(_, level, total)| format!("level {level} total {total}"))
+            ),
+            or_none(
+                p.health
+                    .map(|(health, food, _)| format!("{health} food {food}"))
+            ),
+            or_none(p.game_mode.map(|m| m.to_string())),
+            p.effects.len(),
+        )
+    }
+
     /// Whether this view can be the target of a delta: it kept the packets of
     /// every chunk it holds.
     pub fn complete(&self) -> bool {
