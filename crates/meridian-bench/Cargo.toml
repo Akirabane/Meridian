@@ -18,7 +18,7 @@ ctrlc = "3.4"
 horizon-protocol.workspace = true
 meridian-testkit.workspace = true
 # The proxy process's CPU and memory, and the machine named in the report.
-sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 
 # The processor cycles of a process, which Windows counts exactly; see src/cpu.rs.
 [target.'cfg(windows)'.dependencies]

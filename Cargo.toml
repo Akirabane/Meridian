@@ -9,6 +9,7 @@ members = [
     "crates/meridian-proxy",
     "crates/meridian-rewrite",
     "crates/meridian-sidecar",
+    "crates/meridian-panel",
 ]
 
 [workspace.package]
