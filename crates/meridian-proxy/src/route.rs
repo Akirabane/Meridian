@@ -1,6 +1,7 @@
-//! Which backends a player who logs in may be sent to, in the order to try them.
-//! It is a pure function of the configuration and what the login told the proxy,
-//! so it is tested here without any connection.
+//! Which backends a player who logs in may be sent to, in the order to try them,
+//! and whether there is room for them. Both are pure functions of the
+//! configuration and what the login told the proxy, so they are tested here
+//! without any connection.
 use meridian_config::{AuthKind, Config};
 use std::fmt;
 
@@ -107,6 +108,34 @@ fn serves_other_kind(config: &Config, backend: &str, auth: AuthKind) -> bool {
             .groups
             .iter()
             .any(|g| g.auth != auth && g.backends.iter().any(|b| b == backend))
+}
+
+/// The proxy is full: the reason given to a player who is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Full;
+
+impl Full {
+    /// The text of the Disconnect packet. Vanilla's own key for it is
+    /// `multiplayer.disconnect.server_full`.
+    pub const MESSAGE: &'static str = "The server is full";
+}
+
+impl fmt::Display for Full {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(Full::MESSAGE)
+    }
+}
+
+impl std::error::Error for Full {}
+
+/// Whether one more player may come in when `online` players already are.
+/// `max_players` 0 means no limit.
+pub fn admit(max_players: u32, online: usize) -> Result<(), Full> {
+    if max_players == 0 || online < max_players as usize {
+        Ok(())
+    } else {
+        Err(Full)
+    }
 }
 
 #[cfg(test)]

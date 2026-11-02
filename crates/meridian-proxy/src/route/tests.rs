@@ -330,3 +330,26 @@ fn errors_read_well() {
         "\"nether\" is not a configured backend"
     );
 }
+
+// The player limit.
+
+#[test]
+fn zero_means_no_limit() {
+    assert_eq!(admit(0, 0), Ok(()));
+    assert_eq!(admit(0, 1_000_000), Ok(()));
+}
+
+#[test]
+fn players_are_admitted_until_the_limit() {
+    assert_eq!(admit(20, 0), Ok(()));
+    assert_eq!(admit(20, 19), Ok(()));
+    assert_eq!(admit(20, 20), Err(Full));
+    assert_eq!(admit(20, 21), Err(Full));
+    assert_eq!(admit(1, 0), Ok(()));
+    assert_eq!(admit(1, 1), Err(Full));
+}
+
+#[test]
+fn the_refusal_says_the_server_is_full() {
+    assert_eq!(Full.to_string(), "The server is full");
+}
