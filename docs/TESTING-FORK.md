@@ -13,11 +13,10 @@ this page follows the same steps and only says what differs.
 
 - The bench itself works today: three fork servers, a sidecar for each, the proxy and
   the panel.
-- **The switch command is still to come.** `switch <player> <server>` arrives with the
-  proxy's hand-over (the `meridian-handoff` crate is merged; wiring it into the proxy
-  and the console is the next pull request). Until then, the proxy's `send` and the
-  in-game `/server <name>` answer "transfer not available yet", and section E is what
-  to do once `switch` is there.
+- **Switching is built**: the console's `switch <player> <server>` (and `send`), and
+  the in-game `/server <name>`, `/hub` and `/lobby`. It has been tested against fake
+  servers only; this bench is where it meets real ones for the first time, which is
+  what section E is for.
 
 ## What it costs
 
@@ -96,15 +95,48 @@ You land on the lobby. Before switching, make the state easy to compare:
 - if you can, have a second client on the target server, to see whether you appear
   there and how.
 
-## E. Switch, and what to observe (once `switch` is merged)
+## E. Switch, and what to observe
 
-In the proxy's console in the panel:
+### From the proxy's console
+
+In the panel, open the **proxy**'s console and type:
 
 ```
 switch <your name> game1
 ```
 
-then back with `switch <your name> lobby`, and to `game2`.
+The console waits for the switch to end, then prints one line. When it worked:
+
+```
+<your name> moved from lobby to game1 in 412 ms (prepare 230 ms, freeze 61 ms, hand over 74 ms, commit 47 ms): 1890 packets, 1210344 bytes (441 chunks, 23 entities)
+```
+
+The numbers above are only an example. The first is the whole switch; then come its
+four steps (getting the target ready, freezing you on the source, handing your
+state over, and changing your client's world), and what was sent to your client.
+In the game, the chat says `You are now on game1.`
+
+When it did not work, the console prints the step that failed and why, for example:
+
+```
+<your name> could not move from lobby to game1: prepare: ...
+```
+
+and the chat says `Could not move you to game1.` followed by the same reason. You
+stay where you were.
+
+Then move back with `switch <your name> lobby`, and on to `game2`. The panel's
+**Send to game1 / game2 / lobby** buttons, under Tests, do the same with the player
+name you type next to them, and show the console's line.
+
+### From the game
+
+Type `/server game1` in the chat. The chat says `Moving you to game1...`, then
+`You are now on game1.`, or `Could not move you to game1.` with the step that
+failed. `/hub` or `/lobby` take you back to the lobby the same way. The proxy's
+console shows the same result line as above, in its log.
+
+### What to observe
 
 A switch is **seamless** when, on your screen:
 
@@ -119,9 +151,10 @@ A switch is **seamless** when, on your screen:
 
 For each switch, note in a few lines:
 
-1. the time, the command, from which server to which;
+1. the time, the command (console `switch`, or `/server` in game), from which server
+   to which;
 2. how long from pressing Enter to the game reacting normally (a guess in seconds is
-   fine, or a screen recording);
+   fine, or a screen recording), and the console's result line, with its times;
 3. for each line of the table above: seamless or not, and what you saw;
 4. the exact chat lines;
 5. anything else: a stutter, a sound cut, chunks loading in front of you, the hand or
