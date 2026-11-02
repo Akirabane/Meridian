@@ -463,6 +463,8 @@ about a minute (see [BUILD.md](BUILD.md)).
 | `meridian-handoff` | The player record, the control channel client, and the prepare, freeze, hand over and commit steps |
 | `meridian-ext` | The messages of the cooperative extension, shared with the Horizon client |
 | `meridian-sidecar` | A small process run next to each backend: it relays the proxy's player requests to the backend's local control endpoint over TLS |
+| `meridian-policy` | The retention profiles of section 13, their evaluation on a record, and the traits where extensions plug in |
+| `meridian-auth` | The login modes of section 15: the session check, the name lookup with its cache, and the marking of players as verified or unverified |
 | `meridian-proxy` | The binary: wires the others together, runs the sessions, logs and metrics |
 | `meridian-testkit` | A scripted fake backend and client, and a recorder of packet traces, for tests that need no real game |
 
@@ -471,44 +473,87 @@ is testable with no network and no game.
 
 ## 11. Milestones
 
-**J1: a transparent proxy.** A client connects to the proxy, the proxy logs in to
-one Horizon server and relays everything in both directions, including status
-pings and the player list. *Test:* a Horizon client and a vanilla client play for a
-few minutes through it with no difference from a direct connection, and the packet
-traces match.
+**J1: a transparent proxy.** A client connects to the proxy, the proxy logs in to one
+Horizon server with Horizon's forwarding and relays everything in both directions,
+including status pings and the player list. Named servers, a default server,
+compression, timeouts and a fixed login mode (`online`, or `offline` for tests) come
+with it. *Test:* a Horizon client and a vanilla client play for a few minutes
+through it with no difference from a direct connection, and the packet traces match.
 
-**J2: the ghost.** The proxy decodes the clientbound stream and keeps the ghost.
+**J2: the core of a proxy.** The functions marked J2 in section 14: routing with a
+fallback list and forced hosts, the command to change server (an ordinary, visible
+switch through Start Configuration), the console and its commands, reload,
+aggregated status, limits, and the hybrid login with groups of backends (section 15).
+*Test:* with several test servers, a player is routed by hostname and by login kind,
+changes server by command, and is sent to the fallback when their server stops.
+
+**J3: the ghost.** The proxy decodes the clientbound stream and keeps the ghost.
 *Test:* from a recorded session, the ghost at any point equals the state a client
 holds, checked against a client's own state at the end of the same recording. No
 change in what the player sees.
 
-**J3: the switch between two test servers.** Two backends with the same map,
-identical copies, and the switch triggered by a command. The proxy builds the
-target view and the delta, rewrites ids, and moves the player. *Test:* with the
+**J4: the switch between two test servers with different maps.** Two backends whose
+maps have nothing in common, a same-map pair as the cheapest case, and the switch
+triggered by a command. The proxy builds the target view and the delta, rewrites
+ids, replaces the chunks one by one, and moves the player. *Test:* with the
 scripted client of the test kit, after the switch the client's state equals the
 target backend's description, the old backend has no player, no packet from the old
 backend arrives after the commit, and a failed switch leaves the player where they
-were.
+were. Servers whose dimension type or registries differ are refused or sent through
+the visible path, as configured, and a different hashed seed is allowed. The run
+records bytes and time for the switch, so the estimates of section 8.1 are replaced
+by measures.
 
-**J4: the proof, with no loading screen.** Two Horizon servers, a Horizon client
-and the cooperative extension. *Test:* a recorded run of a switch in which no
-Login, Respawn or configuration packet reaches the client, the client stays in
-Play, and the screen capture shows no loading screen or black frame at the switch.
-Then the same run with a vanilla client, with the artifacts of section 9 listed.
+**J5: the proof, with no loading screen.** Two Horizon servers with different maps,
+a Horizon client and the cooperative extension. *Test:* a recorded run of a switch
+in which no Login, Respawn or configuration packet reaches the client, the client
+stays in Play, and the screen capture shows no loading screen or black frame at the
+switch; the biome borders after the switch are looked at, for section 8.2. Then the
+same run with a vanilla client, with the artifacts of section 9 listed.
 
-J4 is the only step that needs two servers and a client running together. Its cost
-is planned before it is run. J1 to J3 need one or two servers, or none with the
-test kit.
+**J6: what is kept.** Profiles of section 13 in the configuration, applied at every
+switch, with the modes `carry`, `target` and `reset` for each block. *Test:* a
+player with a full inventory, effects and experience goes through a route that
+carries some blocks, resets others and takes the rest from the target, and each
+ends up as the profile says.
+
+**J7: extensions.** Named opaque blocks, messages between servers, the extension
+trait on the proxy, bans and richer permissions, and metrics.
+
+J4 and J5 depend on the Horizon features of section 16 (export, import and the held
+player). Until they exist, J4 is developed and tested against the scripted backends
+of the test kit, which answer the same requests as the sidecar would. J5 is the
+only step that needs two servers and a client running together, and its cost is
+planned before it is run. J1 to J4 need one or two servers, or none with the test
+kit.
 
 ## 12. Decisions that are not ours alone
 
-- **Changes in Horizon's game**: player export and import, and a held state for a
-  joining player, about eleven to sixteen days of work in all. The login that
-  trusts the proxy exists already (forwarding, section 3). The new work is needed,
-  and it belongs to the Horizon project, so it must be agreed first. The switch
-  itself, with no new connection and no Login, is the part nothing in Horizon
-  provides today. The save gaps of section 6 can be fixed
-  first and on their own.
+- **Changes in Horizon's game**: player export and import (with a partial import),
+  a held state for a joining player, and hook points for named blocks, about eleven
+  to sixteen days of work in all. The login that trusts the proxy exists already
+  (forwarding, section 3). The new work is needed, and it belongs to the Horizon
+  project, so it must be agreed there first (section 16). The save gaps of section 6
+  can be fixed first and on their own. The switch itself, with no new connection and
+  no Login, is the part nothing in Horizon provides today.
+- **A change in the Horizon client** for the cooperative extension, with the same
+  caveat.
+- **What to do when a switch is impossible**: refuse it (*stay*), fall back to a
+  visible transfer (*visible*), or send the player to a server listed as the
+  fallback. The configuration allows each, per route, and a default has to be chosen
+  (section 8.2).
+- **Which client-visible differences are tolerated**: the recommendation is to
+  require equal registries, dimension type and key, signed-chat setting, and to allow
+  a different hashed seed. Hardcore, sea level and the flat flag are open.
+- **What is kept by default** (section 13): the proposal is to carry inventory,
+  ender chest, experience, health, food and effects, and to take game mode,
+  position, advancements and statistics from the target. Whether unknown named
+  blocks are kept or dropped by default is open.
+- **The form of the proxy's extension point**: a Rust trait first (recommended),
+  a local socket for other languages later, no dynamic libraries.
+- **Which login modes ship**: `online` is the default. Whether the `offline` and
+  `hybrid` modes are included at all, and with what wording in the documentation, is
+  the operator-facing choice of section 15.
 - **Where the requests are served**: the sidecar of section 6 keeps Horizon free of
   a remote surface; the alternative is to let the supervisor's HTTP interface
   listen on a configured address, which is more work in Horizon.
@@ -517,13 +562,8 @@ test kit.
   that file.
 - **A disconnect during a switch**: the record then exists only in the proxy, and
   must be imported into the target as a normal save or written back to the source.
-- **A change in the Horizon client** for the cooperative extension, with the same
-  caveat.
-- **The common map**: the recommendation is A first and then C. Whether C is built
-  as part of Meridian or as a feature of the Horizon server is open.
-- **What to do when a switch is impossible**: refuse it, fall back to a visible
-  transfer, or keep the player where they are. The configuration should allow each,
-  and a default has to be chosen.
+- **A shared map** is now an optimisation, and whether C (replication of changes) is
+  built at all, and where, is open.
 - **Players seeing each other across servers**: out of scope here, but it changes
   how the target view is built if it comes later.
 - **Pinning the protocol crate**: Horizon has no stable protocol crate release, so
@@ -848,3 +888,27 @@ for them.
 
 Milestones: a fixed mode (`online`, or `offline` for tests) comes with the relay in
 J1; the hybrid mode and the groups come in J2.
+
+## 16. Work proposed to Horizon
+
+Several things in this design would have to exist in Horizon's own code. Each is
+listed here as a proposal, as a unit that could become an issue of its own. None
+has been opened, and none has been accepted by the Horizon project. If one is taken
+up, it follows that project's way of working (an issue, a claim through its
+maintainers, and its own pull request conventions), not the rules of this
+repository.
+
+| # | Proposal | Stands on its own |
+| --- | --- | --- |
+| 1 | Save the values the player file loses today: velocity, food exhaustion and tick timer, freezing ticks, previous game mode, and put the cursor stack back in the inventory when a player leaves. A player who logs out and in loses them already | Yes |
+| 2 | Export one connected player on demand: close the menu, freeze them, answer with the record of section 6 | Needs 1 |
+| 3 | A held player: connected and receiving the world, but not simulated, shown, announced or hurt, entered by an "expect this player" request | Yes, but large |
+| 4 | Import a record into a held player, partial records included, and release it | Needs 2 and 3 |
+| 5 | Release and drop requests: remove a player after a switch without saving or announcing, abort a switch, drop a held player | Needs 3 |
+| 6 | Hook points for mods at export and at import, to add and to read named blocks | Needs 2 and 4 |
+| 7 | A note, and a test if possible, on forwarding with profile properties (the skin), which the forwarding document says were not observed against a real proxy | Yes |
+
+The sidecar, the policy engine, the ghost and the proxy are Meridian's own and need
+nothing from Horizon beyond these. The compatibility of two servers is learned by a
+probe connection that reads their configuration and Login, so no request is needed
+for it.
