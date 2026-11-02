@@ -12,6 +12,9 @@ names a file and line in the `horizon-rust/horizon` repository at commit
 that could not be checked that way is marked *not verified*. Line numbers move
 with every commit; the names of the functions are the stable part.
 
+Section 2.6 and what depends on it (5, 6.2, 6.4, 7) were brought up to date with
+commit `02c8607ee`: Horizon gained Velocity forwarding after `c3905131b`.
+
 Paths are relative to `crates/horizon-client/src/` in the Horizon repository.
 A path that starts with `horizon-server/` or `horizon-protocol/` is relative to
 `crates/`.
@@ -127,11 +130,27 @@ with `commands.data.entity.invalid` (javap). There is no import.
 
 In online mode the server authenticates the player with the session service;
 in offline mode it derives the UUID from the name (`lan/conn.rs:717-734`).
-There is no mode in which the server trusts an identity given by a proxy: no
-forwarding of the real UUID and profile properties, and nothing in `NetConfig`
-for it (`lan/mod.rs:147-189`). A server behind a proxy in offline mode would
-give each player an offline UUID instead of their account's and lose their
-skin.
+
+At `c3905131b` that was all. Since #4963 (commit `5b2537191`, on `main` after
+`c3905131b`), a dedicated server can also trust a proxy, with Velocity's
+"modern" player information forwarding, version 1. The paths and lines below are
+those of commit `02c8607ee`.
+
+- The server turns it on when a file `forwarding.secret` sits in its folder and
+  `online-mode` is off (`game/dedicated.rs:233-258`, read at `:914`, kept in
+  `NetConfig::forwarding_secret`, `lan/mod.rs:182`).
+- At login it sends the proxy a login plugin request on `velocity:player_info`
+  (`forward`, `lan/conn.rs:825`). The answer is an HMAC-SHA256 signature made
+  with the shared secret, then the player's real address, UUID, name and profile
+  properties (`lan/forwarding.rs:17-37`, and Horizon's `docs/velocity-forwarding.md`).
+- The server takes that profile instead of the one it would derive
+  (`lan/conn.rs:738-771`). A login without a valid answer is refused with
+  "This server is behind a proxy: join through the proxy." (`:772`).
+
+So the identity part of section 6.4 already exists. Horizon's own notes say the
+encoding of non-empty properties (the skin) was never checked against a real
+proxy (`docs/velocity-forwarding.md`, "Not observed"); Meridian would be the first
+to send them.
 
 ## 3. Field by field
 
@@ -250,7 +269,7 @@ For Meridian this has three consequences:
    see that is a product choice, but the server should let the proxy choose.
 5. **A channel the proxy can reach.** Both control channels listen on
    `127.0.0.1` only (section 2.4).
-6. **A login that trusts the proxy** (section 2.6).
+6. ~~A login that trusts the proxy.~~ It exists since `5b2537191` (section 2.6).
 7. **The save gaps of section 3**: velocity, food exhaustion and tick timer,
    freezing ticks, previous game mode, and the cursor stack.
 
@@ -284,7 +303,7 @@ Each is one line; each answer is one JSON line, `{"ok": true, ...}` or
 
 | Request | On | Does |
 | --- | --- | --- |
-| `player-expect <uuid> <ticket>` | target | The next login of `<uuid>` carrying `<ticket>` (section 6.4) joins as a held player. The ticket expires after a few seconds |
+| `player-expect <uuid>` | target | The next login of `<uuid>` joins as a held player. The expectation lapses after a few seconds. No ticket is needed: only the proxy can log a player in, through forwarding (section 6.4) |
 | `player-export <uuid>` | source | Closes the player's menu as vanilla does (cursor stack and crafting grid back into the inventory), stops simulating them, and answers with the record (6.3). The player stays connected and frozen |
 | `player-import <uuid> <record>` | target | Checks the record's version and data version, applies it to the held player (body included), sends that player the resulting changes, then unholds them: simulated, shown, announced |
 | `player-release <uuid> moved` | source | Removes the frozen player without saving their file and, by default, without a "left the game" message. The proxy closes that backend connection |
@@ -343,15 +362,19 @@ the example are placeholders.
 
 ### 6.4 Login from the proxy
 
-A setting such as `meridian-secret` in `server.properties`. When it is set, the
-server refuses a login that does not carry a statement signed with it. The
-statement holds the name, the UUID, the profile properties (the skin), the
-address of the real client and, for a switch, the ticket of `player-expect`.
-The login phase already has the packets for an exchange like this
-(`CUSTOM_QUERY` and its answer, `horizon-protocol/src/ids.rs:34`, `:49`), and
-the place to check it is where online and offline mode pick the profile today
-(`lan/conn.rs:717-734`). Online mode is off on such a server: the proxy has
-already authenticated the player.
+Nothing new in Horizon: the backends use the Velocity forwarding they already
+have (section 2.6). Each backend gets the proxy's secret in `forwarding.secret`
+and runs with `online-mode=false`; the proxy has already authenticated the
+player. Meridian's side is to answer the `velocity:player_info` request when it
+logs a player in to a backend, with version 1 of the data, signed with the same
+secret.
+
+A switch needs no extra proof in the login. The target only has to know that the
+next login of this UUID is a switch, which `player-expect <uuid>` tells it on the
+control channel (section 6.2); the earlier draft's ticket is no longer needed.
+
+What is left to check is the skin: the first Meridian login that forwards
+non-empty properties is also the first test of that encoding against Horizon.
 
 ### 6.5 A stopgap that needs no Horizon change
 
@@ -372,9 +395,11 @@ For someone who already knows the code, with tests:
 | Held player: the state in the hub (not announced, not tracked by the others, not simulated, not hurt) and `player-expect` | 4 to 6 |
 | `player-import` into the held player, including the body, then unhold | 2 to 3 |
 | `player-release` and `player-drop` | 1 |
-| Signed login from the proxy | 2 to 3 |
 | Two-server test of the whole exchange | 2 to 3 |
-| **Total** | **13 to 19** |
+| **Total** | **11 to 16** |
+
+The signed login from the proxy, 2 to 3 days in the first version of this
+estimate, is gone: Horizon has it (section 2.6).
 
 The held player is the largest and the riskiest piece: it has to be skipped by
 every place that iterates over the guests to show, track, tick or hurt them, and
