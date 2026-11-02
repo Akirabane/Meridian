@@ -308,6 +308,8 @@ version = "0.1.0"
 dependencies = [
  "horizon-protocol",
  "meridian-config",
+ "meridian-testkit",
+ "sha2",
 ]
 
 [[package]]
@@ -325,6 +327,7 @@ name = "meridian-testkit"
 version = "0.1.0"
 dependencies = [
  "horizon-protocol",
+ "sha2",
 ]
 
 [[package]]

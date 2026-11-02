@@ -10,6 +10,11 @@ repository.workspace = true
 [dependencies]
 horizon-protocol.workspace = true
 meridian-config.workspace = true
+# HMAC-SHA256 for the player information forwarding's signature.
+sha2 = "0.10"
+
+[dev-dependencies]
+meridian-testkit.workspace = true
 
 [lints]
 workspace = true
