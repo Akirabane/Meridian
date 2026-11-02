@@ -17,15 +17,22 @@ In scope:
 
 - A proxy that sits between players and any number of Horizon servers, speaks the
   Minecraft Java protocol on both sides, and is the only thing a player connects to.
-- A seamless switch of a player between two backends that run the same map.
-- A way for backends to hand a player's state to each other.
+- A seamless switch of a player between two backends, whether they run the same
+  map or two different ones.
+- A way for backends to hand a player's state to each other, with a policy that
+  says which parts of it are kept (section 13).
+- The ordinary functions of a proxy such as Velocity or BungeeCord: a list of
+  named servers, routing, a command to change server, forwarding, status and the
+  rest (section 14). The seamless switch is what Meridian adds to them.
 
 Out of scope for now:
 
 - The lobby. It will be a small spawn world served by an ordinary Horizon
   server, and the proxy treats it like any other backend.
-- Switching between backends that run different maps, different versions or
-  different dimensions. Those can fall back to an ordinary, visible transfer.
+- Switching between backends whose client-visible settings cannot change without
+  a loading screen (section 8.2), or between versions of the game. A client speaks
+  one protocol version, and the settings can fall back to an ordinary, visible
+  transfer or be refused.
 - Anything that is not Horizon. The proxy relies on the protocol of the Horizon
   version it is built against and on a few features that only Horizon servers and
   clients will have.
@@ -65,7 +72,8 @@ description. It reads it into a second model, the *target view*, then compares
 the two and sends the client the packets that turn the ghost into the target
 view. If both servers run the same map, the comparison finds almost everything
 equal, and the delta is small: some entities removed, some added, a few slots,
-perhaps a different time of day. That delta is the entire visible event.
+perhaps a different time of day. If the maps differ, the delta replaces the view
+(section 8). Either way the delta is the entire visible event.
 
 ## 3. Connections
 
@@ -265,43 +273,127 @@ anything that is numbered per connection or per server has to be translated.
 - **Plugin channels and cookies.** Passed through. Cookies are stored by the
   client; the proxy does not interpret them.
 
-## 8. The common map
+## 8. Different maps, and the common map
 
-The invisible switch depends on both servers describing the same world. There are
-four ways to arrange that.
+The switch does not need the two servers to share a map. A player can go from a
+lobby to a game server whose world has nothing in common with it, and Meridian
+still sends no Login, no Respawn and no configuration packet. What changes is the
+size of the delta: with the same map it is small, with a different map it is the
+whole view. A shared map becomes an optimisation, described at the end of this
+section.
+
+### 8.1 When the maps differ
+
+The target view holds the target server's chunks, entities, spawn, time, weather,
+border and difficulty, and the delta turns the ghost into it.
+
+- **Chunks are replaced one by one, not cleared and refilled.** The proxy sends a
+  new chunk and forgets the old chunk at the same position in the same bundle,
+  nearest to the player first, so there is never a hole next to the player. Old
+  chunks that have no replacement (the target's view is smaller) are forgotten
+  last. A chunk's light travels with it.
+- **The player's position is sent after the chunks around it.** The first bundle
+  carries the chunk under the player and its neighbours, then the position. Whether
+  a vanilla client waits for an unloaded chunk before it applies gravity was not
+  verified, so the order is what keeps the player from falling through a world that
+  has not arrived yet.
+- **Entities are all removed and the target's are added.** The scoreboard, tab list
+  and boss bars are replaced as in section 4.
+- **The world values** (spawn, time, weather, border, difficulty, tick rate) are
+  sent as the target has them.
+
+What the player sees: no loading screen, no black frame, no Respawn. The world does
+change, since it is another world. Terrain appears from the nearest chunks outward
+over a short time, instead of behind a screen. That is the best a connection that
+never leaves the Play state can do, and the document does not claim more.
+
+**Cost.** A switch sends up to `(2r + 1)^2` chunks for a view distance `r`: 289 for
+8, 625 for 12. A chunk packet after compression is somewhere between ten and a few
+tens of kilobytes depending on the terrain, so a switch is in the order of a few to
+a few tens of megabytes. This is an estimate, to be measured in J4 with two real
+maps, not a figure to design on. The time is set by how fast the client takes
+chunks, which it reports with its chunk batch feedback (section 7): at a few to a
+few tens of chunks per tick the view completes in about one to five seconds. While
+a switch is in progress the proxy holds the ghost and the target view, so its
+memory use for that player doubles. Two settings can bring the cost down: a smaller
+arrival radius that grows back after the switch (the client's radius can be changed
+with a packet), and a limit on how many switches one player can make in a given
+time.
+
+### 8.2 What cannot change without a loading screen
+
+Some values are set by the Login or the Respawn packet and no other packet can
+change them, and the configuration phase is out of reach as well (section 3). A
+server whose values differ from what the client already holds cannot receive this
+player without a visible switch. For each, what goes wrong if it is ignored:
+
+| Value | Set by | If the target differs |
+| --- | --- | --- |
+| Registries, tags, enabled features, resource packs | Configuration | The client misreads ids. Not tolerable |
+| Dimension type (height, lowest block, light) | Login or Respawn | Chunk packets are cut into the wrong number of sections and fail. Not tolerable |
+| Dimension key and sea level | Login or Respawn | Dimension-specific behaviour (compass, clock, portals, sky) follows the old value. Treated as part of the dimension: must be equal |
+| Hardcore | Login | The client draws the wrong hearts and the wrong death screen. Cosmetic but wrong |
+| Signed chat enforced | Login | Chat is rejected or the player is kicked. Not tolerable unless the proxy handles chat |
+| Flat and debug flags | Login or Respawn | The horizon and void fog follow the old value. Cosmetic |
+| Hashed seed | Login or Respawn | See below. Cosmetic and small |
+| Maximum players | Login | Only a number in the client. Harmless |
+
+The hashed seed deserves a closer look, because it is the one most likely to
+differ between two different maps. The client keeps it as the zoom seed of its
+biome manager, built once with the level, and uses it to jitter the position when it
+picks the nearest biome cell for a block. The biomes themselves come from the
+server inside each chunk, so they are right. Only the exact shape of the borders
+between biomes is off, which shows as slightly different edges where the grass,
+foliage and water tints blend, and in the biome used for ambient sound and
+particles at a border. This is read from the structure of the client's classes and
+has not been seen on screen; J4 checks it. The recommendation is to allow it by
+default.
+
+The dimension also constrains the arrival point. The client is in one dimension,
+so the player must arrive in the same one, whatever the policy of section 13 says
+about position.
+
+**When the servers are incompatible**, the route decides, and the choice among
+these is still open (section 12):
+
+- *stay*: refuse the switch and tell the player;
+- *visible*: do the ordinary switch, which sends Start Configuration, runs the
+  target's configuration phase, and then its Login, with the loading screen that
+  goes with it;
+- *fallback*: send the player to a server listed as the fallback instead.
+
+Each value above has its own setting: `require` (must be equal), `warn` (switch
+and log) or `ignore`. The recommended defaults are `require` for everything that is
+not tolerable or cosmetic-but-wrong, and `ignore` for the hashed seed.
+
+### 8.3 Sharing a map as an optimisation
+
+When two servers do serve the same world, equal chunks are recognised by their
+hash and not sent, and a switch costs almost nothing. There are four ways to
+arrange a shared map.
 
 **A. Identical read-only copies.** Each backend loads its own copy of the same
-world files, and nothing writes to them. Easiest, no coordination. Nothing built
-or broken on one server shows on the other, and what players do is lost at
-shutdown. It is enough to prove the switch.
+world files, and nothing writes to them. No coordination. Nothing built or broken
+on one server shows on the other.
 
 **B. A shared directory.** Backends open the same world files. Two writers on one
-region file corrupt it, and even one writer plus readers would see stale data. Not
-acceptable.
+region file corrupt it. Not acceptable.
 
 **C. Replication of changes.** Each backend has its own copy, and changes to blocks
 and block entities are sent to the other backends over the control channel as small
-events, applied there, and ordered by the proxy or a log. Each server stays
-consistent with the others within a short delay, there is no shared file, and each
-backend can be restarted. It is the realistic way to a live shared map. Its cost is
-writing the event stream and handling conflicts.
+events and applied there. Consistent within a short delay, no shared file.
 
-**D. One owner per area.** A server is the only writer of its part of the map, and
-the others follow it. Players cross a boundary instead of choosing a server. This
-is a different product, closer to a sharded world than to a proxy.
+**D. One owner per area.** A server is the only writer of its part of the map and
+the others follow it. A different product, closer to a sharded world.
 
-**Recommendation.** Use A for the first prototype and the first three milestones,
-since they test the switch and not the map. Plan C as the next step, after the
-switch is proven. Do not use B. Leave D aside.
+None of these is needed for the switch to work. A is the simplest way to test the
+cheapest case, two different maps are the case that tests the whole mechanism, and
+C stays an option for a lobby and games that really share a world. B is excluded
+and D left aside. The checks of section 8.2 apply whether or not the maps are
+shared.
 
-The seed, the dimension keys and the registries must be the same on every backend.
-The proxy checks the seed and the dimension at prepare time, next to the
-configuration digest.
-
-Under A, players on different backends do not see each other. For a lobby and two
-game servers that is acceptable, since a game server only needs to show its own
-players. Showing players across servers would mean the proxy copying entities
-between target views, and is left for later.
+Players on different backends do not see each other. Showing them across servers
+would mean the proxy copying entities between target views, and is left for later.
 
 ## 9. Two modes
 
@@ -344,6 +436,9 @@ reach, and it is best effort. Artifacts that can show:
   continues locally but the world does not react.
 - A visible position correction if the two servers disagree about where the player
   stands, which the held import is meant to prevent.
+- With different maps, terrain that fills in from the nearest chunks outward over a
+  second or more, and slightly different biome borders if the hashed seed differs
+  (section 8).
 - Local block predictions made just before the switch may flicker when the new
   server does not confirm them.
 - Sounds and particles from the old server finish playing.
