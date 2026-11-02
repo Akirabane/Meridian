@@ -284,13 +284,12 @@ mod tests {
         assert!(recorder.trace().count(Dir::ToClient) >= 2);
     }
 
-    /// A server that is not there is reported, not waited for.
+    /// A server that is not there is reported, not waited for. Port 0 is one
+    /// nothing can listen on, so no other test can take it in the meantime, as it
+    /// could a port freed for the occasion; the system refuses it at once.
     #[test]
     fn a_closed_port_is_an_error() {
-        let port = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
+        let port = 0;
         let end = session(
             &Options {
                 host: "127.0.0.1".into(),
@@ -300,6 +299,9 @@ mod tests {
             },
             &Recorder::new(),
         );
-        assert!(matches!(end, End::Error(_)), "{end:?}");
+        assert!(
+            matches!(&end, End::Error(why) if why.starts_with("cannot connect")),
+            "{end:?}"
+        );
     }
 }
