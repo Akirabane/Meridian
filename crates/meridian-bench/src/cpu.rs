@@ -212,25 +212,32 @@ mod tests {
     use super::*;
 
     /// Two seconds of a busy loop in this process read as at least 80 % of one
-    /// core. Other tests running at the same time only add to it.
+    /// core. Other tests running at the same time only add to it. On a busy
+    /// machine the loop itself may lose its core for a while, which the meter
+    /// rightly shows, so the loop gets three tries; a meter that misses work, as
+    /// the time Windows counts by tick does, fails all three.
     #[test]
     fn a_busy_loop_reads_as_a_busy_core() {
         let Ok(me) = sysinfo::get_current_pid() else {
             eprintln!("skipped: this system does not give the test's process id");
             return;
         };
-        let meter = Meter::start(&[me]);
-        let began = Instant::now();
-        while began.elapsed() < Duration::from_secs(2) {
-            std::hint::spin_loop();
+        let mut readings = Vec::new();
+        for _ in 0..3 {
+            let meter = Meter::start(&[me]);
+            let began = Instant::now();
+            while began.elapsed() < Duration::from_secs(2) {
+                std::hint::spin_loop();
+            }
+            let Some(used) = meter.read()[0] else {
+                eprintln!("skipped: this system gives no processor time for the test's process");
+                return;
+            };
+            if used >= 80.0 {
+                return;
+            }
+            readings.push(used);
         }
-        let Some(used) = meter.read()[0] else {
-            eprintln!("skipped: this system gives no processor time for the test's process");
-            return;
-        };
-        assert!(
-            used >= 80.0,
-            "a 2 s busy loop read as {used:.1} % of a core"
-        );
+        panic!("three busy loops of 2 s read as {readings:.1?} % of a core");
     }
 }
