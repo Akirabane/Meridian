@@ -26,7 +26,17 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     while !proxy.stopping() {
         match listener.accept() {
-            Ok((stream, peer)) => start_player(stream, peer, proxy, &active),
+            Ok((stream, peer)) => {
+                let per_minute = proxy.config().connections_per_minute;
+                if proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
+                    start_player(stream, peer, proxy, &active);
+                } else {
+                    // Closed before a byte is read: the cheapest answer, and a
+                    // client in a loop learns nothing more from a reason.
+                    debug!("{peer}: over {per_minute} connections this minute; closed");
+                    drop(stream);
+                }
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
@@ -122,13 +132,17 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     fn proxy() -> Arc<Proxy> {
+        proxy_with(Config::default())
+    }
+
+    fn proxy_with(config: Config) -> Arc<Proxy> {
         let config = Config {
             backends: vec![Backend {
                 name: "lobby".into(),
                 address: "127.0.0.1:25566".into(),
             }],
             default_backend: "lobby".into(),
-            ..Config::default()
+            ..config
         };
         Arc::new(Proxy::new(
             config,
@@ -157,6 +171,55 @@ mod tests {
         let mut rest = Vec::new();
         assert_eq!(player.read_to_end(&mut rest).unwrap(), 0);
 
+        proxy.stop();
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn connections_over_the_limit_are_closed_at_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = proxy_with(Config {
+            connections_per_minute: 1,
+            ..Config::default()
+        });
+        let server = {
+            let proxy = Arc::clone(&proxy);
+            thread::spawn(move || serve(listener, &proxy))
+        };
+
+        // The first connection is kept open: the proxy waits for its handshake.
+        let first = TcpStream::connect(address).unwrap();
+        first
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        let waiting = (&first).read(&mut byte).unwrap_err();
+        assert!(
+            matches!(
+                waiting.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "{waiting}"
+        );
+
+        // The second, from the same address in the same minute, is closed without
+        // the proxy waiting for anything.
+        let mut second = TcpStream::connect(address).unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut rest = Vec::new();
+        let closed = second.read_to_end(&mut rest);
+        assert!(
+            matches!(closed, Ok(0))
+                || closed
+                    .as_ref()
+                    .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
+            "{closed:?}"
+        );
+
+        drop(first);
         proxy.stop();
         server.join().unwrap().unwrap();
     }

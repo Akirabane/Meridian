@@ -8,6 +8,7 @@ mod route;
 mod serve;
 mod session;
 mod state;
+mod throttle;
 
 use args::Command;
 use log::{error, info, warning};

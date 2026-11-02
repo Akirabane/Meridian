@@ -2,6 +2,7 @@
 //! configuration, which the console can reload, the sessions being relayed, the
 //! stop flag, and how backends are reached.
 use crate::session::{Connect, Sessions};
+use crate::throttle::Throttle;
 use meridian_config::Config;
 use meridian_net::backend;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -23,6 +24,8 @@ pub struct Proxy {
     stop: Arc<AtomicBool>,
     pub connect: Arc<Connect>,
     pub probe: Arc<Probe>,
+    /// The connections each address opened this minute.
+    pub throttle: Throttle,
 }
 
 impl Proxy {
@@ -36,6 +39,7 @@ impl Proxy {
             stop,
             connect: Arc::new(backend::connect),
             probe: Arc::new(tcp_probe),
+            throttle: Throttle::default(),
         }
     }
 
