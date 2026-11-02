@@ -93,6 +93,30 @@ fn log_text(supervisor: &Supervisor, name: &str) -> String {
         .join("\n")
 }
 
+/// An answer that comes late, like the proxy's `servers`, is given back whole to
+/// its own command, and the next command gets only its own lines.
+#[test]
+fn a_slow_answer_stays_with_its_command() {
+    let dir = scratch("slow");
+    let (bench, _) = bench(&dir, &[], &[]);
+    let supervisor = Supervisor::new(&bench);
+    supervisor.start("proxy").unwrap();
+    wait_for("online", || state_of(&supervisor, "proxy") == State::Online);
+    let slow = supervisor
+        .ask("proxy", "slow", Duration::from_secs(8))
+        .unwrap();
+    assert_eq!(slow, ["slow: first part", "slow: second part"]);
+    let next = supervisor
+        .ask("proxy", "hello", Duration::from_secs(8))
+        .unwrap();
+    assert_eq!(next, ["got: hello"]);
+    // A command that prints nothing returns after a short wait, not the longest.
+    let started = Instant::now();
+    supervisor.send("proxy", "crash").ok();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn a_process_starts_answers_its_console_and_stops_with_its_command() {
     let dir = scratch("one");
