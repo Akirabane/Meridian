@@ -58,3 +58,33 @@ Several people building Meridian at once can point `CARGO_TARGET_DIR` at one
 folder. Cargo locks the folder while it builds, so builds queue instead of
 multiplying the work and the disk use. Prefer `cargo check` when a full build is
 not needed.
+
+## Releases
+
+A release is made by pushing a tag `vX.Y.Z` whose version is the workspace's
+(`version` in the root `Cargo.toml`). The `Release` workflow then:
+
+1. builds `meridian` in the release profile for `x86_64-unknown-linux-gnu` and
+   `x86_64-pc-windows-msvc`, runs the tests, and packs each binary with the README,
+   the licence and the example configuration (`.tar.gz` for Linux, `.zip` for
+   Windows);
+2. unpacks each archive on a clean runner, runs `meridian --check
+   meridian.example.toml`, and checks that `meridian --version` matches the tag;
+3. writes `SHA256SUMS`, records a build provenance attestation for the archives and
+   the checksums, and attaches them to a draft release, which is published by hand.
+
+To check a download:
+
+```
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify meridian-v0.1.0-linux-x86_64.tar.gz -R Akirabane/Meridian
+```
+
+The attestation says that the file was built by this repository's workflow from the
+tagged commit. It is signed with a short-lived certificate from GitHub's own
+signing service, so the repository holds no key. It does not say that the code is
+safe, only where the file comes from.
+
+The Linux binary is linked against the GNU C library of the runner that built it, so
+it needs a distribution at least as recent as the one GitHub's `ubuntu-latest`
+runner uses.
