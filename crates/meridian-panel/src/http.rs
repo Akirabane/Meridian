@@ -18,8 +18,9 @@ const PAGE: &str = include_str!("page.html");
 const SCRIPT: &str = include_str!("page.js");
 /// The largest request body the API reads.
 const MAX_BODY: usize = 16 * 1024;
-/// How long a console command's answer is waited for.
-const ANSWER_WAIT: Duration = Duration::from_millis(1000);
+/// The longest a console command's answer is waited for; it is usually back once
+/// its output has been quiet for a moment.
+const ANSWER_WAIT: Duration = Duration::from_secs(8);
 
 /// The panel's server: the bench, this run's token and the port.
 pub struct Panel {

@@ -19,6 +19,13 @@ use std::time::{Duration, Instant};
 pub const LOG_LINES: usize = 2000;
 /// Samples of CPU and memory kept per process: five minutes at one every two seconds.
 pub const HISTORY: usize = 150;
+/// How long an answer's output must be quiet before it is taken as complete.
+pub const QUIET: Duration = Duration::from_millis(700);
+/// How long a command that prints nothing is waited for: longer than the proxy's
+/// default connect timeout, which its `servers` may wait for before it prints.
+pub const SILENT: Duration = Duration::from_secs(6);
+/// How often an answer's output is looked at.
+const POLL_ANSWER: Duration = Duration::from_millis(100);
 /// How often the state, the ports and the measures are looked at.
 const TICK: Duration = Duration::from_millis(500);
 /// Measures are taken every this many ticks.
@@ -386,13 +393,36 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Writes `line` to the console of `name` and returns the lines it printed
-    /// within `wait`.
+    /// Writes `line` to the console of `name` and returns the lines it printed:
+    /// until its output has been quiet for [`QUIET`] after a line, or for
+    /// [`SILENT`] when nothing came, and for `wait` at most. A command that takes
+    /// a while to answer, such as the proxy's `servers`, which waits for each
+    /// server, still has its lines given back to it rather than to the next one.
     pub fn ask(&self, name: &str, line: &str, wait: Duration) -> Result<Vec<String>, String> {
         let process = self.process(name)?;
         let from = process.log().next;
         self.send(name, line)?;
-        thread::sleep(wait);
+        let started = Instant::now();
+        // The echo of the line is the first new line; an answer comes after it.
+        let echoed = from + 1;
+        let mut seen = process.log().next;
+        let mut changed = started;
+        loop {
+            thread::sleep(POLL_ANSWER);
+            let next = process.log().next;
+            if next != seen {
+                seen = next;
+                changed = Instant::now();
+            }
+            let done = if seen > echoed {
+                changed.elapsed() >= QUIET
+            } else {
+                started.elapsed() >= SILENT
+            };
+            if done || started.elapsed() >= wait {
+                break;
+            }
+        }
         Ok(process
             .log()
             .lines
