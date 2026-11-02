@@ -32,9 +32,17 @@ fn free_port() -> u16 {
 fn bench(dir: &Path, servers: &[&str], extra_args: &[&str]) -> (Bench, Vec<u16>) {
     let mut text = format!("panel-port = {}\n", free_port());
     let mut ports = Vec::new();
+    // A name ending in "-sidecar" is a sidecar; the others are servers.
+    let kind_of = |name: &str| {
+        if name.ends_with("-sidecar") {
+            "sidecar"
+        } else {
+            "server"
+        }
+    };
     for (name, kind) in servers
         .iter()
-        .map(|s| (*s, "server"))
+        .map(|s| (*s, kind_of(s)))
         .chain(std::iter::once(("proxy", "proxy")))
     {
         let port = free_port();
@@ -231,10 +239,13 @@ fn a_process_that_ends_by_itself_is_shown_with_its_code() {
 }
 
 #[test]
-fn the_whole_bench_starts_servers_first_and_stops_servers_first() {
+fn the_whole_bench_starts_servers_sidecars_proxy_and_stops_in_reverse() {
     let dir = scratch("all");
-    let (bench, _) = bench(&dir, &["lobby", "game1", "game2"], &[]);
-    for server in ["lobby", "game1", "game2"] {
+    let servers = ["lobby", "game1", "game2"];
+    let sidecars = ["lobby-sidecar", "game1-sidecar", "game2-sidecar"];
+    let all: Vec<&str> = servers.iter().chain(sidecars.iter()).copied().collect();
+    let (bench, _) = bench(&dir, &all, &[]);
+    for server in servers {
         accept_in(&dir.join(server));
     }
     let supervisor = Supervisor::new(&bench);
@@ -245,8 +256,9 @@ fn the_whole_bench_starts_servers_first_and_stops_servers_first() {
             .iter()
             .all(|s| s.state == State::Online)
     });
-    // The proxy started after every server answered.
-    let started_at = |name: &str| {
+    // Each stage started once the one before answered: the longer a process has
+    // run, the earlier it started.
+    let uptime = |name: &str| {
         supervisor
             .snapshots()
             .into_iter()
@@ -255,10 +267,18 @@ fn the_whole_bench_starts_servers_first_and_stops_servers_first() {
             .uptime
             .unwrap()
     };
-    for server in ["lobby", "game1", "game2"] {
+    for server in servers {
+        for sidecar in sidecars {
+            assert!(
+                uptime(server) >= uptime(sidecar),
+                "{sidecar} started before {server}"
+            );
+        }
+    }
+    for sidecar in sidecars {
         assert!(
-            started_at(server) >= started_at("proxy"),
-            "{server} started before the proxy"
+            uptime(sidecar) >= uptime("proxy"),
+            "the proxy started before {sidecar}"
         );
     }
     // Measures arrive for running processes.
@@ -269,16 +289,25 @@ fn the_whole_bench_starts_servers_first_and_stops_servers_first() {
             .all(|s| s.history.last().is_some_and(|h| h.memory_mb > 0.0))
     });
 
+    // The reverse order: a server is only asked to stop once the proxy and the
+    // sidecars have ended. A sidecar has no console and is ended at once.
     supervisor.stop_all();
-    // The servers go first: while they stop, the proxy still runs.
-    wait_for("servers stopped", || {
-        ["lobby", "game1", "game2"]
+    wait_for("all stopped", || {
+        if servers
             .iter()
-            .all(|s| state_of(&supervisor, s) == State::Stopped)
+            .any(|s| state_of(&supervisor, s) == State::Stopping)
+        {
+            assert_eq!(state_of(&supervisor, "proxy"), State::Stopped);
+            for sidecar in sidecars {
+                assert_eq!(state_of(&supervisor, sidecar), State::Stopped, "{sidecar}");
+            }
+        }
+        supervisor
+            .snapshots()
+            .iter()
+            .all(|s| s.state == State::Stopped)
     });
-    wait_for("proxy stopped", || {
-        state_of(&supervisor, "proxy") == State::Stopped
-    });
+    assert!(log_text(&supervisor, "lobby-sidecar").contains("it has no console"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

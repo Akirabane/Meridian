@@ -23,6 +23,30 @@ pub struct InitOptions {
     pub meridian: PathBuf,
     /// The prepared game files, if the servers should not look in their usual places.
     pub resources: Option<PathBuf>,
+    /// The `meridian-sidecar` program; `None` takes the one beside `meridian`.
+    pub sidecar: Option<PathBuf>,
+}
+
+impl InitOptions {
+    /// The sidecar program: the one given, or `meridian-sidecar` beside `meridian`.
+    pub fn sidecar_program(&self) -> PathBuf {
+        self.sidecar.clone().unwrap_or_else(|| {
+            self.meridian
+                .with_file_name(format!("meridian-sidecar{}", std::env::consts::EXE_SUFFIX))
+        })
+    }
+}
+
+/// The sidecar of each server: the server's name and the sidecar's port.
+pub const SIDECARS: [(&str, u16); 3] = [("lobby", 25580), ("game1", 25581), ("game2", 25582)];
+
+/// Where a server's control endpoint file is, relative to its folder: Horizon's
+/// `horizon-server run` gives the game `--control-socket <folder>/.horizon/engine.json`.
+pub const ENDPOINT_FILE: &str = ".horizon/engine.json";
+
+/// A sidecar's secret file, relative to the bench folder.
+fn secret_file(server: &str) -> String {
+    format!("secrets/{server}.key")
 }
 
 /// The servers of a bench: name, port, message of the day.
@@ -36,9 +60,11 @@ pub const PROXY_PORT: u16 = 25565;
 
 /// Writes the bench and returns what to tell the user.
 pub fn init(options: &InitOptions) -> Result<String, String> {
+    let sidecar = options.sidecar_program();
     for (what, path) in [
         ("horizon-server", &options.horizon_server),
         ("meridian", &options.meridian),
+        ("meridian-sidecar", &sidecar),
     ] {
         if !path.is_file() {
             return Err(format!("{what}: {} is not a file", path.display()));
@@ -74,6 +100,10 @@ pub fn init(options: &InitOptions) -> Result<String, String> {
         // One line, no newline at the end, as Horizon reads it.
         write(&server.join("forwarding.secret"), &secret)?;
     }
+    // A secret of its own for each sidecar: 32 random bytes, in hexadecimal.
+    for (name, _) in SIDECARS {
+        write(&dir.join(secret_file(name)), &random_hex(64))?;
+    }
     write(&bench_file, &bench_config(options))?;
 
     let mut out = String::new();
@@ -84,7 +114,11 @@ pub fn init(options: &InitOptions) -> Result<String, String> {
     );
     let _ = writeln!(
         out,
-        "  The proxy listens on 127.0.0.1:{PROXY_PORT}; the servers on 127.0.0.1:25601 to 25603."
+        "  secrets/: a secret of its own for each server's sidecar (lobby, game1, game2), shared with the proxy"
+    );
+    let _ = writeln!(
+        out,
+        "  The proxy listens on 127.0.0.1:{PROXY_PORT}; the servers on 127.0.0.1:25601 to 25603; their sidecars on 127.0.0.1:25580 to 25582."
     );
     if options.resources.is_none() {
         let _ = writeln!(
@@ -171,10 +205,12 @@ default-backend = "lobby"
 try = ["game1", "game2"]
 "#
     );
-    for (name, port, _) in SERVERS {
+    for ((name, port, _), (_, sidecar)) in SERVERS.into_iter().zip(SIDECARS) {
         let _ = write!(
             text,
-            "\n[[backends]]\nname = \"{name}\"\naddress = \"127.0.0.1:{port}\"\n"
+            "\n[[backends]]\nname = \"{name}\"\naddress = \"127.0.0.1:{port}\"\n\
+             sidecar = \"127.0.0.1:{sidecar}\"\nsidecar-secret-file = \"../{}\"\n",
+            secret_file(name)
         );
     }
     text.push_str(
@@ -252,6 +288,25 @@ dir = "{name}"
 port = {port}
 "#,
             path(&options.horizon_server)
+        );
+    }
+    let sidecar = options.sidecar_program();
+    for (name, port) in SIDECARS {
+        let _ = write!(
+            text,
+            r#"
+# The sidecar of {name}: it reads the server's control endpoint file, and shares
+# a secret with the proxy (the file is named here, never its content).
+[[process]]
+name = "{name}-sidecar"
+kind = "sidecar"
+program = "{}"
+args = ["--listen", "127.0.0.1:{port}", "--endpoint-file", "{ENDPOINT_FILE}", "--secret-file", "../{}"]
+dir = "{name}"
+port = {port}
+"#,
+            path(&sidecar),
+            secret_file(name)
         );
     }
     text

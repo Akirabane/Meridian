@@ -14,14 +14,27 @@ pub enum Kind {
     Proxy,
     /// A Horizon server.
     Server,
+    /// A server's sidecar (`meridian-sidecar`), which has no console.
+    Sidecar,
 }
 
 impl Kind {
-    /// The console command that stops it cleanly.
-    pub fn default_stop_command(self) -> &'static str {
+    /// The console command that stops it cleanly; `None` for a process with no
+    /// console, which is ended at once.
+    pub fn default_stop_command(self) -> Option<&'static str> {
         match self {
-            Kind::Proxy => "end",
-            Kind::Server => "stop",
+            Kind::Proxy => Some("end"),
+            Kind::Server => Some("stop"),
+            Kind::Sidecar => None,
+        }
+    }
+
+    /// The name shown on the page.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Proxy => "proxy",
+            Kind::Server => "server",
+            Kind::Sidecar => "sidecar",
         }
     }
 }
@@ -40,7 +53,7 @@ pub struct ProcessSpec {
     /// The port on 127.0.0.1 that answers once the process is up.
     pub port: u16,
     /// The console line that stops it.
-    pub stop_command: String,
+    pub stop_command: Option<String>,
     /// How long a stop waits before the process is killed.
     pub stop_timeout: Duration,
 }
@@ -115,7 +128,7 @@ impl Bench {
             .map(|p| ProcessSpec {
                 stop_command: p
                     .stop_command
-                    .unwrap_or_else(|| p.kind.default_stop_command().to_owned()),
+                    .or_else(|| p.kind.default_stop_command().map(str::to_owned)),
                 stop_timeout: p
                     .stop_timeout_seconds
                     .map(Duration::from_secs)
@@ -177,7 +190,10 @@ impl Bench {
                     q.name, p.name, p.port
                 )));
             }
-            if p.stop_command.trim().is_empty() {
+            if p.stop_command
+                .as_deref()
+                .is_some_and(|c| c.trim().is_empty())
+            {
                 return Err(error(format!(
                     "process \"{}\": stop-command is empty",
                     p.name
@@ -236,7 +252,7 @@ port = 25565
         let bench = Bench::from_toml_str(ONE, root()).unwrap();
         assert_eq!(bench.panel_port, DEFAULT_PANEL_PORT);
         let p = &bench.processes[0];
-        assert_eq!(p.stop_command, "end");
+        assert_eq!(p.stop_command.as_deref(), Some("end"));
         assert_eq!(p.stop_timeout, DEFAULT_STOP_TIMEOUT);
         assert_eq!(p.dir, Path::new("/bench").join("proxy"));
         assert_eq!(p.program, Path::new("/bench").join("meridian.exe"));
@@ -247,7 +263,10 @@ port = 25565
     fn a_server_stops_with_stop() {
         let text = ONE.replace("kind = \"proxy\"", "kind = \"server\"");
         let bench = Bench::from_toml_str(&text, root()).unwrap();
-        assert_eq!(bench.processes[0].stop_command, "stop");
+        assert_eq!(bench.processes[0].stop_command.as_deref(), Some("stop"));
+        let text = ONE.replace("kind = \"proxy\"", "kind = \"sidecar\"");
+        let bench = Bench::from_toml_str(&text, root()).unwrap();
+        assert_eq!(bench.processes[0].stop_command, None);
     }
 
     #[test]
