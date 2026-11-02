@@ -92,7 +92,7 @@ fn every_request_reaches_the_backend_and_its_answer_comes_back() {
         json!({ "echo": format!("player-export {DASHED}") })
     );
     client
-        .import(UUID, json!({ "version": 1 }), None, None)
+        .import(UUID, json!({ "version": 1 }), None, None, None)
         .unwrap();
     client.release(UUID, Outcome::Moved, false).unwrap();
     client.drop_player(UUID).unwrap();
@@ -339,10 +339,21 @@ const ALL_PARTS: [&str; 10] = [
     "advancements",
 ];
 
+/// The held player of the fake backend: whether there is one, and whether its
+/// record was imported without placing it, with the announce asked then.
+#[derive(Clone, Copy)]
+enum Held {
+    Waiting,
+    Imported { announce: bool },
+    Gone,
+}
+
 /// A backend that answers each command as the contract says, from what the line
-/// holds, and refuses the lines the contract refuses.
+/// holds and from the held player's state, and refuses the lines the contract
+/// refuses.
 fn contract() -> fake::Answer {
-    Arc::new(|line: &str| {
+    let held = Arc::new(Mutex::new(Held::Waiting));
+    Arc::new(move |line: &str| {
         let refuse = |why: &str| Some(json!({ "error": why }).to_string());
         let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
         let mut args = rest.split_whitespace();
@@ -371,8 +382,35 @@ fn contract() -> fake::Answer {
                     .get("parts")
                     .cloned()
                     .unwrap_or_else(|| json!(ALL_PARTS));
-                let announced = request.get("announce").cloned().unwrap_or(json!(true));
-                json!({ "ok": true, "parts": parts, "announced": announced })
+                let announced = request
+                    .get("announce")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let placed = request
+                    .get("place")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                *held.lock().unwrap() = if placed {
+                    Held::Gone
+                } else {
+                    Held::Imported {
+                        announce: announced,
+                    }
+                };
+                json!({ "ok": true, "parts": parts, "placed": placed, "announced": announced })
+            }
+            "player-confirm" => {
+                let mut state = held.lock().unwrap();
+                match *state {
+                    Held::Imported { announce } => {
+                        *state = Held::Gone;
+                        json!({ "ok": true, "placed": true, "announced": announce })
+                    }
+                    Held::Waiting => {
+                        return refuse("that player is held but its record has not been imported");
+                    }
+                    Held::Gone => return refuse("no player with that unique id is held"),
+                }
             }
             "player-release" => match (args.next(), args.next()) {
                 (Some("moved"), None) => {
@@ -388,7 +426,10 @@ fn contract() -> fake::Answer {
                     );
                 }
             },
-            "player-drop" => json!({ "ok": true, "held": false, "expected": true }),
+            "player-drop" => {
+                *held.lock().unwrap() = Held::Gone;
+                json!({ "ok": true, "held": true, "expected": false })
+            }
             _ => return refuse("unknown command"),
         };
         Some(reply.to_string())
@@ -422,14 +463,15 @@ fn a_switch_goes_through_the_contract_line_by_line() {
             exported["record"].clone(),
             Some(vec!["inventory".into(), "experience".into()]),
             Some(false),
+            None,
         )
         .unwrap();
     assert_eq!(
         imported,
-        json!({ "ok": true, "parts": ["inventory", "experience"], "announced": false })
+        json!({ "ok": true, "parts": ["inventory", "experience"], "placed": true, "announced": false })
     );
     // ...or whole, with the default announce.
-    let whole = client.import(UUID, record(), None, None).unwrap();
+    let whole = client.import(UUID, record(), None, None, None).unwrap();
     assert_eq!(whole["announced"], json!(true));
     assert_eq!(whole["parts"], json!(ALL_PARTS));
 
@@ -461,7 +503,7 @@ fn the_backends_refusals_come_back_as_refusals() {
     let mut client = running.client(SECRET);
     let mut old = record();
     old["data_version"] = json!(4000);
-    let error = client.import(UUID, old, None, None).unwrap_err();
+    let error = client.import(UUID, old, None, None, None).unwrap_err();
     assert!(
         matches!(&error, Error::Refused(why) if why.contains("another version")),
         "{error}"
@@ -485,7 +527,9 @@ fn a_request_that_cannot_be_a_line_never_reaches_the_backend() {
             "announce goes with moved",
         ),
         (
-            client.import(UUID, json!([1, 2]), None, None).unwrap_err(),
+            client
+                .import(UUID, json!([1, 2]), None, None, None)
+                .unwrap_err(),
             "JSON object",
         ),
         (
@@ -500,4 +544,48 @@ fn a_request_that_cannot_be_a_line_never_reaches_the_backend() {
         );
     }
     assert!(running.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_import_without_placing_is_confirmed_later() {
+    let running = Running::start(contract(), WAIT);
+    let mut client = running.client(SECRET);
+    // Before any import, there is nothing to confirm.
+    let error = client.confirm(UUID).unwrap_err();
+    assert!(
+        matches!(&error, Error::Refused(why) if why.contains("has not been imported")),
+        "{error}"
+    );
+    let imported = client
+        .import(UUID, record(), None, Some(true), Some(false))
+        .unwrap();
+    assert_eq!(imported["placed"], json!(false));
+    assert_eq!(imported["announced"], json!(true));
+    assert_eq!(
+        client.confirm(UUID).unwrap(),
+        json!({ "ok": true, "placed": true, "announced": true })
+    );
+    // The lines are the contract's.
+    let seen = running.seen.lock().unwrap().clone();
+    let body: Value = serde_json::from_str(seen[1].splitn(3, ' ').nth(2).unwrap()).unwrap();
+    assert_eq!(body["place"], json!(false));
+    assert_eq!(seen[2], format!("player-confirm {DASHED}"));
+}
+
+#[test]
+fn a_dropped_arrival_cannot_be_confirmed() {
+    let running = Running::start(contract(), WAIT);
+    let mut client = running.client(SECRET);
+    client
+        .import(UUID, record(), None, None, Some(false))
+        .unwrap();
+    assert_eq!(
+        client.drop_player(UUID).unwrap(),
+        json!({ "ok": true, "held": true, "expected": false })
+    );
+    let error = client.confirm(UUID).unwrap_err();
+    assert!(
+        matches!(&error, Error::Refused(why) if why.contains("no player with that unique id is held")),
+        "{error}"
+    );
 }

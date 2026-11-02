@@ -130,20 +130,31 @@ impl SidecarClient {
         })
     }
 
-    /// Puts a record, as [`Client::export`] got it, on the held player: every part
-    /// of it, or only `parts`; `announce` false keeps the arrival quiet.
+    /// Puts a record, as [`SidecarClient::export`] got it, on the held player: every part
+    /// of it, or only `parts`; `announce` false keeps the arrival quiet. With
+    /// `place` `Some(false)` the player stays held until [`SidecarClient::confirm`] or
+    /// [`SidecarClient::drop_player`]; `None` takes the backend's default, which places.
     pub fn import(
         &mut self,
         uuid: &str,
         record: Value,
         parts: Option<Vec<String>>,
         announce: Option<bool>,
+        place: Option<bool>,
     ) -> Result<Value, Error> {
         self.request(&Request::Import {
             uuid: uuid.to_owned(),
             record,
             parts,
             announce,
+            place,
+        })
+    }
+
+    /// Places a held player whose record was imported with `place` false.
+    pub fn confirm(&mut self, uuid: &str) -> Result<Value, Error> {
+        self.request(&Request::Confirm {
+            uuid: uuid.to_owned(),
         })
     }
 
