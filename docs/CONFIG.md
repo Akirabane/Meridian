@@ -37,6 +37,7 @@ console's `reload` keeps the configuration in use when the new one is invalid.
 | `forwarding-secret` | none | The secret shared with the servers, which they use to check that a login comes from the proxy. It must be the same as each server's `forwarding.secret`. It never appears in logs or in debug output | Required: may not be empty |
 | `default-backend` | the first server listed | The server players are sent to when nothing else chooses one | A configured server |
 | `try` | `[]` | Servers tried, in order, after the first choice when it cannot be reached | Configured servers, each once, not the default server |
+| `switch-carry-position` | `false` | Whether a switch carries the player's position and look to the other server, where their client stands at that moment. Without it they arrive where that server last had them, or at its spawn. Both servers must put the player in the same dimension | None |
 
 ### Login modes
 

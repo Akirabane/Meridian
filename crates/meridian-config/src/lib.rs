@@ -161,6 +161,10 @@ pub struct Config {
     pub sidecars: Vec<Sidecar>,
     /// Milliseconds allowed for a sidecar to answer.
     pub sidecar_timeout_ms: u64,
+    /// Whether a switch carries the player's position to the other server, where
+    /// their client is at that moment. Without it they arrive where that server
+    /// last had them, or at its spawn.
+    pub switch_carry_position: bool,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -204,6 +208,7 @@ impl Default for Config {
             commands: CommandSettings::default(),
             sidecars: Vec::new(),
             sidecar_timeout_ms: 5_000,
+            switch_carry_position: false,
         }
     }
 }
@@ -235,6 +240,7 @@ impl std::fmt::Debug for Config {
             commands,
             sidecars,
             sidecar_timeout_ms,
+            switch_carry_position,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -265,6 +271,7 @@ impl std::fmt::Debug for Config {
             // The paths of the secret files only: the secrets are never kept.
             .field("sidecars", sidecars)
             .field("sidecar_timeout_ms", sidecar_timeout_ms)
+            .field("switch_carry_position", switch_carry_position)
             .finish()
     }
 }
@@ -301,6 +308,7 @@ struct File {
     #[serde(default)]
     commands: FileCommands,
     sidecar_timeout_ms: Option<u64>,
+    switch_carry_position: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -450,6 +458,9 @@ impl Config {
             sidecar_timeout_ms: file
                 .sidecar_timeout_ms
                 .unwrap_or(defaults.sidecar_timeout_ms),
+            switch_carry_position: file
+                .switch_carry_position
+                .unwrap_or(defaults.switch_carry_position),
         };
         config.validate()?;
         Ok(config)

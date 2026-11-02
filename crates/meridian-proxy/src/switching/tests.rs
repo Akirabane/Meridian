@@ -10,7 +10,7 @@ use horizon_protocol::{
     packets::play::Clientbound as C, text,
 };
 use meridian_config::{AuthMode, Backend};
-use meridian_handoff::{Outcome, Record, Session};
+use meridian_handoff::{Imported, Outcome, Record, Session};
 use meridian_net::{
     Profile,
     backend::BackendLink,
@@ -80,8 +80,9 @@ impl PlayerControl for FakeSidecar {
         _: Option<Vec<String>>,
         _: Option<bool>,
         place: bool,
-    ) -> Result<(), String> {
+    ) -> Result<Imported, String> {
         self.answer("import", format!("import place={place}"))
+            .map(|()| Imported::default())
     }
 
     fn confirm(&mut self, _: &str) -> Result<(), String> {

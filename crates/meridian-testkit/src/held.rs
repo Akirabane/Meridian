@@ -193,6 +193,10 @@ pub struct TargetWorld {
     /// How long the target keeps sending after the import, a packet every 20 ms,
     /// as a busy server does (mobs moving): it is never quiet meanwhile.
     pub chatter: Duration,
+    /// Whether the import moves the player to another chunk: the target then
+    /// moves the view's centre before the position, and sends the chunks around
+    /// the new place in a batch after it, as Horizon does.
+    pub recenter: bool,
 }
 
 impl Default for TargetWorld {
@@ -202,6 +206,7 @@ impl Default for TargetWorld {
             dimension: OVERWORLD,
             import_sends_position: true,
             chatter: Duration::ZERO,
+            recenter: false,
         }
     }
 }
@@ -284,7 +289,23 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
         }
         // What the import changes, a position to confirm among it; the player
         // stays held.
+        if world.recenter {
+            send_typed(
+                &mut c,
+                &C::SetChunkCacheCenter(play::SetChunkCacheCenter { x: 2, z: 2 }),
+            );
+        }
         send_typed(&mut c, &position(2, 41.0));
+        if world.recenter {
+            // The chunks around the new place, on the next tick.
+            std::thread::sleep(Duration::from_millis(50));
+            send(&mut c, pc::CHUNK_BATCH_START, &[]);
+            for (id, payload) in [chunk(2, 2, 3), chunk(2, 3, 3)] {
+                send(&mut c, id, &payload);
+            }
+            send(&mut c, pc::CHUNK_BATCH_FINISHED, &varint(2));
+            expect(&mut c, ps::CHUNK_BATCH_RECEIVED)?;
+        }
         let chatter = std::time::Instant::now();
         while chatter.elapsed() < world.chatter {
             // An entity's swing: a packet the views do not keep.
