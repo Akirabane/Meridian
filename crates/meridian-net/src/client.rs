@@ -44,7 +44,20 @@ pub struct ClientSession {
     /// How the player proved who they are, which decides the servers they may
     /// be sent to.
     pub auth: AuthKind,
+    /// The host name the client wrote in its handshake, in lower case and
+    /// without anything a mod loader appends, or `None` when it was empty. A
+    /// forced host is looked up with it.
+    pub virtual_host: Option<String>,
     pub connection: Connection,
+}
+
+/// The host name of a handshake as the proxy compares it: up to the first NUL
+/// (Forge and others append data after one), without a final dot, in lower case.
+/// The port travels in its own field, so the host has none to remove.
+pub fn virtual_host(raw: &str) -> Option<String> {
+    let host = raw.split('\0').next().unwrap_or_default().trim();
+    let host = host.strip_suffix('.').unwrap_or(host);
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// How a player's login was checked.
@@ -128,7 +141,13 @@ fn accept_with(
             serve_status(&mut connection, config)?;
             Ok(None)
         }
-        handshake::LOGIN => log_in(connection, config, sessions, intention.protocol),
+        handshake::LOGIN => log_in(
+            connection,
+            config,
+            sessions,
+            intention.protocol,
+            virtual_host(&intention.host),
+        ),
         // The proxy is where players arrive; it takes no transfers from other
         // servers, as a vanilla server does by default (`accepts-transfers`).
         handshake::TRANSFER => {
@@ -157,6 +176,7 @@ fn log_in(
     config: &Config,
     sessions: &dyn session::Sessions,
     protocol: i32,
+    virtual_host: Option<String>,
 ) -> Result<Option<ClientSession>> {
     if protocol != horizon_protocol::PROTOCOL_VERSION {
         let key = if protocol < OUTDATED_BELOW {
@@ -208,7 +228,7 @@ fn log_in(
             properties: Vec::new(),
         },
     };
-    finish(connection, config, joined, auth).map(Some)
+    finish(connection, config, joined, auth, virtual_host).map(Some)
 }
 
 /// The proxy's key pair (`MinecraftServer.initializeKeyPair`), made at the first
@@ -425,6 +445,7 @@ fn finish(
     config: &Config,
     joined: Joined,
     auth: AuthKind,
+    virtual_host: Option<String>,
 ) -> Result<ClientSession> {
     // Unlike vanilla, a connection over memory is compressed too: the proxy only
     // has those in tests, which should go through what players get.
@@ -470,6 +491,7 @@ fn finish(
             properties,
         },
         auth,
+        virtual_host,
         connection,
     })
 }
@@ -563,6 +585,26 @@ fn protocol_error(message: String) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_virtual_host_is_the_bare_host_in_lower_case() {
+        assert_eq!(
+            virtual_host("Play.Example.COM").as_deref(),
+            Some("play.example.com")
+        );
+        assert_eq!(
+            virtual_host("play.example.com.").as_deref(),
+            Some("play.example.com")
+        );
+        // Forge appends a marker after a NUL; other loaders do the same.
+        assert_eq!(
+            virtual_host("play.example.com\0FML3\0").as_deref(),
+            Some("play.example.com")
+        );
+        assert_eq!(virtual_host("127.0.0.1").as_deref(), Some("127.0.0.1"));
+        assert_eq!(virtual_host(""), None);
+        assert_eq!(virtual_host("\0FML\0"), None);
+    }
     use horizon_protocol::connection::Pipe;
     use std::thread::JoinHandle;
 
@@ -737,6 +779,8 @@ mod tests {
 
         let session = accepted.join().unwrap().unwrap().expect("a session");
         assert_eq!(session.auth, AuthKind::Offline);
+        // The handshake of these tests names "localhost".
+        assert_eq!(session.virtual_host.as_deref(), Some("localhost"));
         assert_eq!(
             session.profile,
             Profile {
