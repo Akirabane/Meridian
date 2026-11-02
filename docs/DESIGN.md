@@ -149,3 +149,118 @@ If any step fails, the proxy abandons the switch, discards the target view and t
 held player, and unfreezes the old connection. A failed switch must leave the
 player where they were.
 
+## 6. What moves between servers
+
+The part that belongs to the backends is the export and import of a player.
+Meridian does not need the whole player file; it needs what continues the
+player's life without a visible seam:
+
+- Position, rotation, velocity, whether on the ground, fall distance, and the
+  dimension.
+- Health, food, saturation, exhaustion, air, fire and freezing ticks, invulnerable
+  ticks, and active effects with the time they have left.
+- Attribute base values and modifiers that are not derived from items.
+- The inventory (main, armour, off hand), the held slot, the ender chest, the
+  cursor stack, and item cooldowns.
+- Experience level, progress and total score.
+- Game mode, abilities (flying, may fly, speed), and the respawn point.
+- The recipe book and the advancements the player has.
+
+What does not move: statistics, scores that belong to a server's own scoreboard,
+and anything tied to something that exists only on the old server. Riding a
+vehicle, or being ridden, is refused in the first version: the switch waits until
+the player is on their own feet.
+
+The format is a small, versioned record, not a copy of the player file, so the two
+servers can differ in how they store it. Times are relative ("this effect has nine
+seconds left") and never absolute, because the two servers' clocks need not match.
+
+Transport is a control channel between the proxy and each backend, separate from
+any game connection: authenticated with a shared secret, over TLS, with a request
+to export a player, a request to import one into a held player, and a request to
+release it. Horizon's server already has a control protocol of this shape, and
+extending it is the likely route.
+
+This needs a feature in `horizon-server`: player export and import, a held state
+for a joining player, and the proxy-trusting login mode. It touches the server and
+should not be written there until it has been agreed. This document only
+describes the need.
+
+## 7. Rewriting
+
+The client sees one continuous server. The backends are unaware of each other, so
+anything that is numbered per connection or per server has to be translated.
+
+- **Entity ids.** Each backend numbers its entities from its own counter, so two
+  backends will give the same id to different things. The proxy hands the client
+  ids from its own space and keeps a map per backend. The player's own id is
+  chosen once, at login, and stays; each backend's id for the player is mapped
+  onto it. Every packet that carries an entity id (movement, metadata, equipment,
+  passengers, leashes, damage events, animations, item pickup, and so on) is
+  rewritten in both directions. The proxy parses those packets into the typed
+  form from the protocol crate, changes the ids and writes them back. Packets that
+  carry no id are passed through as bytes.
+- **Keep-alive.** The proxy keeps the client alive on its own with its own ids,
+  and keeps each backend alive separately. A client keep-alive is never forwarded,
+  so a switch cannot leave a backend waiting for an answer that went elsewhere.
+- **Teleport confirmations.** Each position correction from a server carries an id
+  the client must answer. The proxy numbers them itself, remembers which backend
+  each belongs to, and routes the answer. After a switch, an answer to an old id
+  is dropped, not sent to the new server.
+- **Containers.** Window ids and state ids belong to a server. The proxy keeps the
+  client's view of both and translates clicks, so a click made against the old
+  state is not applied to the new server. The plain inventory is resynchronised
+  through the delta.
+- **Sequence numbers.** Block interactions carry a sequence that the server
+  acknowledges. The proxy keeps one counter for the client and maps it per
+  backend, and acknowledges any pending sequence of the old server itself at the
+  switch so the client does not wait on it.
+- **Chunk batches.** The client reports how fast it takes chunks. The proxy
+  forwards the reports to the active backend and answers batch markers of the
+  inactive one.
+- **Ping and pong.** Handled by the proxy.
+- **Chat.** Signed chat links each message to the ones the player has already
+  seen, and a switch breaks that link. The first version requires backends that do
+  not enforce signed chat, and the proxy passes the player's chat session key to
+  the new backend so that messages are still attributed to the right player.
+- **Plugin channels and cookies.** Passed through. Cookies are stored by the
+  client; the proxy does not interpret them.
+
+## 8. The common map
+
+The invisible switch depends on both servers describing the same world. There are
+four ways to arrange that.
+
+**A. Identical read-only copies.** Each backend loads its own copy of the same
+world files, and nothing writes to them. Easiest, no coordination. Nothing built
+or broken on one server shows on the other, and what players do is lost at
+shutdown. It is enough to prove the switch.
+
+**B. A shared directory.** Backends open the same world files. Two writers on one
+region file corrupt it, and even one writer plus readers would see stale data. Not
+acceptable.
+
+**C. Replication of changes.** Each backend has its own copy, and changes to blocks
+and block entities are sent to the other backends over the control channel as small
+events, applied there, and ordered by the proxy or a log. Each server stays
+consistent with the others within a short delay, there is no shared file, and each
+backend can be restarted. It is the realistic way to a live shared map. Its cost is
+writing the event stream and handling conflicts.
+
+**D. One owner per area.** A server is the only writer of its part of the map, and
+the others follow it. Players cross a boundary instead of choosing a server. This
+is a different product, closer to a sharded world than to a proxy.
+
+**Recommendation.** Use A for the first prototype and the first three milestones,
+since they test the switch and not the map. Plan C as the next step, after the
+switch is proven. Do not use B. Leave D aside.
+
+The seed, the dimension keys and the registries must be the same on every backend.
+The proxy checks the seed and the dimension at prepare time, next to the
+configuration digest.
+
+Under A, players on different backends do not see each other. For a lobby and two
+game servers that is acceptable, since a game server only needs to show its own
+players. Showing players across servers would mean the proxy copying entities
+between target views, and is left for later.
+
