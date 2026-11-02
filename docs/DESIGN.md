@@ -264,3 +264,117 @@ game servers that is acceptable, since a game server only needs to show its own
 players. Showing players across servers would mean the proxy copying entities
 between target views, and is left for later.
 
+## 9. Two modes
+
+### Cooperative mode
+
+When the client is Horizon, it says so in the configuration phase through the same
+kind of announcement that mod messages use, and the proxy then uses a small
+extension: a custom channel carried in play packets, understood only by a Horizon
+client. A vanilla client ignores it.
+
+The extension has few messages:
+
+- *begin* (with a switch id): the client holds its own prediction state, because a
+  server correction is about to come.
+- *commit* (with the same id): follows the delta bundle. The client may now discard
+  the state it held, such as pending block predictions and the sequence counter of
+  the old server.
+- *abort*: the switch was dropped.
+
+What this gives over the vanilla path:
+
+- The client knows when a switch starts and ends, and can clear state that no
+  packet can reach, such as local block predictions, sounds started by the old
+  server and particles that come from it.
+- It makes the switch atomic from the client's point of view, with no dependence on
+  how the packet arrival is split across ticks.
+- It allows a few things plain packets do not: a different tick rate, other game
+  rules, and a changed value in what the client reads at join.
+
+The first working version is built here. This is the mode that is meant to be
+reliable.
+
+### Vanilla mode
+
+A vanilla client gets the delta with no help. It works as far as the packets can
+reach, and it is best effort. Artifacts that can show:
+
+- Entities that exist on only one side appear or vanish at the switch.
+- A very short pause in server corrections while the freeze lasts; movement
+  continues locally but the world does not react.
+- A visible position correction if the two servers disagree about where the player
+  stands, which the held import is meant to prevent.
+- Local block predictions made just before the switch may flicker when the new
+  server does not confirm them.
+- Sounds and particles from the old server finish playing.
+- A broken signed chat link, unless chat is not enforced.
+- No switch at all if the configuration digests differ, in which case the player
+  gets a visible transfer or none.
+
+## 10. Crates
+
+One Rust workspace, with the protocol taken from `horizon-protocol` at a pinned
+commit. Both projects are MIT licensed.
+
+| Crate | Role |
+| --- | --- |
+| `meridian-config` | The proxy's configuration file: listeners, backends, routes, forwarding secret, switch rules, limits |
+| `meridian-net` | Listeners and connections: handshake, status, login, encryption, compression, backend connections, timeouts |
+| `meridian-ghost` | The ghost, the target view, and the delta between them. No I/O, so it is tested with recorded packet streams |
+| `meridian-rewrite` | Entity id maps, teleport, container and sequence translation, and the rewriting of typed packets |
+| `meridian-handoff` | The player record, the control channel client, and the prepare, freeze, hand over and commit steps |
+| `meridian-ext` | The messages of the cooperative extension, shared with the Horizon client |
+| `meridian-proxy` | The binary: wires the others together, runs the sessions, logs and metrics |
+| `meridian-testkit` | A scripted fake backend and client, and a recorder of packet traces, for tests that need no real game |
+
+The ghost and the rewriting are pure code over packets, so most of the hard logic
+is testable with no network and no game.
+
+## 11. Milestones
+
+**J1: a transparent proxy.** A client connects to the proxy, the proxy logs in to
+one Horizon server and relays everything in both directions, including status
+pings and the player list. *Test:* a Horizon client and a vanilla client play for a
+few minutes through it with no difference from a direct connection, and the packet
+traces match.
+
+**J2: the ghost.** The proxy decodes the clientbound stream and keeps the ghost.
+*Test:* from a recorded session, the ghost at any point equals the state a client
+holds, checked against a client's own state at the end of the same recording. No
+change in what the player sees.
+
+**J3: the switch between two test servers.** Two backends with the same map,
+identical copies, and the switch triggered by a command. The proxy builds the
+target view and the delta, rewrites ids, and moves the player. *Test:* with the
+scripted client of the test kit, after the switch the client's state equals the
+target backend's description, the old backend has no player, no packet from the old
+backend arrives after the commit, and a failed switch leaves the player where they
+were.
+
+**J4: the proof, with no loading screen.** Two Horizon servers, a Horizon client
+and the cooperative extension. *Test:* a recorded run of a switch in which no
+Login, Respawn or configuration packet reaches the client, the client stays in
+Play, and the screen capture shows no loading screen or black frame at the switch.
+Then the same run with a vanilla client, with the artifacts of section 9 listed.
+
+J4 is the only step that needs two servers and a client running together. Its cost
+is planned before it is run. J1 to J3 need one or two servers, or none with the
+test kit.
+
+## 12. Decisions that are not ours alone
+
+- **Changes in `horizon-server`**: player export and import, a held state for a
+  joining player, and a mode that trusts the proxy's identity. They are needed, and
+  they belong to the Horizon project, so they must be agreed first.
+- **A change in the Horizon client** for the cooperative extension, with the same
+  caveat.
+- **The common map**: the recommendation is A first and then C. Whether C is built
+  as part of Meridian or as a feature of the Horizon server is open.
+- **What to do when a switch is impossible**: refuse it, fall back to a visible
+  transfer, or keep the player where they are. The configuration should allow each,
+  and a default has to be chosen.
+- **Players seeing each other across servers**: out of scope here, but it changes
+  how the target view is built if it comes later.
+- **Pinning the protocol crate**: Horizon has no stable protocol crate release, so
+  the dependency is a pinned commit and moves when the project's version does.
