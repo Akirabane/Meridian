@@ -6,13 +6,14 @@ use crate::commands;
 use crate::health::Health;
 use crate::log::{debug, info, warning};
 use crate::route::{self, Full};
+use crate::switching::{self, Switcher};
 use horizon_protocol::{connection::Connection, packets::configuration, text};
 use meridian_config::{Config, OnDuplicate};
+use meridian_handoff::{Session, SessionHandle as Handle};
 use meridian_net::{
     Profile,
     backend::{BackendLink, BackendOptions},
     client::{self, ClientSession},
-    relay::{Handle, Relay},
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -53,6 +54,8 @@ pub struct Sessions {
     /// The players let in, from the check of the player limit to the end of
     /// their session, including those still being sent to a backend.
     admitted: AtomicUsize,
+    /// What the switches of players to other backends share.
+    pub switcher: Arc<Switcher>,
 }
 
 /// Who a player is, for telling a second login of theirs: the unique id of a
@@ -84,6 +87,17 @@ struct Entry {
     player: Player,
     handle: Handle,
     identity: Option<Identity>,
+}
+
+impl Entry {
+    /// The player, on the backend their session relays to now: a switch changes
+    /// it.
+    fn player(&self) -> Player {
+        Player {
+            backend: self.handle.backend(),
+            ..self.player.clone()
+        }
+    }
 }
 
 /// Why [`Sessions::open_as`] did not count a session in.
@@ -213,9 +227,18 @@ impl Sessions {
 
     /// The players being relayed, in the order they joined.
     pub fn players(&self) -> Vec<Player> {
-        let mut players: Vec<Player> = self.lock().values().map(|e| e.player.clone()).collect();
+        let mut players: Vec<Player> = self.lock().values().map(Entry::player).collect();
         players.sort_by_key(|p| p.joined);
         players
+    }
+
+    /// The player called `name`, whatever its case, and the handle of their
+    /// session.
+    pub fn session(&self, name: &str) -> Option<(Player, Handle)> {
+        self.lock()
+            .values()
+            .find(|e| e.player.name.eq_ignore_ascii_case(name))
+            .map(|e| (e.player(), e.handle.clone()))
     }
 
     /// How many sessions are being relayed.
@@ -226,20 +249,13 @@ impl Sessions {
 
     /// The player called `name`, whatever its case.
     pub fn find(&self, name: &str) -> Option<Player> {
-        self.lock()
-            .values()
-            .find(|e| e.player.name.eq_ignore_ascii_case(name))
-            .map(|e| e.player.clone())
+        self.session(name).map(|(player, _)| player)
     }
 
     /// Ends the session of the player called `name`, telling them `reason`.
     /// Returns the player, or `None` if no one has that name.
     pub fn kick(&self, name: &str, reason: &str) -> Option<Player> {
-        let (player, handle) = self
-            .lock()
-            .values()
-            .find(|e| e.player.name.eq_ignore_ascii_case(name))
-            .map(|e| (e.player.clone(), e.handle.clone()))?;
+        let (player, handle) = self.session(name)?;
         handle.disconnect(configuration::Disconnect {
             reason: text::literal(reason),
         });
@@ -400,22 +416,14 @@ pub(crate) fn serve(
         refuse(session.connection, &cannot_reach(&candidates));
         return;
     };
-    // The commands the proxy answers in game, for this player on this backend.
-    let commands = commands::hook(
-        Arc::new(config.clone()),
-        commands::Typist {
-            name: name.clone(),
-            auth,
-            backend: backend.name.clone(),
-        },
-    );
-    let (relay, handle) = match Relay::new(session, link) {
-        Ok((relay, handle)) => (relay.with_commands(commands), handle),
+    let (relay, handle) = match Session::new(session, link, &backend.name) {
+        Ok(session) => session,
         Err(e) => {
             warning!("{peer}: {name}: cannot set up the session: {e}");
             return;
         }
     };
+    let relay = relay.with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
     let player = Player {
         name: name.clone(),
         uuid,
@@ -469,6 +477,42 @@ pub(crate) fn serve(
             started.elapsed().as_secs_f64()
         ),
     }
+}
+
+/// The commands the proxy answers in game for the player of `handle`: a move
+/// starts a switch on a thread of its own, and the player is told at once.
+fn commands_hook(
+    config: &Config,
+    sessions: &Sessions,
+    handle: &Handle,
+    name: &str,
+    auth: meridian_config::AuthKind,
+    peer: SocketAddr,
+) -> Arc<meridian_net::relay::CommandHook> {
+    let config = Arc::new(config.clone());
+    let typist = {
+        let handle = handle.clone();
+        move || commands::Typist {
+            auth,
+            backend: handle.backend(),
+        }
+    };
+    let mover = {
+        let (config, switcher) = (Arc::clone(&config), Arc::clone(&sessions.switcher));
+        let (handle, name) = (handle.clone(), name.to_owned());
+        move |target: &str| {
+            switching::in_game(
+                Arc::clone(&config),
+                Arc::clone(&switcher),
+                handle.clone(),
+                name.clone(),
+                peer.ip(),
+                target.to_owned(),
+            );
+            format!("Moving you to {target}...")
+        }
+    };
+    commands::hook(config, typist, mover)
 }
 
 /// What a player is told when none of the backends tried answers.
@@ -800,7 +844,12 @@ pub(crate) mod tests {
 
     /// A session relayed between two pipes whose far ends do nothing, with the
     /// player's and the backend's ends handed back.
-    pub fn idle_session(name: &str) -> (Relay, Handle, Connection, Connection) {
+    pub fn idle_session(name: &str) -> (Session, Handle, Connection, Connection) {
+        idle_session_on(name, "lobby")
+    }
+
+    /// The same, on the backend `backend`.
+    pub fn idle_session_on(name: &str, backend: &str) -> (Session, Handle, Connection, Connection) {
         let (proxy_client, player) = pipe();
         let (proxy_backend, server) = pipe();
         let client = client::ClientSession {
@@ -813,10 +862,10 @@ pub(crate) mod tests {
             virtual_host: None,
             connection: proxy_client,
         };
-        let backend = BackendLink {
+        let link = BackendLink {
             connection: proxy_backend,
         };
-        let (relay, handle) = Relay::new(client, backend).unwrap();
+        let (relay, handle) = Session::new(client, link, backend).unwrap();
         (relay, handle, player, server)
     }
 

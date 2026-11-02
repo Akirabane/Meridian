@@ -10,6 +10,7 @@ mod route;
 mod serve;
 mod session;
 mod state;
+mod switching;
 mod throttle;
 
 use args::Command;

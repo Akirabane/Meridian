@@ -6,9 +6,12 @@ machine, with the panel (`meridian-panel`). The commands are for Windows PowerSh
 
 ## What you can test today, and what you cannot
 
-Moving a player from one server to another is not built yet: the proxy's `send`, the
-in-game `/server <name>`, `/hub` and `/lobby` all answer "transfer not available yet"
-and move nobody. Until that work is merged, a test covers:
+Moving a player from one server to another (`switch`, `send`, and the in-game
+`/server <name>`, `/hub` and `/lobby`) is built and tested against fake servers, but
+has not been tried on real ones yet. It needs Horizon servers that take players from
+another server (the held-player work) and a sidecar next to each server. Without
+them it answers which step failed, and the player stays where they are. A test
+without them covers:
 
 - joining the proxy with the Horizon client and landing on the lobby;
 - the three servers and the proxy online in the panel, with their CPU and memory;
@@ -140,7 +143,7 @@ In the panel:
 | **Show players** | `1 player online:` and a line with your name on `lobby` |
 | Proxy console: `servers` | each server `answers in N ms`, and `1 player` on lobby |
 | Proxy console: `list` | the same as **Show players** |
-| A player name, then **Send to game1** | `transfer not available yet: <name> would move to game1`. Nobody moves: this is the part not built yet |
+| A player name, then **Send to game1** | `<name> moved from lobby to game1 in N ms (...)` with the times and bytes, or `<name> could not move from lobby to game1: <step>: <why>`; the player is told either way |
 | Lobby console: `say hello` | `hello` in your game's chat |
 | Proxy console: `reload` | `reloaded: nothing changed` (edit `proxy\meridian.toml`, for example the `motd`, and `reload` again: it says what changed) |
 | Proxy console: `kick <name> testing` | `kicked <name> from lobby: testing`; your game shows the reason `testing` |
@@ -150,7 +153,7 @@ In the game, in the chat:
 | Type | You should see |
 | --- | --- |
 | `/server` | `Servers: lobby (default), game1, game2. You are on lobby.` |
-| `/server game1` | `transfer not available yet: <name> would move to game1` |
+| `/server game1` | `Moving you to game1...`, then `You are now on game1.` or `Could not move you to game1.` with the step that failed |
 | `/hub` or `/lobby` | `You are already on lobby.` |
 | Any other command, such as `/time set day` | It goes to the lobby as usual |
 

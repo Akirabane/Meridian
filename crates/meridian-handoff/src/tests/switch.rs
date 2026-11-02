@@ -13,23 +13,6 @@ fn target_control(log: &Log, signal: Signal) -> FakeControl {
         })
 }
 
-/// The client's packets after a switch, up to the last of the target's extras (its
-/// command tree); then the client confirms the position, and the target's first
-/// live packet (an effect on the player) follows.
-fn after_switch(player: &mut Connection) -> Vec<(i32, Vec<u8>)> {
-    let mut packets = Vec::new();
-    loop {
-        let (id, payload) = player.recv().unwrap();
-        packets.push((id, payload));
-        if id == pc::COMMANDS {
-            break;
-        }
-    }
-    send(player, ps::ACCEPT_TELEPORTATION, &varint(2));
-    packets.push(player.recv().unwrap());
-    packets
-}
-
 /// The whole switch: the target prepares while the client stays on the source;
 /// the source freezes and exports; the target imports; the client gets the delta,
 /// the target's extras and then its live packets in its own numbering; the source
@@ -55,6 +38,8 @@ fn a_player_is_switched_to_the_target() {
     };
     let mut target_control = target_control(&log, imported);
     let digests = Digests::default();
+    let steps = Log::default();
+    let traced = steps.clone();
     let done = switch(
         &handle,
         TargetBackend {
@@ -65,15 +50,38 @@ fn a_player_is_switched_to_the_target() {
         &mut source_control,
         &mut target_control,
         &digests,
-        &settings(),
+        &Settings {
+            trace: Some(Arc::new(move |what: &str, _| traced.push(what.to_owned()))),
+            ..settings()
+        },
     )
     .unwrap();
+    // Each step is told, in order.
+    let steps: Vec<String> = steps
+        .lines()
+        .iter()
+        .map(|line| line.split(':').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "prepare",
+            "prepare",
+            "prepare",
+            "prepare",
+            "freeze",
+            "hand over",
+            "hand over",
+            "hand over",
+            "commit"
+        ]
+    );
     assert_eq!(
         log.lines(),
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(true) place=false",
+            "target import parts=all-but-position announce=Some(true) place=false",
             "target confirm",
             "source release Moved announce=true",
         ]
@@ -135,17 +143,11 @@ fn a_player_is_switched_to_the_target() {
     assert_eq!(decode(*id, payload), effect(CLIENT_ID));
 
     // The client attacks what it knows as 9: the target's entity 5.
-    send_typed_serverbound(&mut player, TARGET_ID);
+    attack(&mut player, TARGET_ID);
     let saw = target_thread.join().unwrap().unwrap();
     assert_eq!(saw.attacked, CLIENT_ID);
     // The target closes: the session ends.
     run.join().unwrap().unwrap();
-}
-
-fn send_typed_serverbound(player: &mut Connection, attacked: i32) {
-    player
-        .send(&play::Serverbound::Attack(play::Attack { id: attacked }).encode())
-        .unwrap();
 }
 
 fn target_backend<'a>(address: &'a str, options: &'a BackendOptions) -> TargetBackend<'a> {
@@ -328,7 +330,7 @@ fn a_refused_import_lets_the_source_go_on() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(true) place=false",
+            "target import parts=all-but-position announce=Some(true) place=false",
             "source release Abort announce=false",
             "target drop",
         ]
@@ -336,10 +338,11 @@ fn a_refused_import_lets_the_source_go_on() {
     still_on_source(&mut bench);
 }
 
-/// The import went through but the target sends no position: the player is still
-/// held, so the target forgets them and the source keeps them.
+/// The position is carried, the import went through, but the target sends no
+/// position: the player is still held, so the target forgets them and the source
+/// keeps them.
 #[test]
-fn an_import_without_a_position_is_cancelled() {
+fn a_carried_position_that_never_comes_cancels_the_import() {
     let mut bench = bench();
     let log = Log::default();
     let (address, signal, _target) = target(TargetWorld {
@@ -354,6 +357,7 @@ fn an_import_without_a_position_is_cancelled() {
         &Digests::default(),
         &Settings {
             import_timeout: Duration::from_millis(300),
+            carry_position: true,
             ..settings()
         },
     )
@@ -368,7 +372,7 @@ fn an_import_without_a_position_is_cancelled() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(true) place=false",
+            "target import parts=all announce=Some(true) place=false",
             "source release Abort announce=false",
             "target drop",
         ]
@@ -408,7 +412,7 @@ fn a_refused_confirmation_disconnects_the_player() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(true) place=false",
+            "target import parts=all-but-position announce=Some(true) place=false",
             "target confirm",
             "source release Abort announce=false",
             "target drop",
@@ -457,9 +461,44 @@ fn a_player_who_leaves_during_the_freeze_is_saved_on_the_target() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "target import parts=None announce=Some(false) place=true",
+            "target import parts=all-but-position announce=Some(false) place=true",
             "source release Moved announce=true",
         ]
     );
     run.join().unwrap().unwrap();
+}
+
+/// The source took so long to export that the freeze would run out: the switch
+/// gives up while it can still let the source go on.
+#[test]
+fn a_freeze_that_lasts_too_long_is_given_up() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).on("export", || {
+            std::thread::sleep(Duration::from_millis(300));
+        }),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            freeze_limit: Duration::from_millis(200),
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+    assert!(failure.reason.contains("frozen for 200 ms"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "source release Abort announce=false",
+            "target drop",
+        ]
+    );
+    still_on_source(&mut bench);
 }
