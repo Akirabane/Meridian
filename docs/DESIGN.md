@@ -762,7 +762,7 @@ forwarding was written. The milestones are those of section 11.
 | Seamless switch, the proxy's own command and API | Sections 5 to 8, between test servers first | J4 |
 | Proof on screen with a Horizon client | Section 9, cooperative mode | J5 |
 | Policy for what is kept | Section 13, with profiles in the configuration | J6 |
-| Data of plugins between servers | Section 13.3, with the hooks proposed in section 15 | J7 |
+| Data of plugins between servers | Section 13.3, with the hooks proposed in section 16 | J7 |
 
 ### Extensions
 
