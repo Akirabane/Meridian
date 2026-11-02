@@ -12,6 +12,8 @@ name = "meridian"
 path = "src/main.rs"
 
 [dependencies]
+ctrlc = "3.4"
+horizon-protocol.workspace = true
 meridian-config.workspace = true
 meridian-net.workspace = true
 
