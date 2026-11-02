@@ -33,6 +33,15 @@ pub enum ConfigError {
     ZeroConnectTimeout,
     /// `forwarding-secret` is empty while backends are configured.
     MissingForwardingSecret,
+    /// A setting names a backend that is not configured. `setting` says where,
+    /// such as `try` or `group "verified"`.
+    UnknownBackend { setting: String, name: String },
+    /// `try` lists the default backend, which is always tried first anyway.
+    DefaultInTry(String),
+    /// `try` lists a backend twice.
+    DuplicateTry(String),
+    /// `max-players` does not fit the server list's signed 32-bit number.
+    MaxPlayersTooLarge(u32),
 }
 
 impl fmt::Display for ConfigError {
@@ -74,6 +83,23 @@ impl fmt::Display for ConfigError {
             ConfigError::MissingForwardingSecret => {
                 write!(f, "forwarding-secret must be set: the backends check it")
             }
+            ConfigError::UnknownBackend { setting, name } => {
+                write!(
+                    f,
+                    "{setting} names \"{name}\", which is not a configured backend"
+                )
+            }
+            ConfigError::DefaultInTry(name) => write!(
+                f,
+                "try lists \"{name}\", the default backend: it is always tried first, so \
+                 try lists only the backends that come after it"
+            ),
+            ConfigError::DuplicateTry(name) => write!(f, "try lists \"{name}\" twice"),
+            ConfigError::MaxPlayersTooLarge(n) => write!(
+                f,
+                "max-players = {n} is too large: the most is {}, and 0 means no limit",
+                i32::MAX
+            ),
         }
     }
 }

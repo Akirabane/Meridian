@@ -213,9 +213,9 @@ fn a_zero_connect_timeout_is_refused() {
 
 #[test]
 fn an_unknown_setting_is_refused_with_its_name() {
-    let e = error(&format!("max-players = 20\n{MINIMAL}"));
+    let e = error(&format!("view-distance = 10\n{MINIMAL}"));
     assert!(matches!(e, ConfigError::Parse(_)));
-    assert!(e.to_string().contains("max-players"), "{e}");
+    assert!(e.to_string().contains("view-distance"), "{e}");
 }
 
 #[test]

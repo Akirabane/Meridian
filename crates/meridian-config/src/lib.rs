@@ -42,6 +42,12 @@ pub struct Config {
     /// really comes from the proxy (Velocity modern forwarding). Empty by default,
     /// and required as soon as a backend is configured.
     pub forwarding_secret: String,
+    /// Backends tried in this order when the default backend cannot be reached
+    /// (`try` in the file). Empty by default.
+    pub try_backends: Vec<String>,
+    /// The most players the proxy takes at once, shown in the server list; 0 means
+    /// no limit.
+    pub max_players: u32,
 }
 
 impl Default for Config {
@@ -55,6 +61,8 @@ impl Default for Config {
             compression_threshold: 256,
             connect_timeout_ms: 5_000,
             forwarding_secret: String::new(),
+            try_backends: Vec::new(),
+            max_players: 20,
         }
     }
 }
@@ -72,6 +80,8 @@ impl std::fmt::Debug for Config {
             compression_threshold,
             connect_timeout_ms,
             forwarding_secret,
+            try_backends,
+            max_players,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -87,6 +97,8 @@ impl std::fmt::Debug for Config {
             .field("compression_threshold", compression_threshold)
             .field("connect_timeout_ms", connect_timeout_ms)
             .field("forwarding_secret", &format_args!("{secret}"))
+            .field("try_backends", try_backends)
+            .field("max_players", max_players)
             .finish()
     }
 }
@@ -104,6 +116,9 @@ struct File {
     compression_threshold: Option<i32>,
     connect_timeout_ms: Option<u64>,
     forwarding_secret: Option<String>,
+    #[serde(default, rename = "try")]
+    try_backends: Vec<String>,
+    max_players: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +175,8 @@ impl Config {
                 .connect_timeout_ms
                 .unwrap_or(defaults.connect_timeout_ms),
             forwarding_secret: file.forwarding_secret.unwrap_or(defaults.forwarding_secret),
+            try_backends: file.try_backends,
+            max_players: file.max_players.unwrap_or(defaults.max_players),
         };
         config.validate()?;
         Ok(config)
@@ -167,8 +184,9 @@ impl Config {
 
     /// Checks what the types alone cannot: there is at least one backend, names
     /// are unique and not empty, addresses are `host:port`, the default backend
-    /// exists, the connect timeout is not zero and the forwarding secret is set. The first problem found is
-    /// returned.
+    /// exists, the fallback list names other backends once each, the connect
+    /// timeout is not zero, the player limit fits the server list and the
+    /// forwarding secret is set. The first problem found is returned.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.backends.is_empty() {
             return Err(ConfigError::NoBackend);
@@ -191,8 +209,21 @@ impl Config {
                 self.default_backend.clone(),
             ));
         }
+        for (i, name) in self.try_backends.iter().enumerate() {
+            self.known_backend("try", name)?;
+            if *name == self.default_backend {
+                return Err(ConfigError::DefaultInTry(name.clone()));
+            }
+            if self.try_backends[..i].contains(name) {
+                return Err(ConfigError::DuplicateTry(name.clone()));
+            }
+        }
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
+        }
+        // The server list carries the limit as a signed 32-bit number.
+        if i32::try_from(self.max_players).is_err() {
+            return Err(ConfigError::MaxPlayersTooLarge(self.max_players));
         }
         if self.forwarding_secret.is_empty() {
             return Err(ConfigError::MissingForwardingSecret);
@@ -203,6 +234,18 @@ impl Config {
     /// The backend with this name.
     pub fn backend(&self, name: &str) -> Option<&Backend> {
         self.backends.iter().find(|b| b.name == name)
+    }
+
+    /// Refuses a reference to a backend that is not configured; `setting` says
+    /// where the reference was written.
+    fn known_backend(&self, setting: &str, name: &str) -> Result<(), ConfigError> {
+        match self.backend(name) {
+            Some(_) => Ok(()),
+            None => Err(ConfigError::UnknownBackend {
+                setting: setting.to_owned(),
+                name: name.to_owned(),
+            }),
+        }
     }
 }
 
@@ -239,3 +282,6 @@ fn check_address(address: &str) -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod routing_tests;
