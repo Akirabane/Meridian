@@ -293,3 +293,78 @@ one second before to one second after. No frame may be uniformly dark (a mean
 brightness under a tenth of the frames before the switch), and no frame may show
 the `level_loading` screen. A small script compares each frame's mean brightness
 with the frames before the switch.
+
+## 5. Scenarios
+
+Every scenario runs twice: once as a baseline with no switch, and once with the
+switch. The baseline gives the gaps and frame times that the checks of section 4
+compare against. The switch is triggered by the proxy's switch command (the form
+J3 gives it), at a fixed time after the player joins, so runs can be compared.
+
+| Id | Scenario | Client | What it adds to the checks of section 4 |
+| --- | --- | --- | --- |
+| S0 | Baseline: the player joins backend A through the proxy and stays | bot | The reference gaps, chunk counts and frame times |
+| S1 | Idle: the player stands still, then is switched from A to B | bot, then Horizon client | The simplest proof: no new world, no jump, no chunk sent again |
+| S2 | Walking: the player walks a straight line across the switch | bot `walk`, Horizon client holding a key | Position continues on its line; queued movement is replayed; chunks at the edge of the view arrive normally after the switch |
+| S3 | Combat: in survival, the player is hit by a summoned mob and hits back across the switch | bot `fight` | Health and hurt state carry over; the mob on A disappears and the one on B, if any, appears, and nothing else; no damage is applied twice |
+| S4 | Open container: the player has a chest open when the switch starts | bot `--click`, Horizon client | The first version closes it (DESIGN.md section 4): one `ContainerClose`, the inventory totals unchanged, a click made during the freeze not applied twice |
+| S5 | Mount: the player rides a horse or a boat | Horizon client | The first version refuses the switch while riding (DESIGN.md section 6): the player stays on A with nothing changed; after dismounting the switch goes through |
+| S6 | Failed switch: backend B is stopped during the prepare phase | bot | The player stays on A as if nothing had happened (DESIGN.md section 5): no new world, no jump, the old connection unfrozen |
+| S7 | Repeated: fifty switches A to B to A with an idle player | bot | No growth in the proxy's memory, no drift in position, no leftover held player on either backend |
+
+S1 to S4 and S6 with the bot are J3's real-server checks. S1, S2 and S4 with the
+Horizon client, with screenshots, are J4. S5 needs the Horizon client because the
+bot cannot mount. S7 runs last, once the others pass.
+
+### What each run costs
+
+These figures are for planning. The server and client figures are measured; the
+proxy's are a budget until Meridian exists.
+
+| Part | Memory | CPU | Disk | Time |
+| --- | --- | --- | --- | --- |
+| Horizon build, once (`fast` profile: client, `horizon-ctl`, `horizon-server`, `horizon-bots`) | n/a | about 5 minutes of all cores | about 4 to 5 GB in `target` | 5 to 10 minutes |
+| Prepared game files | n/a | n/a | 589 MB, shared read-only, not copied | once |
+| One backend | 1.4 to 1.5 GB idle (Horizon's `docs/server.md`), up to about 2 GB with one player | a core for the 6 to 12 s start, then a few percent | a few MB per world copy | ready in 6 to 12 s |
+| Horizon client, off screen | about 1.1 GB (measured here) | about 1 ms per frame at about 100 frames a second, a tenth of a core | its home folder, under 50 MB | ready in about 30 s |
+| `horizon-bots`, one bot | tens of MB | under a twentieth of a core | the capture, a few MB a minute | joins in a second |
+| Meridian proxy | budget 200 MB | budget a tenth of a core | logs | n/a |
+
+Per scenario, with everything it starts:
+
+| Scenario | Memory at peak | CPU time | Disk | Wall time |
+| --- | --- | --- | --- | --- |
+| S0 (one backend, proxy, bot) | about 2 GB | about 1 core-minute | under 50 MB | 2 minutes |
+| S1, S2, S3, S4, S6 with the bot (two backends, proxy, bot) | 3.5 to 4.5 GB | 2 to 3 core-minutes | under 100 MB | 3 to 4 minutes each |
+| S1, S2, S4, S5 with the Horizon client (two backends, proxy, client, screenshots) | 5 to 6.5 GB | 4 to 6 core-minutes | about 100 MB with screenshots | 4 to 5 minutes each |
+| S7, fifty switches with the bot | 3.5 to 4.5 GB | 10 to 15 core-minutes | under 200 MB | about 10 minutes |
+
+A full pass of every scenario, baselines included, fits in about an hour of wall
+time, under 7 GB of memory at any moment and under 1 GB of disk beyond the build.
+Nothing needs a window. Start the heavier Horizon-client runs only when the
+machine has at least 8 GB of free memory.
+
+## 6. Running order and cleanup
+
+For each run:
+
+1. Mirror `golden\` into `server-a\` and `server-b\`, and set B's port.
+2. Start A and B from their folders, wait for `Done (` on both, write their
+   process ids to `pids.txt`.
+3. Run the checks of section 2 (same seed, same chunks, same digest).
+4. Start the proxy, then the client; write their process ids too.
+5. Run the scenario, collect the capture, the client's `events` and `stats`, the
+   screenshots and the proxy's log into `traces\<scenario>-<date>\`.
+6. Stop the client, the proxy and the backends: `stop` on each backend's console
+   so they save and exit cleanly, `quit` for the Horizon client.
+
+After the last run:
+
+- Stop anything still running by the process ids in `pids.txt`, never by program
+  name: other Horizon games or servers may be running on the same machine, and
+  they are not the rig's.
+- Move any traces worth keeping out of the rig root, then delete the rig root.
+- Delete the Horizon build's `target` folder if it was made only for the rig; it
+  is the biggest thing the rig leaves behind.
+- Check that no world, `saves` folder or capture was written inside this
+  repository or inside the Horizon checkout.
