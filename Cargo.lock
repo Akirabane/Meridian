@@ -466,6 +466,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridian-ghost"
+version = "0.1.0"
+dependencies = [
+ "horizon-protocol",
+ "meridian-testkit",
+]
+
+[[package]]
 name = "meridian-net"
 version = "0.1.0"
 dependencies = [
