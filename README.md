@@ -55,12 +55,20 @@ Horizon server, one player at a time, and its limits.
 
 ### From a release
 
-When releases are published, each one has a `meridian` binary for Linux (x86_64) and
-Windows (x86_64), with a `SHA256SUMS` file. Check the download against it before
+When releases are published, each one has an archive for Linux (x86_64) and one for
+Windows (x86_64), each with the `meridian` binary, this README, the licence and the
+example configuration, and a `SHA256SUMS` file. Check the download against it before
 running it:
 
 ```
 sha256sum -c SHA256SUMS --ignore-missing
+```
+
+Each archive also has a build provenance attestation, which says it was built by this
+repository's release workflow from the tagged commit:
+
+```
+gh attestation verify <archive> -R Akirabane/Meridian
 ```
 
 ### From the sources
