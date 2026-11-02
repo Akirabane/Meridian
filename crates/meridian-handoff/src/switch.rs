@@ -99,25 +99,50 @@ pub struct Done {
     pub warning: Option<String>,
 }
 
+/// The parts of a record `player-import` knows (Horizon's `docs/server.md`).
+pub const PARTS: [&str; 10] = [
+    "inventory",
+    "ender_chest",
+    "experience",
+    "health",
+    "effects",
+    "game_mode",
+    "position",
+    "spawn_point",
+    "recipe_book",
+    "advancements",
+];
+
+/// Told of each step of a switch as it happens, with the time since the switch
+/// began: what the proxy writes to its log.
+pub type Trace = Arc<dyn Fn(&str, Duration) + Send + Sync>;
+
 /// How long each part of a switch may take, and what the others are told.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Settings {
     /// How long the target holds a place for the player (1 to 60 s).
     pub expect_seconds: u64,
     /// How long the target has to configure the player and send their world.
     pub prepare_timeout: Duration,
-    /// The world is taken as sent once no chunk batch came for this long.
+    /// The target's world is taken as sent once it sent nothing for this long
+    /// after a chunk batch: before the freeze, and again after the import.
     pub settle: Duration,
-    /// How long the target has, after the import, to send the player's position.
+    /// How long the target has, after the import, to settle.
     pub import_timeout: Duration,
     /// How long the player may stay frozen before the switch is given up. Horizon
-    /// lets a freeze go by itself after ten seconds; the switch gives up before,
+    /// lets a freeze go by itself after some seconds; the switch gives up before,
     /// so that it can still let the source go on (`player-release abort`).
     pub freeze_limit: Duration,
+    /// Whether the player keeps the position of their record. Without it they
+    /// arrive where the target puts them, in chunks the target already sent;
+    /// with it, the target must first send the chunks around the new place.
+    pub carry_position: bool,
     /// The target's players are told the player came (join line, list entry).
     pub announce_arrival: bool,
     /// The source's players get the "left the game" line.
     pub announce_departure: bool,
+    /// Told of each step.
+    pub trace: Option<Trace>,
 }
 
 impl Default for Settings {
@@ -128,9 +153,24 @@ impl Default for Settings {
             settle: Duration::from_millis(200),
             import_timeout: Duration::from_secs(3),
             freeze_limit: Duration::from_secs(8),
+            carry_position: false,
             announce_arrival: true,
             announce_departure: true,
+            trace: None,
         }
+    }
+}
+
+impl Settings {
+    /// The parts the import takes: every one, or every one but the position.
+    fn parts(&self) -> Option<Vec<String>> {
+        (!self.carry_position).then(|| {
+            PARTS
+                .iter()
+                .filter(|part| **part != "position")
+                .map(|part| (*part).to_owned())
+                .collect()
+        })
     }
 }
 
@@ -179,6 +219,8 @@ struct Run<'a> {
     source_lane: Arc<Lane>,
     /// The target's lane, once it exists.
     lane: Option<Arc<Lane>>,
+    /// The parts of the record the target takes.
+    parts: Option<Vec<String>>,
 }
 
 impl Run<'_> {
@@ -217,7 +259,7 @@ impl Run<'_> {
         let placed = match record {
             Some(record) => self
                 .target
-                .import(&self.uuid, record, None, Some(false), true)
+                .import(&self.uuid, record, self.parts.clone(), Some(false), true)
                 .is_ok(),
             None => self.target.confirm(&self.uuid).is_ok(),
         };
@@ -266,6 +308,7 @@ pub fn switch(
         uuid: uuid_text(shared.profile.uuid),
         source_lane: Arc::clone(&shared.up().lane),
         lane: None,
+        parts: settings.parts(),
     };
     if shared.switching.swap(true, Ordering::SeqCst) {
         return Err(run.fail(Step::Check, "a switch of this player is already under way"));
@@ -299,6 +342,11 @@ pub fn switch(
 
     // Prepare.
     let started = Instant::now();
+    let note = |what: &str| {
+        if let Some(trace) = &settings.trace {
+            trace(what, started.elapsed());
+        }
+    };
     run.target
         .expect(&run.uuid, Some(settings.expect_seconds))
         .map_err(|e| {
@@ -307,6 +355,7 @@ pub fn switch(
                 format!("{} would not expect the player: {e}", target.name),
             )
         })?;
+    note("prepare: the target expects the player");
     let mut link = match backend::connect(target.address, &shared.profile, target.options) {
         Ok(link) => link,
         Err(e) => {
@@ -317,6 +366,7 @@ pub fn switch(
             ));
         }
     };
+    note("prepare: the player is logged in on the target");
     let configured = link
         .connection
         .reader
@@ -342,6 +392,7 @@ pub fn switch(
         let _ = run.target.drop_player(&run.uuid);
         return Err(run.fail(Step::Prepare, differs(target.name, kind)));
     }
+    note("prepare: the target configures clients as the first server did (digest)");
     let (reader, writer) = link.connection.split();
     let closer = match reader.closer() {
         Ok(closer) => closer,
@@ -406,6 +457,10 @@ pub fn switch(
         run.abandon_target();
         return Err(run.fail(Step::Prepare, "the player left"));
     }
+    let (chunks, entities) = state.lock().view.counts();
+    note(&format!(
+        "prepare: the target's world is here ({chunks} chunks, {entities} entities)"
+    ));
     let prepared = Instant::now();
 
     // Freeze. From the export on, the switch must hand the player over, or give up
@@ -442,6 +497,7 @@ pub fn switch(
     if run.client_gone() {
         return Err(run.left(Step::Freeze, Some(record), settings.announce_departure));
     }
+    note("freeze: the source froze the player and gave their record");
     let frozen = Instant::now();
 
     // Hand over: the import, without placing the player. The target sends what it
@@ -459,7 +515,7 @@ pub fn switch(
     if let Err(e) = run.target.import(
         &run.uuid,
         record,
-        None,
+        run.parts.clone(),
         Some(settings.announce_arrival),
         false,
     ) {
@@ -469,18 +525,30 @@ pub fn switch(
             format!("{} would not take the player's record: {e}", target.name),
         ));
     }
-    // What the import sends includes a position for the client to confirm.
+    let imported_at = Instant::now();
+    note(if settings.carry_position {
+        "hand over: the target took the record, position included"
+    } else {
+        "hand over: the target took the record, all but the position"
+    });
+    // The target sends what the import changed, and, when the player moved, the
+    // chunks around the new place on the next ticks: the delta waits until it has
+    // been quiet for a while. A carried position also comes with a position for
+    // the client to confirm.
+    let carry = settings.carry_position;
+    let settled = |s: &crate::prepare::Preparing| {
+        let quiet_since = s.last_packet.map_or(imported_at, |at| at.max(imported_at));
+        ((!carry || s.positions > positions) && quiet_since.elapsed() >= settle).then_some(())
+    };
     let late = Instant::now() + settings.import_timeout;
     let imported = if late < thaw {
         state.wait(
             late,
-            "the target did not send the player's position after the import",
-            |s| (s.positions > positions).then_some(()),
+            "the target did not settle after the import (no position, or chunks without end)",
+            settled,
         )
     } else {
-        state.wait(thaw, &too_long(), |s| {
-            (s.positions > positions).then_some(())
-        })
+        state.wait(thaw, &too_long(), settled)
     };
     if let Err(why) = imported {
         // The player is still held: the target forgets them, the source keeps them.
@@ -548,6 +616,10 @@ pub fn switch(
         }
         (packets.len(), bytes, extras.len(), chunks, entities)
     };
+    note(&format!(
+        "hand over: the client has the target's world ({delta_packets} packets, {delta_bytes} \
+         bytes; {chunks} chunks, {entities} entities)"
+    ));
     // The client has the target's world: the target places the player.
     if let Err(e) = run.target.confirm(&run.uuid) {
         session.disconnect(horizon_protocol::packets::configuration::Disconnect {
@@ -564,6 +636,7 @@ pub fn switch(
             after: After::Disconnected,
         });
     }
+    note("hand over: the target placed the player");
     let handed = Instant::now();
 
     // Commit.
@@ -578,6 +651,10 @@ pub fn switch(
             )
         });
     source_lane.closer.close();
+    note(match &warning {
+        None => "commit: the source let the player go",
+        Some(_) => "commit: the source did not let the player go; its connection was closed",
+    });
     let committed = Instant::now();
     Ok(Done {
         delta_packets,

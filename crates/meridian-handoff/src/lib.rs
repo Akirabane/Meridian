@@ -22,8 +22,12 @@
 //!    (`player-export freeze`). The client still gets the source's packets.
 //! 3. **Hand over.** The target takes the record without placing the player
 //!    (`player-import` with `"place": false`) and sends the held player's
-//!    connection what the import changes, a position to confirm among it: the
-//!    target view becomes the world after the import. Then, in one go under the
+//!    connection what the import changes. The record's position is left out by
+//!    default ([`Settings::carry_position`]): the player arrives where the target
+//!    put them, in the chunks it already sent. With it, the target moves the
+//!    player and streams the chunks around the new place over the next ticks. The
+//!    delta waits until the target has been quiet for [`Settings::settle`], so the
+//!    target view is the world after the import. Then, in one go under the
 //!    session's locks: the delta from the ghost to the target view goes to the
 //!    client, then the target's command tree, recipes, advancements and the
 //!    player's own synced data; the target becomes the active backend. Last, the
@@ -66,7 +70,10 @@
 //!
 //! # Timing
 //!
-//! Horizon lets a freeze go after ten seconds, and a held player nobody takes
+//! Each step is told to [`Settings::trace`] with the time since the switch began,
+//! for the proxy's log.
+//!
+//! Horizon lets a freeze go after some seconds (ten, then thirty), and a held player nobody takes
 //! after a minute; `player-expect` holds a place for 60 seconds at most. The
 //! freeze, the import and the hand-over to the client must fit in the first of
 //! these: the world is fetched before the freeze, so what is left is three requests
@@ -98,7 +105,9 @@ mod switch;
 pub use configure::{ClientConfiguration, Digest, DigestBuilder, configure};
 pub use control::{Outcome, PlayerControl, Record, record_dimension, uuid_text};
 pub use session::{Session, SessionHandle};
-pub use switch::{After, Digests, Done, Failure, Settings, Step, TargetBackend, switch};
+pub use switch::{
+    After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,
+};
 
 #[cfg(test)]
 mod tests;
