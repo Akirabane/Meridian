@@ -18,14 +18,14 @@ and move nobody. Until that work is merged, a test covers:
 ## What it costs
 
 Each Horizon server takes about 1.5 GB of memory when idle, so the bench takes about
-4.5 GB, plus a little for the proxy and the panel. The three worlds take a few hundred
+4.5 GB, plus a little for the proxy, the three sidecars and the panel. The three worlds take a few hundred
 megabytes of disk once generated. Close what you can spare before starting the bench.
 
 ## The paths on this machine
 
 | What | Where |
 | --- | --- |
-| Meridian's programs | `D:\disque\dev\meridian-bench-out\bin\` (`meridian.exe`, `meridian-panel.exe`; `COMMIT.txt` says which commit they come from) |
+| Meridian's programs | `D:\disque\dev\meridian-bench-out\bin\` (`meridian.exe`, `meridian-sidecar.exe`, `meridian-panel.exe`; `COMMIT.txt` says which commit they come from). `init` takes `meridian-sidecar.exe` from beside `meridian.exe`, or from `--sidecar PATH` |
 | The bench, made in step A | `D:\disque\dev\meridian-bench-out\banc\` |
 | Horizon's Nightly, installed by the launcher | `C:\Users\Akirabane\AppData\Roaming\horizon-launcher\versions\nightly-2026-11-01-4aa6854\` |
 | Its prepared game files (650 MB) | the Nightly's `.local\horizon-client\26.3\` |
@@ -54,12 +54,17 @@ If you open another PowerShell window later, set them again there.
 
 It writes, in `banc`:
 
-- `bench.toml`: the four processes for the panel;
+- `bench.toml`: the seven processes for the panel: the proxy, three servers and a
+  sidecar for each server;
 - `proxy\meridian.toml`: the proxy on `127.0.0.1:25565`, in offline login (nobody's
-  account is checked, which suits a bench on one machine), with the three servers;
+  account is checked, which suits a bench on one machine), with the three servers
+  and the address of each one's sidecar (ports 25580, 25581, 25582);
 - `lobby\`, `game1\`, `game2\`: each a `server.toml` (ports 25601, 25602, 25603, on
   `127.0.0.1` only, online mode off) and a `forwarding.secret` holding the proxy's
-  secret.
+  secret;
+- `secrets\`: `lobby.key`, `game1.key`, `game2.key`, a secret of its own for each
+  sidecar, which the proxy reads from the same file. Neither the panel nor `init`
+  ever shows them.
 
 It ends by printing the EULA command of step B. You can check what it wrote:
 
@@ -95,13 +100,16 @@ Leave this window open: the panel runs in it. Open
 the access token of this run by itself; there is nothing to type. Opened in another
 way, or after the panel restarted, reload the page.
 
-You see four cards: proxy, lobby, game1, game2, all stopped.
+You see seven cards: proxy, lobby, game1, game2, and lobby-sidecar, game1-sidecar,
+game2-sidecar, all stopped.
 
 Click **Start all**. The servers start first; each card goes from `starting` to
 `online` when its server accepts connections. The first start generates each world,
-which takes a while; the panel then starts the proxy. Once all four are online, each
-card shows its CPU (100 % is one processor core) and memory, with a curve over the
-last minutes. A server's figures include the game process it starts.
+which takes a while; the panel then starts the three sidecars, and once they answer,
+the proxy. Once all seven are online, each card shows its CPU (100 % is one processor
+core) and memory, with a curve over the last minutes. A server's figures include the
+game process it starts. A sidecar is the small program that will move players in and
+out of its server; until switching is built it only waits for the proxy.
 
 Click a card's **Console** to see its output. A server's console shows the line
 `Velocity player information forwarding is on (forwarding.secret)`: it trusts only
@@ -154,12 +162,12 @@ else.
 ## F. Stop everything and clean up
 
 1. Leave the game.
-2. In the panel, click **Stop all**: the servers stop first, saving their worlds,
-   then the proxy. Wait until the four cards say `stopped`.
+2. In the panel, click **Stop all**: the proxy stops first, then the sidecars, then
+   the servers, which save their worlds. Wait until the seven cards say `stopped`.
 3. Close the panel with Ctrl+C in its window. Ctrl+C also reaches anything the panel
    started, which stops as on its own Ctrl+C; if the panel window was closed another
    way while servers ran, end them in the Task Manager (`horizon-server.exe`,
-   `horizon-client.exe`, `meridian.exe`).
+   `horizon-client.exe`, `meridian.exe`, `meridian-sidecar.exe`).
 
 To start again later, run step C again: the bench and its worlds stay.
 

@@ -1,8 +1,8 @@
 # meridian-panel
 
-A small local panel to try Meridian on one machine: a test bench of one proxy and
-three Horizon servers (lobby, game1, game2), started, stopped, watched and driven
-from a page in your browser.
+A small local panel to try Meridian on one machine: a test bench of one proxy,
+three Horizon servers (lobby, game1, game2) and a sidecar for each server, started,
+stopped, watched and driven from a page in your browser.
 
 It serves the page on `127.0.0.1` only. It downloads nothing, sends nothing
 anywhere, and copies nothing: you give it the programs, it writes configuration
@@ -12,7 +12,7 @@ stops only the ones it started.
 ## What it costs
 
 A Horizon server takes about 1.5 GB of memory when idle, so a bench of three takes
-about 4.5 GB, plus the proxy and the panel, which take little. Each server also
+about 4.5 GB, plus the proxy, the sidecars and the panel, which take little. Each server also
 uses processor time while its world is loaded. The panel shows each process's
 processor and memory use.
 
@@ -23,19 +23,29 @@ installed Horizon release with its game files prepared (Horizon's documentation,
 "Host a server"). The panel does not install or copy them.
 
 ```
-meridian-panel init --dir BENCH --horizon-server PATH/horizon-server --meridian PATH/meridian [--resources PATH]
+meridian-panel init --dir BENCH --horizon-server PATH/horizon-server --meridian PATH/meridian [--resources PATH] [--sidecar PATH]
 ```
 
 `init` writes into `BENCH`:
 
-- `bench.toml`: the four processes, their folders, ports and how each one stops;
+- `bench.toml`: the seven processes, their folders, ports and how each one stops;
 - `proxy/meridian.toml`: the proxy on `127.0.0.1:25565`, offline login (a bench on
   one machine), the three servers as backends, `lobby` as the default server, and a
-  random forwarding secret;
+  random forwarding secret, and for each server the address of its sidecar (ports
+  25580 to 25582) and the file of the secret the proxy shares with it;
 - `lobby/`, `game1/`, `game2/`: each with a `server.toml` (on `127.0.0.1`, ports
   25601 to 25603, online mode off, backups off, Horizon's own web panel off so the
   three do not ask for the same port) and a `forwarding.secret` with the proxy's
   secret.
+
+- `secrets/`: `lobby.key`, `game1.key`, `game2.key`, a random secret of its own for
+  each sidecar (32 bytes, in hexadecimal). The proxy and the sidecar read the same
+  file; the secret is never written anywhere else, nor shown.
+
+Each sidecar runs in its server's folder with `--listen 127.0.0.1:<port>`,
+`--endpoint-file .horizon/engine.json` (where `horizon-server run` puts its control
+endpoint) and `--secret-file ../secrets/<name>.key`. `init` takes
+`meridian-sidecar` from beside `meridian` unless `--sidecar` names it.
 
 `--resources` names the folder of prepared game files for the three servers; without
 it, they look in their usual places. `init` never overwrites a bench.
@@ -67,10 +77,12 @@ The page shows, for each process:
 - its processor use (100 % is one core) and memory, with five minutes of history;
 - buttons to start, stop and restart it, and to open its console.
 
-"Start all" starts the servers, then the proxy once they answer. "Stop all" stops
-the servers, then the proxy. A process is stopped with its console command (`end`
+"Start all" starts the servers, then the sidecars once the servers answer, then the
+proxy once the sidecars answer. "Stop all" stops them in the reverse order: the
+proxy, then the sidecars, then the servers. A process is stopped with its console command (`end`
 for the proxy, `stop` for a server) and killed if it has not ended after
-`stop-timeout-seconds` (30 by default).
+`stop-timeout-seconds` (30 by default). A sidecar has no console: stopping it ends
+it at once.
 
 The console shows the last 2,000 lines of the process's output and sends a line to
 its input: for the proxy `list`, `servers`, `send`, `kick`, `reload`, `end`; for a
@@ -95,7 +107,9 @@ it started too, which stop as they do on Ctrl+C.
   machine cannot use the API either.
 - The API takes the name of a process of the bench, a console line, or a player
   name and a server of the bench. It never takes a program or a path.
-- The forwarding secret is written in the proxy's and the servers' files only. The
-  bench file, the page and the panel's own messages never show it.
+- The forwarding secret is written in the proxy's and the servers' files only, and
+  each sidecar's secret in its own file under `secrets/`. The bench file names those
+  files, never what they hold, and the page and the panel's own messages never show
+  a secret.
 - The page sends a content security policy that allows only its own script, and
   puts the processes' output on screen as plain text.
