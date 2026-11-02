@@ -494,9 +494,27 @@ fn the_api_drives_the_bench_by_name_only() {
         r#"{"player":"Alex","target":"game1"}"#,
     );
     assert_eq!(status, 200);
-    assert_eq!(
-        sent["lines"][0],
-        "transfer not available yet: Alex would move to game1"
+    // The proxy's own line comes back as it is: a player moved...
+    let moved = sent["lines"][0].as_str().unwrap();
+    assert!(
+        moved.starts_with("Alex moved from lobby to game1 in ") && moved.contains(" ms (prepare "),
+        "{moved}"
+    );
+    // ...or the step at which the switch failed.
+    let (status, failed, _) = request(
+        &panel,
+        "POST",
+        "/api/test/send",
+        t,
+        r#"{"player":"Steve","target":"game1"}"#,
+    );
+    assert_eq!(status, 200);
+    assert!(
+        failed["lines"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("Steve could not move from game1 to game1: check: "),
+        "{failed}"
     );
     // Only a player name and a server of the bench are taken.
     for body in [
