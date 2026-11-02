@@ -486,6 +486,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridian-handoff"
+version = "0.1.0"
+dependencies = [
+ "horizon-protocol",
+ "meridian-ghost",
+ "meridian-net",
+ "meridian-rewrite",
+ "meridian-sidecar",
+ "meridian-testkit",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "meridian-net"
 version = "0.1.0"
 dependencies = [

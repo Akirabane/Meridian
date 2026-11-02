@@ -10,6 +10,7 @@ members = [
     "crates/meridian-rewrite",
     "crates/meridian-sidecar",
     "crates/meridian-panel",
+    "crates/meridian-handoff",
 ]
 
 [workspace.package]
@@ -25,8 +26,11 @@ repository = "https://github.com/Akirabane/Meridian"
 horizon-protocol = { git = "https://github.com/horizon-rust/horizon", rev = "f696adc8996d7d4b11e7d50a863f2735a21c8000" }
 
 meridian-config = { path = "crates/meridian-config" }
+meridian-ghost = { path = "crates/meridian-ghost" }
+meridian-handoff = { path = "crates/meridian-handoff" }
 meridian-net = { path = "crates/meridian-net" }
 meridian-rewrite = { path = "crates/meridian-rewrite" }
+meridian-sidecar = { path = "crates/meridian-sidecar" }
 meridian-testkit = { path = "crates/meridian-testkit" }
 
 [workspace.lints.rust]
