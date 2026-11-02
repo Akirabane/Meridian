@@ -73,7 +73,7 @@ impl PlayerControl for SidecarClient {
         announce: Option<bool>,
         place: bool,
     ) -> Result<Imported, String> {
-        let answer = SidecarClient::import(self, uuid, record, parts, announce, Some(place))
+        let answer = SidecarClient::import(self, uuid, record, parts, announce, Some(place), None)
             .map_err(|e| e.to_string())?;
         Ok(Imported {
             recentered: answer.get("recentered").and_then(Value::as_bool),

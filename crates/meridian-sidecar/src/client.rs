@@ -1,7 +1,7 @@
 //! The proxy's side of the signed exchange: one connection to one sidecar, and a
 //! function for each player request.
 use crate::Error;
-use crate::request::{Outcome, Request};
+use crate::request::{Arrival, Outcome, Request};
 use crate::wire::{self, Challenge, Direction, Expected};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
@@ -134,6 +134,8 @@ impl SidecarClient {
     /// of it, or only `parts`; `announce` false keeps the arrival quiet. With
     /// `place` `Some(false)` the player stays held until [`SidecarClient::confirm`] or
     /// [`SidecarClient::drop_player`]; `None` takes the backend's default, which places.
+    /// An `arrival` puts the player there instead of the record's place, with the
+    /// `position` part only.
     pub fn import(
         &mut self,
         uuid: &str,
@@ -141,6 +143,7 @@ impl SidecarClient {
         parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: Option<bool>,
+        arrival: Option<Arrival>,
     ) -> Result<Value, Error> {
         self.request(&Request::Import {
             uuid: uuid.to_owned(),
@@ -148,6 +151,7 @@ impl SidecarClient {
             parts,
             announce,
             place,
+            arrival,
         })
     }
 
