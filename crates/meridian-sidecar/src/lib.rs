@@ -7,8 +7,11 @@
 //! - [`request`] holds the player requests and the endpoint command each becomes.
 //! - [`endpoint`] talks to the backend's local control endpoint.
 //! - [`server`] serves the proxy's requests; [`client`] is the proxy's side.
+//! - [`options`] reads the program's command line and refuses a listening
+//!   address other machines can reach while the exchange is not encrypted.
 pub mod client;
 pub mod endpoint;
+pub mod options;
 pub mod request;
 pub mod server;
 pub mod wire;

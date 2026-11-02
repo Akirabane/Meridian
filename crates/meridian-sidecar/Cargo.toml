@@ -7,6 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "meridian-sidecar"
+path = "src/main.rs"
+
 [dependencies]
 # The challenge each connection starts with.
 getrandom = "0.3"
