@@ -20,6 +20,20 @@ use std::time::Duration;
 /// The compression threshold the backend asks for, as a server does by default.
 pub const COMPRESSION: i32 = 256;
 
+/// The backend's queue of waiting connections, as long as the proxy's, so a
+/// burst of logins is not refused by the backend before it reaches the measure.
+/// std's listener has 128, and Windows keeps more only when asked with
+/// `SOMAXCONN_HINT`, written as the negative length.
+const BACKLOG: i32 = 4096;
+
+fn listen() -> io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    socket.listen(if cfg!(windows) { -BACKLOG } else { BACKLOG })?;
+    Ok(socket.into())
+}
+
 /// A running backend.
 pub struct Backend {
     pub address: SocketAddr,
@@ -35,7 +49,7 @@ impl Backend {
     /// player information forwarding and refuses one the secret did not sign, as
     /// a server behind the proxy does; without one it takes players directly.
     pub fn start(secret: Option<Vec<u8>>) -> io::Result<Backend> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let listener = listen()?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let (logged_in, refused) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
