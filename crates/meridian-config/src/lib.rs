@@ -54,6 +54,44 @@ impl AuthMode {
     }
 }
 
+/// What the proxy knows about a player's account (DESIGN.md section 15.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthKind {
+    /// The session service confirmed the account.
+    Verified,
+    /// The proxy let a name in without that check.
+    Unverified,
+}
+
+impl AuthKind {
+    /// The name used in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            AuthKind::Verified => "verified",
+            AuthKind::Unverified => "unverified",
+        }
+    }
+}
+
+/// Backends for one kind of player (`[[group]]` in the file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub name: String,
+    /// The kind of player this group is for.
+    pub auth: AuthKind,
+    /// The backends of the group, by name.
+    pub backends: Vec<String>,
+}
+
+/// Where players of one kind go (`[[route]]` in the file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub auth: AuthKind,
+    /// The group they are sent to.
+    pub group: String,
+}
+
 /// Everything the proxy reads from its configuration. Its `Debug` output hides
 /// the forwarding secret, so a configuration can be logged safely.
 #[derive(Clone, PartialEq, Eq)]
@@ -89,6 +127,11 @@ pub struct Config {
     pub forced_hosts: Vec<ForcedHost>,
     /// How players are logged in. Online by default.
     pub auth_mode: AuthMode,
+    /// Groups of backends, each for one kind of player.
+    pub groups: Vec<Group>,
+    /// Which group each kind of player is sent to. When empty, every player uses
+    /// the default backend and `try_backends`.
+    pub routes: Vec<Route>,
 }
 
 impl Default for Config {
@@ -106,6 +149,8 @@ impl Default for Config {
             max_players: 20,
             forced_hosts: Vec::new(),
             auth_mode: AuthMode::Online,
+            groups: Vec::new(),
+            routes: Vec::new(),
         }
     }
 }
@@ -127,6 +172,8 @@ impl std::fmt::Debug for Config {
             max_players,
             forced_hosts,
             auth_mode,
+            groups,
+            routes,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -146,6 +193,8 @@ impl std::fmt::Debug for Config {
             .field("max_players", max_players)
             .field("forced_hosts", forced_hosts)
             .field("auth_mode", auth_mode)
+            .field("groups", groups)
+            .field("routes", routes)
             .finish()
     }
 }
@@ -169,6 +218,25 @@ struct File {
     #[serde(default, rename = "forced-host")]
     forced_hosts: Vec<FileForcedHost>,
     auth_mode: Option<AuthMode>,
+    #[serde(default, rename = "group")]
+    groups: Vec<FileGroup>,
+    #[serde(default, rename = "route")]
+    routes: Vec<FileRoute>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileGroup {
+    name: String,
+    auth: AuthKind,
+    backends: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRoute {
+    auth: AuthKind,
+    group: String,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +313,23 @@ impl Config {
                 })
                 .collect(),
             auth_mode,
+            groups: file
+                .groups
+                .into_iter()
+                .map(|g| Group {
+                    name: g.name,
+                    auth: g.auth,
+                    backends: g.backends,
+                })
+                .collect(),
+            routes: file
+                .routes
+                .into_iter()
+                .map(|r| Route {
+                    auth: r.auth,
+                    group: r.group,
+                })
+                .collect(),
         };
         config.validate()?;
         Ok(config)
@@ -305,6 +390,8 @@ impl Config {
                 auth_mode: self.auth_mode,
             });
         }
+        self.validate_groups()?;
+        self.validate_routes()?;
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
         }
@@ -321,6 +408,100 @@ impl Config {
     /// The backend with this name.
     pub fn backend(&self, name: &str) -> Option<&Backend> {
         self.backends.iter().find(|b| b.name == name)
+    }
+
+    /// The group of this name.
+    pub fn group(&self, name: &str) -> Option<&Group> {
+        self.groups.iter().find(|g| g.name == name)
+    }
+
+    /// The group players of this kind are routed to, when routes are configured.
+    pub fn route_group(&self, auth: AuthKind) -> Option<&Group> {
+        let route = self.routes.iter().find(|r| r.auth == auth)?;
+        self.group(&route.group)
+    }
+
+    /// Groups have unique names, list configured backends once each, and never
+    /// share a backend with a group of the other kind: a verified and an
+    /// unverified player have different unique ids for the same name, so one
+    /// server would keep two files for them (DESIGN.md section 15.3).
+    fn validate_groups(&self) -> Result<(), ConfigError> {
+        for (i, group) in self.groups.iter().enumerate() {
+            if group.name.trim().is_empty() {
+                return Err(ConfigError::EmptyGroupName);
+            }
+            if self.groups[..i].iter().any(|g| g.name == group.name) {
+                return Err(ConfigError::DuplicateGroup(group.name.clone()));
+            }
+            if group.backends.is_empty() {
+                return Err(ConfigError::EmptyGroup(group.name.clone()));
+            }
+            for (j, backend) in group.backends.iter().enumerate() {
+                self.known_backend(&format!("group \"{}\"", group.name), backend)?;
+                if group.backends[..j].contains(backend) {
+                    return Err(ConfigError::DuplicateInGroup {
+                        group: group.name.clone(),
+                        backend: backend.clone(),
+                    });
+                }
+                let other = self.groups[..i]
+                    .iter()
+                    .find(|g| g.auth != group.auth && g.backends.contains(backend));
+                if let Some(other) = other {
+                    let (verified, unverified) = match group.auth {
+                        AuthKind::Verified => (group, other),
+                        AuthKind::Unverified => (other, group),
+                    };
+                    return Err(ConfigError::MixedAuthBackend {
+                        backend: backend.clone(),
+                        verified_group: verified.name.clone(),
+                        unverified_group: unverified.name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Each route leads to a group of its own kind, each kind has one route at
+    /// most, and once routes are written every kind the login mode lets in has
+    /// one. The hybrid mode lets in both kinds, so it needs both routes even when
+    /// none is written: otherwise the two kinds would meet on the default backend.
+    fn validate_routes(&self) -> Result<(), ConfigError> {
+        for (i, route) in self.routes.iter().enumerate() {
+            if self.routes[..i].iter().any(|r| r.auth == route.auth) {
+                return Err(ConfigError::DuplicateRoute(route.auth));
+            }
+            let Some(group) = self.group(&route.group) else {
+                return Err(ConfigError::UnknownRouteGroup {
+                    auth: route.auth,
+                    group: route.group.clone(),
+                });
+            };
+            if group.auth != route.auth {
+                return Err(ConfigError::RouteAuthMismatch {
+                    auth: route.auth,
+                    group: group.name.clone(),
+                    group_auth: group.auth,
+                });
+            }
+        }
+        let needed: &[AuthKind] = match self.auth_mode {
+            AuthMode::Online => &[AuthKind::Verified],
+            AuthMode::Offline => &[AuthKind::Unverified],
+            AuthMode::Hybrid => &[AuthKind::Verified, AuthKind::Unverified],
+        };
+        if !self.routes.is_empty() || self.auth_mode == AuthMode::Hybrid {
+            for &auth in needed {
+                if !self.routes.iter().any(|r| r.auth == auth) {
+                    return Err(ConfigError::MissingRoute {
+                        auth,
+                        mode: self.auth_mode,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The backend forced for the host name a client put in its handshake, if any.

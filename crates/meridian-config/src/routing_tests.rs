@@ -180,9 +180,6 @@ fn auth_mode_is_read_and_keeps_online_mode_in_step() {
     for (text, mode, online) in [
         ("online", AuthMode::Online, true),
         ("offline", AuthMode::Offline, false),
-        // Hybrid asks accounts to authenticate, so code that only knows
-        // online-mode keeps encrypting until hybrid logins are written.
-        ("hybrid", AuthMode::Hybrid, true),
     ] {
         let config = load(&format!("auth-mode = \"{text}\""));
         assert_eq!(config.auth_mode, mode, "{text}");
@@ -252,4 +249,242 @@ fn a_config_built_in_code_must_keep_the_two_settings_in_step() {
     ));
     config.auth_mode = AuthMode::Offline;
     assert!(config.validate().is_ok());
+}
+
+/// Two groups, one of each kind. `extra` holds top-level keys, `tables` more
+/// tables after the groups.
+fn grouped(extra: &str, tables: &str) -> Result<Config, ConfigError> {
+    Config::from_toml_str(&format!(
+        r#"{}
+[[group]]
+name = "accounts"
+auth = "verified"
+backends = ["lobby", "hub"]
+
+[[group]]
+name = "guests"
+auth = "unverified"
+backends = ["open"]
+{tables}"#,
+        with(extra)
+    ))
+}
+
+const BOTH_ROUTES: &str = r#"
+[[route]]
+auth = "verified"
+group = "accounts"
+[[route]]
+auth = "unverified"
+group = "guests"
+"#;
+
+#[test]
+fn groups_and_routes_are_read() {
+    let config = grouped("auth-mode = \"hybrid\"", BOTH_ROUTES).unwrap();
+    assert_eq!(config.auth_mode, AuthMode::Hybrid);
+    // Hybrid asks accounts to authenticate, so code that only knows online-mode
+    // keeps encrypting until hybrid logins are written.
+    assert!(config.online_mode);
+    assert_eq!(
+        config.groups[0],
+        Group {
+            name: "accounts".into(),
+            auth: AuthKind::Verified,
+            backends: vec!["lobby".into(), "hub".into()],
+        }
+    );
+    assert_eq!(config.routes.len(), 2);
+    assert_eq!(
+        config.route_group(AuthKind::Verified).unwrap().name,
+        "accounts"
+    );
+    assert_eq!(
+        config.route_group(AuthKind::Unverified).unwrap().name,
+        "guests"
+    );
+}
+
+#[test]
+fn groups_without_routes_are_allowed_and_change_nothing() {
+    let config = grouped("", "").unwrap();
+    assert_eq!(config.groups.len(), 2);
+    assert!(config.routes.is_empty());
+    assert!(config.route_group(AuthKind::Verified).is_none());
+}
+
+#[test]
+fn online_mode_needs_only_the_verified_route() {
+    let config = grouped(
+        "auth-mode = \"online\"",
+        "[[route]]\nauth = \"verified\"\ngroup = \"accounts\"",
+    )
+    .unwrap();
+    assert_eq!(config.routes.len(), 1);
+}
+
+#[test]
+fn a_route_missing_for_a_kind_the_mode_lets_in_is_refused() {
+    let e = grouped(
+        "auth-mode = \"offline\"",
+        "[[route]]\nauth = \"verified\"\ngroup = \"accounts\"",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            ConfigError::MissingRoute {
+                auth: AuthKind::Unverified,
+                mode: AuthMode::Offline
+            }
+        ),
+        "{e}"
+    );
+    let e = grouped(
+        "auth-mode = \"hybrid\"",
+        "[[route]]\nauth = \"verified\"\ngroup = \"accounts\"",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            ConfigError::MissingRoute {
+                auth: AuthKind::Unverified,
+                ..
+            }
+        ),
+        "{e}"
+    );
+}
+
+#[test]
+fn hybrid_mode_without_routes_is_refused() {
+    // Both kinds would meet on the default backend.
+    let e = refused("auth-mode = \"hybrid\"");
+    assert!(
+        matches!(
+            e,
+            ConfigError::MissingRoute {
+                auth: AuthKind::Verified,
+                ..
+            }
+        ),
+        "{e}"
+    );
+    assert!(e.to_string().contains("add a route"), "{e}");
+}
+
+#[test]
+fn a_backend_in_groups_of_both_kinds_is_refused() {
+    let e = grouped(
+        "",
+        "[[group]]\nname = \"mixed\"\nauth = \"unverified\"\nbackends = [\"hub\"]",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::MixedAuthBackend { backend, verified_group, unverified_group }
+            if backend == "hub" && verified_group == "accounts" && unverified_group == "mixed"),
+        "{e}"
+    );
+    let message = e.to_string();
+    assert!(
+        message.contains("\"hub\"") && message.contains("two files"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_backend_in_two_groups_of_the_same_kind_is_allowed() {
+    let config = grouped(
+        "",
+        "[[group]]\nname = \"more-accounts\"\nauth = \"verified\"\nbackends = [\"hub\"]",
+    )
+    .unwrap();
+    assert_eq!(config.groups.len(), 3);
+}
+
+#[test]
+fn bad_groups_are_refused() {
+    let e = grouped(
+        "",
+        "[[group]]\nname = \"accounts\"\nauth = \"verified\"\nbackends = [\"hub\"]",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::DuplicateGroup(n) if n == "accounts"),
+        "{e}"
+    );
+
+    let e = grouped(
+        "",
+        "[[group]]\nname = \"empty\"\nauth = \"verified\"\nbackends = []",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::EmptyGroup(n) if n == "empty"),
+        "{e}"
+    );
+
+    let e = grouped(
+        "",
+        "[[group]]\nname = \" \"\nauth = \"verified\"\nbackends = [\"hub\"]",
+    )
+    .unwrap_err();
+    assert!(matches!(e, ConfigError::EmptyGroupName), "{e}");
+
+    let e = grouped(
+        "",
+        "[[group]]\nname = \"x\"\nauth = \"verified\"\nbackends = [\"nether\"]",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::UnknownBackend { setting, name } if setting == "group \"x\"" && name == "nether"),
+        "{e}"
+    );
+
+    let e = grouped(
+        "",
+        "[[group]]\nname = \"x\"\nauth = \"verified\"\nbackends = [\"hub\", \"hub\"]",
+    )
+    .unwrap_err();
+    assert!(matches!(e, ConfigError::DuplicateInGroup { .. }), "{e}");
+
+    let e = grouped(
+        "",
+        "[[group]]\nname = \"x\"\nauth = \"guest\"\nbackends = [\"hub\"]",
+    )
+    .unwrap_err();
+    assert!(matches!(e, ConfigError::Parse(_)), "{e}");
+}
+
+#[test]
+fn bad_routes_are_refused() {
+    let e = grouped("", "[[route]]\nauth = \"verified\"\ngroup = \"nowhere\"").unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::UnknownRouteGroup { group, .. } if group == "nowhere"),
+        "{e}"
+    );
+
+    let e = grouped("", "[[route]]\nauth = \"verified\"\ngroup = \"guests\"").unwrap_err();
+    assert!(
+        matches!(
+            e,
+            ConfigError::RouteAuthMismatch {
+                auth: AuthKind::Verified,
+                group_auth: AuthKind::Unverified,
+                ..
+            }
+        ),
+        "{e}"
+    );
+
+    let e = grouped(
+        "",
+        "[[route]]\nauth = \"verified\"\ngroup = \"accounts\"\n[[route]]\nauth = \"verified\"\ngroup = \"accounts\"",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, ConfigError::DuplicateRoute(AuthKind::Verified)),
+        "{e}"
+    );
 }
