@@ -112,34 +112,53 @@ impl SidecarClient {
         }
     }
 
-    /// The player will arrive through the proxy: the backend holds them.
-    pub fn expect(&mut self, uuid: &str, name: &str) -> Result<Value, Error> {
+    /// The player will arrive through the proxy within `seconds` (the backend's
+    /// default when `None`): the backend holds them when they log in.
+    pub fn expect(&mut self, uuid: &str, seconds: Option<u64>) -> Result<Value, Error> {
         self.request(&Request::Expect {
             uuid: uuid.to_owned(),
-            name: name.to_owned(),
+            seconds,
         })
     }
 
-    /// The player's record, to move to another backend.
-    pub fn export(&mut self, uuid: &str) -> Result<Value, Error> {
+    /// The player's record, to move to another backend; with `freeze`, the
+    /// player's own inputs stop being acted on until a release.
+    pub fn export(&mut self, uuid: &str, freeze: bool) -> Result<Value, Error> {
         self.request(&Request::Export {
             uuid: uuid.to_owned(),
+            freeze,
         })
     }
 
-    /// Puts a record on the held player.
-    pub fn import(&mut self, uuid: &str, record: Value) -> Result<Value, Error> {
+    /// Puts a record, as [`Client::export`] got it, on the held player: every part
+    /// of it, or only `parts`; `announce` false keeps the arrival quiet.
+    pub fn import(
+        &mut self,
+        uuid: &str,
+        record: Value,
+        parts: Option<Vec<String>>,
+        announce: Option<bool>,
+    ) -> Result<Value, Error> {
         self.request(&Request::Import {
             uuid: uuid.to_owned(),
             record,
+            parts,
+            announce,
         })
     }
 
-    /// Ends a switch on this backend.
-    pub fn release(&mut self, uuid: &str, outcome: Outcome) -> Result<Value, Error> {
+    /// Ends a switch on this backend; `announce` (with [`Outcome::Moved`] only)
+    /// tells the others the player left.
+    pub fn release(
+        &mut self,
+        uuid: &str,
+        outcome: Outcome,
+        announce: bool,
+    ) -> Result<Value, Error> {
         self.request(&Request::Release {
             uuid: uuid.to_owned(),
             outcome,
+            announce,
         })
     }
 

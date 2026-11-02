@@ -44,15 +44,13 @@ pub fn run(args: &[String]) -> i32 {
             ["crash"] => return 3,
             ["slow"] => {
                 // An answer that comes late, like the proxy's servers, which waits
-                // for every server before it prints.
-                std::thread::sleep(std::time::Duration::from_millis(2500));
-                let _ = writeln!(out, "slow: first part");
-                let _ = writeln!(out, "slow: second part");
+                // for every server before it prints, then prints it at once.
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let _ = out.write_all(b"slow: first part\nslow: second part\n");
             }
             ["list"] => {
-                let _ = writeln!(out, "2 players online:");
-                let _ = writeln!(out, "  Alex on lobby");
-                let _ = writeln!(out, "  Steve on game1");
+                // At once, as the proxy prints a command's lines.
+                let _ = out.write_all(b"2 players online:\n  Alex on lobby\n  Steve on game1\n");
             }
             ["send", player, target] => {
                 let _ = writeln!(
