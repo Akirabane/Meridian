@@ -1,17 +1,15 @@
 //! One player's session: the login to the proxy, the backend chosen for them, the
 //! login there with the player information forwarding, then the relay until either
-//! side leaves.
+//! side leaves. [`Sessions`] keeps every session being relayed: who the player
+//! is, where they are, and the handle that ends the session.
 use crate::log::{debug, info, warning};
-use horizon_protocol::{
-    connection::{Closer, Connection},
-    packets::configuration,
-    text,
-};
+use horizon_protocol::{connection::Connection, packets::configuration, text};
 use meridian_config::Config;
 use meridian_net::{
     Profile,
     backend::{BackendLink, BackendOptions},
-    client, relay,
+    client,
+    relay::{Handle, Relay},
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,37 +26,46 @@ pub type Connect =
 /// proxy closes the connection itself.
 const REFUSAL_GRACE: Duration = Duration::from_secs(2);
 
-/// The sessions being relayed, so that a stop can close them all.
+/// A player whose session is being relayed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Player {
+    pub name: String,
+    pub uuid: [u8; 16],
+    /// The name of the backend they are on.
+    pub backend: String,
+    /// Where they connected from.
+    pub address: SocketAddr,
+    /// When the relay started.
+    pub joined: Instant,
+}
+
+/// The sessions being relayed.
 #[derive(Default)]
 pub struct Sessions {
     next: AtomicU64,
     closing: AtomicBool,
-    open: Mutex<HashMap<u64, Vec<Closer>>>,
+    open: Mutex<HashMap<u64, (Player, Handle)>>,
 }
 
 impl Sessions {
-    /// Counts a session in, with what closes its connections. `None` once the
-    /// proxy is stopping: the session must end at once.
-    fn open(&self, closers: Vec<Closer>) -> Option<Open<'_>> {
+    /// Counts a session in. `None` once the proxy is stopping: the session must
+    /// end at once.
+    fn open(&self, player: Player, handle: Handle) -> Option<Open<'_>> {
         let mut open = self.lock();
         // Checked under the lock, so a stop cannot miss a session opening now.
         if self.closing.load(Ordering::Relaxed) {
             return None;
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        open.insert(id, closers);
+        open.insert(id, (player, handle));
         Some(Open { sessions: self, id })
     }
 
-    /// Closes both connections of every session, and refuses new ones. Returns
-    /// how many sessions were closed.
-    pub fn close_all(&self) -> usize {
-        let open = self.lock();
-        self.closing.store(true, Ordering::Relaxed);
-        for closer in open.values().flatten() {
-            closer.close();
-        }
-        open.len()
+    /// The players being relayed, in the order they joined.
+    pub fn players(&self) -> Vec<Player> {
+        let mut players: Vec<Player> = self.lock().values().map(|(p, _)| p.clone()).collect();
+        players.sort_by_key(|p| p.joined);
+        players
     }
 
     /// How many sessions are being relayed.
@@ -67,7 +74,44 @@ impl Sessions {
         self.lock().len()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Vec<Closer>>> {
+    /// The player called `name`, whatever its case.
+    pub fn find(&self, name: &str) -> Option<Player> {
+        self.lock()
+            .values()
+            .find(|(p, _)| p.name.eq_ignore_ascii_case(name))
+            .map(|(p, _)| p.clone())
+    }
+
+    /// Ends the session of the player called `name`, telling them `reason`.
+    /// Returns the player, or `None` if no one has that name.
+    pub fn kick(&self, name: &str, reason: &str) -> Option<Player> {
+        let (player, handle) = self
+            .lock()
+            .values()
+            .find(|(p, _)| p.name.eq_ignore_ascii_case(name))
+            .cloned()?;
+        handle.disconnect(configuration::Disconnect {
+            reason: text::literal(reason),
+        });
+        Some(player)
+    }
+
+    /// Ends every session, telling each player that the server closed, and refuses
+    /// new ones. Returns how many sessions were ended.
+    pub fn close_all(&self) -> usize {
+        let open = self.lock();
+        self.closing.store(true, Ordering::Relaxed);
+        for (_, handle) in open.values() {
+            // `multiplayer.disconnect.server_shutdown`: the "Server closed" of the
+            // player's own language.
+            handle.disconnect(configuration::Disconnect {
+                reason: text::translatable("multiplayer.disconnect.server_shutdown", &[]),
+            });
+        }
+        open.len()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, (Player, Handle)>> {
         self.open.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -106,7 +150,7 @@ pub fn handle(
     // Counted as online in the server list from now until the session ends.
     let _seat = client::Seat::take();
     let name = session.profile.name.clone();
-    let uuid = hyphenated(session.profile.uuid);
+    let uuid = session.profile.uuid;
     let Some(backend) = config.backend(&config.default_backend) else {
         // The configuration's check makes this impossible; refuse rather than panic.
         warning!(
@@ -125,7 +169,8 @@ pub fn handle(
         Ok(link) => link,
         Err(e) => {
             warning!(
-                "{peer}: {name} ({uuid}) cannot join backend \"{}\" at {}: {e}",
+                "{peer}: {name} ({}) cannot join backend \"{}\" at {}: {e}",
+                hyphenated(uuid),
                 backend.name,
                 backend.address
             );
@@ -139,29 +184,38 @@ pub fn handle(
             return;
         }
     };
-    let closers = match (
-        session.connection.reader.closer(),
-        link.connection.reader.closer(),
-    ) {
-        (Ok(a), Ok(b)) => vec![a, b],
-        (Err(e), _) | (_, Err(e)) => {
+    let (relay, handle) = match Relay::new(session, link) {
+        Ok(relay) => relay,
+        Err(e) => {
             warning!("{peer}: {name}: cannot set up the session: {e}");
             return;
         }
     };
-    let Some(_open) = sessions.open(closers) else {
+    let player = Player {
+        name: name.clone(),
+        uuid,
+        backend: backend.name.clone(),
+        address: peer,
+        joined: Instant::now(),
+    };
+    let Some(_open) = sessions.open(player, handle.clone()) else {
         debug!("{peer}: {name}: the proxy is stopping; not relaying");
+        handle.disconnect(configuration::Disconnect {
+            reason: text::translatable("multiplayer.disconnect.server_shutdown", &[]),
+        });
         return;
     };
     info!(
-        "{peer}: {name} ({uuid}) joined backend \"{}\"",
+        "{peer}: {name} ({}) joined backend \"{}\"",
+        hyphenated(uuid),
         backend.name
     );
     let started = Instant::now();
-    match relay::run_counting(session, link) {
+    match relay.run() {
         Ok(report) => info!(
-            "{peer}: {name} ({uuid}) left backend \"{}\" after {:.1} s: \
+            "{peer}: {name} ({}) left backend \"{}\" after {:.1} s: \
              {} packets, {} bytes to the player; {} packets, {} bytes to the backend",
+            hyphenated(uuid),
             backend.name,
             started.elapsed().as_secs_f64(),
             report.to_client.packets,
@@ -170,7 +224,8 @@ pub fn handle(
             report.to_backend.bytes
         ),
         Err(e) => warning!(
-            "{peer}: {name} ({uuid}) on backend \"{}\": the session broke after {:.1} s: {e}",
+            "{peer}: {name} ({}) on backend \"{}\": the session broke after {:.1} s: {e}",
+            hyphenated(uuid),
             backend.name,
             started.elapsed().as_secs_f64()
         ),
@@ -200,7 +255,7 @@ fn refuse(mut connection: Connection, reason: &str) {
 }
 
 /// A unique id as `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
-fn hyphenated(uuid: [u8; 16]) -> String {
+pub fn hyphenated(uuid: [u8; 16]) -> String {
     let hex = format!("{:032x}", u128::from_be_bytes(uuid));
     format!(
         "{}-{}-{}-{}-{}",
@@ -213,7 +268,7 @@ fn hyphenated(uuid: [u8; 16]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use horizon_protocol::{crypto::offline_uuid, ids};
     use meridian_config::Backend;
@@ -456,11 +511,17 @@ mod tests {
             let sessions = Arc::clone(&sessions);
             std::thread::spawn(move || handle(proxy_end, peer(), &config(), &*connect, &sessions))
         };
+        let player_trace = Recorder::new();
         let client = FakeClient {
-            after_login: vec![Step::ExpectClose],
+            after_login: vec![
+                Step::Expect {
+                    id: ids::configuration::clientbound::DISCONNECT,
+                },
+                Step::ExpectClose,
+            ],
             ..FakeClient::named("Alex")
         }
-        .spawn(player_end, recorder);
+        .spawn(player_end, player_trace.clone());
         let deadline = Instant::now() + Duration::from_secs(5);
         while sessions.count() == 0 {
             assert!(Instant::now() < deadline, "the session never started");
@@ -472,6 +533,39 @@ mod tests {
         let (_, _, server) = seen.lock().unwrap().take().unwrap();
         server.join().unwrap().unwrap();
         assert_eq!(sessions.count(), 0);
+        // The player is told the server closed, in their own language.
+        let trace = player_trace.trace();
+        let configuration::Clientbound::Disconnect(disconnect) =
+            configuration::Clientbound::decode(trace.packets[0].id, &trace.packets[0].payload)
+                .unwrap()
+        else {
+            panic!("not a disconnect");
+        };
+        assert_eq!(
+            disconnect.reason,
+            text::translatable("multiplayer.disconnect.server_shutdown", &[])
+        );
+    }
+
+    /// A session relayed between two pipes whose far ends do nothing, with the
+    /// player's and the backend's ends handed back.
+    pub fn idle_session(name: &str) -> (Relay, Handle, Connection, Connection) {
+        let (proxy_client, player) = pipe();
+        let (proxy_backend, server) = pipe();
+        let client = client::ClientSession {
+            profile: Profile {
+                name: name.to_owned(),
+                uuid: offline_uuid(name).to_be_bytes(),
+                properties: Vec::new(),
+            },
+            auth: client::AuthKind::Offline,
+            connection: proxy_client,
+        };
+        let backend = BackendLink {
+            connection: proxy_backend,
+        };
+        let (relay, handle) = Relay::new(client, backend).unwrap();
+        (relay, handle, player, server)
     }
 
     #[test]
@@ -484,7 +578,60 @@ mod tests {
     fn a_stopping_proxy_refuses_new_sessions() {
         let sessions = Sessions::default();
         assert_eq!(sessions.close_all(), 0);
-        assert!(sessions.open(Vec::new()).is_none());
+        let (_relay, handle, _player, _server) = idle_session("Alex");
+        let player = Player {
+            name: "Alex".into(),
+            uuid: [0; 16],
+            backend: "lobby".into(),
+            address: peer(),
+            joined: Instant::now(),
+        };
+        assert!(sessions.open(player, handle).is_none());
         assert_eq!(sessions.count(), 0);
+    }
+
+    /// The registry lists players in the order they joined, finds them whatever
+    /// the case of the name, and a kick ends only that player's session.
+    #[test]
+    fn the_registry_lists_finds_and_kicks_players() {
+        let sessions = Sessions::default();
+        let mut ends = Vec::new();
+        let mut opened = Vec::new();
+        let start = Instant::now();
+        for (i, name) in ["Alex", "Steve"].into_iter().enumerate() {
+            let (relay, handle, player, server) = idle_session(name);
+            let player_info = Player {
+                name: name.into(),
+                uuid: offline_uuid(name).to_be_bytes(),
+                backend: "lobby".into(),
+                address: peer(),
+                joined: start + Duration::from_millis(i as u64),
+            };
+            opened.push(sessions.open(player_info, handle).unwrap());
+            ends.push((std::thread::spawn(move || relay.run()), player, server));
+        }
+        let names: Vec<String> = sessions.players().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Alex", "Steve"]);
+        assert_eq!(sessions.find("steve").unwrap().name, "Steve");
+        assert!(sessions.find("Herobrine").is_none());
+        assert!(sessions.kick("Herobrine", "bye").is_none());
+        assert_eq!(sessions.kick("ALEX", "bye").unwrap().name, "Alex");
+        let (relay, mut player, _server) = ends.remove(0);
+        assert!(relay.join().unwrap().is_ok());
+        let (id, payload) = player.recv().unwrap();
+        let configuration::Clientbound::Disconnect(d) =
+            configuration::Clientbound::decode(id, &payload).unwrap()
+        else {
+            panic!("not a disconnect");
+        };
+        assert_eq!(text::plain(&d.reason, &Default::default()), "bye");
+        // Steve is still relayed.
+        drop(opened.remove(0));
+        assert_eq!(sessions.count(), 1);
+        drop(opened);
+        for (relay, player, server) in ends {
+            drop((player, server));
+            assert!(relay.join().unwrap().is_ok());
+        }
     }
 }
