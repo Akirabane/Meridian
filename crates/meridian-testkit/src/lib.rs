@@ -8,8 +8,10 @@
 //! - [`backend`] takes a player through the login as a Horizon server does, with
 //!   compression and the player information forwarding, then runs a script.
 //! - [`client`] logs in as an offline vanilla client does, then runs a script.
+//! - [`live`] is a quiet player for a real server, over TCP.
 pub mod backend;
 pub mod client;
+pub mod live;
 pub mod peer;
 pub mod trace;
 
