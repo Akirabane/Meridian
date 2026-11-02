@@ -2,6 +2,7 @@
 //! `__fake-process`, which prints, answers its console and opens a port. No real
 //! server is started, and nothing leaves the test's own folders.
 use meridian_panel::bench::Bench;
+use meridian_panel::http::{self, Panel, Request};
 use meridian_panel::supervisor::{State, Supervisor};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -267,4 +268,231 @@ fn restart_stops_then_starts_again() {
         state_of(&supervisor, "proxy") == State::Stopped
     });
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// The page and its API.
+
+fn panel(bench: &Bench) -> Panel {
+    Panel {
+        supervisor: Supervisor::new(bench),
+        token: "test-token".into(),
+        port: bench.panel_port,
+    }
+}
+
+fn request(
+    panel: &Panel,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: &str,
+) -> (u16, serde_json::Value, String) {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    let response = http::route(
+        panel,
+        &Request {
+            method: method.into(),
+            path: path.into(),
+            query: query.into(),
+            host: Some(format!("127.0.0.1:{}", panel.port)),
+            token: token.map(str::to_owned),
+            body: body.as_bytes().to_vec(),
+        },
+    );
+    let text = String::from_utf8(response.body).unwrap();
+    let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    (response.status, json, text)
+}
+
+#[test]
+fn every_api_call_needs_the_token_and_the_host_of_the_panel() {
+    let dir = scratch("token");
+    let (bench, _) = bench(&dir, &["lobby"], &[]);
+    let panel = panel(&bench);
+    for (method, path) in [
+        ("GET", "/api/state"),
+        ("GET", "/api/log?name=lobby"),
+        ("POST", "/api/action"),
+        ("POST", "/api/command"),
+        ("POST", "/api/test/players"),
+        ("POST", "/api/test/send"),
+    ] {
+        assert_eq!(request(&panel, method, path, None, "{}").0, 401, "{path}");
+        assert_eq!(
+            request(&panel, method, path, Some("wrong"), "{}").0,
+            401,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        request(&panel, "GET", "/api/state", Some("test-token"), "").0,
+        200
+    );
+
+    // A name that is not the panel's, as a rebinding site would send.
+    for host in [
+        Some("evil.example:8140".to_owned()),
+        None,
+        Some(format!("127.0.0.1:{}", panel.port + 1)),
+    ] {
+        let response = http::route(
+            &panel,
+            &Request {
+                method: "GET".into(),
+                path: "/api/state".into(),
+                host,
+                token: Some("test-token".into()),
+                ..Request::default()
+            },
+        );
+        assert_eq!(response.status, 403);
+    }
+    // The page carries the token for the script, and works with localhost too.
+    let page = http::route(
+        &panel,
+        &Request {
+            method: "GET".into(),
+            path: "/".into(),
+            host: Some(format!("localhost:{}", panel.port)),
+            ..Request::default()
+        },
+    );
+    assert_eq!(page.status, 200);
+    assert!(
+        String::from_utf8(page.body)
+            .unwrap()
+            .contains("content=\"test-token\"")
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_api_drives_the_bench_by_name_only() {
+    let dir = scratch("api");
+    let (bench, _) = bench(&dir, &["game1"], &[]);
+    accept_in(&dir.join("game1"));
+    let panel = panel(&bench);
+    let t = Some("test-token");
+
+    let (status, state, _) = request(&panel, "GET", "/api/state", t, "");
+    assert_eq!(status, 200);
+    assert_eq!(state["processes"][0]["name"], "game1");
+    assert_eq!(state["processes"][0]["state"], "stopped");
+
+    // No program or path can be given: only names of the bench.
+    let (status, error, _) = request(
+        &panel,
+        "POST",
+        "/api/action",
+        t,
+        r#"{"name":"cmd.exe","action":"start"}"#,
+    );
+    assert_eq!(status, 400);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("no process called")
+    );
+    assert_eq!(
+        request(
+            &panel,
+            "POST",
+            "/api/action",
+            t,
+            r#"{"name":"game1","action":"delete"}"#
+        )
+        .0,
+        400
+    );
+
+    assert_eq!(
+        request(
+            &panel,
+            "POST",
+            "/api/action",
+            t,
+            r#"{"name":"proxy","action":"start"}"#
+        )
+        .0,
+        200
+    );
+    wait_for("online", || {
+        state_of(&panel.supervisor, "proxy") == State::Online
+    });
+
+    // The test buttons go through the proxy's console.
+    let (_, players, _) = request(&panel, "POST", "/api/test/players", t, "{}");
+    assert!(
+        players["lines"].to_string().contains("Alex on lobby"),
+        "{players}"
+    );
+    let (status, sent, _) = request(
+        &panel,
+        "POST",
+        "/api/test/send",
+        t,
+        r#"{"player":"Alex","target":"game1"}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        sent["lines"][0],
+        "transfer not available yet: Alex would move to game1"
+    );
+    // Only a player name and a server of the bench are taken.
+    for body in [
+        r#"{"player":"Alex; end","target":"game1"}"#,
+        r#"{"player":"","target":"game1"}"#,
+        r#"{"player":"Alex","target":"proxy"}"#,
+        r#"{"player":"Alex","target":"nether"}"#,
+    ] {
+        assert_eq!(
+            request(&panel, "POST", "/api/test/send", t, body).0,
+            400,
+            "{body}"
+        );
+    }
+
+    // A console line, and the log since a number.
+    let (_, answer, _) = request(
+        &panel,
+        "POST",
+        "/api/command",
+        t,
+        r#"{"name":"proxy","line":"servers"}"#,
+    );
+    assert_eq!(answer["lines"][0], "got: servers");
+    let (_, log, _) = request(&panel, "GET", "/api/log?name=proxy&since=0", t, "");
+    assert!(log["lines"].to_string().contains("> servers"));
+    let next = log["next"].as_u64().unwrap();
+    let (_, later, _) = request(
+        &panel,
+        "GET",
+        &format!("/api/log?name=proxy&since={next}"),
+        t,
+        "",
+    );
+    assert_eq!(later["lines"].as_array().unwrap().len(), 0);
+
+    assert_eq!(
+        request(
+            &panel,
+            "POST",
+            "/api/action",
+            t,
+            r#"{"name":"proxy","action":"stop"}"#
+        )
+        .0,
+        200
+    );
+    wait_for("stopped", || {
+        state_of(&panel.supervisor, "proxy") == State::Stopped
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_panel_listens_on_127_0_0_1_only() {
+    let listener = http::bind(0).unwrap();
+    assert!(listener.local_addr().unwrap().ip().is_loopback());
 }

@@ -1,7 +1,9 @@
 //! The `meridian-panel` program.
-use meridian_panel::{bench::Bench, fake, init};
-use std::path::PathBuf;
+use meridian_panel::{bench::Bench, fake, http, init, supervisor::Supervisor};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const USAGE: &str = "\
 Usage:
@@ -46,14 +48,7 @@ fn main() -> ExitCode {
             eprintln!("meridian-panel: unknown option {flag}\n\n{USAGE}");
             ExitCode::from(2)
         }
-        _ => {
-            eprintln!(
-                "meridian-panel: running the panel comes with the page
-
-{USAGE}"
-            );
-            ExitCode::from(2)
-        }
+        other => run(&bench_path(other.map(|s| s.to_owned()).as_ref())),
     }
 }
 
@@ -97,4 +92,50 @@ fn parse_init(args: &[String]) -> Result<init::InitOptions, String> {
 fn parse_accept(args: &[String]) -> Result<String, String> {
     let dir = value(args, "--dir").ok_or_else(|| format!("accept-eula needs --dir\n\n{USAGE}"))?;
     init::accept_eula(&dir, args.iter().any(|a| a == init::ACCEPT_FLAG))
+}
+
+fn run(path: &Path) -> ExitCode {
+    let bench = match Bench::load(path) {
+        Ok(bench) => bench,
+        Err(e) => {
+            eprintln!("meridian-panel: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let listener = match http::bind(bench.panel_port) {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!(
+                "meridian-panel: cannot listen on 127.0.0.1:{}: {e}",
+                bench.panel_port
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let supervisor = Supervisor::new(&bench);
+    let panel = Arc::new(http::Panel {
+        supervisor: Arc::clone(&supervisor),
+        token: init::random_hex(32),
+        port: bench.panel_port,
+    });
+    let count = match bench.processes.len() {
+        1 => "1 process".to_owned(),
+        n => format!("{n} processes"),
+    };
+    println!(
+        "Meridian bench panel on http://127.0.0.1:{}/ ({count}, none started).\n\
+         Ctrl+C in this terminal ends the panel, and reaches the processes it started \
+         too, which stop as they do on Ctrl+C.",
+        bench.panel_port
+    );
+    let stop = AtomicBool::new(false);
+    let result = http::serve(listener, panel, &stop);
+    supervisor.kill_all();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("meridian-panel: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

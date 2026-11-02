@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="panel-token" content="{{TOKEN}}">
+<title>Meridian bench</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #6a7282; --line: #dde1e7;
+          --ok: #1f8a4c; --warn: #b7791f; --bad: #c0392b; --accent: #3557c4; --mono: ui-monospace, Consolas, monospace; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --card: #1d2128; --text: #e4e7ec; --muted: #9aa3b2; --line: #2e343e;
+            --ok: #3fbf74; --warn: #e0a83c; --bad: #e5675a; --accent: #7d9bff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0 12px 0 0; }
+  main { padding: 16px; display: grid; gap: 16px; }
+  .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .card.selected { outline: 2px solid var(--accent); }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .name { font-weight: 600; font-size: 15px; cursor: pointer; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .state { font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .state.online { color: var(--ok); } .state.starting, .state.stopping { color: var(--warn); }
+  .state.exited { color: var(--bad); } .state.stopped { color: var(--muted); }
+  .numbers { display: flex; gap: 16px; margin: 6px 0; font-family: var(--mono); }
+  svg.spark { width: 100%; height: 40px; display: block; }
+  button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  section h2 { font-size: 15px; margin: 0 0 8px; }
+  pre#console { height: 360px; overflow: auto; margin: 0; padding: 8px; background: var(--bg);
+                border: 1px solid var(--line); border-radius: 6px; font: 12px/1.35 var(--mono); white-space: pre-wrap; word-break: break-all; }
+  form { display: flex; gap: 6px; margin-top: 8px; }
+  input { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  form input { flex: 1; font-family: var(--mono); }
+  #message { min-height: 1.4em; }
+  #message.error { color: var(--bad); }
+  pre.result { margin: 8px 0 0; font: 12px/1.35 var(--mono); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Meridian bench</h1>
+  <button id="start-all">Start all</button>
+  <button id="stop-all">Stop all</button>
+  <span id="message" class="muted"></span>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+  <section>
+    <h2>Console: <span id="console-name"></span></h2>
+    <pre id="console"></pre>
+    <form id="command-form" autocomplete="off">
+      <input id="command" placeholder="A console line, for example list or stop">
+      <button type="submit">Send</button>
+    </form>
+  </section>
+  <section>
+    <h2>Tests</h2>
+    <div class="buttons">
+      <button id="players">Show players</button>
+      <input id="player" placeholder="Player name" size="16" maxlength="16">
+      <span id="send-buttons" class="buttons"></span>
+    </div>
+    <pre class="result" id="result"></pre>
+  </section>
+</main>
+<script src="/page.js"></script>
+</body>
+</html>

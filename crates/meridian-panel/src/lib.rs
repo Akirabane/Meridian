@@ -2,5 +2,6 @@
 //! machine, started, stopped, watched and driven from a page served on 127.0.0.1.
 pub mod bench;
 pub mod fake;
+pub mod http;
 pub mod init;
 pub mod supervisor;
