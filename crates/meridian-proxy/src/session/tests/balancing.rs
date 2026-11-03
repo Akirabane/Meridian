@@ -556,3 +556,132 @@ fn with_balancing_off_a_report_changes_nothing() {
     let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
     assert_eq!(tried, [LOBBY]);
 }
+
+// ---- Ping and drain ----
+
+fn ping(sessions: &Sessions, backend: &str, ms: u64) {
+    sessions
+        .statuses
+        .record_ping(backend, Duration::from_millis(ms), Instant::now());
+}
+
+/// Two lobbies with the same number of players: the one the proxy measured as the
+/// quicker takes the login, whatever the order they are listed in.
+#[test]
+fn the_quicker_lobby_takes_a_tie() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    ping(&sessions, "lobby", 40);
+    ping(&sessions, "east", 5);
+    ping(&sessions, "west", 90);
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+}
+
+/// The ping only breaks a tie: a fuller lobby is still preferred to a quicker one.
+#[test]
+fn the_ping_does_not_beat_the_fill_rule_at_login() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    ping(&sessions, "lobby", 80);
+    ping(&sessions, "east", 1);
+    let _held = hold(&sessions, &config, "lobby");
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// With `tie-break = "order"` the measures are not used.
+#[test]
+fn the_order_breaks_the_tie_when_it_is_asked_for() {
+    let mut config = balanced(true, 5, 5);
+    config.balancing.tie_break = meridian_config::TieBreak::Order;
+    let sessions = Sessions::default();
+    ping(&sessions, "lobby", 80);
+    ping(&sessions, "east", 1);
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// A measure that grew old is not used, as a report that grew old is not believed.
+#[test]
+fn an_old_measure_is_not_used() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs(
+            config.balancing.state_max_age_seconds + 5,
+        ))
+        .expect("the clock has run long enough");
+    sessions
+        .statuses
+        .record_ping("east", Duration::from_millis(1), old);
+    ping(&sessions, "lobby", 50);
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY], "east's measure is too old to rank it first");
+}
+
+/// A lobby the operator drained takes no new player, not even through a forced host.
+#[test]
+fn a_drained_lobby_takes_no_new_player_and_is_offered_again_when_undrained() {
+    let mut config = balanced(true, 5, 5);
+    forced_east(&mut config);
+    let sessions = Sessions::default();
+    sessions.balancer.drain("lobby");
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+    sessions.balancer.drain("east");
+    let (tried, _) = login_one(
+        &config,
+        &sessions,
+        up(),
+        Some("east.example.com"),
+        vec![Step::ExpectClose],
+    );
+    assert_eq!(tried, [WEST], "the forced host's backend is drained too");
+    assert!(sessions.balancer.undrain("lobby"));
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// Every lobby drained: the player is refused and no lobby is tried by the ordinary
+/// loop either.
+#[test]
+fn every_lobby_drained_leaves_no_room() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    for lobby in ["lobby", "east", "west"] {
+        sessions.balancer.drain(lobby);
+    }
+    let (tried, trace) = login_one(&config, &sessions, up(), None, refused());
+    assert!(tried.is_empty(), "{tried:?}");
+    assert_eq!(refusal(&trace), Full::MESSAGE);
+}
+
+/// The same when every lobby says it does not accept transfers, or has not been heard
+/// from for too long: none is offered, and the ordinary loop does not try them.
+#[test]
+fn lobbies_that_do_not_accept_transfers_or_are_not_heard_from_are_not_tried_at_all() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs(
+            config.balancing.state_max_age_seconds + 5,
+        ))
+        .expect("the clock has run long enough");
+    sessions
+        .statuses
+        .record("lobby", ServerStatus::default(), old);
+    for lobby in ["east", "west"] {
+        report(
+            &sessions,
+            lobby,
+            ServerStatus {
+                accepts_transfers: Some(false),
+                ..accepting(0, 20)
+            },
+        );
+    }
+    let (tried, trace) = login_one(&config, &sessions, up(), None, refused());
+    assert!(tried.is_empty(), "{tried:?}");
+    assert_eq!(refusal(&trace), Full::MESSAGE);
+}

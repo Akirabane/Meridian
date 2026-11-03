@@ -34,8 +34,8 @@ with whom, are not part of it.
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
 | Does a server accept transfers | The proxy reads `accepts_transfers`, `players` and `capacity` through the sidecar (section 3). A failed login also marks a server "passed over" for `backend-retry-seconds` (`health.rs`) | The answer on the Horizon side: its command and its names are not fixed |
 | Premium or offline | Done. Players are verified or unverified, decided at login (DESIGN.md section 15), and groups and routes keep the two kinds apart | Nothing for placement: it chooses among the servers the route already allows |
-| Ping | The console's `servers` command measures how long a TCP connection to a backend takes. Nothing measures a player. The relay passes keep-alives through as they are (`relay.rs`) | A measure kept by the proxy, see section 5 |
-| Drain | Nothing. A server removed from the file keeps its players until they leave (CONFIG.md, "What a reload changes") | Stop offering a server and let it empty |
+| Ping | The proxy measures the TCP connection time to each server with a role and keeps it (section 5). Nothing measures a player. The relay passes keep-alives through as they are (`relay.rs`) | Player to proxy, not asked for |
+| Drain | A server that reports it does not accept transfers, or that the operator drains with the console's `drain`, is not offered to new players, not even to a named choice; its players stay | Nothing moves the players off it. A removed server still keeps its players until they leave |
 | Moving players between roles | `/server` and `/hub` switch a player through the sidecars (DESIGN.md section 5) | Moving a group from a sublobby to a game, and who decides |
 
 ## 3. Reading the state of a server
@@ -129,10 +129,16 @@ placed to even out the load. Those are later steps.
 The ping a player has to the proxy is the same whichever server is chosen, so it
 cannot tell two servers apart. Two things are worth measuring instead:
 
-- **Proxy to server**, the time a connection to the server takes. The console already
-  does this once on request (`probe` in `state.rs`). Measured every
-  `probe-interval-seconds` it is what `tie-break = "ping"` compares. This matters when
-  the servers are not all in one place.
+- **Proxy to server**, the time a TCP connection to the server takes. The polling
+  thread measures it for every server that has a role, every `probe-interval-seconds`,
+  with the probe the console already used (`probe` in `state.rs`), while balancing is on
+  and `tie-break = "ping"`. A measure older than `state-max-age-seconds`, such as one
+  of a server that stopped answering, is not used. The balancer uses it only to break a
+  tie, after the fill rule: a quicker server never beats a fuller open one. A server
+  with no measure ranks after one that has one, and two without keep their order. This
+  matters when the servers are not all in one place. The time to open a connection is
+  not the time a player will feel, but it is what the proxy can measure without asking
+  anything of the server.
 - **Player to proxy**, kept for later. It would matter with more than one proxy, or to
   group players with a similar ping in a matchmaking server. It is not measured today:
   the login has no round trip that is not part of the account check, and the relay
@@ -184,8 +190,9 @@ kind of player already (section 4).
    does not answer is left for the next, and a forced host may pass the soft cap but
    not the hard cap. Done. Not done: `/hub` and `/server`, and the sublobby and game
    roles.
-4. The probe of section 5, kept by the proxy, and the console's `servers` command
-   showing the role, the count against the caps, open or closed, and draining.
+4. The probe of section 5, kept by the proxy; the console's `servers` command showing
+   the role, the count against the caps, open, closed or draining, and the ping; and
+   `drain` and `undrain`. Done.
 5. The report of section 3: the sidecar request and the proxy's reading of it are done.
    What is missing is the Horizon server's own command, and the drain it allows once
    a server can say it no longer accepts transfers.

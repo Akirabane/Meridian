@@ -355,3 +355,103 @@ impl WithCapacity for ServerStatus {
         }
     }
 }
+
+// ---- The ping ----
+
+#[test]
+fn a_measure_is_used_for_the_maximum_age_and_then_not() {
+    let statuses = Statuses::default();
+    let start = Instant::now();
+    assert_eq!(statuses.ping("lobby", AGE, start), None);
+    statuses.record_ping("lobby", Duration::from_millis(12), start);
+    let at = |secs: u64| start + Duration::from_secs(secs);
+    assert_eq!(
+        statuses.ping("lobby", AGE, at(15)),
+        Some(Duration::from_millis(12))
+    );
+    assert_eq!(statuses.ping("lobby", AGE, at(16)), None);
+    assert_eq!(statuses.ping("east", AGE, at(1)), None);
+    statuses.retain(|_| false);
+    assert_eq!(statuses.ping("lobby", AGE, at(1)), None);
+}
+
+/// Every backend that has a role is measured, those with none are not, and one that
+/// does not answer keeps no measure.
+#[test]
+fn only_the_balanced_backends_are_measured_and_a_silent_one_has_no_measure() {
+    let mut config = config();
+    config.backends = ["lobby", "east", "unbalanced"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| meridian_config::Backend {
+            name: (*name).into(),
+            address: format!("127.0.0.1:{}", 25600 + i),
+        })
+        .collect();
+    config.connect_timeout_ms = 777;
+    let asked = Mutex::new(Vec::new());
+    let probe = |address: &str, timeout: Duration| {
+        asked.lock().unwrap().push((address.to_owned(), timeout));
+        match address {
+            "127.0.0.1:25600" => Ok(Duration::from_millis(4)),
+            _ => Err("refused".to_owned()),
+        }
+    };
+    let statuses = Statuses::default();
+    measure(&config, &probe, &statuses);
+    let mut asked = asked.into_inner().unwrap();
+    asked.sort();
+    assert_eq!(
+        asked,
+        [
+            ("127.0.0.1:25600".to_owned(), Duration::from_millis(777)),
+            ("127.0.0.1:25601".to_owned(), Duration::from_millis(777)),
+        ]
+    );
+    let now = Instant::now();
+    assert_eq!(
+        statuses.ping("lobby", AGE, now),
+        Some(Duration::from_millis(4))
+    );
+    assert_eq!(statuses.ping("east", AGE, now), None);
+    assert_eq!(statuses.ping("unbalanced", AGE, now), None);
+}
+
+/// The polling thread measures with the proxy's own probe while the tie is broken by
+/// ping, and not otherwise.
+#[test]
+fn the_polling_thread_measures_only_when_the_tie_is_broken_by_ping() {
+    for (tie_break, measured) in [
+        (meridian_config::TieBreak::Ping, true),
+        (meridian_config::TieBreak::Order, false),
+    ] {
+        let mut config = config();
+        config.backends = vec![meridian_config::Backend {
+            name: "lobby".into(),
+            address: "127.0.0.1:25600".into(),
+        }];
+        config.balancing.enabled = true;
+        config.balancing.tie_break = tie_break;
+        config.balancing.probe_interval_seconds = 1;
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut proxy = Proxy::new(config, PathBuf::from("meridian.toml"), stop);
+        proxy.probe = Arc::new(|_, _| Ok(Duration::from_millis(9)));
+        let proxy = Arc::new(proxy);
+        let thread = spawn(&proxy).unwrap();
+        let started = Instant::now();
+        let patience = Duration::from_millis(if measured { 5000 } else { 500 });
+        while proxy
+            .sessions
+            .statuses
+            .ping("lobby", AGE, Instant::now())
+            .is_none()
+            && started.elapsed() < patience
+        {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let got = proxy.sessions.statuses.ping("lobby", AGE, Instant::now());
+        assert_eq!(got.is_some(), measured, "{tie_break:?}");
+        proxy.stop();
+        thread.join().unwrap();
+    }
+}

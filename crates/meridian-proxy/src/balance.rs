@@ -65,12 +65,24 @@ impl Gates {
     /// opens again at `soft_cap - margin` or below. Between the two it keeps the
     /// state it had. A margin of 0 opens it as soon as it is below its soft cap.
     pub fn update(&mut self, candidate: &Candidate<'_>, margin: u32) {
+        if self.closed_after(candidate, margin) {
+            self.closed.insert(candidate.backend.to_owned());
+        } else {
+            self.closed.remove(candidate.backend);
+        }
+    }
+
+    /// Whether `candidate` is closed once its players are taken into account, without
+    /// changing anything: for showing the state between two placements.
+    pub fn closed_after(&self, candidate: &Candidate<'_>, margin: u32) -> bool {
         let soft = candidate.soft_cap as usize;
         let reopen_at = soft.saturating_sub(margin as usize);
         if candidate.players >= soft {
-            self.closed.insert(candidate.backend.to_owned());
+            true
         } else if candidate.players <= reopen_at {
-            self.closed.remove(candidate.backend);
+            false
+        } else {
+            self.is_closed(candidate.backend)
         }
     }
 
@@ -232,7 +244,9 @@ pub struct Server<'a> {
 }
 
 impl<'a> Server<'a> {
-    fn with_players(self, counted: usize) -> Candidate<'a> {
+    /// The server as a candidate with `counted` players, or the players it reports if
+    /// there are more.
+    pub fn with_players(self, counted: usize) -> Candidate<'a> {
         let players = counted.max(self.reported_players.unwrap_or(0));
         Candidate {
             backend: self.backend,
@@ -260,6 +274,9 @@ pub struct Balancer {
 struct State {
     gates: Gates,
     reserved: HashMap<String, usize>,
+    /// The backends the operator drained: they take no new player, and the players
+    /// they have stay.
+    drained: HashSet<String>,
 }
 
 /// A place taken on a server for a player who is being sent to it, given back when
@@ -305,7 +322,9 @@ impl Balancer {
         let mut state = self.lock();
         let counts = counts();
         let candidates = candidates(servers, &counts, &state.reserved);
-        let State { gates, reserved } = &mut *state;
+        let State {
+            gates, reserved, ..
+        } = &mut *state;
         let placed = place(&candidates, gates, margin, tie_break)?;
         let (backend, overflow) = (placed.backend.to_owned(), placed.overflow);
         *reserved.entry(backend.clone()).or_default() += 1;
@@ -338,7 +357,35 @@ impl Balancer {
     /// Forgets the servers `keep` refuses, such as one a reload removed. Places
     /// already reserved on them are kept until they are given back.
     pub fn retain(&self, mut keep: impl FnMut(&str) -> bool) {
-        self.lock().gates.retain(&mut keep);
+        let mut state = self.lock();
+        state.gates.retain(&mut keep);
+        state.drained.retain(|b| keep(b));
+    }
+
+    /// Stops offering `backend` to new players until [`Balancer::undrain`]. Its players
+    /// stay. `true` when it was not drained already.
+    pub fn drain(&self, backend: &str) -> bool {
+        self.lock().drained.insert(backend.to_owned())
+    }
+
+    /// Offers `backend` again. `true` when it was drained.
+    pub fn undrain(&self, backend: &str) -> bool {
+        self.lock().drained.remove(backend)
+    }
+
+    /// Whether the operator drained `backend`.
+    pub fn is_drained(&self, backend: &str) -> bool {
+        self.lock().drained.contains(backend)
+    }
+
+    /// Whether `candidate` is closed, as the next placement would find it.
+    pub fn is_closed_now(&self, candidate: &Candidate<'_>, margin: u32) -> bool {
+        self.lock().gates.closed_after(candidate, margin)
+    }
+
+    /// The places reserved on `backend`, for players being sent to it.
+    pub fn reserved(&self, backend: &str) -> usize {
+        self.lock().reserved.get(backend).copied().unwrap_or(0)
     }
 
     /// Whether `backend` is closed.

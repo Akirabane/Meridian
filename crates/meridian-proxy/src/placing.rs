@@ -25,7 +25,9 @@ pub struct Balanced<'c, 's> {
     /// The backends the ordinary loop must not try: the balancer tried them, or
     /// refused them for want of room.
     pub tried: Vec<String>,
-    /// Whether the balancer found no room on any lobby that was reachable.
+    /// Whether the balancer turned the player away because no lobby could take them
+    /// (at their hard cap, drained, not accepting transfers or not heard from), and
+    /// not because every one failed to answer.
     pub full: bool,
 }
 
@@ -134,14 +136,17 @@ pub fn login<'c, 's>(
             }
             Err(NoRoom) if !passed_over_ok => passed_over_ok = true,
             Err(NoRoom) => {
-                let open: Vec<&str> = servers
-                    .iter()
-                    .filter(|s| s.available)
-                    .map(|s| s.backend)
-                    .collect();
-                out.full = !open.is_empty();
-                // They are at their hard cap: the ordinary loop must not try them.
-                out.tried.extend(open.iter().map(|n| (*n).to_owned()));
+                // Some lobby was not lost to a failed connection: the player is
+                // turned away for want of room, not because nothing answers.
+                out.full = lobbies.iter().any(|n| !out.tried.iter().any(|t| t == n));
+                // None can take the player, whether it is at its hard cap, drained,
+                // not accepting transfers or not heard from: the ordinary loop must
+                // not try them.
+                for name in &lobbies {
+                    if !out.tried.iter().any(|t| t == name) {
+                        out.tried.push((*name).to_owned());
+                    }
+                }
                 return out;
             }
         }
@@ -212,6 +217,8 @@ fn server_of<'n>(
             s.capacity,
         ),
     };
+    let ping = sessions.statuses.ping(name, max_age, now);
+    let drained = sessions.balancer.is_drained(name);
     let hard_cap = capacity.map_or(limits.hard_cap, |c| {
         limits.hard_cap.min(u32::try_from(c).unwrap_or(u32::MAX))
     });
@@ -219,8 +226,56 @@ fn server_of<'n>(
         backend: name,
         soft_cap: limits.soft_cap.min(hard_cap),
         hard_cap,
-        available: believed && accepts && !failed_now && (passed_over_ok || !passed_over),
-        ping: None,
+        available: believed
+            && accepts
+            && !drained
+            && !failed_now
+            && (passed_over_ok || !passed_over),
+        ping,
         reported_players: reported.map(|p| usize::try_from(p).unwrap_or(usize::MAX)),
     })
+}
+
+/// What the console says of a balanced backend: its role, its players against its
+/// caps, whether the balancer offers it, and how quickly it answered. `None` for a
+/// backend with no role. `on` is the players its sessions count.
+pub fn describe(config: &Config, sessions: &Sessions, name: &str, on: usize) -> Option<String> {
+    let limits = config.balanced(name)?;
+    let now = Instant::now();
+    let retry = Duration::from_secs(config.backend_retry_seconds);
+    let max_age = Duration::from_secs(config.balancing.state_max_age_seconds);
+    let server = server_of(config, sessions, name, &[], true, (retry, now))?;
+    let candidate = server.with_players(on + sessions.balancer.reserved(name));
+    let report = sessions.statuses.report(name, max_age, now);
+    let offered = if sessions.balancer.is_drained(name) {
+        "draining (drained from the console)".to_owned()
+    } else if matches!(report, Report::Fresh(s) if s.accepts_transfers == Some(false)) {
+        "draining (it does not accept transfers)".to_owned()
+    } else if report == Report::Stale {
+        format!(
+            "not offered (no report for {} s)",
+            config.balancing.state_max_age_seconds
+        )
+    } else if sessions
+        .balancer
+        .is_closed_now(&candidate, config.balancing.margin)
+    {
+        "closed (soft cap reached)".to_owned()
+    } else {
+        "open".to_owned()
+    };
+    let mut line = format!(
+        "role {}, {}/{} (hard {}): {offered}",
+        limits.role.name(),
+        candidate.players,
+        candidate.soft_cap,
+        candidate.hard_cap
+    );
+    if let Some(ping) = candidate.ping {
+        line.push_str(&format!(", ping {} ms", ping.as_millis()));
+    }
+    if let Some(passed) = sessions.health.describe(name, retry, now) {
+        line.push_str(&format!(", {passed}"));
+    }
+    Some(line)
 }

@@ -35,11 +35,27 @@ pub struct Statuses {
 #[derive(Default)]
 struct State {
     reported: HashMap<String, (Instant, ServerStatus)>,
+    /// How long a connection to each backend took the last time it was measured, and
+    /// when.
+    pings: HashMap<String, (Instant, Duration)>,
     /// The backends whose last attempt failed, so that a failure is logged once.
     failing: HashSet<String>,
 }
 
 impl Statuses {
+    /// A connection to `backend` took `took` at `at`.
+    pub fn record_ping(&self, backend: &str, took: Duration, at: Instant) {
+        self.lock().pings.insert(backend.to_owned(), (at, took));
+    }
+
+    /// How long a connection to `backend` took, if it was measured no longer ago than
+    /// `max_age`. A backend that stops answering is not measured, so its last measure
+    /// grows old and is not used.
+    pub fn ping(&self, backend: &str, max_age: Duration, now: Instant) -> Option<Duration> {
+        let (at, took) = *self.lock().pings.get(backend)?;
+        (now.saturating_duration_since(at) <= max_age).then_some(took)
+    }
+
     /// `backend` reported `status` at `at`.
     pub fn record(&self, backend: &str, status: ServerStatus, at: Instant) {
         let mut state = self.lock();
@@ -73,6 +89,7 @@ impl Statuses {
     pub fn retain(&self, mut keep: impl FnMut(&str) -> bool) {
         let mut state = self.lock();
         state.reported.retain(|b, _| keep(b));
+        state.pings.retain(|b, _| keep(b));
         state.failing.retain(|b| keep(b));
     }
 
@@ -125,6 +142,28 @@ pub fn poll(
     });
 }
 
+/// How a connection to a backend is timed: [`crate::state::Probe`].
+pub type Probe<'a> = &'a (dyn Fn(&str, Duration) -> Result<Duration, String> + Sync);
+
+/// One round of measures: a connection is opened to every backend that has a role,
+/// all at once, and the time it took is kept. Only needed for `tie-break = "ping"`.
+/// A backend that does not answer is not measured, and its last measure grows old.
+pub fn measure(config: &Config, probe: Probe<'_>, statuses: &Statuses) {
+    let timeout = Duration::from_millis(config.connect_timeout_ms);
+    std::thread::scope(|scope| {
+        for server in &config.balanced {
+            let Some(backend) = config.backend(&server.backend) else {
+                continue;
+            };
+            scope.spawn(move || {
+                if let Ok(took) = probe(&backend.address, timeout) {
+                    statuses.record_ping(&backend.name, took, Instant::now());
+                }
+            });
+        }
+    });
+}
+
 /// How often the stop flag is looked at while waiting for the next round.
 const TICK: Duration = Duration::from_millis(100);
 
@@ -140,6 +179,9 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
                 let config = proxy.config();
                 if config.balancing.enabled {
                     poll(&config, &ask_sidecar, &proxy.sessions.statuses);
+                    if config.balancing.tie_break == meridian_config::TieBreak::Ping {
+                        measure(&config, &*proxy.probe, &proxy.sessions.statuses);
+                    }
                 }
                 let wait = Duration::from_secs(config.balancing.probe_interval_seconds);
                 let until = Instant::now() + wait;
