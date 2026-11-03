@@ -6,10 +6,9 @@ is missing. The only code that comes with it is the configuration: the settings 
 are read and checked by `meridian-config` and nothing uses them yet. A file without
 roles behaves exactly as before.
 
-[DESIGN.md](DESIGN.md) section 14 lists "queues and load balancing between copies of
-one server" as out of scope. This note reopens that line for the case where the
-operator names the servers and their roles; a decision to build the logic should
-change that line at the same time.
+Placing players across servers of one role is in scope for Meridian
+([DESIGN.md](DESIGN.md) section 14 lists it). Matchmaking rules, meaning who plays
+with whom, are not part of it.
 
 ## 1. What is wanted
 
@@ -56,10 +55,14 @@ them, at most:
   `state-max-age-seconds` is not believed, and the server is not offered to new
   players. The server is not removed from anything: its players stay.
 
-How the report reaches the proxy is open. Either a new read-only sidecar request,
-which keeps the signed exchange of `wire.rs` and adds no port, or something the
-server sends by itself. The recommendation is the read-only request, polled at the
-probe interval, since the sidecar already authenticates both sides.
+The direction chosen for the report: the sidecar already talks to its server, so it
+asks the server for its state through the server's control endpoint (the management
+protocol of the Horizon server: status, activity, whether it accepts transfers) and
+passes the answer up to the proxy. The proxy asks the sidecar, as it does for every
+other request, at the probe interval, over the signed exchange of `wire.rs`. This is a
+direction, not something that exists: the sidecar has no such request, and the control
+endpoint's side is not specified here. It adds a read-only request to the sidecar
+protocol and no new port.
 
 Until a server reports, the proxy treats it as accepting, with its own count of
 players. That is how it works today, with a limit added.
@@ -88,9 +91,16 @@ an unverified group, whatever the balancer would prefer (DESIGN.md section 15.3)
    players stay until they leave, and it is not emptied by force. A server that is
    draining and empty can be stopped.
 
-A forced host, `/server <name>` and `/hub` name a server on purpose. They should keep
-doing so, and respect only the `hard-cap` and the drain. This is a choice to confirm,
-not a decision.
+A forced host and `/server <name>` name a server on purpose. They may go past the
+`soft-cap` but never past the `hard-cap`, and a draining server refuses them too.
+Because `hard-cap` defaults to `soft-cap`, a server with no `hard-cap` written takes
+no overflow from them either.
+
+`/hub` and `/lobby` do not name a server. With roles, they take the best open server
+of role `lobby` by the rule above, and a `sublobby` only when no lobby can take the
+player. Within the player's route, as always. A written `hub-backend` still wins, as
+an explicit choice, and then follows the rule for explicit names. Without roles
+nothing changes.
 
 What the rule does not do: it does not group players for a match, it does not decide
 when a game server starts or stops, and it does not move players that are already
@@ -158,13 +168,23 @@ kind of player already (section 4).
 5. Moving players between roles (lobby to sublobby to game). This one needs a decision
    on who starts a move and is not designed here.
 
-## 8. Open questions
+## 8. Decided, and still open
 
-- The form and the carrier of the server's report (section 3).
-- Whether forced hosts and commands should ignore the soft cap (section 4).
-- Whether `hub-backend` and `default-backend` should follow the roles, so that `/hub`
-  leads to the lobby with room.
+Decided:
+
+- Placing players across servers of one role is in scope (DESIGN.md section 14).
+- The server's state reaches the proxy through the sidecar (section 3).
+- Explicit choices (forced host, `/server <name>`) may pass the soft cap, never the
+  hard cap (section 4).
+- `/hub` looks for a lobby first, then a sublobby (section 4).
+
+Open:
+
+- The state the sidecar reads from the server, and how, until the Horizon server
+  defines it (section 3).
+- Whether `default-backend` should follow the roles too, so a new login lands on the
+  lobby with room. The rule of section 4 allows it; it is not decided.
 - What a player sees when every server of a role is at its hard cap. Today it is "The
   server is full".
 - A reload changes the caps for the logins after it, as for every other setting. The
-  open/closed state of a server is kept across a reload.
+  open or closed state of a server is meant to be kept across a reload.
