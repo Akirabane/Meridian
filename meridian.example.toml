@@ -99,6 +99,16 @@ address = "127.0.0.1:25566"
 # relative to this file, it holds at least 16 bytes, and each backend has its own.
 # sidecar = "127.0.0.1:25580"
 # sidecar-secret-file = "secrets/lobby.key"
+# The role of the backend for load balancing: "lobby", "sublobby" (a waiting room
+# where players are grouped) or "game". Without a role the backend is not balanced.
+# Read and checked, but not used yet: see docs/LOAD-BALANCING.md.
+# role = "lobby"
+# The players the backend is filled to before the next backend of its role is
+# opened. Required with a role.
+# soft-cap = 40
+# The most players the balancer ever places on it, taken only as overflow when every
+# backend of the role is at its soft cap. At least soft-cap; defaults to soft-cap.
+# hard-cap = 40
 
 [[backends]]
 name = "east"
@@ -149,6 +159,22 @@ on-lookup-failure = "refuse"
 # Lookups one address may cause in a minute; names already remembered do not
 # count. An address over the limit is refused until the minute is over.
 lookups-per-minute = 10
+
+# Load balancing across the backends that have a role (see the backends above).
+# Read and checked, but not used yet: see docs/LOAD-BALANCING.md.
+[balancing]
+# How far below its soft cap a backend that reached it must fall before it is
+# filled again, so it does not flip between open and closed with each player who
+# leaves. 0 turns this off.
+margin = 2
+# Seconds after which what a backend last reported is no longer believed; it is
+# then not offered to new players.
+state-max-age-seconds = 15
+# How a tie between equally good backends is broken: "ping" (the one the proxy
+# measured as quickest to answer) or "order" (the one listed first).
+tie-break = "ping"
+# Seconds between two measures of how quickly each backend answers.
+probe-interval-seconds = 10
 
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.

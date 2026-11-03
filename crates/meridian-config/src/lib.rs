@@ -3,16 +3,19 @@
 //! defaults and checks it; `meridian.example.toml` at the root of the repository
 //! shows every setting.
 mod auth;
+mod balancing;
 mod commands;
 mod error;
 mod sidecar;
 
 pub use auth::{AuthSettings, OnLookupFailure};
+pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
 pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
 
 use auth::FileAuth;
+use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
 
 use serde::Deserialize;
@@ -165,6 +168,12 @@ pub struct Config {
     /// their client is at that moment. Without it they arrive where that server
     /// last had them, or at its spawn.
     pub switch_carry_position: bool,
+    /// The role and limits of the backends that have a role (`role`, `soft-cap`
+    /// and `hard-cap` in `[[backends]]`). Read and checked; nothing uses them yet
+    /// (docs/LOAD-BALANCING.md, step 1).
+    pub balanced: Vec<BalancedServer>,
+    /// The `[balancing]` table.
+    pub balancing: Balancing,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -209,6 +218,8 @@ impl Default for Config {
             sidecars: Vec::new(),
             sidecar_timeout_ms: 5_000,
             switch_carry_position: false,
+            balanced: Vec::new(),
+            balancing: Balancing::default(),
         }
     }
 }
@@ -241,6 +252,8 @@ impl std::fmt::Debug for Config {
             sidecars,
             sidecar_timeout_ms,
             switch_carry_position,
+            balanced,
+            balancing,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -272,6 +285,8 @@ impl std::fmt::Debug for Config {
             .field("sidecars", sidecars)
             .field("sidecar_timeout_ms", sidecar_timeout_ms)
             .field("switch_carry_position", switch_carry_position)
+            .field("balanced", balanced)
+            .field("balancing", balancing)
             .finish()
     }
 }
@@ -309,6 +324,8 @@ struct File {
     commands: FileCommands,
     sidecar_timeout_ms: Option<u64>,
     switch_carry_position: Option<bool>,
+    #[serde(default)]
+    balancing: FileBalancing,
 }
 
 #[derive(Deserialize)]
@@ -340,6 +357,9 @@ struct FileBackend {
     address: String,
     sidecar: Option<String>,
     sidecar_secret_file: Option<PathBuf>,
+    role: Option<Role>,
+    soft_cap: Option<u32>,
+    hard_cap: Option<u32>,
 }
 
 impl Config {
@@ -389,6 +409,18 @@ impl Config {
                 }
             }
         }
+        let balanced = balancing::servers(
+            &file
+                .backends
+                .iter()
+                .map(|b| FileServer {
+                    name: &b.name,
+                    role: b.role,
+                    soft_cap: b.soft_cap,
+                    hard_cap: b.hard_cap,
+                })
+                .collect::<Vec<_>>(),
+        )?;
         let backends: Vec<Backend> = file
             .backends
             .into_iter()
@@ -461,6 +493,8 @@ impl Config {
             switch_carry_position: file
                 .switch_carry_position
                 .unwrap_or(defaults.switch_carry_position),
+            balanced,
+            balancing: file.balancing.into_settings(),
         };
         config.validate()?;
         Ok(config)
@@ -528,6 +562,7 @@ impl Config {
             return Err(ConfigError::StatusSampleTooLarge(self.status_sample));
         }
         self.commands.validate(self)?;
+        self.validate_balancing()?;
         for s in &self.sidecars {
             if self.backend(&s.backend).is_none() {
                 return Err(ConfigError::UnknownBackend {
@@ -759,6 +794,9 @@ mod auth_tests;
 
 #[cfg(test)]
 mod commands_tests;
+
+#[cfg(test)]
+mod balancing_tests;
 
 #[cfg(test)]
 mod sidecar_tests;

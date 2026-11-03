@@ -188,6 +188,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 - [docs/TESTING.md](docs/TESTING.md): trying the proxy with three Horizon servers and
   the panel, step by step, on Windows.
 - [docs/CONFIG.md](docs/CONFIG.md): every setting.
+- [docs/LOAD-BALANCING.md](docs/LOAD-BALANCING.md): design note for placing players
+  across servers by role; only its settings exist so far.
 - [docs/BUILD.md](docs/BUILD.md): building and testing.
 - [crates/meridian-panel](crates/meridian-panel/README.md): a local panel to try the
   proxy with three Horizon servers on one machine.

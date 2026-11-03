@@ -780,6 +780,7 @@ forwarding was written. The milestones are those of section 11.
 | Ban lists at the proxy | Bans by name, unique id and address that apply before any backend | J7 |
 | Richer permissions | Groups and per-command permissions, through the extension API | J7 |
 | Metrics | Counters and histograms of players, switches and timings, in a text format | J8 |
+| Load balancing | Servers with a role (lobby, sublobby, game) are filled to a configured number of players, then the next is opened; [LOAD-BALANCING.md](LOAD-BALANCING.md) | Not scheduled |
 
 ### Out of scope
 
@@ -787,8 +788,9 @@ forwarding was written. The milestones are those of section 11.
 - Legacy forwarding variants and the shared-secret scheme of BungeeCord's older
   mode: Horizon already reads one form, and that is the one Meridian speaks.
 - Versions of the game other than the one Horizon serves, and modded handshakes.
-- A tab list merged across servers, global chat, queues and load balancing between
-  copies of one server, and a remote console: these are plugin matters.
+- A tab list merged across servers, global chat, queues, and a remote console: these
+  are plugin matters. (Placing players across servers of one role is not: it is in
+  scope, see [LOAD-BALANCING.md](LOAD-BALANCING.md).)
 - Sending resource packs from the proxy. A pack comes with the configuration
   phase, which belongs to the backend (section 3).
 - The query protocol of the server list.
