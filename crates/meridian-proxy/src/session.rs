@@ -2,6 +2,7 @@
 //! login there with the player information forwarding, then the relay until either
 //! side leaves. [`Sessions`] keeps every session being relayed: who the player
 //! is, where they are, and the handle that ends the session.
+use crate::balance::Balancer;
 use crate::commands;
 use crate::health::Health;
 use crate::log::{debug, info, warning};
@@ -56,6 +57,9 @@ pub struct Sessions {
     admitted: AtomicUsize,
     /// What the switches of players to other backends share.
     pub switcher: Arc<Switcher>,
+    /// Where logins are placed when balancing is on: the closed servers and the
+    /// places reserved for players still being sent to their server.
+    pub balancer: Balancer,
 }
 
 /// Who a player is, for telling a second login of theirs: the unique id of a
@@ -234,7 +238,6 @@ impl Sessions {
 
     /// How many players are on each backend now; a switch moves a player to the
     /// backend they are on after it. A backend with none is absent.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn counts(&self) -> std::collections::HashMap<String, usize> {
         let backends: Vec<String> = self.lock().values().map(|e| e.handle.backend()).collect();
         crate::balance::count_by_backend(backends.iter().map(String::as_str))
@@ -397,16 +400,33 @@ pub(crate) fn serve(
         connect_timeout: Duration::from_millis(config.connect_timeout_ms),
         player_address: peer.ip(),
     };
+    // With balancing on, the balancer places the player among the lobbies first.
+    // Off, nothing here runs and the candidates are tried as they always were.
+    let mut balanced = crate::placing::login(
+        config,
+        sessions,
+        connect,
+        &session.profile,
+        &options,
+        &candidates,
+        session.virtual_host.as_deref(),
+    );
     // Each candidate in turn, with the connect timeout for each.
-    let mut joined = None;
+    let mut joined = balanced.joined.take();
     for candidate in &candidates {
+        if joined.is_some() {
+            break;
+        }
+        if balanced.tried.contains(candidate) {
+            continue;
+        }
         let Some(backend) = config.backend(candidate) else {
             continue;
         };
         match connect(&backend.address, &session.profile, &options) {
             Ok(link) => {
                 sessions.health.answered(&backend.name);
-                joined = Some((backend, link));
+                joined = Some((backend, link, None));
                 break;
             }
             Err(e) => {
@@ -420,8 +440,16 @@ pub(crate) fn serve(
             }
         }
     }
-    let Some((backend, link)) = joined else {
-        refuse(session.connection, &cannot_reach(&candidates));
+    let Some((backend, link, reservation)) = joined else {
+        if balanced.full {
+            info!(
+                "{peer}: {name} ({}) refused: every lobby is at its hard cap",
+                hyphenated(uuid)
+            );
+            refuse(session.connection, Full::MESSAGE);
+        } else {
+            refuse(session.connection, &cannot_reach(&candidates));
+        }
         return;
     };
     let (relay, handle) = match Session::new(session, link, &backend.name) {
@@ -460,6 +488,14 @@ pub(crate) fn serve(
             return;
         }
     };
+    // The session counts from now on: the place reserved for it is given back.
+    if reservation.as_ref().is_some_and(|r| r.overflow) {
+        debug!(
+            "{peer}: {name}: every open lobby was full; backend \"{}\" took the overflow",
+            backend.name
+        );
+    }
+    drop(reservation);
     info!(
         "{peer}: {name} ({}) joined backend \"{}\"",
         hyphenated(uuid),
@@ -585,6 +621,8 @@ pub(crate) mod tests {
     };
     use std::sync::Arc;
     use std::thread::JoinHandle;
+
+    mod balancing;
 
     const SECRET: &str = "a shared secret";
 

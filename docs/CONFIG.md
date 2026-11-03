@@ -57,7 +57,7 @@ The servers behind the proxy. At least one is required.
 | --- | --- | --- |
 | `name` | The name used in the rest of the file, in commands and in logs | Not empty; unique |
 | `address` | Where the server listens, as `host:port` | A host and a port from 1 to 65535, with no space. The host is a name or an IPv4 address, or an IPv6 address in brackets (`"[::1]:25567"`). It is not looked up when the file is read |
-| `role` | What the server is for in load balancing: `"lobby"`, `"sublobby"` or `"game"`. Without one, the server is not balanced. Read and checked only: nothing uses it yet ([LOAD-BALANCING.md](LOAD-BALANCING.md)) | One of the three. Needs `soft-cap` |
+| `role` | What the server is for in load balancing: `"lobby"`, `"sublobby"` or `"game"`. Without one, the server is not balanced. Only `"lobby"` is used so far, by `[balancing] enabled` ([LOAD-BALANCING.md](LOAD-BALANCING.md)) | One of the three. Needs `soft-cap` |
 | `soft-cap` | The players the server is filled to before the next server of its role is opened | At least 1; only with a `role` |
 | `hard-cap` | The most players the balancer ever places on it. Defaults to `soft-cap` | At least `soft-cap`; only with a `role` |
 
@@ -115,13 +115,17 @@ How the hybrid mode looks names up. The other modes ignore it.
 
 ## `[balancing]`
 
-How servers that have a `role` are filled. Read and checked only: nothing in the
-proxy uses these settings yet, and a file without roles behaves exactly as before.
+How servers that have a `role` are filled. With `enabled` left at `false`, the
+proxy chooses a server exactly as it did before there were roles, whatever the roles
+say. Of the other settings, only `margin` is used so far; `state-max-age-seconds`,
+`tie-break` and `probe-interval-seconds` are read and checked and wait for the
+server's report and the measure of its answer time.
 [LOAD-BALANCING.md](LOAD-BALANCING.md) says what each setting is for and what is
 still missing.
 
 | Key | Default | What it does | Checks |
 | --- | --- | --- | --- |
+| `enabled` | `false` | Whether logins are placed by the balancer among the servers of role `"lobby"` that the player's route allows. Off, the proxy chooses a server as it always did | Needs at least one server with a `role` |
 | `margin` | `2` | How far below its `soft-cap` a server that reached it must fall before it is filled again. `0` turns this off. A margin larger than the soft cap means the server is filled again only when empty | None |
 | `state-max-age-seconds` | `15` | Seconds after which what a server last reported is no longer believed; it is then not offered to new players | More than 0 |
 | `tie-break` | `"ping"` | How a tie between equally good servers is broken: `"ping"` (the one the proxy measured as quickest to answer) or `"order"` (the one listed first) | `"ping"` or `"order"` |
