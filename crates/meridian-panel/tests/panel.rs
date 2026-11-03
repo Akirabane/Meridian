@@ -583,6 +583,7 @@ fn the_panel_listens_on_127_0_0_1_only() {
 }
 
 /// The process id a stand-in started with `--child` wrote to `file` in `dir`.
+#[cfg(windows)]
 fn pid_in(dir: &Path, file: &str) -> u32 {
     let path = dir.join(file);
     let mut pid = None;
