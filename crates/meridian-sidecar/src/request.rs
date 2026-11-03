@@ -12,6 +12,7 @@
 //! | confirm | `player-confirm <uuid>` |
 //! | release | `player-release <uuid> moved [announce]` or `player-release <uuid> abort` |
 //! | drop | `player-drop <uuid>` |
+//! | status | `status` (a placeholder: see [`STATUS_LINE`]) |
 //!
 //! A player record is carried as it is: the sidecar never reads it.
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,58 @@ pub enum Request {
     },
     /// Forget an expected or held player.
     Drop { uuid: String },
+    /// The state of the backend: how many players it has, how many it can take,
+    /// and whether it accepts transfers. Read only, and it names no player.
+    // A struct variant, so that a field it does not have is refused like for the others.
+    Status {},
+}
+
+/// The line a [`Request::Status`] becomes on the backend's control endpoint. It is a
+/// placeholder: the Horizon server has not fixed the command that reports its state,
+/// so this is the one place to change when it does. Until a server answers it, the
+/// proxy hears no report from it and goes on as if the server accepted players.
+pub const STATUS_LINE: &str = "status";
+
+/// What a backend reports of itself, as the proxy reads it from the answer to
+/// [`Request::Status`]. A field the backend leaves out is unknown, not zero or false,
+/// and any other field of the answer is ignored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServerStatus {
+    /// The players on the backend now (`players`).
+    pub players: Option<u64>,
+    /// The most players it can take (`capacity`).
+    pub capacity: Option<u64>,
+    /// Whether it takes players sent by the proxy (`accepts_transfers`).
+    pub accepts_transfers: Option<bool>,
+}
+
+impl ServerStatus {
+    /// Reads the answer of the backend: a JSON object, whose `players` and `capacity`
+    /// are whole numbers and `accepts_transfers` a boolean when they are there.
+    pub fn from_value(answer: &Value) -> Result<ServerStatus, String> {
+        let Value::Object(map) = answer else {
+            return Err(format!("the status is not a JSON object: {answer}"));
+        };
+        let number = |key: &str| match map.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| format!("{key} is not a whole number: {value}")),
+        };
+        let accepts_transfers = match map.get("accepts_transfers") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(b)) => Some(*b),
+            Some(other) => {
+                return Err(format!("accepts_transfers is not true or false: {other}"));
+            }
+        };
+        Ok(ServerStatus {
+            players: number("players")?,
+            capacity: number("capacity")?,
+            accepts_transfers,
+        })
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -160,14 +213,16 @@ pub fn normalize_uuid(text: &str) -> Option<String> {
 }
 
 impl Request {
-    fn uuid(&self) -> &str {
+    /// The player the request is about; `None` for a request that names no one.
+    fn uuid(&self) -> Option<&str> {
         match self {
             Request::Expect { uuid, .. }
             | Request::Export { uuid, .. }
             | Request::Import { uuid, .. }
             | Request::Release { uuid, .. }
             | Request::Confirm { uuid }
-            | Request::Drop { uuid } => uuid,
+            | Request::Drop { uuid } => Some(uuid),
+            Request::Status {} => None,
         }
     }
 
@@ -175,11 +230,11 @@ impl Request {
     /// cannot be one. What is checked here is what the line's form needs; the
     /// backend checks the rest, such as the record and the names of the parts.
     pub fn endpoint_line(&self) -> Result<String, String> {
-        let uuid = normalize_uuid(self.uuid()).ok_or_else(|| {
-            format!(
-                "{:?} is not a unique id: 32 hexadecimal digits, with or without dashes",
-                self.uuid()
-            )
+        let Some(named) = self.uuid() else {
+            return Ok(STATUS_LINE.to_owned());
+        };
+        let uuid = normalize_uuid(named).ok_or_else(|| {
+            format!("{named:?} is not a unique id: 32 hexadecimal digits, with or without dashes")
         })?;
         Ok(match self {
             Request::Expect { seconds: None, .. } => format!("player-expect {uuid}"),
@@ -266,6 +321,7 @@ impl Request {
             }
             Request::Confirm { .. } => format!("player-confirm {uuid}"),
             Request::Drop { .. } => format!("player-drop {uuid}"),
+            Request::Status {} => STATUS_LINE.to_owned(),
         })
     }
 }
@@ -574,6 +630,62 @@ mod tests {
                 .endpoint_line()
                 .unwrap_err();
             assert!(e.contains("is not a unique id"), "{uuid}: {e}");
+        }
+    }
+
+    #[test]
+    fn status_names_no_player_and_is_one_line() {
+        assert_eq!(line(Request::Status {}), STATUS_LINE);
+        let text = serde_json::to_string(&Request::Status {}).unwrap();
+        assert_eq!(text, r#"{"op":"status"}"#);
+        assert_eq!(
+            serde_json::from_str::<Request>(&text).unwrap(),
+            Request::Status {}
+        );
+        // Any other field is refused, as for every request.
+        assert!(serde_json::from_str::<Request>(r#"{"op":"status","uuid":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn a_status_is_read_as_far_as_the_backend_gives_it() {
+        let status = |v: Value| ServerStatus::from_value(&v);
+        assert_eq!(
+            status(json!({"players": 3, "capacity": 20, "accepts_transfers": false})),
+            Ok(ServerStatus {
+                players: Some(3),
+                capacity: Some(20),
+                accepts_transfers: Some(false),
+            })
+        );
+        // What is left out, or null, is unknown, and other fields are ignored.
+        assert_eq!(status(json!({})), Ok(ServerStatus::default()));
+        assert_eq!(
+            status(json!({"players": null, "activity": "idle", "tps": 19.9})),
+            Ok(ServerStatus::default())
+        );
+        assert_eq!(
+            status(json!({"capacity": 8})),
+            Ok(ServerStatus {
+                capacity: Some(8),
+                ..ServerStatus::default()
+            })
+        );
+    }
+
+    #[test]
+    fn a_status_that_is_not_one_is_refused() {
+        for bad in [
+            json!([]),
+            json!("ok"),
+            json!(null),
+            json!({"players": "3"}),
+            json!({"players": -1}),
+            json!({"players": 1.5}),
+            json!({"capacity": true}),
+            json!({"accepts_transfers": "yes"}),
+            json!({"accepts_transfers": 1}),
+        ] {
+            assert!(ServerStatus::from_value(&bad).is_err(), "{bad}");
         }
     }
 }

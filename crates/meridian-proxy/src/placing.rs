@@ -6,6 +6,7 @@
 use crate::balance::{NoRoom, Reservation, Server};
 use crate::log::{debug, warning};
 use crate::session::{Connect, Sessions};
+use crate::status::Report;
 use meridian_config::{Backend, Config, Role};
 use meridian_net::{
     Profile,
@@ -196,11 +197,30 @@ fn server_of<'n>(
     let limits = config.balanced(name)?;
     let failed_now = tried.iter().any(|t| t == name);
     let passed_over = sessions.health.passed_over_for(name, retry, now).is_some();
+    let max_age = Duration::from_secs(config.balancing.state_max_age_seconds);
+    // What the backend says of itself: nothing known is as if it accepted; an old
+    // report is not believed, so the backend is not offered; a fresh one may refuse
+    // transfers, and may be smaller than the caps written.
+    let (believed, accepts, reported, capacity) = match sessions.statuses.report(name, max_age, now)
+    {
+        Report::Unknown => (true, true, None, None),
+        Report::Stale => (false, true, None, None),
+        Report::Fresh(s) => (
+            true,
+            s.accepts_transfers.unwrap_or(true),
+            s.players,
+            s.capacity,
+        ),
+    };
+    let hard_cap = capacity.map_or(limits.hard_cap, |c| {
+        limits.hard_cap.min(u32::try_from(c).unwrap_or(u32::MAX))
+    });
     Some(Server {
         backend: name,
-        soft_cap: limits.soft_cap,
-        hard_cap: limits.hard_cap,
-        available: !failed_now && (passed_over_ok || !passed_over),
+        soft_cap: limits.soft_cap.min(hard_cap),
+        hard_cap,
+        available: believed && accepts && !failed_now && (passed_over_ok || !passed_over),
         ping: None,
+        reported_players: reported.map(|p| usize::try_from(p).unwrap_or(usize::MAX)),
     })
 }

@@ -1,7 +1,7 @@
 //! The proxy's side of the signed exchange: one connection to one sidecar, and a
 //! function for each player request.
 use crate::Error;
-use crate::request::{Arrival, Outcome, Request};
+use crate::request::{Arrival, Outcome, Request, ServerStatus};
 use crate::wire::{self, Challenge, Direction, Expected};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
@@ -175,6 +175,15 @@ impl SidecarClient {
             outcome,
             announce,
         })
+    }
+
+    /// The state of the backend: its players, its capacity, whether it accepts
+    /// transfers. What the backend leaves out is `None`; an answer that is not a status
+    /// is an error.
+    pub fn status(&mut self) -> Result<ServerStatus, Error> {
+        let answer = self.request(&Request::Status {})?;
+        ServerStatus::from_value(&answer)
+            .map_err(|why| Error::Endpoint(format!("the status is not usable: {why}")))
     }
 
     /// Forgets an expected or held player.

@@ -161,7 +161,8 @@ on-lookup-failure = "refuse"
 lookups-per-minute = 10
 
 # Load balancing across the backends that have a role (see the backends above).
-# See docs/LOAD-BALANCING.md. Only enabled and margin are used so far.
+# See docs/LOAD-BALANCING.md. Everything here is used except tie-break, which waits
+# for the measure of each backend's answer time.
 [balancing]
 # Whether logins are placed by the balancer among the backends of role "lobby".
 # Off by default: the proxy then chooses a backend as it always did. It needs at
@@ -171,13 +172,15 @@ enabled = false
 # filled again, so it does not flip between open and closed with each player who
 # leaves. 0 turns this off.
 margin = 2
-# Seconds after which what a backend last reported is no longer believed; it is
-# then not offered to new players.
+# Seconds after which what a backend last reported (through its sidecar) is no longer
+# believed; it is then not offered to new players. A backend that never reported is
+# treated as accepting.
 state-max-age-seconds = 15
 # How a tie between equally good backends is broken: "ping" (the one the proxy
 # measured as quickest to answer) or "order" (the one listed first).
 tie-break = "ping"
-# Seconds between two measures of how quickly each backend answers.
+# Seconds between two readings of the state of each backend that has a role and a
+# sidecar.
 probe-interval-seconds = 10
 
 # Commands players type in game that the proxy answers itself; it never passes

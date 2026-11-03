@@ -12,6 +12,7 @@ requests of a switch (DESIGN.md section 6, decision 8):
 | `confirm` | `player-confirm <uuid>` | places a held player whose record was imported with `place` false (refused when no player is held, or its record was not imported) |
 | `release` (`moved` with `announce`, or `abort`) | `player-release <uuid> moved [announce]`, `player-release <uuid> abort` | ends a switch: the player has gone for good, or stays |
 | `drop` | `player-drop <uuid>` | forgets an expected or held player; after an import with `place` false, cancels the arrival without a word to anyone |
+| `status` | `status` (a placeholder: the Horizon server has not fixed the command) | reports its state; the proxy reads `players`, `capacity` and `accepts_transfers` from the answer, and ignores the rest. Read only, and it names no player. See `docs/LOAD-BALANCING.md`, section 3 |
 
 The lines are those of Horizon's held-player work (its `docs/server.md`, "Players
 arriving from another server"). A request names the player by a unique id of 32
