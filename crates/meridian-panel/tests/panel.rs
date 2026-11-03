@@ -581,3 +581,149 @@ fn the_panel_listens_on_127_0_0_1_only() {
     let listener = http::bind(0).unwrap();
     assert!(listener.local_addr().unwrap().ip().is_loopback());
 }
+
+/// The process id a stand-in started with `--child` wrote to `file` in `dir`.
+#[cfg(windows)]
+fn pid_in(dir: &Path, file: &str) -> u32 {
+    let path = dir.join(file);
+    let mut pid = None;
+    wait_for(file, || {
+        pid = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| t.trim().parse().ok());
+        pid.is_some()
+    });
+    pid.unwrap()
+}
+
+/// Whether `pid` is a running stand-in: the name is checked too, so an id the
+/// system gave again to another program does not count.
+fn alive(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
+    let mut system = sysinfo::System::new();
+    let pid = Pid::from_u32(pid);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system
+        .process(pid)
+        .is_some_and(|p| p.name().to_string_lossy().contains("meridian-panel"))
+}
+
+/// A server whose world an engine of an earlier run still holds is not started:
+/// the message names that engine, which the panel leaves alone.
+#[test]
+fn a_server_whose_world_an_earlier_engine_holds_is_not_started_and_the_engine_is_named() {
+    let dir = scratch("engine-left");
+    let (bench, _) = bench(&dir, &["lobby"], &[]);
+    accept_in(&dir.join("lobby"));
+    // As a server starts its engine: the absolute path, its separators mixed.
+    let control = format!(
+        "{}/.horizon/engine.json",
+        std::path::absolute(dir.join("lobby")).unwrap().display()
+    );
+    let mut engine = std::process::Command::new(FAKE)
+        .args(["__fake-process", "--hold", "--control-socket", &control])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let supervisor = Supervisor::new(&bench);
+    let why = supervisor.start("lobby").unwrap_err();
+    let named = format!("another engine still holds the world: pid {}", engine.id());
+    assert!(why.contains(&named), "{why}");
+    assert_eq!(state_of(&supervisor, "lobby"), State::Stopped);
+    assert!(log_text(&supervisor, "lobby").contains(&named));
+    assert!(alive(engine.id()), "the panel left the engine alone");
+    // Once it is gone, the server starts.
+    engine.kill().unwrap();
+    engine.wait().unwrap();
+    supervisor.start("lobby").unwrap();
+    ready(&supervisor, "lobby");
+    supervisor.kill_all();
+}
+
+/// A process killed at its stop timeout takes what it started with it, as a
+/// server takes its engine.
+#[cfg(windows)]
+#[test]
+fn a_process_killed_at_its_stop_timeout_takes_its_children_with_it() {
+    let dir = scratch("tree-stop");
+    let (bench, _) = bench(&dir, &["lobby"], &["--ignore-stop", "--child"]);
+    accept_in(&dir.join("lobby"));
+    let supervisor = Supervisor::new(&bench);
+    supervisor.start("lobby").unwrap();
+    let child = pid_in(&dir.join("lobby"), "child.pid");
+    assert!(alive(child));
+    supervisor.stop("lobby").unwrap();
+    wait_for("lobby to be killed", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    wait_for("its child to end", || !alive(child));
+}
+
+/// One HTTP call to the panel at `port`, as the page makes it; the whole answer.
+#[cfg(windows)]
+fn call(port: u16, method: &str, path: &str, token: &str, body: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Panel-Token: {token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    let _ = stream.read_to_string(&mut answer);
+    answer
+}
+
+/// When the panel dies, however it dies, the processes it started end, and what
+/// they started: no server's engine is left holding its world.
+#[cfg(windows)]
+#[test]
+fn when_the_panel_dies_what_it_started_ends_too() {
+    let dir = scratch("tree-panel");
+    let (bench, _) = bench(&dir, &["lobby"], &["--child"]);
+    accept_in(&dir.join("lobby"));
+    let mut panel = std::process::Command::new(FAKE)
+        .arg(dir.join("bench.toml"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let port = bench.panel_port;
+    wait_for("the panel to listen", || {
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+    });
+    let page = call(port, "GET", "/", "", "");
+    let token = page
+        .split("name=\"panel-token\" content=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the page has the token")
+        .to_owned();
+    let answer = call(
+        port,
+        "POST",
+        "/api/action",
+        &token,
+        r#"{"name":"lobby","action":"start"}"#,
+    );
+    assert!(answer.contains("\"ok\":true"), "{answer}");
+    let lobby = dir.join("lobby");
+    let (server, child) = (pid_in(&lobby, "fake.pid"), pid_in(&lobby, "child.pid"));
+    assert!(alive(server) && alive(child));
+    // The worst way: ended at once, with no chance to stop anything itself.
+    panel.kill().unwrap();
+    panel.wait().unwrap();
+    wait_for("the server to end", || !alive(server));
+    wait_for("its child to end", || !alive(child));
+}

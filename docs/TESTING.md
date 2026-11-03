@@ -168,9 +168,11 @@ else.
 2. In the panel, click **Stop all**: the proxy stops first, then the sidecars, then
    the servers, which save their worlds. Wait until the seven cards say `stopped`.
 3. Close the panel with Ctrl+C in its window. Ctrl+C also reaches anything the panel
-   started, which stops as on its own Ctrl+C; if the panel window was closed another
-   way while servers ran, end them in the Task Manager (`horizon-server.exe`,
-   `horizon-client.exe`, `meridian.exe`, `meridian-sidecar.exe`).
+   started, which stops as on its own Ctrl+C; the panel waits for it, then ends what
+   is left, the servers' engines (`horizon-client.exe`) included. On Windows this
+   also holds when the panel window is closed or the panel is killed. If a server
+   then says `another engine still holds the world: pid N`, an engine of an older
+   panel outlived it: end that process in the Task Manager and start the server again.
 
 To start again later, run step C again: the bench and its worlds stay.
 

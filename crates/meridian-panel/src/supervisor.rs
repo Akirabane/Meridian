@@ -3,12 +3,15 @@
 //!
 //! The panel starts only the processes of the bench file, and stops only the ones
 //! it started: each is stopped through the handle of the child process it made,
-//! never by a process id, so a process that later got the same id is never
-//! touched.
+//! and on Windows through the job object that holds it and what it started (see
+//! the `tree` module), never by a process id, so a process that later got the
+//! same id is never touched.
 use crate::bench::{Bench, Kind, ProcessSpec, eula_accepted};
+use crate::tree::Tree;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -95,6 +98,9 @@ pub struct Snapshot {
 
 struct Running {
     child: Child,
+    /// The child and what it starts, such as a server's engine; `None` when the
+    /// system would not make one, and then only the child is ended.
+    tree: Option<Tree>,
     stdin: Option<ChildStdin>,
     started: Instant,
     /// Counts the starts, so a stop meant for one run never ends the next.
@@ -200,6 +206,25 @@ impl Supervisor {
         if inner.state.running() {
             return Err(format!("{name} is already {}", inner.state.name()));
         }
+        if spec.kind == Kind::Server {
+            let engines = engines_of(&spec.dir);
+            if let Some(first) = engines.first() {
+                let pids = engines
+                    .iter()
+                    .map(|pid| format!("pid {pid}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let why = format!(
+                    "{name}: another engine still holds the world: {pids}. It is the game of an \
+                     earlier run of this server that outlived it, and it keeps the world open, so \
+                     a new engine could not open it. End it (in the Task Manager, or with \
+                     Stop-Process -Id {first} in PowerShell), then start {name} again."
+                );
+                drop(inner);
+                process.log().push(format!("[panel] {why}"));
+                return Err(why);
+            }
+        }
         let mut child = Command::new(&spec.program)
             .args(&spec.args)
             .current_dir(&spec.dir)
@@ -214,11 +239,23 @@ impl Supervisor {
         if let Some(err) = child.stderr.take() {
             read_lines(Arc::clone(process), err, "[stderr] ");
         }
+        // At once, before the child starts anything of its own.
+        let tree = Tree::adopt(&child);
         inner.runs += 1;
         let pid = child.id();
+        let tree = match tree {
+            Ok(tree) => Some(tree),
+            Err(e) => {
+                process.log().push(format!(
+                    "[panel] what it starts will not be ended with it: no job object: {e}"
+                ));
+                None
+            }
+        };
         inner.running = Some(Running {
             stdin: child.stdin.take(),
             child,
+            tree,
             started: Instant::now(),
             run: inner.runs,
         });
@@ -479,8 +516,26 @@ impl Supervisor {
             .collect()
     }
 
-    /// Kills every process still running, without waiting: for when the panel
-    /// ends.
+    /// How many processes are running.
+    pub fn running(&self) -> usize {
+        self.processes
+            .iter()
+            .filter(|p| p.lock().state.running())
+            .count()
+    }
+
+    /// The longest stop timeout of the running processes.
+    pub fn longest_stop(&self) -> Duration {
+        self.processes
+            .iter()
+            .filter(|p| p.lock().state.running())
+            .map(|p| p.spec.stop_timeout)
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// Kills every process still running, and what each started, without
+    /// waiting: for when the panel ends.
     pub fn kill_all(&self) {
         self.closing.store(true, Ordering::Relaxed);
         for p in &self.processes {
@@ -506,16 +561,61 @@ impl Process {
     }
 }
 
-/// Kills the child of run `run`, if it is still the one running. Returns whether
-/// it did.
+/// Kills the child of run `run`, and what it started, if it is still the one
+/// running. Returns whether it did.
 fn kill(inner: &mut Inner, run: u64) -> bool {
     match inner.running.as_mut() {
         Some(running) if running.run == run => {
-            // Through the child's own handle: never another process.
+            // Through the child's own job and handle: never another process.
+            if let Some(tree) = &running.tree {
+                tree.end();
+            }
             let _ = running.child.kill();
             true
         }
         _ => false,
+    }
+}
+
+/// The processes running the game of the Horizon server in `dir`: a server
+/// starts its engine with `--control-socket <dir>/.horizon/engine.json`, the
+/// absolute path, which names the server. The panel only reads them: one found
+/// before the server is started was not started by this run of the panel.
+pub fn engines_of(dir: &Path) -> Vec<u32> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+    let Ok(dir) = std::path::absolute(dir) else {
+        return Vec::new();
+    };
+    let control = comparable(&dir.join(".horizon").join("engine.json"));
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let mut pids: Vec<u32> = system
+        .processes()
+        .iter()
+        .filter(|(_, p)| {
+            p.cmd().windows(2).any(|pair| {
+                pair[0] == "--control-socket" && comparable(Path::new(&pair[1])) == control
+            })
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// A path as text that compares equal however its separators were written, and,
+/// on Windows, whatever the case of its letters.
+fn comparable(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text.strip_prefix("//?/").unwrap_or(&text).to_owned();
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text
     }
 }
 
@@ -572,6 +672,14 @@ fn check(process: &Process) {
     match running.child.try_wait() {
         Ok(Some(status)) => {
             let code = status.code();
+            // What it started and left running, such as the engine of a server
+            // that crashed, ends with it, or it would keep the world open.
+            let left = running.tree.as_ref().and_then(Tree::running).unwrap_or(0);
+            if left > 0 {
+                if let Some(tree) = &running.tree {
+                    tree.end();
+                }
+            }
             let asked = inner.state == State::Stopping;
             inner.running = None;
             inner.state = if asked {
@@ -584,6 +692,12 @@ fn check(process: &Process) {
                 Some(code) => format!("[panel] ended with code {code}"),
                 None => "[panel] ended".to_owned(),
             });
+            if left > 0 {
+                process.log().push(format!(
+                    "[panel] {left} process{} it had started still ran: ended",
+                    if left == 1 { "" } else { "es" }
+                ));
+            }
         }
         Ok(None) if inner.state == State::Starting => {
             drop(inner);

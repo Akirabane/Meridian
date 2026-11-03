@@ -3,7 +3,8 @@ use meridian_panel::{bench::Bench, fake, http, init, supervisor::Supervisor};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
 Usage:
@@ -125,12 +126,25 @@ fn run(path: &Path) -> ExitCode {
     };
     println!(
         "Meridian bench panel on http://127.0.0.1:{}/ ({count}, none started).\n\
-         Ctrl+C in this terminal ends the panel, and reaches the processes it started \
-         too, which stop as they do on Ctrl+C.",
+         Ctrl+C in this terminal ends the panel. It reaches the processes it started \
+         too, which stop as they do on Ctrl+C; the panel waits for them, then ends what \
+         is left, the servers' engines included. A second Ctrl+C ends them at once.",
         bench.panel_port
     );
-    let stop = AtomicBool::new(false);
+    // Ctrl+C, or the window closed: the handler only counts the requests.
+    let requests = Arc::new(AtomicU32::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let (requests, stop) = (Arc::clone(&requests), Arc::clone(&stop));
+        if let Err(e) = ctrlc::set_handler(move || {
+            requests.fetch_add(1, Ordering::SeqCst);
+            stop.store(true, Ordering::SeqCst);
+        }) {
+            eprintln!("meridian-panel: Ctrl+C will end the panel at once: {e}");
+        }
+    }
     let result = http::serve(listener, panel, &stop);
+    wind_down(&supervisor, &requests);
     supervisor.kill_all();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -138,5 +152,24 @@ fn run(path: &Path) -> ExitCode {
             eprintln!("meridian-panel: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// After Ctrl+C, which the processes got too: waits for them to stop by
+/// themselves, so the servers save their worlds, for their longest stop timeout
+/// at most, or until a second Ctrl+C. The caller then ends what is left.
+fn wind_down(supervisor: &Supervisor, requests: &AtomicU32) {
+    let running = supervisor.running();
+    if running == 0 || requests.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    println!(
+        "Waiting for the {running} running process{} to stop (Ctrl+C again ends them at once)...",
+        if running == 1 { "" } else { "es" }
+    );
+    let until = Instant::now() + supervisor.longest_stop() + Duration::from_secs(2);
+    while supervisor.running() > 0 && Instant::now() < until && requests.load(Ordering::SeqCst) < 2
+    {
+        std::thread::sleep(Duration::from_millis(200));
     }
 }

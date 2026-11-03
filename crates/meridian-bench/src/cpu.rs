@@ -11,7 +11,7 @@
 //! Elsewhere the system's own figure is used, through sysinfo; Linux counts it
 //! exactly.
 //!
-//! This is the one module of the workspace with unsafe code, for the Windows calls.
+//! This is the one module of this crate with unsafe code, for the Windows calls.
 use std::time::{Duration, Instant};
 use sysinfo::Pid;
 

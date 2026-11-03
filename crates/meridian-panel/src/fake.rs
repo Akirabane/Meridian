@@ -1,13 +1,18 @@
 //! A stand-in for a server or the proxy, for the panel's tests:
-//! `meridian-panel __fake-process [--port N] [--ignore-stop]`. It prints a line on
-//! each output, opens `N` on 127.0.0.1 if asked, answers its console, and ends on
-//! `stop` or `end` unless told to ignore them.
+//! `meridian-panel __fake-process [--port N] [--ignore-stop] [--child] [--hold]`.
+//! It prints a line on each output, opens `N` on 127.0.0.1 if asked, answers its
+//! console, and ends on `stop` or `end` unless told to ignore them. With
+//! `--child` it first starts a child of its own, as a server starts its engine,
+//! and writes its id and the child's to `fake.pid` and `child.pid` in its
+//! folder. With `--hold` it only waits, a minute at most, as an engine would,
+//! whatever its other arguments (such as `--control-socket PATH`).
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
 
 pub fn run(args: &[String]) -> i32 {
     let mut port = None;
     let mut ignore_stop = false;
+    let mut with_child = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -16,10 +21,32 @@ pub fn run(args: &[String]) -> i32 {
                 i += 1;
             }
             "--ignore-stop" => ignore_stop = true,
+            "--child" => with_child = true,
+            "--hold" => {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                return 0;
+            }
             _ => {}
         }
         i += 1;
     }
+    // Kept, not waited for: the child outlives this process unless something
+    // ends it.
+    let _child = with_child.then(|| {
+        let child = std::env::current_exe()
+            .and_then(|me| {
+                std::process::Command::new(me)
+                    .args(["__fake-process", "--hold"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+            })
+            .expect("the child starts");
+        let _ = std::fs::write("fake.pid", std::process::id().to_string());
+        let _ = std::fs::write("child.pid", child.id().to_string());
+        child
+    });
     println!("fake process ready");
     eprintln!("fake process warning on stderr");
     // Kept open until the process ends.
