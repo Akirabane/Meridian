@@ -260,9 +260,10 @@ impl Run<'_> {
         Some(Arrival {
             position: pose.at,
             rotation: [pose.yaw, pose.pitch],
-            // The client never sends its velocity; the record's is the export's,
-            // which the client has left behind since.
-            velocity: Some([0.0; 3]),
+            // The client never sends its velocity, and the record's is the export's,
+            // which the client has left behind since. A zero velocity is not sent:
+            // a server may refuse the field, even as [0, 0, 0].
+            velocity: None,
             on_ground: pose.on_ground,
         })
     }
