@@ -29,7 +29,7 @@ with whom, are not part of it.
 | Roles | Nothing. A server has a name and an address ([CONFIG.md](CONFIG.md)) | Read and checked by this step (`role`, `soft-cap`, `hard-cap`). Nothing uses it |
 | Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each | A choice among several lobbies |
 | Order of candidates | `route::candidates` gives the servers of the player's group in the listed order, and a login goes to the first that answers. Filling a server first is therefore what happens already, with no limit at all | A limit: the first server takes every player until it fails |
-| Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | A cheap count by backend, held for the placement. Players who joined a server some other way are not seen |
+| Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` and `balance::count_by_backend` give the count (step 2). A login still being set up is not counted yet, so several logins at once can pass a soft cap by a few players until the placement reserves a place. Players who joined a server some other way are not seen |
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
 | Does a server accept transfers | Not known. A failed login marks a server "passed over" for `backend-retry-seconds` (`health.rs`), which is the only signal | A report from the server, see section 3 |
 | Premium or offline | Done. Players are verified or unverified, decided at login (DESIGN.md section 15), and groups and routes keep the two kinds apart | Nothing for placement: it chooses among the servers the route already allows |
@@ -158,10 +158,11 @@ kind of player already (section 4).
 ## 7. Order of work
 
 1. This note and the settings. Nothing uses them.
-2. A count of players per backend and the placement of section 4 as a pure function
-   over the configuration, the counts and the reports, tested without any
-   connection, as `route.rs` is. The login calls it only for the servers that have a
-   role.
+2. A count of players per backend and the placement of section 4 as pure functions
+   over the counts, the limits and what the caller knows of each server, tested
+   without any connection, as `route.rs` is (`balance.rs` in `meridian-proxy`). Done.
+   Not yet called by the login: wiring it, with a reservation so that logins at the
+   same time do not pass a soft cap, is the next step.
 3. The probe of section 5, kept by the proxy, and the console's `servers` command
    showing the role, the count against the caps, open or closed, and draining.
 4. The report of section 3, once its form is fixed, and the drain it allows.
