@@ -117,6 +117,24 @@ pub enum ConfigError {
         online_mode: bool,
         auth_mode: crate::AuthMode,
     },
+    /// A backend has a `soft-cap` or a `hard-cap` and no `role`.
+    LimitWithoutRole { backend: String, key: &'static str },
+    /// A backend has a `role` and no `soft-cap`.
+    RoleWithoutSoftCap(String),
+    /// A backend's `soft-cap` is zero.
+    ZeroSoftCap(String),
+    /// A backend's `hard-cap` is below its `soft-cap`.
+    HardCapBelowSoftCap {
+        backend: String,
+        soft_cap: u32,
+        hard_cap: u32,
+    },
+    /// Backends have a role, and none is a lobby.
+    NoLobby,
+    /// `[balancing] state-max-age-seconds` is zero.
+    ZeroStateMaxAge,
+    /// `[balancing] probe-interval-seconds` is zero.
+    ZeroProbeInterval,
 }
 
 impl fmt::Display for ConfigError {
@@ -296,6 +314,42 @@ impl fmt::Display for ConfigError {
                 f,
                 "two [[forced-host]] entries have the host \"{host}\": each host leads to one backend"
             ),
+            ConfigError::LimitWithoutRole { backend, key } => write!(
+                f,
+                "backend \"{backend}\" has {key} but no role: a limit applies to a backend with \
+                 a role (lobby, sublobby or game)"
+            ),
+            ConfigError::RoleWithoutSoftCap(backend) => write!(
+                f,
+                "backend \"{backend}\" has a role but no soft-cap: the soft cap is the number \
+                 of players it is filled to before the next server of its role is opened"
+            ),
+            ConfigError::ZeroSoftCap(backend) => {
+                write!(
+                    f,
+                    "backend \"{backend}\" has a soft-cap of 0: it must be at least 1"
+                )
+            }
+            ConfigError::HardCapBelowSoftCap {
+                backend,
+                soft_cap,
+                hard_cap,
+            } => write!(
+                f,
+                "backend \"{backend}\" has hard-cap = {hard_cap} below soft-cap = {soft_cap}: \
+                 the hard cap is the most it ever takes, so it cannot be lower"
+            ),
+            ConfigError::NoLobby => write!(
+                f,
+                "backends have roles but none has role = \"lobby\": players need a lobby to \
+                 arrive in"
+            ),
+            ConfigError::ZeroStateMaxAge => {
+                write!(f, "[balancing] state-max-age-seconds must be more than 0")
+            }
+            ConfigError::ZeroProbeInterval => {
+                write!(f, "[balancing] probe-interval-seconds must be more than 0")
+            }
             ConfigError::MaxPlayersTooLarge(n) => write!(
                 f,
                 "max-players = {n} is too large: the most is {}, and 0 means no limit",

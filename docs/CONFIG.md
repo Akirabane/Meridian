@@ -57,6 +57,11 @@ The servers behind the proxy. At least one is required.
 | --- | --- | --- |
 | `name` | The name used in the rest of the file, in commands and in logs | Not empty; unique |
 | `address` | Where the server listens, as `host:port` | A host and a port from 1 to 65535, with no space. The host is a name or an IPv4 address, or an IPv6 address in brackets (`"[::1]:25567"`). It is not looked up when the file is read |
+| `role` | What the server is for in load balancing: `"lobby"`, `"sublobby"` or `"game"`. Without one, the server is not balanced. Read and checked only: nothing uses it yet ([LOAD-BALANCING.md](LOAD-BALANCING.md)) | One of the three. Needs `soft-cap` |
+| `soft-cap` | The players the server is filled to before the next server of its role is opened | At least 1; only with a `role` |
+| `hard-cap` | The most players the balancer ever places on it. Defaults to `soft-cap` | At least `soft-cap`; only with a `role` |
+
+Once any server has a `role`, one of them must be a `"lobby"`.
 
 ## `[[forced-host]]`
 
@@ -107,6 +112,20 @@ How the hybrid mode looks names up. The other modes ignore it.
 | `negative-cache-seconds` | `300` | Seconds a name found to be no account's is remembered | Not more than `lookup-cache-seconds` |
 | `on-lookup-failure` | `"refuse"` | What happens when the account service does not answer: `"refuse"` the login, or let the player in `"unverified"` | One of the two |
 | `lookups-per-minute` | `10` | Lookups one address may cause in a minute; names already remembered do not count. An address over the limit is refused until the minute is over, whatever `on-lookup-failure` says | At least 1 |
+
+## `[balancing]`
+
+How servers that have a `role` are filled. Read and checked only: nothing in the
+proxy uses these settings yet, and a file without roles behaves exactly as before.
+[LOAD-BALANCING.md](LOAD-BALANCING.md) says what each setting is for and what is
+still missing.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `margin` | `2` | How far below its `soft-cap` a server that reached it must fall before it is filled again. `0` turns this off. A margin larger than the soft cap means the server is filled again only when empty | None |
+| `state-max-age-seconds` | `15` | Seconds after which what a server last reported is no longer believed; it is then not offered to new players | More than 0 |
+| `tie-break` | `"ping"` | How a tie between equally good servers is broken: `"ping"` (the one the proxy measured as quickest to answer) or `"order"` (the one listed first) | `"ping"` or `"order"` |
+| `probe-interval-seconds` | `10` | Seconds between two measures of how quickly each server answers | More than 0 |
 
 ## `[commands]`
 
