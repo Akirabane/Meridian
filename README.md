@@ -29,7 +29,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Connection limit per address | Done | Counted before any packet is read |
 | Backend health | Done | A server that just failed is tried last for a while |
 | Server list status | Done | The proxy's own message, player count, limit and a sample of names |
-| Console | Done | `list`, `servers`, `switch`, `send`, `kick`, `reload`, `end`, `help` |
+| Console | Done | `list`, `servers`, `drain`, `undrain`, `switch`, `send`, `kick`, `reload`, `end`, `help` |
 | Reload | Done | Without a restart; `listen` needs a restart |
 | In-game commands | Done | `/server`, `/hub`, `/lobby`; moving starts a seamless switch |
 | Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests; not yet tried on real servers. It needs a sidecar next to each server |
@@ -119,7 +119,9 @@ Type these in the terminal the proxy runs in.
 | --- | --- |
 | `help [command]` | Lists the commands, or explains one |
 | `list` | Lists the players online and where they are |
-| `servers` | Lists the servers, whether each one answers, and who is on it |
+| `servers` | Lists the servers, whether each one answers, and who is on it. A server with a `role` has a second line: its players against its caps, whether the balancer offers it (open, closed, draining), and its ping ([docs/LOAD-BALANCING.md](docs/LOAD-BALANCING.md)) |
+| `drain <server>` | Stops offering a server that has a `role` to new players; its players stay |
+| `undrain <server>` | Offers a drained server again |
 | `switch <player> <server>` | Moves a player to another server while they stay connected. The answer gives the time and bytes it took, or the step that failed and where the player is; the player is told too |
 | `send <player\|all> <server>` | The same, for one player or, with `all`, for each player in turn |
 | `kick <player> [reason]` | Disconnects a player, telling them why |

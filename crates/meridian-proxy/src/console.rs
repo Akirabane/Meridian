@@ -56,8 +56,20 @@ impl Commands {
             command(
                 "servers",
                 "servers",
-                "lists the backends and whether each one answers",
+                "lists the backends, whether each one answers, and the role and state of those that have one",
                 servers,
+            ),
+            command(
+                "drain",
+                "drain <server>",
+                "stops offering a server with a role to new players; its players stay",
+                drain,
+            ),
+            command(
+                "undrain",
+                "undrain <server>",
+                "offers a drained server to new players again",
+                undrain,
             ),
             command(
                 "switch",
@@ -244,7 +256,7 @@ fn servers(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
         .backends
         .iter()
         .zip(answers)
-        .map(|(b, answer)| {
+        .flat_map(|(b, answer)| {
             let default = if b.name == config.default_backend {
                 " (default)"
             } else {
@@ -255,14 +267,49 @@ fn servers(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
                 Ok(took) => format!("answers in {} ms", took.as_millis()),
                 Err(e) => format!("does not answer: {e}"),
             };
-            format!(
+            let line = format!(
                 "  {}{default} at {}: {state}, {}",
                 b.name,
                 b.address,
                 count(on, "player", "players")
-            )
+            );
+            // A backend with a role has a second line: what the balancer makes of it.
+            let balancing =
+                crate::placing::describe(&config, &proxy.sessions.shared(), &b.name, on)
+                    .map(|l| format!("    {l}"));
+            std::iter::once(line).chain(balancing)
         })
         .collect())
+}
+
+fn drain(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
+    let [server] = args else {
+        return Err(usage("drain", commands));
+    };
+    let config = proxy.config();
+    if config.balanced(server).is_none() {
+        return Err(format!(
+            "{server} has no role, so there is nothing to drain; it takes players only where              a route, a forced host or a command sends them"
+        ));
+    }
+    if !proxy.sessions.balancer.drain(server) {
+        return Ok(vec![format!("{server} is already drained")]);
+    }
+    info!("backend \"{server}\" is drained from the console");
+    Ok(vec![format!(
+        "{server} takes no new player; its players stay. undrain {server} offers it again"
+    )])
+}
+
+fn undrain(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
+    let [server] = args else {
+        return Err(usage("undrain", commands));
+    };
+    if !proxy.sessions.balancer.undrain(server) {
+        return Ok(vec![format!("{server} is not drained")]);
+    }
+    info!("backend \"{server}\" is offered again");
+    Ok(vec![format!("{server} is offered to new players again")])
 }
 
 fn count(n: usize, one: &str, many: &str) -> String {
@@ -582,7 +629,8 @@ mod tests {
         let proxy = proxy();
         let lines = run(&proxy, "help");
         for name in [
-            "help", "list", "servers", "switch", "send", "kick", "reload", "end",
+            "help", "list", "servers", "drain", "undrain", "switch", "send", "kick", "reload",
+            "end",
         ] {
             assert!(
                 lines.iter().any(|l| l.starts_with(name)),
@@ -817,5 +865,152 @@ mod tests {
         assert_eq!(duration(Duration::from_secs(7)), "7 s");
         assert_eq!(duration(Duration::from_secs(185)), "3 min 05 s");
         assert_eq!(duration(Duration::from_secs(3720)), "1 h 02 min");
+    }
+
+    // ---- Load balancing ----
+
+    use meridian_config::{BalancedServer, Role};
+    use meridian_sidecar::request::ServerStatus;
+
+    /// The proxy of `proxy()` with the lobby balanced: soft cap 3, hard cap 4.
+    fn balanced_proxy() -> Proxy {
+        let proxy = proxy();
+        proxy.set_config(Config {
+            balanced: vec![BalancedServer {
+                backend: "lobby".into(),
+                role: Role::Lobby,
+                soft_cap: 3,
+                hard_cap: 4,
+            }],
+            ..config()
+        });
+        proxy
+    }
+
+    /// The lines of `servers` that belong to the lobby.
+    fn lobby_lines(proxy: &Proxy) -> Vec<String> {
+        let lines = run(proxy, "servers");
+        let at = lines
+            .iter()
+            .position(|l| l.contains("lobby (default)"))
+            .unwrap();
+        lines[at..]
+            .iter()
+            .take_while(|l| at == lines.len() - 1 || !l.starts_with("  east"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn servers_gives_a_backend_with_a_role_a_second_line() {
+        let proxy = balanced_proxy();
+        let _alex = join(&proxy, "Alex", "lobby");
+        let _steve = join(&proxy, "Steve", "lobby");
+        assert_eq!(
+            lobby_lines(&proxy),
+            [
+                "  lobby (default) at 127.0.0.1:25601: answers in 3 ms, 2 players",
+                "    role lobby, 2/3 (hard 4): open",
+            ]
+        );
+        // A backend with no role keeps its one line.
+        assert!(
+            run(&proxy, "servers")
+                .iter()
+                .any(|l| l.starts_with("  east at"))
+        );
+        assert_eq!(run(&proxy, "servers").len(), 3);
+    }
+
+    #[test]
+    fn servers_says_closed_at_the_soft_cap() {
+        let proxy = balanced_proxy();
+        let _players: Vec<_> = ["Alex", "Steve", "Eve"]
+            .iter()
+            .map(|n| join(&proxy, n, "lobby"))
+            .collect();
+        assert_eq!(
+            lobby_lines(&proxy)[1],
+            "    role lobby, 3/3 (hard 4): closed (soft cap reached)"
+        );
+    }
+
+    #[test]
+    fn servers_shows_the_ping_the_reports_and_the_places_reserved() {
+        let proxy = balanced_proxy();
+        proxy
+            .sessions
+            .statuses
+            .record_ping("lobby", Duration::from_millis(7), Instant::now());
+        assert_eq!(
+            lobby_lines(&proxy)[1],
+            "    role lobby, 0/3 (hard 4): open, ping 7 ms"
+        );
+        // A backend that says it does not accept transfers is draining.
+        proxy.sessions.statuses.record(
+            "lobby",
+            ServerStatus {
+                accepts_transfers: Some(false),
+                ..ServerStatus::default()
+            },
+            Instant::now(),
+        );
+        assert!(
+            lobby_lines(&proxy)[1].contains("draining (it does not accept transfers)"),
+            "{:?}",
+            lobby_lines(&proxy)
+        );
+        // A report that grew old is not believed.
+        let old = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("the clock has run long enough");
+        proxy
+            .sessions
+            .statuses
+            .record("lobby", ServerStatus::default(), old);
+        assert!(
+            lobby_lines(&proxy)[1].contains("not offered (no report for 15 s)"),
+            "{:?}",
+            lobby_lines(&proxy)
+        );
+    }
+
+    #[test]
+    fn drain_stops_offering_a_backend_and_undrain_offers_it_again() {
+        let proxy = balanced_proxy();
+        let _alex = join(&proxy, "Alex", "lobby");
+        let said = run(&proxy, "drain lobby");
+        assert!(
+            said[0].starts_with("lobby takes no new player; its players stay"),
+            "{said:?}"
+        );
+        assert!(proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(
+            lobby_lines(&proxy)[1],
+            "    role lobby, 1/3 (hard 4): draining (drained from the console)"
+        );
+        assert_eq!(run(&proxy, "drain lobby"), ["lobby is already drained"]);
+        // The player on it is still there.
+        assert_eq!(proxy.sessions.counts().get("lobby"), Some(&1));
+        assert_eq!(
+            run(&proxy, "undrain lobby"),
+            ["lobby is offered to new players again"]
+        );
+        assert!(!proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(run(&proxy, "undrain lobby"), ["lobby is not drained"]);
+        assert_eq!(lobby_lines(&proxy)[1], "    role lobby, 1/3 (hard 4): open");
+    }
+
+    #[test]
+    fn drain_checks_its_arguments() {
+        let proxy = balanced_proxy();
+        assert_eq!(run(&proxy, "drain"), ["usage: drain <server>"]);
+        assert_eq!(run(&proxy, "undrain a b"), ["usage: undrain <server>"]);
+        // East has no role: there is nothing to drain, and nothing is changed.
+        let said = run(&proxy, "drain east");
+        assert!(said[0].starts_with("east has no role"), "{said:?}");
+        assert!(!proxy.sessions.balancer.is_drained("east"));
+        let said = run(&proxy, "drain nowhere");
+        assert!(said[0].starts_with("nowhere has no role"), "{said:?}");
     }
 }

@@ -163,11 +163,15 @@ pub fn in_game(
     name: String,
     player_address: IpAddr,
     target: String,
+    place: Option<crate::balance::Reservation>,
 ) {
     let spawned = std::thread::Builder::new()
         .name(format!("switch-{name}"))
-        .spawn(
-            move || match switch(&config, &switcher, &handle, &name, player_address, &target) {
+        .spawn(move || {
+            // The place reserved on the target is kept until the switch has ended: the
+            // player counts there from the commit, and it is given back after.
+            let _place = place;
+            match switch(&config, &switcher, &handle, &name, player_address, &target) {
                 Ok(moved) => {
                     info!("{}", moved.describe(&name));
                     handle.tell(&format!("You are now on {}.", moved.to));
@@ -176,8 +180,8 @@ pub fn in_game(
                     warning!("{why}");
                     handle.tell(&format!("Could not move you to {target}. {why}"));
                 }
-            },
-        );
+            }
+        });
     if let Err(e) = spawned {
         warning!("cannot start a thread for a switch: {e}");
     }

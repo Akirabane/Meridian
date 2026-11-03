@@ -49,10 +49,10 @@ pub struct Player {
 #[derive(Default)]
 pub struct Sessions {
     /// Which backends recently failed to take a player.
-    pub health: Health,
+    pub health: Arc<Health>,
     next: AtomicU64,
     closing: AtomicBool,
-    open: Mutex<HashMap<u64, Entry>>,
+    open: Arc<Mutex<HashMap<u64, Entry>>>,
     /// The players let in, from the check of the player limit to the end of
     /// their session, including those still being sent to a backend.
     admitted: AtomicUsize,
@@ -60,9 +60,35 @@ pub struct Sessions {
     pub switcher: Arc<Switcher>,
     /// Where logins are placed when balancing is on: the closed servers and the
     /// places reserved for players still being sent to their server.
-    pub balancer: Balancer,
+    pub balancer: Arc<Balancer>,
     /// What the backends last reported of themselves, read by the balancer.
-    pub statuses: Statuses,
+    pub statuses: Arc<Statuses>,
+}
+
+/// What placement reads, held apart from [`Sessions`] so that a command typed in
+/// game, which outlives the login that built it, can place its player: the sessions
+/// that are counted, the health of the backends, the balancer's state and what the
+/// backends reported. Every handle is shared with the [`Sessions`] it came from.
+#[derive(Clone)]
+pub struct Shared {
+    open: Arc<Mutex<HashMap<u64, Entry>>>,
+    pub health: Arc<Health>,
+    pub balancer: Arc<Balancer>,
+    pub statuses: Arc<Statuses>,
+}
+
+impl Shared {
+    /// How many players are on each backend now; see [`Sessions::counts`].
+    pub fn counts(&self) -> HashMap<String, usize> {
+        let backends: Vec<String> = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|e| e.handle.backend())
+            .collect();
+        crate::balance::count_by_backend(backends.iter().map(String::as_str))
+    }
 }
 
 /// Who a player is, for telling a second login of theirs: the unique id of a
@@ -241,9 +267,19 @@ impl Sessions {
 
     /// How many players are on each backend now; a switch moves a player to the
     /// backend they are on after it. A backend with none is absent.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn counts(&self) -> std::collections::HashMap<String, usize> {
-        let backends: Vec<String> = self.lock().values().map(|e| e.handle.backend()).collect();
-        crate::balance::count_by_backend(backends.iter().map(String::as_str))
+        self.shared().counts()
+    }
+
+    /// What placement reads, for a command that outlives this borrow.
+    pub fn shared(&self) -> Shared {
+        Shared {
+            open: Arc::clone(&self.open),
+            health: Arc::clone(&self.health),
+            balancer: Arc::clone(&self.balancer),
+            statuses: Arc::clone(&self.statuses),
+        }
     }
 
     /// The player called `name`, whatever its case, and the handle of their
@@ -407,7 +443,7 @@ pub(crate) fn serve(
     // Off, nothing here runs and the candidates are tried as they always were.
     let mut balanced = crate::placing::login(
         config,
-        sessions,
+        &sessions.shared(),
         connect,
         &session.profile,
         &options,
@@ -544,10 +580,17 @@ fn commands_hook(
             backend: handle.backend(),
         }
     };
+    let shared = sessions.shared();
+    // A move to a backend the player named: with balancing on, it may pass the soft
+    // cap, never the hard cap, and a place is kept on it until the switch ends.
     let mover = {
         let (config, switcher) = (Arc::clone(&config), Arc::clone(&sessions.switcher));
-        let (handle, name) = (handle.clone(), name.to_owned());
+        let (handle, name, shared) = (handle.clone(), name.to_owned(), shared.clone());
         move |target: &str| {
+            let place = match crate::placing::named(&config, &shared, target) {
+                Ok(place) => place,
+                Err(line) => return line,
+            };
             switching::in_game(
                 Arc::clone(&config),
                 Arc::clone(&switcher),
@@ -555,11 +598,35 @@ fn commands_hook(
                 name.clone(),
                 peer.ip(),
                 target.to_owned(),
+                place,
             );
             format!("Moving you to {target}...")
         }
     };
-    commands::hook(config, typist, mover)
+    // `/hub` with balancing on: the lobby the balancer finds for the player.
+    let hubber = {
+        let (config, switcher) = (Arc::clone(&config), Arc::clone(&sessions.switcher));
+        let (handle, name) = (handle.clone(), name.to_owned());
+        move |typist: &commands::Typist| {
+            let open_to = |backend: &str| commands::open_to(&config, backend, typist);
+            match crate::placing::hub(&config, &shared, open_to, &typist.backend) {
+                Ok((target, place)) => {
+                    switching::in_game(
+                        Arc::clone(&config),
+                        Arc::clone(&switcher),
+                        handle.clone(),
+                        name.clone(),
+                        peer.ip(),
+                        target.clone(),
+                        Some(place),
+                    );
+                    format!("Moving you to {target}...")
+                }
+                Err(line) => line,
+            }
+        }
+    };
+    commands::hook(config, typist, mover, hubber)
 }
 
 /// What a player is told when none of the backends tried answers.

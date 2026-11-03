@@ -47,8 +47,7 @@ impl Health {
     }
 
     /// A line for the console's list of backends: `None` for a backend that is
-    /// not passed over. The `servers` command shows it once the console reads it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// not passed over.
     pub fn describe(&self, backend: &str, retry: Duration, now: Instant) -> Option<String> {
         let left = self.passed_over_for(backend, retry, now)?;
         Some(format!(

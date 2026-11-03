@@ -161,8 +161,7 @@ on-lookup-failure = "refuse"
 lookups-per-minute = 10
 
 # Load balancing across the backends that have a role (see the backends above).
-# See docs/LOAD-BALANCING.md. Everything here is used except tie-break, which waits
-# for the measure of each backend's answer time.
+# See docs/LOAD-BALANCING.
 [balancing]
 # Whether logins are placed by the balancer among the backends of role "lobby".
 # Off by default: the proxy then chooses a backend as it always did. It needs at
@@ -176,11 +175,11 @@ margin = 2
 # believed; it is then not offered to new players. A backend that never reported is
 # treated as accepting.
 state-max-age-seconds = 15
-# How a tie between equally good backends is broken: "ping" (the one the proxy
-# measured as quickest to answer) or "order" (the one listed first).
+# How a tie between equally full backends is broken: "ping" (the one the proxy
+# measured as quickest to connect to) or "order" (the one listed first).
 tie-break = "ping"
 # Seconds between two readings of the state of each backend that has a role and a
-# sidecar.
+# sidecar, and between two measures of the time a connection to it takes.
 probe-interval-seconds = 10
 
 # Commands players type in game that the proxy answers itself; it never passes
@@ -189,7 +188,8 @@ probe-interval-seconds = 10
 # "server": /server lists the servers and /server <name> asks to move to one.
 # "hub": /hub and /lobby ask to move to the hub backend.
 enabled = ["server", "hub"]
-# The backend /hub and /lobby lead to. When it is left out, the default backend.
+# The backend /hub and /lobby lead to. When it is left out, the default backend, or,
+# with [balancing] enabled and a backend of role "lobby", the lobby the balancer finds.
 # hub-backend = "lobby"
 # Whether players may list the servers with /server.
 server-list = true

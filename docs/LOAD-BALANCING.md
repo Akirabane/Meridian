@@ -28,14 +28,14 @@ with whom, are not part of it.
 | Need | Today | Missing |
 | --- | --- | --- |
 | Roles | `role`, `soft-cap` and `hard-cap` are read and checked. At login, role `lobby` is used | The use of `sublobby` and `game`: moving players between roles |
-| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each. With balancing on, a login is placed among the lobbies its route allows | `/hub` and `/server` do not use the balancer yet |
+| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each. With balancing on, a login is placed among the lobbies its route allows, and `/hub` takes a lobby, then a sublobby | `default-backend` does not follow the roles |
 | Order of candidates | `route::candidates` gives the servers of the player's group in the listed order, and a login goes to the first that answers. Filling a server first is therefore what happens already, with no limit at all | A limit: the first server takes every player until it fails |
 | Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` gives the count. A place is reserved with the count, under one lock, from the choice of a server until the session is open, so logins at the same time do not pass a cap. Players who joined a server some other way are not seen |
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
 | Does a server accept transfers | The proxy reads `accepts_transfers`, `players` and `capacity` through the sidecar (section 3). A failed login also marks a server "passed over" for `backend-retry-seconds` (`health.rs`) | The answer on the Horizon side: its command and its names are not fixed |
 | Premium or offline | Done. Players are verified or unverified, decided at login (DESIGN.md section 15), and groups and routes keep the two kinds apart | Nothing for placement: it chooses among the servers the route already allows |
-| Ping | The console's `servers` command measures how long a TCP connection to a backend takes. Nothing measures a player. The relay passes keep-alives through as they are (`relay.rs`) | A measure kept by the proxy, see section 5 |
-| Drain | Nothing. A server removed from the file keeps its players until they leave (CONFIG.md, "What a reload changes") | Stop offering a server and let it empty |
+| Ping | The proxy measures the TCP connection time to each server with a role and keeps it (section 5). Nothing measures a player. The relay passes keep-alives through as they are (`relay.rs`) | Player to proxy, not asked for |
+| Drain | A server that reports it does not accept transfers, or that the operator drains with the console's `drain`, is not offered to new players, not even to a named choice; its players stay | Nothing moves the players off it. A removed server still keeps its players until they leave |
 | Moving players between roles | `/server` and `/hub` switch a player through the sidecars (DESIGN.md section 5) | Moving a group from a sublobby to a game, and who decides |
 
 ## 3. Reading the state of a server
@@ -110,15 +110,24 @@ an unverified group, whatever the balancer would prefer (DESIGN.md section 15.3)
    draining and empty can be stopped.
 
 A forced host and `/server <name>` name a server on purpose. They may go past the
-`soft-cap` but never past the `hard-cap`, and a draining server refuses them too.
-Because `hard-cap` defaults to `soft-cap`, a server with no `hard-cap` written takes
-no overflow from them either.
+`soft-cap` but never past the `hard-cap`, and a draining server refuses them too. The
+player is told "<name> is full." or "<name> is not taking players right now." Because
+`hard-cap` defaults to `soft-cap`, a server with no `hard-cap` written takes no
+overflow from them either.
 
-`/hub` and `/lobby` do not name a server. With roles, they take the best open server
-of role `lobby` by the rule above, and a `sublobby` only when no lobby can take the
-player. Within the player's route, as always. A written `hub-backend` still wins, as
-an explicit choice, and then follows the rule for explicit names. Without roles
-nothing changes.
+`/hub` and `/lobby` do not name a server. With balancing on, no `hub-backend` written
+and a server of role `lobby`, they take the best open server of role `lobby` by the
+rule above, and a `sublobby` only when no lobby can take the player. A lobby in
+overflow still comes before a sublobby, since `/hub` means a lobby. The servers the
+player may not be sent to (those of the other kind of player) are left out, as for
+`/server`. A player already on the server the rule finds is told so. A written
+`hub-backend` still wins, as an explicit choice, and then follows the rule for named
+servers. With balancing off, or with no lobby, nothing changes.
+
+A place is reserved on the target of a move for as long as the switch lasts, so that
+players moving at the same time do not pass a cap; it is given back when the switch
+ends, whether it worked or not. The console's `switch` and `send` are the operator's
+own choice and ignore the caps.
 
 What the rule does not do: it does not group players for a match, it does not decide
 when a game server starts or stops, and it does not move players that are already
@@ -129,10 +138,16 @@ placed to even out the load. Those are later steps.
 The ping a player has to the proxy is the same whichever server is chosen, so it
 cannot tell two servers apart. Two things are worth measuring instead:
 
-- **Proxy to server**, the time a connection to the server takes. The console already
-  does this once on request (`probe` in `state.rs`). Measured every
-  `probe-interval-seconds` it is what `tie-break = "ping"` compares. This matters when
-  the servers are not all in one place.
+- **Proxy to server**, the time a TCP connection to the server takes. The polling
+  thread measures it for every server that has a role, every `probe-interval-seconds`,
+  with the probe the console already used (`probe` in `state.rs`), while balancing is on
+  and `tie-break = "ping"`. A measure older than `state-max-age-seconds`, such as one
+  of a server that stopped answering, is not used. The balancer uses it only to break a
+  tie, after the fill rule: a quicker server never beats a fuller open one. A server
+  with no measure ranks after one that has one, and two without keep their order. This
+  matters when the servers are not all in one place. The time to open a connection is
+  not the time a player will feel, but it is what the proxy can measure without asking
+  anything of the server.
 - **Player to proxy**, kept for later. It would matter with more than one proxy, or to
   group players with a similar ping in a matchmaking server. It is not measured today:
   the login has no round trip that is not part of the account check, and the relay
@@ -182,10 +197,13 @@ kind of player already (section 4).
 3. The login uses it, behind `[balancing] enabled` (off by default), for the servers
    of role `lobby`: a place is reserved while the player is sent, a server that
    does not answer is left for the next, and a forced host may pass the soft cap but
-   not the hard cap. Done. Not done: `/hub` and `/server`, and the sublobby and game
-   roles.
-4. The probe of section 5, kept by the proxy, and the console's `servers` command
-   showing the role, the count against the caps, open or closed, and draining.
+   not the hard cap. Done. `/hub` takes a lobby then a sublobby, and `/server <name>`
+   respects the hard cap and the drain, with a place reserved until the switch ends.
+   Done. Not done: placing players on the game role, and the console's `switch` and
+   `send`, which ignore the caps.
+4. The probe of section 5, kept by the proxy; the console's `servers` command showing
+   the role, the count against the caps, open, closed or draining, and the ping; and
+   `drain` and `undrain`. Done.
 5. The report of section 3: the sidecar request and the proxy's reading of it are done.
    What is missing is the Horizon server's own command, and the drain it allows once
    a server can say it no longer accepts transfers.

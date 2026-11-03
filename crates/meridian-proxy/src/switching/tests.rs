@@ -322,6 +322,7 @@ fn a_switch_asked_in_game_tells_the_player() {
         "Alex".into(),
         "198.51.100.7".parse().unwrap(),
         "east".into(),
+        None,
     );
     let (mut lines, _) = client_after_switch(&mut player);
     // The switch's thread tells the player once the source let them go, which
@@ -435,4 +436,110 @@ fn a_backend_without_a_sidecar_is_named() {
         ]
     );
     assert!(log.lines().is_empty());
+}
+
+/// The place a move keeps on its target is given back once the switch has ended, and
+/// the player counts on the target from then on.
+#[test]
+fn the_place_reserved_for_a_switch_is_given_back_when_it_ends() {
+    use crate::balance::Server;
+    let World {
+        proxy,
+        mut player,
+        _source,
+        relay,
+        target,
+        ..
+    } = world(Sidecars::default());
+    let (_, handle) = proxy.sessions.session("Alex").unwrap();
+    let place = proxy
+        .sessions
+        .balancer
+        .reserve_named(
+            Server {
+                backend: "east",
+                soft_cap: 5,
+                hard_cap: 5,
+                available: true,
+                ping: None,
+                reported_players: None,
+            },
+            || proxy.sessions.counts(),
+        )
+        .unwrap();
+    assert_eq!(proxy.sessions.balancer.reserved("east"), 1);
+    in_game(
+        proxy.config(),
+        Arc::clone(&proxy.sessions.switcher),
+        handle,
+        "Alex".into(),
+        "198.51.100.7".parse().unwrap(),
+        "east".into(),
+        Some(place),
+    );
+    let (mut lines, _) = client_after_switch(&mut player);
+    // The switch's thread tells the player once the source let them go, which may be
+    // after the target's first packet.
+    while lines.is_empty() {
+        let (id, payload) = player.recv().unwrap();
+        lines.extend(chat(id, &payload));
+    }
+    assert_eq!(lines, ["You are now on east."]);
+    // The thread gives the place back after it has told the player.
+    let started = std::time::Instant::now();
+    while proxy.sessions.balancer.reserved("east") != 0
+        && started.elapsed() < Duration::from_secs(5)
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(proxy.sessions.balancer.reserved("east"), 0);
+    assert_eq!(proxy.sessions.counts().get("east"), Some(&1));
+    attack(&mut player, TARGET_ID);
+    target.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
+}
+
+/// A switch that fails gives the place back too.
+#[test]
+fn the_place_reserved_for_a_switch_that_fails_is_given_back() {
+    use crate::balance::Server;
+    let World {
+        proxy,
+        mut player,
+        _source,
+        ..
+    } = world(Sidecars::default());
+    let (_, handle) = proxy.sessions.session("Alex").unwrap();
+    let place = proxy
+        .sessions
+        .balancer
+        .reserve_named(
+            Server {
+                backend: "nowhere",
+                soft_cap: 5,
+                hard_cap: 5,
+                available: true,
+                ping: None,
+                reported_players: None,
+            },
+            || proxy.sessions.counts(),
+        )
+        .unwrap();
+    in_game(
+        proxy.config(),
+        Arc::clone(&proxy.sessions.switcher),
+        handle,
+        "Alex".into(),
+        "198.51.100.7".parse().unwrap(),
+        "nowhere".into(),
+        Some(place),
+    );
+    let started = std::time::Instant::now();
+    while proxy.sessions.balancer.reserved("nowhere") != 0
+        && started.elapsed() < Duration::from_secs(5)
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(proxy.sessions.balancer.reserved("nowhere"), 0);
+    let _ = &mut player;
 }

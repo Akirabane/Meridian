@@ -3,7 +3,7 @@
 //! `/hub` or `/lobby` to the hub backend. Any other command, or one of these that
 //! is turned off, goes to the backend.
 use crate::route;
-use meridian_config::{AuthKind, Config, ProxyCommand};
+use meridian_config::{AuthKind, Config, ProxyCommand, Role};
 use meridian_net::relay::CommandHook;
 use std::sync::Arc;
 
@@ -22,6 +22,8 @@ pub enum Answer {
     Say(String),
     /// Moves the player to this backend.
     Move(String),
+    /// Moves the player to the lobby the balancer finds for them.
+    Hub,
 }
 
 /// The hook the session asks about each command its player types. `typist`
@@ -31,13 +33,16 @@ pub fn hook(
     config: Arc<Config>,
     typist: impl Fn() -> Typist + Send + Sync + 'static,
     mover: impl Fn(&str) -> String + Send + Sync + 'static,
+    hubber: impl Fn(&Typist) -> String + Send + Sync + 'static,
 ) -> Arc<CommandHook> {
-    Arc::new(
-        move |command: &str| match answer(&config, &typist(), command)? {
+    Arc::new(move |command: &str| {
+        let typist = typist();
+        match answer(&config, &typist, command)? {
             Answer::Say(line) => Some(line),
             Answer::Move(target) => Some(mover(&target)),
-        },
-    )
+            Answer::Hub => Some(hubber(&typist)),
+        }
+    })
 }
 
 /// The proxy's answer to `command` (without its slash), or `None` when the
@@ -56,6 +61,13 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
     }
     if settings.is_enabled(ProxyCommand::Hub) && ProxyCommand::Hub.words().contains(&first) {
         return Some(match rest.as_slice() {
+            // With balancing on and no hub written, the balancer picks the lobby.
+            [] if config.balancing.enabled
+                && config.commands.hub_backend.is_none()
+                && config.servers_with_role(Role::Lobby).next().is_some() =>
+            {
+                Answer::Hub
+            }
             [] => move_to(config, typist, config.hub_backend()),
             _ => Answer::Say(format!("Usage: /{first}")),
         });
@@ -65,7 +77,7 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
 
 /// Whether `typist` may be sent to `backend`: a backend in a group for the other
 /// kind of player is closed to them.
-fn open_to(config: &Config, backend: &str, typist: &Typist) -> bool {
+pub fn open_to(config: &Config, backend: &str, typist: &Typist) -> bool {
     config.backend(backend).is_some() && !route::serves_other_kind(config, backend, typist.auth)
 }
 

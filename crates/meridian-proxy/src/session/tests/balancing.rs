@@ -40,7 +40,7 @@ fn server<'a>(config: &Config, backend: &'a str) -> Server<'a> {
 }
 
 /// Keeps a place on `backend`, as a player already there would.
-fn hold<'a>(sessions: &'a Sessions, config: &Config, backend: &str) -> Reservation<'a> {
+fn hold(sessions: &Sessions, config: &Config, backend: &str) -> Reservation {
     sessions
         .balancer
         .reserve_named(server(config, backend), || sessions.counts())
@@ -329,7 +329,7 @@ fn logins_at_the_same_time_do_not_pass_the_hard_cap() {
     let config = balanced(true, 3, 3);
     let sessions = Sessions::default();
     let names = ["lobby", "east", "west"];
-    let results: Vec<Result<Reservation<'_>, NoRoom>> = std::thread::scope(|scope| {
+    let results: Vec<Result<Reservation, NoRoom>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..24)
             .map(|_| {
                 scope.spawn(|| {
@@ -555,4 +555,450 @@ fn with_balancing_off_a_report_changes_nothing() {
     );
     let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
     assert_eq!(tried, [LOBBY]);
+}
+
+// ---- Ping and drain ----
+
+fn ping(sessions: &Sessions, backend: &str, ms: u64) {
+    sessions
+        .statuses
+        .record_ping(backend, Duration::from_millis(ms), Instant::now());
+}
+
+/// Two lobbies with the same number of players: the one the proxy measured as the
+/// quicker takes the login, whatever the order they are listed in.
+#[test]
+fn the_quicker_lobby_takes_a_tie() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    ping(&sessions, "lobby", 40);
+    ping(&sessions, "east", 5);
+    ping(&sessions, "west", 90);
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+}
+
+/// The ping only breaks a tie: a fuller lobby is still preferred to a quicker one.
+#[test]
+fn the_ping_does_not_beat_the_fill_rule_at_login() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    ping(&sessions, "lobby", 80);
+    ping(&sessions, "east", 1);
+    let _held = hold(&sessions, &config, "lobby");
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// With `tie-break = "order"` the measures are not used.
+#[test]
+fn the_order_breaks_the_tie_when_it_is_asked_for() {
+    let mut config = balanced(true, 5, 5);
+    config.balancing.tie_break = meridian_config::TieBreak::Order;
+    let sessions = Sessions::default();
+    ping(&sessions, "lobby", 80);
+    ping(&sessions, "east", 1);
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// A measure that grew old is not used, as a report that grew old is not believed.
+#[test]
+fn an_old_measure_is_not_used() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs(
+            config.balancing.state_max_age_seconds + 5,
+        ))
+        .expect("the clock has run long enough");
+    sessions
+        .statuses
+        .record_ping("east", Duration::from_millis(1), old);
+    ping(&sessions, "lobby", 50);
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY], "east's measure is too old to rank it first");
+}
+
+/// A lobby the operator drained takes no new player, not even through a forced host.
+#[test]
+fn a_drained_lobby_takes_no_new_player_and_is_offered_again_when_undrained() {
+    let mut config = balanced(true, 5, 5);
+    forced_east(&mut config);
+    let sessions = Sessions::default();
+    sessions.balancer.drain("lobby");
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+    sessions.balancer.drain("east");
+    let (tried, _) = login_one(
+        &config,
+        &sessions,
+        up(),
+        Some("east.example.com"),
+        vec![Step::ExpectClose],
+    );
+    assert_eq!(tried, [WEST], "the forced host's backend is drained too");
+    assert!(sessions.balancer.undrain("lobby"));
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// Every lobby drained: the player is refused and no lobby is tried by the ordinary
+/// loop either.
+#[test]
+fn every_lobby_drained_leaves_no_room() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    for lobby in ["lobby", "east", "west"] {
+        sessions.balancer.drain(lobby);
+    }
+    let (tried, trace) = login_one(&config, &sessions, up(), None, refused());
+    assert!(tried.is_empty(), "{tried:?}");
+    assert_eq!(refusal(&trace), Full::MESSAGE);
+}
+
+/// The same when every lobby says it does not accept transfers, or has not been heard
+/// from for too long: none is offered, and the ordinary loop does not try them.
+#[test]
+fn lobbies_that_do_not_accept_transfers_or_are_not_heard_from_are_not_tried_at_all() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs(
+            config.balancing.state_max_age_seconds + 5,
+        ))
+        .expect("the clock has run long enough");
+    sessions
+        .statuses
+        .record("lobby", ServerStatus::default(), old);
+    for lobby in ["east", "west"] {
+        report(
+            &sessions,
+            lobby,
+            ServerStatus {
+                accepts_transfers: Some(false),
+                ..accepting(0, 20)
+            },
+        );
+    }
+    let (tried, trace) = login_one(&config, &sessions, up(), None, refused());
+    assert!(tried.is_empty(), "{tried:?}");
+    assert_eq!(refusal(&trace), Full::MESSAGE);
+}
+
+// ---- /server and /hub ----
+
+use crate::placing;
+
+fn open_to_all(_: &str) -> bool {
+    true
+}
+
+/// A config of lobbies lobby, east and west (soft cap `soft`, hard cap `hard`) and a
+/// sublobby `queue`, with balancing on.
+fn with_queue(soft: u32, hard: u32) -> Config {
+    let mut config = balanced(true, soft, hard);
+    config.backends.push(meridian_config::Backend {
+        name: "queue".into(),
+        address: "127.0.0.1:25604".into(),
+    });
+    config.balanced.push(BalancedServer {
+        backend: "queue".into(),
+        role: Role::Sublobby,
+        soft_cap: soft,
+        hard_cap: hard,
+    });
+    config
+}
+
+#[test]
+fn a_named_move_reserves_a_place_unless_balancing_is_off_or_the_target_has_no_role() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = balanced(true, 2, 3);
+    let place = placing::named(&config, &shared, "east").unwrap().unwrap();
+    assert_eq!(place.backend(), "east");
+    assert_eq!(sessions.balancer.reserved("east"), 1);
+    drop(place);
+    assert_eq!(sessions.balancer.reserved("east"), 0);
+    // Off: nothing is reserved, whatever the roles say.
+    let off = balanced(false, 2, 3);
+    assert!(placing::named(&off, &shared, "east").unwrap().is_none());
+    // A backend with no role is not balanced.
+    let mut unbalanced = balanced(true, 2, 3);
+    unbalanced.balanced.retain(|b| b.backend != "east");
+    assert!(
+        placing::named(&unbalanced, &shared, "east")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        placing::named(&unbalanced, &shared, "nowhere")
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A named move may pass the soft cap, never the hard cap, and the place it holds
+/// counts until it is given back.
+#[test]
+fn a_named_move_may_pass_the_soft_cap_but_not_the_hard_cap() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = balanced(true, 1, 2);
+    let first = placing::named(&config, &shared, "east").unwrap().unwrap();
+    let second = placing::named(&config, &shared, "east").unwrap().unwrap();
+    assert_eq!(
+        placing::named(&config, &shared, "east").unwrap_err(),
+        "east is full."
+    );
+    drop(first);
+    let third = placing::named(&config, &shared, "east").unwrap().unwrap();
+    drop((second, third));
+    assert_eq!(sessions.balancer.reserved("east"), 0);
+}
+
+#[test]
+fn a_named_move_is_refused_to_a_drained_or_silent_backend() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = balanced(true, 5, 5);
+    sessions.balancer.drain("east");
+    assert_eq!(
+        placing::named(&config, &shared, "east").unwrap_err(),
+        "east is not taking players right now."
+    );
+    sessions.balancer.undrain("east");
+    report(
+        &sessions,
+        "east",
+        ServerStatus {
+            accepts_transfers: Some(false),
+            ..accepting(0, 20)
+        },
+    );
+    assert_eq!(
+        placing::named(&config, &shared, "east").unwrap_err(),
+        "east is not taking players right now."
+    );
+    // The others are not touched.
+    assert!(placing::named(&config, &shared, "west").unwrap().is_some());
+}
+
+/// `/hub` goes to the fullest open lobby, as a login does.
+#[test]
+fn the_hub_takes_the_fullest_open_lobby() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_queue(5, 5);
+    let _held = [
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "west"),
+    ];
+    let (target, place) = placing::hub(&config, &shared, open_to_all, "queue").unwrap();
+    assert_eq!(target, "east");
+    assert_eq!(place.backend(), "east");
+    assert_eq!(sessions.balancer.reserved("east"), 3);
+}
+
+/// A player already on the lobby the balancer finds is told so, and no place stays
+/// reserved.
+#[test]
+fn the_hub_does_not_move_a_player_to_the_lobby_they_are_on() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_queue(5, 5);
+    let _held = hold(&sessions, &config, "west");
+    let said = placing::hub(&config, &shared, open_to_all, "west").unwrap_err();
+    assert_eq!(said, "You are already on west.");
+    assert_eq!(sessions.balancer.reserved("west"), 1, "only the held place");
+}
+
+/// A sublobby takes the player only when no lobby can: closed lobbies still take the
+/// overflow, so it takes lobbies at their hard cap, drained or not accepting.
+#[test]
+fn the_hub_falls_back_to_a_sublobby_when_no_lobby_can_take_the_player() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_queue(1, 1);
+    let _held = [
+        hold(&sessions, &config, "lobby"),
+        hold(&sessions, &config, "east"),
+    ];
+    sessions.balancer.drain("west");
+    let (target, _place) = placing::hub(&config, &shared, open_to_all, "guests").unwrap();
+    assert_eq!(target, "queue");
+}
+
+/// A lobby past its soft cap but below its hard cap still beats an open sublobby.
+#[test]
+fn a_lobby_in_overflow_beats_an_open_sublobby() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_queue(1, 2);
+    let _held = [
+        hold(&sessions, &config, "lobby"),
+        hold(&sessions, &config, "lobby"),
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "west"),
+    ];
+    let (target, place) = placing::hub(&config, &shared, open_to_all, "guests").unwrap();
+    assert_eq!(target, "east");
+    assert!(place.overflow);
+}
+
+#[test]
+fn the_hub_says_so_when_nothing_can_take_the_player() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_queue(1, 1);
+    let _held = [
+        hold(&sessions, &config, "lobby"),
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "west"),
+        hold(&sessions, &config, "queue"),
+    ];
+    assert_eq!(
+        placing::hub(&config, &shared, open_to_all, "guests").unwrap_err(),
+        "No lobby has room right now."
+    );
+}
+
+/// The backends a player may not be sent to, such as those of the other kind of
+/// player, are never chosen.
+#[test]
+fn the_hub_leaves_out_the_backends_the_player_may_not_go_to() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_queue(5, 5);
+    let _held = hold(&sessions, &config, "east");
+    let (target, _place) = placing::hub(
+        &config,
+        &shared,
+        |backend: &str| backend != "east",
+        "guests",
+    )
+    .unwrap();
+    assert_eq!(
+        target, "lobby",
+        "the fullest lobby left is the first listed"
+    );
+}
+
+// ---- The commands a player types, through the hook a session builds ----
+
+use super::super::commands_hook;
+
+/// A player on `lobby`, with the hook their session would give them.
+fn typing(
+    config: &Config,
+    sessions: &Sessions,
+) -> (std::sync::Arc<meridian_net::relay::CommandHook>, impl Sized) {
+    let (relay, handle, player, server) = idle_session_on("Alex", "lobby");
+    let hook = commands_hook(
+        config,
+        sessions,
+        &handle,
+        "Alex",
+        meridian_config::AuthKind::Unverified,
+        peer(),
+    );
+    (hook, (relay, handle, player, server))
+}
+
+fn wait_for_reserved(sessions: &Sessions, backend: &str, expected: usize) {
+    let started = Instant::now();
+    while sessions.balancer.reserved(backend) != expected
+        && started.elapsed() < Duration::from_secs(5)
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(sessions.balancer.reserved(backend), expected, "{backend}");
+}
+
+#[test]
+fn hub_in_game_goes_to_the_balancers_lobby_and_keeps_a_place_until_the_switch_ends() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let _held = hold(&sessions, &config, "east");
+    let (hook, _alex) = typing(&config, &sessions);
+    // East is the fullest lobby, and Alex is on lobby.
+    assert_eq!(hook("hub").as_deref(), Some("Moving you to east..."));
+    // The switch fails at once (no sidecars here), and the place it held is given back.
+    wait_for_reserved(&sessions, "east", 1);
+}
+
+#[test]
+fn hub_in_game_tells_a_player_already_on_the_lobby_so() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let (hook, _alex) = typing(&config, &sessions);
+    // Nothing is held: the first lobby listed is the one Alex is on.
+    assert_eq!(hook("hub").as_deref(), Some("You are already on lobby."));
+    assert_eq!(sessions.balancer.reserved("lobby"), 0);
+}
+
+#[test]
+fn hub_in_game_says_so_when_no_lobby_has_room() {
+    let config = balanced(true, 1, 1);
+    let sessions = Sessions::default();
+    let _held = [
+        hold(&sessions, &config, "lobby"),
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "west"),
+    ];
+    let (hook, _alex) = typing(&config, &sessions);
+    assert_eq!(hook("hub").as_deref(), Some("No lobby has room right now."));
+}
+
+#[test]
+fn server_in_game_may_pass_the_soft_cap_but_not_the_hard_cap() {
+    let config = balanced(true, 1, 2);
+    let sessions = Sessions::default();
+    let _held = hold(&sessions, &config, "east");
+    let (hook, _alex) = typing(&config, &sessions);
+    // East is at its soft cap, not its hard cap: the move goes on.
+    assert_eq!(
+        hook("server east").as_deref(),
+        Some("Moving you to east...")
+    );
+    wait_for_reserved(&sessions, "east", 1);
+    let _more = hold(&sessions, &config, "east");
+    assert_eq!(hook("server east").as_deref(), Some("east is full."));
+    assert_eq!(
+        sessions.balancer.reserved("east"),
+        2,
+        "nothing was reserved"
+    );
+}
+
+#[test]
+fn server_in_game_is_refused_to_a_drained_backend() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    sessions.balancer.drain("east");
+    let (hook, _alex) = typing(&config, &sessions);
+    assert_eq!(
+        hook("server east").as_deref(),
+        Some("east is not taking players right now.")
+    );
+}
+
+/// With balancing off the commands are what they always were: a move to the hub
+/// backend, with no place reserved.
+#[test]
+fn the_commands_are_unchanged_with_balancing_off() {
+    let config = balanced(false, 1, 1);
+    let sessions = Sessions::default();
+    let _held = hold(&sessions, &config, "east");
+    let (hook, _alex) = typing(&config, &sessions);
+    // Alex is on lobby, the hub backend: nothing to move.
+    assert_eq!(hook("hub").as_deref(), Some("You are already on lobby."));
+    // East has its hard cap, and a named move still goes on.
+    assert_eq!(
+        hook("server east").as_deref(),
+        Some("Moving you to east...")
+    );
+    assert_eq!(sessions.balancer.reserved("east"), 1, "only the held place");
 }
