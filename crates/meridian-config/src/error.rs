@@ -131,6 +131,8 @@ pub enum ConfigError {
     },
     /// Backends have a role, and none is a lobby.
     NoLobby,
+    /// `[balancing] enabled = true` while no backend has a role.
+    BalancingWithoutRoles,
     /// `[balancing] state-max-age-seconds` is zero.
     ZeroStateMaxAge,
     /// `[balancing] probe-interval-seconds` is zero.
@@ -343,6 +345,10 @@ impl fmt::Display for ConfigError {
                 f,
                 "backends have roles but none has role = \"lobby\": players need a lobby to \
                  arrive in"
+            ),
+            ConfigError::BalancingWithoutRoles => write!(
+                f,
+                "[balancing] enabled = true, but no backend has a role: give the backends a                  role and a soft-cap, or turn balancing off"
             ),
             ConfigError::ZeroStateMaxAge => {
                 write!(f, "[balancing] state-max-age-seconds must be more than 0")

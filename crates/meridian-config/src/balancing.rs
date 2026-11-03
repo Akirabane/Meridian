@@ -67,6 +67,9 @@ pub struct BalancedServer {
 /// The `[balancing]` table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Balancing {
+    /// Whether logins are placed by the balancer. Off by default: the proxy then
+    /// chooses a backend exactly as it did before there were roles.
+    pub enabled: bool,
     /// How far below its soft cap a server that reached it must fall before it is
     /// filled again, so that a server does not flip between open and closed with
     /// each player who leaves. A margin larger than the soft cap means the server
@@ -84,6 +87,7 @@ pub struct Balancing {
 impl Default for Balancing {
     fn default() -> Self {
         Self {
+            enabled: false,
             margin: 2,
             state_max_age_seconds: 15,
             tie_break: TieBreak::Ping,
@@ -96,6 +100,7 @@ impl Default for Balancing {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct FileBalancing {
+    enabled: Option<bool>,
     margin: Option<u32>,
     state_max_age_seconds: Option<u64>,
     tie_break: Option<TieBreak>,
@@ -106,6 +111,7 @@ impl FileBalancing {
     pub(crate) fn into_settings(self) -> Balancing {
         let defaults = Balancing::default();
         Balancing {
+            enabled: self.enabled.unwrap_or(defaults.enabled),
             margin: self.margin.unwrap_or(defaults.margin),
             state_max_age_seconds: self
                 .state_max_age_seconds
@@ -195,6 +201,9 @@ impl Config {
             }
         }
         self.balancing.validate()?;
+        if self.balancing.enabled && self.balanced.is_empty() {
+            return Err(ConfigError::BalancingWithoutRoles);
+        }
         if !self.balanced.is_empty() && self.servers_with_role(Role::Lobby).next().is_none() {
             return Err(ConfigError::NoLobby);
         }

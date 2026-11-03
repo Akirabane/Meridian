@@ -48,6 +48,7 @@ fn nothing_is_balanced_by_default() {
     .unwrap();
     assert!(config.balanced.is_empty());
     assert_eq!(config.balancing, Balancing::default());
+    assert!(!config.balancing.enabled);
     assert_eq!(config.balancing.margin, 2);
     assert_eq!(config.balancing.state_max_age_seconds, 15);
     assert_eq!(config.balancing.tie_break, TieBreak::Ping);
@@ -101,6 +102,7 @@ fn the_balancing_table_is_read() {
     assert_eq!(
         config.balancing,
         Balancing {
+            enabled: false,
             margin: 4,
             state_max_age_seconds: 30,
             tie_break: TieBreak::Order,
@@ -243,4 +245,46 @@ fn roles_do_not_change_how_a_player_is_routed() {
     let config = with("default-backend = \"game-1\"", LOBBY_AND_GAMES, "").unwrap();
     assert_eq!(config.default_backend, "game-1");
     assert!(config.groups.is_empty() && config.routes.is_empty());
+}
+
+#[test]
+fn balancing_is_turned_on_with_enabled_and_needs_roles() {
+    let config = with(
+        "",
+        LOBBY_AND_GAMES,
+        "[balancing]
+enabled = true",
+    )
+    .unwrap();
+    assert!(config.balancing.enabled);
+    let one = "[[backends]]
+name = \"a\"
+address = \"127.0.0.1:25566\"";
+    let e = with(
+        "",
+        one,
+        "[balancing]
+enabled = true",
+    )
+    .unwrap_err();
+    assert!(matches!(e, ConfigError::BalancingWithoutRoles), "{e}");
+    // Off, with or without roles, is always valid.
+    assert!(
+        with(
+            "",
+            one,
+            "[balancing]
+enabled = false"
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        with(
+            "",
+            LOBBY_AND_GAMES,
+            "[balancing]
+enabled = \"yes\""
+        ),
+        Err(ConfigError::Parse(_))
+    ));
 }

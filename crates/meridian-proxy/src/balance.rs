@@ -8,6 +8,7 @@
 //! Nothing here reads the configuration, the clock or the network.
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use meridian_config::TieBreak;
@@ -197,6 +198,7 @@ pub fn allow_named(candidate: &Candidate<'_>) -> Result<(), Refused> {
 /// [`place`] in the first of `tiers` that can take the player: for `/hub`, the servers
 /// of role `lobby`, then those of role `sublobby`. Each tier's gates are updated, so a
 /// tier is kept up to date even when an earlier one answered.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn place_first<'a>(
     tiers: &[&[Candidate<'a>]],
     gates: &mut Gates,
@@ -211,6 +213,156 @@ pub fn place_first<'a>(
         }
     }
     found
+}
+
+/// A server as the caller knows it, without its players, which the [`Balancer`]
+/// counts itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Server<'a> {
+    pub backend: &'a str,
+    pub soft_cap: u32,
+    pub hard_cap: u32,
+    /// As in [`Candidate::available`].
+    pub available: bool,
+    /// As in [`Candidate::ping`].
+    pub ping: Option<Duration>,
+}
+
+impl<'a> Server<'a> {
+    fn with_players(self, players: usize) -> Candidate<'a> {
+        Candidate {
+            backend: self.backend,
+            players,
+            soft_cap: self.soft_cap,
+            hard_cap: self.hard_cap,
+            available: self.available,
+            ping: self.ping,
+        }
+    }
+}
+
+/// The state placement keeps between logins: which servers are closed, and the
+/// places taken by players who are still being sent to their server.
+///
+/// A player counts from the moment a place is reserved for them until their
+/// session is open, so that logins at the same time cannot all see the same free
+/// place. The count and the reservation are one step under one lock.
+#[derive(Default)]
+pub struct Balancer {
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    gates: Gates,
+    reserved: HashMap<String, usize>,
+}
+
+/// A place taken on a server for a player who is being sent to it, given back when
+/// it is dropped. It is dropped once the player's session is open (then the
+/// session counts) or when the login fails.
+pub struct Reservation<'a> {
+    balancer: &'a Balancer,
+    backend: String,
+    /// Whether the server was past its soft cap: the player took the overflow.
+    pub overflow: bool,
+}
+
+impl Reservation<'_> {
+    /// The server the place is on.
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let mut state = self.balancer.lock();
+        if let Some(n) = state.reserved.get_mut(&self.backend) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                state.reserved.remove(&self.backend);
+            }
+        }
+    }
+}
+
+impl Balancer {
+    /// Places a player among `servers` as [`place`] does and reserves their place.
+    /// `counts` gives the players on each backend and is called with the lock held,
+    /// so that no session can be counted both before and after a reservation drops.
+    pub fn reserve(
+        &self,
+        servers: &[Server<'_>],
+        counts: impl FnOnce() -> HashMap<String, usize>,
+        margin: u32,
+        tie_break: TieBreak,
+    ) -> Result<Reservation<'_>, NoRoom> {
+        let mut state = self.lock();
+        let counts = counts();
+        let candidates = candidates(servers, &counts, &state.reserved);
+        let State { gates, reserved } = &mut *state;
+        let placed = place(&candidates, gates, margin, tie_break)?;
+        let (backend, overflow) = (placed.backend.to_owned(), placed.overflow);
+        *reserved.entry(backend.clone()).or_default() += 1;
+        Ok(Reservation {
+            balancer: self,
+            backend,
+            overflow,
+        })
+    }
+
+    /// Reserves a place on `server`, named on purpose: it may be past its soft cap,
+    /// never past its hard cap ([`allow_named`]).
+    pub fn reserve_named(
+        &self,
+        server: Server<'_>,
+        counts: impl FnOnce() -> HashMap<String, usize>,
+    ) -> Result<Reservation<'_>, Refused> {
+        let mut state = self.lock();
+        let counts = counts();
+        let candidate = candidates(&[server], &counts, &state.reserved).remove(0);
+        allow_named(&candidate)?;
+        *state.reserved.entry(server.backend.to_owned()).or_default() += 1;
+        Ok(Reservation {
+            balancer: self,
+            backend: server.backend.to_owned(),
+            overflow: candidate.players >= candidate.soft_cap as usize,
+        })
+    }
+
+    /// Forgets the servers `keep` refuses, such as one a reload removed. Places
+    /// already reserved on them are kept until they are given back.
+    pub fn retain(&self, mut keep: impl FnMut(&str) -> bool) {
+        self.lock().gates.retain(&mut keep);
+    }
+
+    /// Whether `backend` is closed.
+    #[cfg(test)]
+    pub fn is_closed(&self, backend: &str) -> bool {
+        self.lock().gates.is_closed(backend)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// `servers` with the players on each: the sessions counted plus the places
+/// reserved.
+fn candidates<'a>(
+    servers: &[Server<'a>],
+    counts: &HashMap<String, usize>,
+    reserved: &HashMap<String, usize>,
+) -> Vec<Candidate<'a>> {
+    servers
+        .iter()
+        .map(|s| {
+            let players = counts.get(s.backend).copied().unwrap_or(0)
+                + reserved.get(s.backend).copied().unwrap_or(0);
+            s.with_players(players)
+        })
+        .collect()
 }
 
 #[cfg(test)]

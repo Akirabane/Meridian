@@ -1,10 +1,11 @@
 # Load balancing
 
-This is a design note, step 1 of the work. It says what the proxy needs to place
-players across several servers of one kind, what Meridian already has for it, and what
-is missing. The only code that comes with it is the configuration: the settings below
-are read and checked by `meridian-config` and nothing uses them yet. A file without
-roles behaves exactly as before.
+This is a design note. It says what the proxy needs to place players across several
+servers of one kind, what Meridian already has for it, and what is missing. What
+exists so far: the settings (`meridian-config`), the placement as pure functions
+(`balance.rs`), and the login using them for the servers of role `lobby` when
+`[balancing] enabled = true` (`placing.rs`). With `enabled` left at `false`, which is
+the default, nothing changes: the proxy chooses a server as it always did.
 
 Placing players across servers of one role is in scope for Meridian
 ([DESIGN.md](DESIGN.md) section 14 lists it). Matchmaking rules, meaning who plays
@@ -26,10 +27,10 @@ with whom, are not part of it.
 
 | Need | Today | Missing |
 | --- | --- | --- |
-| Roles | Nothing. A server has a name and an address ([CONFIG.md](CONFIG.md)) | Read and checked by this step (`role`, `soft-cap`, `hard-cap`). Nothing uses it |
-| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each | A choice among several lobbies |
+| Roles | `role`, `soft-cap` and `hard-cap` are read and checked. At login, role `lobby` is used | The use of `sublobby` and `game`: moving players between roles |
+| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each. With balancing on, a login is placed among the lobbies its route allows | `/hub` and `/server` do not use the balancer yet |
 | Order of candidates | `route::candidates` gives the servers of the player's group in the listed order, and a login goes to the first that answers. Filling a server first is therefore what happens already, with no limit at all | A limit: the first server takes every player until it fails |
-| Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` and `balance::count_by_backend` give the count (step 2). A login still being set up is not counted yet, so several logins at once can pass a soft cap by a few players until the placement reserves a place. Players who joined a server some other way are not seen |
+| Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` gives the count. A place is reserved with the count, under one lock, from the choice of a server until the session is open, so logins at the same time do not pass a cap. Players who joined a server some other way are not seen |
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
 | Does a server accept transfers | Not known. A failed login marks a server "passed over" for `backend-retry-seconds` (`health.rs`), which is the only signal | A report from the server, see section 3 |
 | Premium or offline | Done. Players are verified or unverified, decided at login (DESIGN.md section 15), and groups and routes keep the two kinds apart | Nothing for placement: it chooses among the servers the route already allows |
@@ -157,16 +158,19 @@ kind of player already (section 4).
 
 ## 7. Order of work
 
-1. This note and the settings. Nothing uses them.
+1. This note and the settings. Done.
 2. A count of players per backend and the placement of section 4 as pure functions
    over the counts, the limits and what the caller knows of each server, tested
    without any connection, as `route.rs` is (`balance.rs` in `meridian-proxy`). Done.
-   Not yet called by the login: wiring it, with a reservation so that logins at the
-   same time do not pass a soft cap, is the next step.
-3. The probe of section 5, kept by the proxy, and the console's `servers` command
+3. The login uses it, behind `[balancing] enabled` (off by default), for the servers
+   of role `lobby`: a place is reserved while the player is sent, a server that
+   does not answer is left for the next, and a forced host may pass the soft cap but
+   not the hard cap. Done. Not done: `/hub` and `/server`, and the sublobby and game
+   roles.
+4. The probe of section 5, kept by the proxy, and the console's `servers` command
    showing the role, the count against the caps, open or closed, and draining.
-4. The report of section 3, once its form is fixed, and the drain it allows.
-5. Moving players between roles (lobby to sublobby to game). This one needs a decision
+5. The report of section 3, once its form is fixed, and the drain it allows.
+6. Moving players between roles (lobby to sublobby to game). This one needs a decision
    on who starts a move and is not designed here.
 
 ## 8. Decided, and still open

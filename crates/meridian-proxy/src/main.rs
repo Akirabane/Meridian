@@ -1,12 +1,11 @@
 //! The Meridian proxy.
 mod args;
-// Used by the session once placement is wired in; until then only its tests call it.
-#[cfg_attr(not(test), allow(dead_code))]
 mod balance;
 mod commands;
 mod console;
 mod health;
 mod log;
+mod placing;
 // Used by the session once routing is wired in; until then only its tests call it.
 #[cfg_attr(not(test), allow(dead_code))]
 mod route;

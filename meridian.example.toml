@@ -101,7 +101,7 @@ address = "127.0.0.1:25566"
 # sidecar-secret-file = "secrets/lobby.key"
 # The role of the backend for load balancing: "lobby", "sublobby" (a waiting room
 # where players are grouped) or "game". Without a role the backend is not balanced.
-# Read and checked, but not used yet: see docs/LOAD-BALANCING.md.
+# Only "lobby" is used so far, by [balancing] below: see docs/LOAD-BALANCING.md.
 # role = "lobby"
 # The players the backend is filled to before the next backend of its role is
 # opened. Required with a role.
@@ -161,8 +161,12 @@ on-lookup-failure = "refuse"
 lookups-per-minute = 10
 
 # Load balancing across the backends that have a role (see the backends above).
-# Read and checked, but not used yet: see docs/LOAD-BALANCING.md.
+# See docs/LOAD-BALANCING.md. Only enabled and margin are used so far.
 [balancing]
+# Whether logins are placed by the balancer among the backends of role "lobby".
+# Off by default: the proxy then chooses a backend as it always did. It needs at
+# least one backend with a role.
+enabled = false
 # How far below its soft cap a backend that reached it must fall before it is
 # filled again, so it does not flip between open and closed with each player who
 # leaves. 0 turns this off.
