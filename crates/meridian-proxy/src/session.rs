@@ -232,6 +232,14 @@ impl Sessions {
         players
     }
 
+    /// How many players are on each backend now; a switch moves a player to the
+    /// backend they are on after it. A backend with none is absent.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn counts(&self) -> std::collections::HashMap<String, usize> {
+        let backends: Vec<String> = self.lock().values().map(|e| e.handle.backend()).collect();
+        crate::balance::count_by_backend(backends.iter().map(String::as_str))
+    }
+
     /// The player called `name`, whatever its case, and the handle of their
     /// session.
     pub fn session(&self, name: &str) -> Option<(Player, Handle)> {
@@ -913,6 +921,8 @@ pub(crate) mod tests {
         }
         let names: Vec<String> = sessions.players().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Alex", "Steve"]);
+        assert_eq!(sessions.counts().get("lobby"), Some(&2));
+        assert_eq!(sessions.counts().len(), 1);
         assert_eq!(sessions.find("steve").unwrap().name, "Steve");
         assert!(sessions.find("Herobrine").is_none());
         assert!(sessions.kick("Herobrine", "bye").is_none());
