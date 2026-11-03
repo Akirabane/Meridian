@@ -32,7 +32,7 @@ with whom, are not part of it.
 | Order of candidates | `route::candidates` gives the servers of the player's group in the listed order, and a login goes to the first that answers. Filling a server first is therefore what happens already, with no limit at all | A limit: the first server takes every player until it fails |
 | Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` gives the count. A place is reserved with the count, under one lock, from the choice of a server until the session is open, so logins at the same time do not pass a cap. Players who joined a server some other way are not seen |
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
-| Does a server accept transfers | Not known. A failed login marks a server "passed over" for `backend-retry-seconds` (`health.rs`), which is the only signal | A report from the server, see section 3 |
+| Does a server accept transfers | The proxy reads `accepts_transfers`, `players` and `capacity` through the sidecar (section 3). A failed login also marks a server "passed over" for `backend-retry-seconds` (`health.rs`) | The answer on the Horizon side: its command and its names are not fixed |
 | Premium or offline | Done. Players are verified or unverified, decided at login (DESIGN.md section 15), and groups and routes keep the two kinds apart | Nothing for placement: it chooses among the servers the route already allows |
 | Ping | The console's `servers` command measures how long a TCP connection to a backend takes. Nothing measures a player. The relay passes keep-alives through as they are (`relay.rs`) | A measure kept by the proxy, see section 5 |
 | Drain | Nothing. A server removed from the file keeps its players until they leave (CONFIG.md, "What a reload changes") | Stop offering a server and let it empty |
@@ -40,33 +40,50 @@ with whom, are not part of it.
 
 ## 3. Reading the state of a server
 
-Today the sidecar protocol has six requests: `Expect`, `Export`, `Import`, `Confirm`,
-`Release`, `Drop` (`crates/meridian-sidecar/src/request.rs`). All of them move a
-player. None reports the state of the server.
+The sidecar protocol has seven requests: `Expect`, `Export`, `Import`, `Confirm`,
+`Release`, `Drop`, and `Status` (`crates/meridian-sidecar/src/request.rs`). The first
+six move a player. `Status` only reads, names no player, and goes through the same
+signed exchange as the others (`wire.rs`).
 
-The Horizon server is expected to report four things: its status, its activity, a
-heartbeat, and whether it accepts transfers. They are not in this repository and their
-form is not fixed, so this note does not depend on it. What the placement needs from
-them, at most:
+The direction chosen: the sidecar already talks to its server, so it asks the server
+for its state through the server's control endpoint and passes the answer up to the
+proxy, which asks the sidecar every `probe-interval-seconds`. No new port is opened.
 
-- **players** and **capacity**, to compare with the soft and hard caps. If a server
-  does not report the players, the proxy's own count (section 2) stands in for them.
-- **accepts transfers**, true or false. False means: offer this server to nobody.
-- **a heartbeat**, so the proxy knows the report is fresh. A report older than
-  `state-max-age-seconds` is not believed, and the server is not offered to new
-  players. The server is not removed from anything: its players stay.
+What exists, and what does not:
 
-The direction chosen for the report: the sidecar already talks to its server, so it
-asks the server for its state through the server's control endpoint (the management
-protocol of the Horizon server: status, activity, whether it accepts transfers) and
-passes the answer up to the proxy. The proxy asks the sidecar, as it does for every
-other request, at the probe interval, over the signed exchange of `wire.rs`. This is a
-direction, not something that exists: the sidecar has no such request, and the control
-endpoint's side is not specified here. It adds a read-only request to the sidecar
-protocol and no new port.
+- **The sidecar side is done.** `Request::Status` becomes one line on the endpoint,
+  `status` (`STATUS_LINE`), and the answer is passed up as the backend gave it, like
+  every other answer. `SidecarClient::status` reads it as a `ServerStatus`.
+- **The Horizon side is not.** The Horizon server has not fixed the command that
+  reports its state, nor the names in its answer. `status` is a placeholder and
+  `STATUS_LINE` is the one place to change. Until a server answers it, the proxy
+  hears nothing from it and treats it as accepting players, which is what it does
+  without balancing.
+- **What the proxy reads** from the answer is three optional fields: `players` and
+  `capacity` (whole numbers) and `accepts_transfers` (true or false). A field that is
+  left out is unknown, not zero or false. Any other field, such as an activity, is
+  ignored. A field of the wrong type makes the whole answer an error. Changing these
+  names is a change in `ServerStatus::from_value`.
+- **The heartbeat is the answer itself.** The proxy keeps the time of the last answer
+  of each backend (`status.rs`). It is believed for `state-max-age-seconds`.
 
-Until a server reports, the proxy treats it as accepting, with its own count of
-players. That is how it works today, with a limit added.
+How the proxy uses it, for the backends that have a role and a sidecar, while
+`[balancing] enabled` is on:
+
+- A backend that has **never answered** is treated as accepting, with its own count of
+  players.
+- A backend that answered but **not within `state-max-age-seconds`** is not believed
+  and is not offered to new players, until it answers again. Its players stay.
+- A fresh `accepts_transfers = false` means the same: it is not offered, not even to
+  a forced host.
+- A fresh `players` larger than what the proxy counts on the backend replaces the
+  count, since the backend may have players the proxy did not send. A smaller one
+  changes nothing.
+- A fresh `capacity` below a cap written in the file lowers that cap, and the soft cap
+  with it. A larger one raises nothing: the caps of the file are the operator's choice.
+
+A failed poll keeps the last answer, which then grows old. The first failure of a
+backend is logged once, and so is its recovery.
 
 ## 4. Placement
 
@@ -169,7 +186,9 @@ kind of player already (section 4).
    roles.
 4. The probe of section 5, kept by the proxy, and the console's `servers` command
    showing the role, the count against the caps, open or closed, and draining.
-5. The report of section 3, once its form is fixed, and the drain it allows.
+5. The report of section 3: the sidecar request and the proxy's reading of it are done.
+   What is missing is the Horizon server's own command, and the drain it allows once
+   a server can say it no longer accepts transfers.
 6. Moving players between roles (lobby to sublobby to game). This one needs a decision
    on who starts a move and is not designed here.
 
@@ -185,8 +204,9 @@ Decided:
 
 Open:
 
-- The state the sidecar reads from the server, and how, until the Horizon server
-  defines it (section 3).
+- The command and the field names of the Horizon server's report, until it defines
+  them (section 3). The proxy side reads `players`, `capacity` and
+  `accepts_transfers`.
 - Whether `default-backend` should follow the roles too, so a new login lands on the
   lobby with room. The rule of section 4 allows it; it is not decided.
 - What a player sees when every server of a role is at its hard cap. Today it is "The

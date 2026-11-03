@@ -7,6 +7,7 @@ use crate::commands;
 use crate::health::Health;
 use crate::log::{debug, info, warning};
 use crate::route::{self, Full};
+use crate::status::Statuses;
 use crate::switching::{self, Switcher};
 use horizon_protocol::{connection::Connection, packets::configuration, text};
 use meridian_config::{Config, OnDuplicate};
@@ -60,6 +61,8 @@ pub struct Sessions {
     /// Where logins are placed when balancing is on: the closed servers and the
     /// places reserved for players still being sent to their server.
     pub balancer: Balancer,
+    /// What the backends last reported of themselves, read by the balancer.
+    pub statuses: Statuses,
 }
 
 /// Who a player is, for telling a second login of theirs: the unique id of a

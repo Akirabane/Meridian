@@ -12,6 +12,7 @@ mod route;
 mod serve;
 mod session;
 mod state;
+mod status;
 mod switching;
 mod throttle;
 
@@ -104,6 +105,10 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
     // Without a console the proxy still runs: it then stops on Ctrl+C alone.
     if let Err(e) = console::start(Arc::clone(&proxy)) {
         warning!("cannot start the console: {e}");
+    }
+    // Asks the sidecars for the state of the backends while balancing is on.
+    if let Err(e) = status::spawn(&proxy) {
+        warning!("cannot start the thread that reads the state of the backends: {e}");
     }
     match serve::serve(listener, &proxy) {
         Ok(()) => {

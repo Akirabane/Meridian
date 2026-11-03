@@ -35,6 +35,7 @@ fn server<'a>(config: &Config, backend: &'a str) -> Server<'a> {
         hard_cap: limits.hard_cap,
         available: true,
         ping: None,
+        reported_players: None,
     }
 }
 
@@ -385,4 +386,173 @@ fn a_lobby_closed_at_its_soft_cap_stays_closed_until_the_margin() {
     assert_eq!(tried, [LOBBY]);
     assert!(!sessions.balancer.is_closed("lobby"));
     drop(first);
+}
+
+// ---- What the backends report of themselves ----
+
+use meridian_sidecar::request::ServerStatus;
+
+fn report(sessions: &Sessions, backend: &str, status: ServerStatus) {
+    sessions.statuses.record(backend, status, Instant::now());
+}
+
+fn accepting(players: u64, capacity: u64) -> ServerStatus {
+    ServerStatus {
+        players: Some(players),
+        capacity: Some(capacity),
+        accepts_transfers: Some(true),
+    }
+}
+
+fn up() -> Vec<(&'static str, bool)> {
+    vec![(LOBBY, true), (EAST, true), (WEST, true)]
+}
+
+/// A lobby that reports it does not accept transfers is not offered, whatever its
+/// count; its place goes to the next.
+#[test]
+fn a_lobby_that_does_not_accept_transfers_is_not_offered() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    report(
+        &sessions,
+        "lobby",
+        ServerStatus {
+            accepts_transfers: Some(false),
+            ..accepting(0, 20)
+        },
+    );
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+}
+
+/// A report that left `accepts_transfers` out says nothing against the backend.
+#[test]
+fn a_report_that_leaves_out_accepts_transfers_does_not_refuse() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    report(
+        &sessions,
+        "lobby",
+        ServerStatus {
+            accepts_transfers: None,
+            ..accepting(0, 20)
+        },
+    );
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// A backend that reported once and then fell silent past the maximum age is not
+/// believed, so it is not offered; one that answers again is.
+#[test]
+fn a_stale_report_takes_the_lobby_out_until_it_answers_again() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs(
+            config.balancing.state_max_age_seconds + 5,
+        ))
+        .expect("the clock has run long enough");
+    sessions.statuses.record("lobby", accepting(0, 20), old);
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+    report(&sessions, "lobby", accepting(0, 20));
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// A backend that never reported is treated as accepting, as it is without balancing.
+#[test]
+fn a_backend_that_never_reported_is_treated_as_accepting() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
+}
+
+/// The backend has players the proxy did not send: the larger count is used, so the
+/// lobby is full for the balancer even though the proxy counts none on it.
+#[test]
+fn the_players_a_backend_reports_count_when_there_are_more_than_the_proxy_sent() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    report(&sessions, "lobby", accepting(5, 20));
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+    // Fewer than the proxy counts changes nothing: its own count stands.
+    let _held = [
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "east"),
+    ];
+    report(&sessions, "east", accepting(0, 20));
+    report(&sessions, "lobby", accepting(0, 20));
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST], "east has two, the fullest");
+}
+
+/// A backend that can take fewer players than the caps written is held to what it
+/// says: its capacity lowers its hard cap, and its soft cap with it.
+#[test]
+fn the_capacity_a_backend_reports_lowers_its_caps() {
+    let config = balanced(true, 5, 5);
+    let sessions = Sessions::default();
+    report(&sessions, "lobby", accepting(0, 1));
+    let _held = hold(&sessions, &config, "lobby");
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST], "lobby holds one and can take one");
+}
+
+/// A capacity above the caps written raises nothing: the caps of the file are the
+/// operator's choice.
+#[test]
+fn a_larger_capacity_does_not_raise_the_caps() {
+    let config = balanced(true, 1, 1);
+    let sessions = Sessions::default();
+    report(&sessions, "lobby", accepting(0, 100));
+    let _held = hold(&sessions, &config, "lobby");
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST]);
+}
+
+/// A forced host respects the report too: a backend that does not accept transfers
+/// does not take the player, even named on purpose.
+#[test]
+fn a_forced_host_does_not_reach_a_backend_that_does_not_accept_transfers() {
+    let mut config = balanced(true, 5, 5);
+    forced_east(&mut config);
+    let sessions = Sessions::default();
+    report(
+        &sessions,
+        "east",
+        ServerStatus {
+            accepts_transfers: Some(false),
+            ..accepting(0, 20)
+        },
+    );
+    let (tried, _) = login_one(
+        &config,
+        &sessions,
+        up(),
+        Some("east.example.com"),
+        vec![Step::ExpectClose],
+    );
+    assert_eq!(tried, [WEST]);
+}
+
+/// With balancing off a report changes nothing at login.
+#[test]
+fn with_balancing_off_a_report_changes_nothing() {
+    let config = balanced(false, 5, 5);
+    let sessions = Sessions::default();
+    report(
+        &sessions,
+        "lobby",
+        ServerStatus {
+            accepts_transfers: Some(false),
+            ..accepting(0, 20)
+        },
+    );
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY]);
 }

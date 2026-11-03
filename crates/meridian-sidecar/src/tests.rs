@@ -594,3 +594,62 @@ fn a_dropped_arrival_cannot_be_confirmed() {
         "{error}"
     );
 }
+
+/// The state of the backend goes through the sidecar and the signed exchange: one
+/// line to the backend, which names no player, and the answer is read as a status.
+#[test]
+fn the_state_of_the_backend_comes_back_as_a_status() {
+    use crate::request::{STATUS_LINE, ServerStatus};
+    let running = Running::start(
+        Arc::new(|line| {
+            (line == STATUS_LINE).then(|| {
+                json!({"players": 4, "capacity": 12, "accepts_transfers": true, "activity": "busy"})
+                    .to_string()
+            })
+        }),
+        WAIT,
+    );
+    let mut client = running.client(SECRET);
+    assert_eq!(
+        client.status().unwrap(),
+        ServerStatus {
+            players: Some(4),
+            capacity: Some(12),
+            accepts_transfers: Some(true),
+        }
+    );
+    // The same connection can ask again, and nothing but the one line was sent.
+    client.status().unwrap();
+    assert_eq!(*running.seen.lock().unwrap(), [STATUS_LINE, STATUS_LINE]);
+}
+
+#[test]
+fn a_backend_that_does_not_know_the_status_is_an_error_not_a_status() {
+    let running = Running::start(
+        Arc::new(|_| Some(json!({"error": "unknown command"}).to_string())),
+        WAIT,
+    );
+    let error = running.client(SECRET).status().unwrap_err();
+    assert!(matches!(error, Error::Refused(_)), "{error}");
+}
+
+#[test]
+fn an_answer_that_is_not_a_status_is_an_error() {
+    let running = Running::start(
+        Arc::new(|_| Some(json!({"players": "many"}).to_string())),
+        WAIT,
+    );
+    let error = running.client(SECRET).status().unwrap_err();
+    assert!(
+        error.to_string().contains("the status is not usable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_status_needs_the_secret_like_every_request() {
+    let running = Running::start(Arc::new(|_| Some("{}".to_owned())), WAIT);
+    let mut client = running.client(b"another secret that is long enough");
+    assert!(client.status().is_err());
+    assert!(running.seen.lock().unwrap().is_empty());
+}

@@ -117,9 +117,9 @@ How the hybrid mode looks names up. The other modes ignore it.
 
 How servers that have a `role` are filled. With `enabled` left at `false`, the
 proxy chooses a server exactly as it did before there were roles, whatever the roles
-say. Of the other settings, only `margin` is used so far; `state-max-age-seconds`,
-`tie-break` and `probe-interval-seconds` are read and checked and wait for the
-server's report and the measure of its answer time.
+say. Of the other settings, `margin`, `state-max-age-seconds` and
+`probe-interval-seconds` are used; `tie-break` is read and checked and waits for the
+measure of each server's answer time.
 [LOAD-BALANCING.md](LOAD-BALANCING.md) says what each setting is for and what is
 still missing.
 
@@ -127,9 +127,9 @@ still missing.
 | --- | --- | --- | --- |
 | `enabled` | `false` | Whether logins are placed by the balancer among the servers of role `"lobby"` that the player's route allows. Off, the proxy chooses a server as it always did | Needs at least one server with a `role` |
 | `margin` | `2` | How far below its `soft-cap` a server that reached it must fall before it is filled again. `0` turns this off. A margin larger than the soft cap means the server is filled again only when empty | None |
-| `state-max-age-seconds` | `15` | Seconds after which what a server last reported is no longer believed; it is then not offered to new players | More than 0 |
+| `state-max-age-seconds` | `15` | Seconds after which what a server last reported is no longer believed; it is then not offered to new players. A server that never reported is treated as accepting | More than 0 |
 | `tie-break` | `"ping"` | How a tie between equally good servers is broken: `"ping"` (the one the proxy measured as quickest to answer) or `"order"` (the one listed first) | `"ping"` or `"order"` |
-| `probe-interval-seconds` | `10` | Seconds between two measures of how quickly each server answers | More than 0 |
+| `probe-interval-seconds` | `10` | Seconds between two readings of the state of each server with a role and a sidecar, through its sidecar | More than 0 |
 
 ## `[commands]`
 

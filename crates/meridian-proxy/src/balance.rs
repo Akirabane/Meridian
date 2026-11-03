@@ -226,10 +226,14 @@ pub struct Server<'a> {
     pub available: bool,
     /// As in [`Candidate::ping`].
     pub ping: Option<Duration>,
+    /// The players the backend reports it has. The proxy counts the players it sent
+    /// itself, and a backend may have others, so the larger of the two is used.
+    pub reported_players: Option<usize>,
 }
 
 impl<'a> Server<'a> {
-    fn with_players(self, players: usize) -> Candidate<'a> {
+    fn with_players(self, counted: usize) -> Candidate<'a> {
+        let players = counted.max(self.reported_players.unwrap_or(0));
         Candidate {
             backend: self.backend,
             players,
