@@ -188,7 +188,8 @@ probe-interval-seconds = 10
 # "server": /server lists the servers and /server <name> asks to move to one.
 # "hub": /hub and /lobby ask to move to the hub backend.
 enabled = ["server", "hub"]
-# The backend /hub and /lobby lead to. When it is left out, the default backend.
+# The backend /hub and /lobby lead to. When it is left out, the default backend, or,
+# with [balancing] enabled and a backend of role "lobby", the lobby the balancer finds.
 # hub-backend = "lobby"
 # Whether players may list the servers with /server.
 server-list = true

@@ -8,7 +8,7 @@
 //! Nothing here reads the configuration, the clock or the network.
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use meridian_config::TieBreak;
@@ -282,21 +282,30 @@ struct State {
 /// A place taken on a server for a player who is being sent to it, given back when
 /// it is dropped. It is dropped once the player's session is open (then the
 /// session counts) or when the login fails.
-pub struct Reservation<'a> {
-    balancer: &'a Balancer,
+pub struct Reservation {
+    balancer: Arc<Balancer>,
     backend: String,
     /// Whether the server was past its soft cap: the player took the overflow.
     pub overflow: bool,
 }
 
-impl Reservation<'_> {
+impl fmt::Debug for Reservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reservation")
+            .field("backend", &self.backend)
+            .field("overflow", &self.overflow)
+            .finish()
+    }
+}
+
+impl Reservation {
     /// The server the place is on.
     pub fn backend(&self) -> &str {
         &self.backend
     }
 }
 
-impl Drop for Reservation<'_> {
+impl Drop for Reservation {
     fn drop(&mut self) {
         let mut state = self.balancer.lock();
         if let Some(n) = state.reserved.get_mut(&self.backend) {
@@ -313,12 +322,12 @@ impl Balancer {
     /// `counts` gives the players on each backend and is called with the lock held,
     /// so that no session can be counted both before and after a reservation drops.
     pub fn reserve(
-        &self,
+        self: &Arc<Self>,
         servers: &[Server<'_>],
         counts: impl FnOnce() -> HashMap<String, usize>,
         margin: u32,
         tie_break: TieBreak,
-    ) -> Result<Reservation<'_>, NoRoom> {
+    ) -> Result<Reservation, NoRoom> {
         let mut state = self.lock();
         let counts = counts();
         let candidates = candidates(servers, &counts, &state.reserved);
@@ -329,7 +338,7 @@ impl Balancer {
         let (backend, overflow) = (placed.backend.to_owned(), placed.overflow);
         *reserved.entry(backend.clone()).or_default() += 1;
         Ok(Reservation {
-            balancer: self,
+            balancer: Arc::clone(self),
             backend,
             overflow,
         })
@@ -338,17 +347,17 @@ impl Balancer {
     /// Reserves a place on `server`, named on purpose: it may be past its soft cap,
     /// never past its hard cap ([`allow_named`]).
     pub fn reserve_named(
-        &self,
+        self: &Arc<Self>,
         server: Server<'_>,
         counts: impl FnOnce() -> HashMap<String, usize>,
-    ) -> Result<Reservation<'_>, Refused> {
+    ) -> Result<Reservation, Refused> {
         let mut state = self.lock();
         let counts = counts();
         let candidate = candidates(&[server], &counts, &state.reserved).remove(0);
         allow_named(&candidate)?;
         *state.reserved.entry(server.backend.to_owned()).or_default() += 1;
         Ok(Reservation {
-            balancer: self,
+            balancer: Arc::clone(self),
             backend: server.backend.to_owned(),
             overflow: candidate.players >= candidate.soft_cap as usize,
         })

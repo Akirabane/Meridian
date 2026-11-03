@@ -274,8 +274,9 @@ fn servers(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
                 count(on, "player", "players")
             );
             // A backend with a role has a second line: what the balancer makes of it.
-            let balancing = crate::placing::describe(&config, &proxy.sessions, &b.name, on)
-                .map(|l| format!("    {l}"));
+            let balancing =
+                crate::placing::describe(&config, &proxy.sessions.shared(), &b.name, on)
+                    .map(|l| format!("    {l}"));
             std::iter::once(line).chain(balancing)
         })
         .collect())

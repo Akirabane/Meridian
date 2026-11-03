@@ -137,7 +137,7 @@ The commands players type in game that the proxy answers itself.
 | Key | Default | What it does | Checks |
 | --- | --- | --- | --- |
 | `enabled` | `["server", "hub"]` | The commands the proxy answers. `"server"` is `/server`; `"hub"` is `/hub` and `/lobby`. Any other command goes to the server | `"server"` or `"hub"`, each once; may be empty |
-| `hub-backend` | the default server | The server `/hub` and `/lobby` lead to | A configured server |
+| `hub-backend` | the default server | The server `/hub` and `/lobby` lead to. With `[balancing] enabled` and a server of role `"lobby"`, leaving it out lets the balancer choose the lobby; writing it keeps that server | A configured server |
 | `server-list` | `true` | Whether `/server` may list the servers | None |
 
 ## What a reload changes

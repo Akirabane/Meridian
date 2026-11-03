@@ -28,7 +28,7 @@ with whom, are not part of it.
 | Need | Today | Missing |
 | --- | --- | --- |
 | Roles | `role`, `soft-cap` and `hard-cap` are read and checked. At login, role `lobby` is used | The use of `sublobby` and `game`: moving players between roles |
-| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each. With balancing on, a login is placed among the lobbies its route allows | `/hub` and `/server` do not use the balancer yet |
+| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each. With balancing on, a login is placed among the lobbies its route allows, and `/hub` takes a lobby, then a sublobby | `default-backend` does not follow the roles |
 | Order of candidates | `route::candidates` gives the servers of the player's group in the listed order, and a login goes to the first that answers. Filling a server first is therefore what happens already, with no limit at all | A limit: the first server takes every player until it fails |
 | Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` gives the count. A place is reserved with the count, under one lock, from the choice of a server until the session is open, so logins at the same time do not pass a cap. Players who joined a server some other way are not seen |
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
@@ -110,15 +110,24 @@ an unverified group, whatever the balancer would prefer (DESIGN.md section 15.3)
    draining and empty can be stopped.
 
 A forced host and `/server <name>` name a server on purpose. They may go past the
-`soft-cap` but never past the `hard-cap`, and a draining server refuses them too.
-Because `hard-cap` defaults to `soft-cap`, a server with no `hard-cap` written takes
-no overflow from them either.
+`soft-cap` but never past the `hard-cap`, and a draining server refuses them too. The
+player is told "<name> is full." or "<name> is not taking players right now." Because
+`hard-cap` defaults to `soft-cap`, a server with no `hard-cap` written takes no
+overflow from them either.
 
-`/hub` and `/lobby` do not name a server. With roles, they take the best open server
-of role `lobby` by the rule above, and a `sublobby` only when no lobby can take the
-player. Within the player's route, as always. A written `hub-backend` still wins, as
-an explicit choice, and then follows the rule for explicit names. Without roles
-nothing changes.
+`/hub` and `/lobby` do not name a server. With balancing on, no `hub-backend` written
+and a server of role `lobby`, they take the best open server of role `lobby` by the
+rule above, and a `sublobby` only when no lobby can take the player. A lobby in
+overflow still comes before a sublobby, since `/hub` means a lobby. The servers the
+player may not be sent to (those of the other kind of player) are left out, as for
+`/server`. A player already on the server the rule finds is told so. A written
+`hub-backend` still wins, as an explicit choice, and then follows the rule for named
+servers. With balancing off, or with no lobby, nothing changes.
+
+A place is reserved on the target of a move for as long as the switch lasts, so that
+players moving at the same time do not pass a cap; it is given back when the switch
+ends, whether it worked or not. The console's `switch` and `send` are the operator's
+own choice and ignore the caps.
 
 What the rule does not do: it does not group players for a match, it does not decide
 when a game server starts or stops, and it does not move players that are already
@@ -188,8 +197,10 @@ kind of player already (section 4).
 3. The login uses it, behind `[balancing] enabled` (off by default), for the servers
    of role `lobby`: a place is reserved while the player is sent, a server that
    does not answer is left for the next, and a forced host may pass the soft cap but
-   not the hard cap. Done. Not done: `/hub` and `/server`, and the sublobby and game
-   roles.
+   not the hard cap. Done. `/hub` takes a lobby then a sublobby, and `/server <name>`
+   respects the hard cap and the drain, with a place reserved until the switch ends.
+   Done. Not done: placing players on the game role, and the console's `switch` and
+   `send`, which ignore the caps.
 4. The probe of section 5, kept by the proxy; the console's `servers` command showing
    the role, the count against the caps, open, closed or draining, and the ping; and
    `drain` and `undrain`. Done.

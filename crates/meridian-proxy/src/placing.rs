@@ -1,11 +1,19 @@
-//! The login's use of the balancer (docs/LOAD-BALANCING.md, section 4): with
-//! `[balancing] enabled`, a player is placed among the backends of role `lobby`
-//! that their route allows, one place is reserved for them while they are sent
-//! there, and the backends the balancer refuses are not tried again by the
-//! ordinary loop. With balancing off, none of this runs.
-use crate::balance::{NoRoom, Reservation, Server};
+//! The use of the balancer by the login, `/hub` and `/server` (docs/LOAD-BALANCING.md,
+//! section 4). With `[balancing] enabled`:
+//!
+//! - a login is placed among the backends of role `lobby` that the player's route
+//!   allows ([`login`]);
+//! - `/hub` takes a lobby by the same rule, then a sublobby when no lobby can take the
+//!   player ([`hub`]);
+//! - a backend named on purpose, by a forced host or `/server <name>`, may pass its
+//!   soft cap but never its hard cap, and never takes a player while drained
+//!   ([`named`]).
+//!
+//! One place is reserved on the backend while the player is sent there. With balancing
+//! off, none of this runs.
+use crate::balance::{NoRoom, Refused, Reservation, Server};
 use crate::log::{debug, warning};
-use crate::session::{Connect, Sessions};
+use crate::session::{Connect, Shared};
 use crate::status::Report;
 use meridian_config::{Backend, Config, Role};
 use meridian_net::{
@@ -16,12 +24,12 @@ use std::time::{Duration, Instant};
 
 /// A backend that took the player, with its link and the place reserved for them
 /// (`None` when the ordinary loop chose it).
-pub type Joined<'c, 's> = (&'c Backend, BackendLink, Option<Reservation<'s>>);
+pub type Joined<'c> = (&'c Backend, BackendLink, Option<Reservation>);
 
 /// What the balancer did for a login.
-pub struct Balanced<'c, 's> {
+pub struct Balanced<'c> {
     /// The backend that took the player, if the balancer found one.
-    pub joined: Option<Joined<'c, 's>>,
+    pub joined: Option<Joined<'c>>,
     /// The backends the ordinary loop must not try: the balancer tried them, or
     /// refused them for want of room.
     pub tried: Vec<String>,
@@ -33,15 +41,15 @@ pub struct Balanced<'c, 's> {
 
 /// Places a login. `candidates` are the backends the route allows, in the order the
 /// ordinary loop would try them, and `host` is the host name the player typed.
-pub fn login<'c, 's>(
+pub fn login<'c>(
     config: &'c Config,
-    sessions: &'s Sessions,
+    shared: &Shared,
     connect: &Connect,
     profile: &Profile,
     options: &BackendOptions,
     candidates: &[String],
     host: Option<&str>,
-) -> Balanced<'c, 's> {
+) -> Balanced<'c> {
     let mut out = Balanced {
         joined: None,
         tried: Vec::new(),
@@ -61,20 +69,20 @@ pub fn login<'c, 's>(
     }
     let retry = Duration::from_secs(config.backend_retry_seconds);
     let now = Instant::now();
-    sessions
+    shared
         .balancer
         .retain(|name| config.balanced(name).is_some());
-    let counts = || sessions.counts();
+    let counts = || shared.counts();
     let timing = (retry, now);
 
     // A server named on purpose may pass its soft cap, never its hard cap.
     if let Some(name) = forced {
-        if let Some(server) = server_of(config, sessions, name, &out.tried, true, timing) {
-            match sessions.balancer.reserve_named(server, counts) {
+        if let Some(server) = server_of(config, shared, name, &out.tried, true, timing) {
+            match shared.balancer.reserve_named(server, counts) {
                 Ok(reservation) => {
                     if join(
                         config,
-                        sessions,
+                        shared,
                         connect,
                         profile,
                         options,
@@ -108,11 +116,9 @@ pub fn login<'c, 's>(
     loop {
         let servers: Vec<Server<'_>> = lobbies
             .iter()
-            .filter_map(|name| {
-                server_of(config, sessions, name, &out.tried, passed_over_ok, timing)
-            })
+            .filter_map(|name| server_of(config, shared, name, &out.tried, passed_over_ok, timing))
             .collect();
-        let reserved = sessions.balancer.reserve(
+        let reserved = shared.balancer.reserve(
             &servers,
             counts,
             config.balancing.margin,
@@ -123,7 +129,7 @@ pub fn login<'c, 's>(
                 let name = reservation.backend().to_owned();
                 if join(
                     config,
-                    sessions,
+                    shared,
                     connect,
                     profile,
                     options,
@@ -153,18 +159,83 @@ pub fn login<'c, 's>(
     }
 }
 
+/// A place for a player who types `/server <target>`, or whom a forced host leads to
+/// `target`. `Ok(None)` when balancing is off or `target` has no role: nothing is
+/// reserved and the move goes on as it always did. `Err` is the line the player is
+/// told.
+pub fn named(
+    config: &Config,
+    shared: &Shared,
+    target: &str,
+) -> Result<Option<Reservation>, String> {
+    if !config.balancing.enabled {
+        return Ok(None);
+    }
+    let retry = Duration::from_secs(config.backend_retry_seconds);
+    // A backend that recently failed a login is still one the player named.
+    let Some(server) = server_of(config, shared, target, &[], true, (retry, Instant::now())) else {
+        return Ok(None);
+    };
+    shared
+        .balancer
+        .reserve_named(server, || shared.counts())
+        .map(Some)
+        .map_err(|refused| match refused {
+            Refused::AtHardCap => format!("{target} is full."),
+            Refused::Unavailable => format!("{target} is not taking players right now."),
+        })
+}
+
+/// Where `/hub` and `/lobby` lead for a player on `current` when `open_to` says which
+/// backends they may be sent to: the best open server of role `lobby` by the rule of
+/// the login, and a `sublobby` only when no lobby can take them. A place is reserved.
+/// `Err` is the line the player is told.
+pub fn hub(
+    config: &Config,
+    shared: &Shared,
+    open_to: impl Fn(&str) -> bool,
+    current: &str,
+) -> Result<(String, Reservation), String> {
+    let retry = Duration::from_secs(config.backend_retry_seconds);
+    let now = Instant::now();
+    shared
+        .balancer
+        .retain(|name| config.balanced(name).is_some());
+    for role in [Role::Lobby, Role::Sublobby] {
+        let servers: Vec<Server<'_>> = config
+            .servers_with_role(role)
+            .filter(|s| open_to(&s.backend))
+            .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
+            .collect();
+        let reserved = shared.balancer.reserve(
+            &servers,
+            || shared.counts(),
+            config.balancing.margin,
+            config.balancing.tie_break,
+        );
+        if let Ok(reservation) = reserved {
+            let target = reservation.backend().to_owned();
+            if target == current {
+                return Err(format!("You are already on {target}."));
+            }
+            return Ok((target, reservation));
+        }
+    }
+    Err("No lobby has room right now.".to_owned())
+}
+
 /// Connects to `name` with the place already reserved. Whatever happens, `name` is
 /// not tried again for this login.
 #[allow(clippy::too_many_arguments)]
-fn join<'c, 's>(
+fn join<'c>(
     config: &'c Config,
-    sessions: &Sessions,
+    shared: &Shared,
     connect: &Connect,
     profile: &Profile,
     options: &BackendOptions,
     name: &str,
-    reservation: Reservation<'s>,
-    out: &mut Balanced<'c, 's>,
+    reservation: Reservation,
+    out: &mut Balanced<'c>,
 ) -> bool {
     let Some(backend) = config.backend(name) else {
         out.tried.push(name.to_owned());
@@ -172,12 +243,12 @@ fn join<'c, 's>(
     };
     match connect(&backend.address, profile, options) {
         Ok(link) => {
-            sessions.health.answered(name);
+            shared.health.answered(name);
             out.joined = Some((backend, link, Some(reservation)));
             true
         }
         Err(e) => {
-            sessions.health.failed(name, Instant::now());
+            shared.health.failed(name, Instant::now());
             warning!(
                 "balancer: cannot join backend \"{name}\" at {}: {e}",
                 backend.address
@@ -193,7 +264,7 @@ fn join<'c, 's>(
 /// only when `passed_over_ok`.
 fn server_of<'n>(
     config: &Config,
-    sessions: &Sessions,
+    shared: &Shared,
     name: &'n str,
     tried: &[String],
     passed_over_ok: bool,
@@ -201,13 +272,12 @@ fn server_of<'n>(
 ) -> Option<Server<'n>> {
     let limits = config.balanced(name)?;
     let failed_now = tried.iter().any(|t| t == name);
-    let passed_over = sessions.health.passed_over_for(name, retry, now).is_some();
+    let passed_over = shared.health.passed_over_for(name, retry, now).is_some();
     let max_age = Duration::from_secs(config.balancing.state_max_age_seconds);
     // What the backend says of itself: nothing known is as if it accepted; an old
     // report is not believed, so the backend is not offered; a fresh one may refuse
     // transfers, and may be smaller than the caps written.
-    let (believed, accepts, reported, capacity) = match sessions.statuses.report(name, max_age, now)
-    {
+    let (believed, accepts, reported, capacity) = match shared.statuses.report(name, max_age, now) {
         Report::Unknown => (true, true, None, None),
         Report::Stale => (false, true, None, None),
         Report::Fresh(s) => (
@@ -217,8 +287,8 @@ fn server_of<'n>(
             s.capacity,
         ),
     };
-    let ping = sessions.statuses.ping(name, max_age, now);
-    let drained = sessions.balancer.is_drained(name);
+    let ping = shared.statuses.ping(name, max_age, now);
+    let drained = shared.balancer.is_drained(name);
     let hard_cap = capacity.map_or(limits.hard_cap, |c| {
         limits.hard_cap.min(u32::try_from(c).unwrap_or(u32::MAX))
     });
@@ -239,15 +309,15 @@ fn server_of<'n>(
 /// What the console says of a balanced backend: its role, its players against its
 /// caps, whether the balancer offers it, and how quickly it answered. `None` for a
 /// backend with no role. `on` is the players its sessions count.
-pub fn describe(config: &Config, sessions: &Sessions, name: &str, on: usize) -> Option<String> {
+pub fn describe(config: &Config, shared: &Shared, name: &str, on: usize) -> Option<String> {
     let limits = config.balanced(name)?;
     let now = Instant::now();
     let retry = Duration::from_secs(config.backend_retry_seconds);
     let max_age = Duration::from_secs(config.balancing.state_max_age_seconds);
-    let server = server_of(config, sessions, name, &[], true, (retry, now))?;
-    let candidate = server.with_players(on + sessions.balancer.reserved(name));
-    let report = sessions.statuses.report(name, max_age, now);
-    let offered = if sessions.balancer.is_drained(name) {
+    let server = server_of(config, shared, name, &[], true, (retry, now))?;
+    let candidate = server.with_players(on + shared.balancer.reserved(name));
+    let report = shared.statuses.report(name, max_age, now);
+    let offered = if shared.balancer.is_drained(name) {
         "draining (drained from the console)".to_owned()
     } else if matches!(report, Report::Fresh(s) if s.accepts_transfers == Some(false)) {
         "draining (it does not accept transfers)".to_owned()
@@ -256,7 +326,7 @@ pub fn describe(config: &Config, sessions: &Sessions, name: &str, on: usize) -> 
             "not offered (no report for {} s)",
             config.balancing.state_max_age_seconds
         )
-    } else if sessions
+    } else if shared
         .balancer
         .is_closed_now(&candidate, config.balancing.margin)
     {
@@ -274,7 +344,7 @@ pub fn describe(config: &Config, sessions: &Sessions, name: &str, on: usize) -> 
     if let Some(ping) = candidate.ping {
         line.push_str(&format!(", ping {} ms", ping.as_millis()));
     }
-    if let Some(passed) = sessions.health.describe(name, retry, now) {
+    if let Some(passed) = shared.health.describe(name, retry, now) {
         line.push_str(&format!(", {passed}"));
     }
     Some(line)
