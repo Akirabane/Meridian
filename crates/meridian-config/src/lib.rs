@@ -9,6 +9,7 @@ mod commands;
 mod error;
 mod favicon;
 mod metrics;
+mod permissions;
 mod proxy_protocol;
 mod restart;
 mod sidecar;
@@ -20,6 +21,10 @@ pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
 pub use favicon::{FAVICON_SIDE, Favicon, MAX_FAVICON_BYTES};
 pub use metrics::Metrics;
+pub use permissions::{
+    DEFAULT_GROUP, Member, PermissionGroup, PermissionSettings, Permissions, Setting,
+    check_group_name, check_node, node,
+};
 pub use proxy_protocol::{ProxyProtocol, ProxyProtocolMode, TrustedNet};
 pub use restart::Restart;
 pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
@@ -29,6 +34,7 @@ use auth::FileAuth;
 use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
 use metrics::FileMetrics;
+use permissions::FilePermissionSettings;
 use proxy_protocol::FileProxyProtocol;
 use restart::FileRestart;
 
@@ -209,6 +215,8 @@ pub struct Config {
     pub metrics: Metrics,
     /// The `[access]` table.
     pub access: AccessSettings,
+    /// The `[permissions]` table.
+    pub permissions: PermissionSettings,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -262,6 +270,7 @@ impl Default for Config {
             proxy_protocol: ProxyProtocol::default(),
             metrics: Metrics::default(),
             access: AccessSettings::default(),
+            permissions: PermissionSettings::default(),
         }
     }
 }
@@ -303,6 +312,7 @@ impl std::fmt::Debug for Config {
             proxy_protocol,
             metrics,
             access,
+            permissions,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -343,6 +353,7 @@ impl std::fmt::Debug for Config {
             .field("proxy_protocol", proxy_protocol)
             .field("metrics", metrics)
             .field("access", access)
+            .field("permissions", permissions)
             .finish()
     }
 }
@@ -393,6 +404,8 @@ struct File {
     metrics: FileMetrics,
     #[serde(default)]
     access: FileAccess,
+    #[serde(default)]
+    permissions: FilePermissionSettings,
 }
 
 #[derive(Deserialize)]
@@ -584,6 +597,7 @@ impl Config {
             proxy_protocol: file.proxy_protocol.into_settings()?,
             metrics: file.metrics.into_settings()?,
             access: file.access.into_settings(folder),
+            permissions: file.permissions.into_settings(folder),
         };
         config.validate()?;
         Ok(config)
@@ -920,5 +934,7 @@ mod proxy_protocol_tests;
 
 #[cfg(test)]
 mod access_tests;
+#[cfg(test)]
+mod permissions_tests;
 #[cfg(test)]
 mod sidecar_tests;

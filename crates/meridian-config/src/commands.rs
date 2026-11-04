@@ -13,6 +13,13 @@ pub enum ProxyCommand {
     Hub,
     /// `/play` asks to move to a server of role `game` that the balancer finds.
     Play,
+    /// `/send <player|all|server:name> <server>` moves players. Needs the permission
+    /// `meridian.send` (docs/OPERATING.md, section 5.9).
+    Send,
+    /// `/glist [server]` lists the players online. Needs `meridian.glist`.
+    Glist,
+    /// `/alert [server:name] <message>` shows a message to players. Needs `meridian.alert`.
+    Alert,
 }
 
 impl ProxyCommand {
@@ -22,6 +29,9 @@ impl ProxyCommand {
             ProxyCommand::Server => "server",
             ProxyCommand::Hub => "hub",
             ProxyCommand::Play => "play",
+            ProxyCommand::Send => "send",
+            ProxyCommand::Glist => "glist",
+            ProxyCommand::Alert => "alert",
         }
     }
 
@@ -31,6 +41,9 @@ impl ProxyCommand {
             ProxyCommand::Server => &["server"],
             ProxyCommand::Hub => &["hub", "lobby"],
             ProxyCommand::Play => &["play"],
+            ProxyCommand::Send => &["send"],
+            ProxyCommand::Glist => &["glist"],
+            ProxyCommand::Alert => &["alert"],
         }
     }
 }
