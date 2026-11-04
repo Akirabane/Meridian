@@ -84,6 +84,9 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
                     // address of a direct client is never taken for a player's.
                     debug!("{peer}: not a trusted address, and a PROXY header is required; closed");
                     drop(stream);
+                } else if proxy.sessions.access.address_banned(peer.ip()) {
+                    banned_address(proxy, peer);
+                    drop(stream);
                 } else if proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
                     start_player(stream, peer, proxy, &active, None);
                 } else {
@@ -239,6 +242,10 @@ fn player_address(
             return None;
         }
     };
+    if proxy.sessions.access.address_banned(player.ip()) {
+        banned_address(proxy, player);
+        return None;
+    }
     if !proxy
         .throttle
         .allow(player.ip(), header.per_minute, Instant::now())
@@ -251,6 +258,17 @@ fn player_address(
         return None;
     }
     Some(player)
+}
+
+/// A connection from a banned address is closed before a byte is read, like one over the
+/// limit: the cheapest answer, and one that gives a client in a loop nothing. A ban's
+/// reason is shown to the players the ban holds once they are identified, not here.
+fn banned_address(proxy: &Proxy, address: SocketAddr) {
+    proxy
+        .sessions
+        .metrics()
+        .login_failed(crate::metrics::LoginFailure::Banned);
+    debug!("{address}: a banned address; closed");
 }
 
 /// One player's connection, from the first byte to the close. The configuration

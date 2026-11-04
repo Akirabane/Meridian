@@ -1,4 +1,5 @@
 //! The Meridian proxy.
+mod access;
 mod args;
 mod balance;
 mod commands;
@@ -93,6 +94,16 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // The bans and the whitelist: a file that cannot be read stops the start, since
+    // running without the bans it holds would let in who it keeps out.
+    let access = match access::read(config.access.file.as_deref()) {
+        Ok(access) => access,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let access_file = config.access.file.clone();
     let listener = match serve::listen(config.listen) {
         Ok(listener) => listener,
         Err(e) => {
@@ -109,6 +120,12 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
         config.default_backend.clone(),
     );
     let proxy = Arc::new(Proxy::new(config, path, stop));
+    // Installed before the signals are watched and before the line below, so that a SIGHUP
+    // never finds the lists missing.
+    if let Some(access) = access {
+        info!("bans and whitelist: {}", access::summary(&access));
+        proxy.sessions.access.install(access, access_file);
+    }
     // SIGTERM stops the proxy and SIGHUP reloads it, where the system has them. Set before
     // the line below, which says the proxy is up, so that a signal sent once it is read
     // is not lost.
