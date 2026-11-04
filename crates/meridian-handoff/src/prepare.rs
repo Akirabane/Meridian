@@ -20,6 +20,10 @@ use std::{
 /// (`ChunkBatchSender`'s cap), so that the world arrives as fast as it can.
 const CHUNKS_PER_TICK: f32 = 64.0;
 
+/// The entity events that tell a player their operator level: 24 for level 0 to
+/// 28 for level 4.
+const PERMISSION_EVENTS: std::ops::RangeInclusive<i8> = 24..=28;
+
 /// A switch's target lane, with what it has sent so far.
 pub(crate) struct Target {
     state: Mutex<Preparing>,
@@ -248,12 +252,39 @@ impl Preparing {
                 id,
                 payload: payload.to_vec(),
             }),
+            c::ENTITY_EVENT if self.permission_event(id, payload) => {}
             c::SET_ENTITY_DATA if self.is_own(payload) => {
                 let payload = self.swapped(id, payload);
                 self.extras.push(Packet { id, payload });
             }
             _ => self.apply(id, payload),
         }
+    }
+
+    /// Keeps the target's permission level for the client, and says whether the
+    /// packet was one: the player's entity event 24 to 28 (`PlayerList.
+    /// sendPlayerPermissionLevel`, 24 plus the level). The views keep no entity
+    /// events, and the client learns its level from nothing else, so it would keep
+    /// that of its first server. The last one is sent after the delta, in the
+    /// client's numbering, before the command tree it goes with; it is sent whatever
+    /// the client holds, so that a target with a lower level lowers it.
+    fn permission_event(&mut self, id: i32, payload: &[u8]) -> bool {
+        let Ok(C::EntityEvent(event)) = C::decode(id, payload) else {
+            return false;
+        };
+        let own = self.swap.is_some_and(|swap| swap.backend == event.id);
+        if !own || !PERMISSION_EVENTS.contains(&event.event) {
+            return false;
+        }
+        self.extras.retain(|packet| packet.id != c::ENTITY_EVENT);
+        let payload = self.swapped(id, payload);
+        let at = self
+            .extras
+            .iter()
+            .position(|packet| packet.id == c::COMMANDS)
+            .unwrap_or(self.extras.len());
+        self.extras.insert(at, Packet { id, payload });
+        true
     }
 
     /// Whether a packet that starts with an entity id is about the player.

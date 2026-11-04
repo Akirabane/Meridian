@@ -1087,3 +1087,69 @@ fn a_carried_position_in_the_same_chunk_waits_for_no_chunk() {
     target_thread.join().unwrap().unwrap();
     run.join().unwrap().unwrap();
 }
+
+/// The target tells the player their operator level at login, as an entity event
+/// (24 plus the level) the views do not keep: the client must still get it, in its
+/// own numbering, after the delta and before the command tree, or it keeps the level
+/// of its first server. A target that gives a lower level lowers it, so level 0 is
+/// sent as well. A target that sends none sends the client none.
+#[test]
+fn the_permission_level_of_the_target_reaches_the_client() {
+    for (permission, event) in [(Some(4), Some(28)), (Some(0), Some(24)), (None, None)] {
+        let Bench {
+            handle,
+            run,
+            mut player,
+            source: _source,
+        } = bench();
+        let log = Log::default();
+        let (address, signal, target_thread) = target(TargetWorld {
+            permission,
+            ..TargetWorld::default()
+        });
+        let done = switch(
+            &handle,
+            target_backend(&address, &options()),
+            &mut FakeControl::new("source", &log),
+            &mut target_control(&log, signal),
+            &Digests::default(),
+            &settings(),
+        )
+        .unwrap();
+        let packets = after_switch(&mut player);
+        let ids: Vec<i32> = packets.iter().map(|(id, _)| *id).collect();
+        let last_delimiter = ids
+            .iter()
+            .rposition(|&id| id == pc::BUNDLE_DELIMITER)
+            .unwrap();
+        let sent: Vec<&(i32, Vec<u8>)> = packets
+            .iter()
+            .filter(|(id, _)| *id == pc::ENTITY_EVENT)
+            .collect();
+        match event {
+            Some(event) => {
+                // One event, with the client's id, between the delta and the tree.
+                assert_eq!(sent.len(), 1, "{ids:?}");
+                let (id, payload) = sent[0];
+                assert_eq!(
+                    decode(*id, payload),
+                    C::EntityEvent(play::EntityEvent {
+                        id: CLIENT_ID,
+                        event
+                    })
+                );
+                let at = ids.iter().position(|&id| id == pc::ENTITY_EVENT).unwrap();
+                assert!(at > last_delimiter, "{ids:?}");
+                assert_eq!(ids[at + 1], pc::COMMANDS, "{ids:?}");
+                assert_eq!(done.extras, 2);
+            }
+            None => {
+                assert!(sent.is_empty(), "{ids:?}");
+                assert_eq!(done.extras, 1);
+            }
+        }
+        attack(&mut player, TARGET_ID);
+        assert_eq!(target_thread.join().unwrap().unwrap().attacked, CLIENT_ID);
+        run.join().unwrap().unwrap();
+    }
+}

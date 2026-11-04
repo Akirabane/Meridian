@@ -36,7 +36,8 @@
 //!    busy server never is, and the player is frozen meanwhile. Then, in one go
 //!    under the
 //!    session's locks: the delta from the ghost to the target view goes to the
-//!    client, then the target's command tree, recipes, advancements and the
+//!    client, then the player's operator level on the target (the entity event 24 to 28, which the
+//!    client reads nowhere else) and its command tree, recipes, advancements and the
 //!    player's own synced data; the target becomes the active backend. Last, the
 //!    target places the player (`player-confirm`), and its reply comes once the
 //!    player's file is on its disk.
