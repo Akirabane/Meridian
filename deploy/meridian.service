@@ -1,0 +1,61 @@
+# systemd unit for the Meridian proxy. Install it as /etc/systemd/system/meridian.service;
+# docs/OPERATING.md, section 5.7, has the steps (the user, the files, the first start).
+#
+#   ExecStart   the binary and the configuration file, both paths to change if yours differ
+#   stop        systemd sends SIGTERM: the proxy stops accepting players, closes their sessions
+#               and waits up to five seconds, so TimeoutStopSec leaves room beyond that
+#   reload      `systemctl reload meridian` sends SIGHUP: the configuration file is read again
+#               and a file that does not pass the checks changes nothing
+#
+# `systemd-analyze verify meridian.service` checks the file.
+
+[Unit]
+Description=Meridian proxy for Horizon servers
+Documentation=https://github.com/Akirabane/Meridian/blob/main/docs/OPERATING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meridian
+Group=meridian
+ExecStart=/usr/local/bin/meridian /etc/meridian/meridian.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+Environment=MERIDIAN_LOG=info
+
+# Every player takes two sockets and two threads.
+LimitNOFILE=65536
+
+# The proxy reads its configuration and the secret files next to it, listens on a port above
+# 1024 and talks TCP. It writes no file.
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+# AF_UNIX is for name lookups through the system's resolver.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

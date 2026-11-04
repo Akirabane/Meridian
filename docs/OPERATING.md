@@ -230,15 +230,23 @@ their sessions, and waits up to five seconds. The players see the connection clo
 sends them no message. The log says `stopping: no new connections are accepted`, then
 `all connections are closed` and `stopped`.
 
-The proxy handles Ctrl+C (SIGINT). It does not install a handler for SIGTERM, so a service
-manager's default stop signal ends it at once without closing sessions cleanly. Under systemd,
-set `KillSignal=SIGINT`.
+On Linux and the other Unix systems the proxy also handles two signals, which is what a service
+manager sends:
+
+| Signal | What the proxy does |
+| --- | --- |
+| `SIGTERM` | Stops, exactly as Ctrl+C does. This is what `systemctl stop` and `docker stop` send, so a service needs no `KillSignal=` setting. The log says `SIGTERM: stopping` first |
+| `SIGHUP` | Reads the configuration file again, exactly as the console's `reload` does (section 5.4; [CONFIG.md](CONFIG.md), "What a reload changes"). The log says `SIGHUP: reloading <file>`, then one `reload: ...` line for each change. A file that does not pass the checks changes nothing, and the log says `reload: not reloaded, <file> is unchanged in use: <why>` at the warning level. |
+
+On Windows only Ctrl+C (and `end` in the console) stops the proxy, and there is no signal for
+`reload`. A second SIGTERM while the proxy is stopping does nothing; SIGKILL, which no program
+can catch, ends the proxy at once and drops its players.
 
 ### 5.4 The console is standard input
 
 All operator commands (`list`, `servers`, `drain`, `reload`, `switch`, `end`...) are typed on
-the proxy's standard input. There is no signal for `reload`, no administration port and no
-remote console. A proxy started without a terminal keeps running but has no console (the log
+the proxy's standard input. On Unix, `kill -HUP` runs `reload` (section 5.3). There is no
+administration port and no remote console. A proxy started without a terminal keeps running but has no console (the log
 does not say so at the default level). To keep one on a server, run the proxy in `tmux` or
 `screen`, or under the panel, which types the commands for you, or read its standard input from
 a pipe you write to.
@@ -302,6 +310,95 @@ Test it before opening: connect through the balancer, and check that the proxy's
 your own address and not the balancer's. Then connect straight to the proxy's port from a
 machine that is not trusted and check, with `required`, that the connection is closed.
 
+### 5.7 Running as a service
+
+Two files in the repository run the proxy without a terminal: a systemd unit
+([deploy/meridian.service](../deploy/meridian.service)) and a container image
+([Dockerfile](../Dockerfile)). Neither has been run on a real host (see the end of this section).
+Under either one the proxy has **no console**: its standard input is closed, so `list`, `servers`,
+`drain`, `send` and the other console commands are not available (section 5.4). `reload` is,
+through SIGHUP, and the log shows what happened.
+
+#### systemd
+
+1. Put the binary where the unit expects it, and make a user that owns nothing else:
+
+   ```
+   install -m 0755 meridian /usr/local/bin/meridian
+   useradd --system --no-create-home --shell /usr/sbin/nologin meridian
+   ```
+
+2. Put the configuration and the files it names (the sidecar secrets; a relative path is taken from
+   the configuration's folder) in `/etc/meridian`, readable by that user and nobody else:
+
+   ```
+   install -d -o root -g meridian -m 0750 /etc/meridian
+   install -o root -g meridian -m 0640 meridian.toml /etc/meridian/meridian.toml
+   ```
+
+3. Install the unit, check the configuration, and start it:
+
+   ```
+   install -m 0644 deploy/meridian.service /etc/systemd/system/meridian.service
+   systemctl daemon-reload
+   meridian --check /etc/meridian/meridian.toml
+   systemctl enable --now meridian
+   ```
+
+Then:
+
+| You want | You run | What happens |
+| --- | --- | --- |
+| The log | `journalctl -u meridian -f` | The proxy writes to standard error, which the journal keeps |
+| A new configuration | `systemctl reload meridian` | SIGHUP: the file is read again as by `reload`; an invalid file changes nothing, and the journal says why |
+| A stop | `systemctl stop meridian` | SIGTERM: sessions closed, up to five seconds; `TimeoutStopSec=15` leaves room beyond that |
+| A restart after a crash | nothing | `Restart=on-failure` starts it again after five seconds. A stop you asked for is not restarted. Players on a crashed proxy are dropped (section 12) |
+
+What the unit restricts, so that you can tell if a setting of yours needs more: it runs as the
+`meridian` user with no capabilities, so the port must be above 1024 (for 25565 nothing to do; for
+a lower port add `AmbientCapabilities=CAP_NET_BIND_SERVICE` and the same in
+`CapabilityBoundingSet=`); the file system is read-only to it, apart from a private `/tmp`; only
+TCP and local sockets; the home directories are hidden; `LimitNOFILE=65536`, since each player
+takes two sockets. A configuration file or secret outside `/etc/meridian` needs
+`ReadOnlyPaths=` for it.
+
+#### Container
+
+```
+docker build -t meridian .
+docker run -d --name meridian -p 25565:25565 -v /srv/meridian:/etc/meridian:ro meridian
+```
+
+The image is built in two stages (the Rust image, then a small Debian 12 "distroless" image with
+the C library and no shell) and runs as the unprivileged user `nonroot` (65532). It holds the
+binary and `meridian.example.toml` in `/usr/share/meridian`. The configuration is the volume:
+`/etc/meridian/meridian.toml` is read, so `/srv/meridian` above must hold `meridian.toml` and the
+files it names, readable by user 65532.
+
+- **Addresses.** Inside the container `127.0.0.1` is the container. A backend or a sidecar on the
+  host, or in another container, needs an address the container can reach: a name on a shared
+  Docker network, the host's address, or `--network host` for a proxy on the host's network.
+  `[metrics] bind` and a sidecar's address have the same rule; to scrape the metrics page, set
+  `bind = "0.0.0.0:9100"` in the file and publish the port only to the machine that scrapes it,
+  as the page has no authentication.
+- **Stopping and reloading.** `docker stop` sends SIGTERM and waits ten seconds before it kills,
+  which is enough for the five seconds the proxy takes. `docker kill --signal=HUP meridian`
+  reloads the file, and `docker logs meridian` shows the log.
+- **The console.** There is none unless the container is started with `-i`: `docker run -it ...`,
+  or `docker attach` to a container started with `-i`, types the console commands.
+- **Version of Rust.** The build argument `RUST_VERSION` (1.90 by default) names the Rust image;
+  the sources need 1.85 or later: `docker build --build-arg RUST_VERSION=1.91 -t meridian .`
+- **The build needs the network**, for the crates and for Horizon's protocol crate on GitHub, and
+  the image is not published anywhere: the release workflow builds the archives only.
+
+#### What was checked
+
+The unit passes `systemd-analyze verify` (systemd 257) and scores 1.5 ("OK") in
+`systemd-analyze security --offline`. It was not started on a host: nothing here shows that the
+proxy runs under every one of its restrictions, so start it once and read `journalctl -u meridian`
+before relying on it. The Dockerfile was not built, because no Docker engine was running where it
+was written: the first `docker build` may need a change, such as the Rust version.
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it
@@ -351,6 +448,8 @@ Before the first player:
 - [ ] Behind a load balancer: `[proxy-protocol]` is on with `trusted` set to the balancer's
       addresses only, the balancer sends the header, the proxy's port is closed to everyone
       else, and the proxy's log shows a test player's own address (section 5.6).
+- [ ] Run as a service (section 5.7): a dedicated user, a configuration only that user can read,
+      `systemctl reload` and `stop` tried once, and the log read in the journal.
 - [ ] Sidecars listen on `127.0.0.1`, and the proxy reaches them over a private network, a
       VPN or a tunnel. Never `--insecure-remote` over the internet.
 - [ ] If you switch players: the Horizon build has `[transfer]` and `max_freeze_seconds` is
@@ -509,9 +608,9 @@ switch, and keep the proxy's log and both servers' logs.
 | TLS for the sidecar | A signed, replay-proof exchange, listening on `127.0.0.1` by default; `--allow-remote` with `--insecure-remote` is refused without both | TLS. The proxy must reach each sidecar over a trusted network or a tunnel |
 | The real address of a player behind a TCP load balancer (PROXY protocol) | `[proxy-protocol]`: versions 1 and 2, read only from the balancers you list, `optional` or `required`. The address is used for the log, the connection limits and the address forwarded to the servers (section 5.6) | Nothing for the PROXY protocol itself. The servers behind the proxy still see the proxy; the player's address reaches them in the forwarded data |
 | Metrics | `list` and `servers` on the console, the log, and (when `[metrics]` is on) a Prometheus text page and a health check (section 8.1) | Authentication and TLS on that page, a push to a monitoring service, per-player or per-packet figures, and the relay's latency and bytes |
-| Operating without a terminal | The panel types commands for a proxy it starts | A remote console or administration port, a signal for `reload`, a handler for SIGTERM |
+| Operating without a terminal | The panel types commands for a proxy it starts. On Unix, SIGTERM stops the proxy and SIGHUP reloads it (section 5.3) | A remote console or administration port. On Windows, a signal for `reload` |
 | Logs | One line per event on standard error, in UTC | A log file, rotation, a structured format. Let the service manager keep them |
-| Service files and packages | `meridian` for Linux and Windows x86_64 in release archives, with a checksum file and an attestation | A service unit, a container image or a package for the proxy, the sidecar or the panel. The sidecar and the panel are built from the sources |
+| Service files and packages | `meridian` for Linux and Windows x86_64 in release archives, with a checksum file and an attestation. A systemd unit and a Dockerfile for the proxy, in the repository (section 5.7) | A published image, a package, and a unit or an image for the sidecar or the panel. The unit and the Dockerfile were not run on a real host. The sidecar and the panel are built from the sources |
 | Several proxies, or a proxy that restarts without dropping players | Nothing | A second proxy for the same servers: the counts and the caps are per proxy, and players on a proxy that dies are dropped |
 | Placing players | Caps, a drain, balancing among lobbies and `/play` for games, evacuation of a restarting server | Moving a group from a lobby to a game, matchmaking, a decision on who starts a move |
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
@@ -545,7 +644,8 @@ switch, and keep the proxy's log and both servers' logs.
   chat.
 - The proxy shows its own server-list message, not the server's. `/server` is not completed by
   Tab.
-- Nothing handles SIGTERM or SIGHUP. The console is standard input (section 5.4).
+- SIGTERM and SIGHUP are handled on Unix only (section 5.3); on Windows only Ctrl+C stops the
+  proxy. The console is standard input (section 5.4).
 - A proxy that dies drops its players, and nothing runs a second proxy for them.
 
 ## 13. How this page was checked

@@ -78,6 +78,13 @@ repository's release workflow from the tagged commit:
 gh attestation verify <archive> -R Akirabane/Meridian
 ```
 
+### As a service or a container
+
+[deploy/meridian.service](deploy/meridian.service) is a systemd unit (a dedicated user, a restart
+after a crash, `systemctl reload` for SIGHUP), and the [Dockerfile](Dockerfile) builds a small image
+that runs as a non-root user and reads its configuration from a volume. The steps are in
+[docs/OPERATING.md](docs/OPERATING.md), section 5.7. Neither has been run on a real host yet.
+
 ### From the sources
 
 Meridian needs Rust 1.85 or later and nothing else. The Minecraft protocol comes from
@@ -124,8 +131,8 @@ are added one at a time:
 | To put it on a real network | The checklist | [OPERATING.md](docs/OPERATING.md) section 7 |
 | To fix something | The log message, its cause and what to do | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
-`MERIDIAN_LOG` sets the log level (`error`, `warn`, `info`, `debug`). Ctrl+C, or `end`
-in the console, stops the proxy: it stops accepting players, closes their sessions,
+`MERIDIAN_LOG` sets the log level (`error`, `warn`, `info`, `debug`). Ctrl+C, `end`
+in the console, or SIGTERM on Unix, stops the proxy: it stops accepting players, closes their sessions,
 and waits up to five seconds for them to end.
 
 ## Commands
@@ -194,7 +201,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   The switch has not been tried on a real network.
 - A player whose server stops without warning is disconnected, not sent to the fallback.
   Only a planned restart moves them ([docs/RESTART.md](docs/RESTART.md)).
-- The console is standard input: there is no remote console and no signal for `reload`.
+- The console is standard input: there is no remote console. On Unix, SIGTERM stops the
+  proxy and SIGHUP reloads it; on Windows only Ctrl+C stops it.
   The sidecar has no TLS, so it listens on
   `127.0.0.1` ([docs/OPERATING.md](docs/OPERATING.md), sections 11 and 12).
 - The proxy has been run against a real Horizon server with one scripted player at a

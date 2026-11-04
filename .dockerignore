@@ -1,0 +1,14 @@
+# What the image build does not need to be sent.
+.git
+.github
+.gitignore
+.gitattributes
+target
+**/target
+deploy
+docs
+*.md
+!README.md
+meridian.toml
+*.key
+*.secret
