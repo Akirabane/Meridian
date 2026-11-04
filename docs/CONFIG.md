@@ -197,6 +197,38 @@ and no TLS, so it listens on the loopback unless you say otherwise.
 The page names no player: its labels are the names of the servers in this file and fixed
 words. A reload does not change it: `enabled` and `bind` are read when the proxy starts.
 
+## `[access]`
+
+Where the bans and the whitelist are kept ([OPERATING.md](OPERATING.md), section 5.8). They
+are not in this file: the console changes them while the proxy runs, so they have a file of
+their own, and a configuration written by hand is never rewritten.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `file` | `"access.toml"` | The file of the bans and the whitelist. A relative path is taken from the folder of this file. A file that is not there means no bans and the whitelist off; the console creates it at the first change | A path; the file, if it is there, must be valid (the proxy does not start with one that is not) |
+
+Nothing is banned and the whitelist is off until the file says so, so a proxy without one
+behaves as it did before. The file is read when the proxy starts and at `reload`:
+
+```toml
+whitelist = false      # on or off; off when the file does not say
+
+[[ban]]                # one of name, uuid, ip
+name = "Griefer"
+reason = "Griefing the spawn"   # optional; the player is told it
+
+[[ban]]
+ip = "203.0.113.0/24"  # an address, or a range
+
+[[allow]]              # one of name, uuid
+uuid = "069a79f4-44e9-4726-a5be-fca90e38aaf5"
+```
+
+A name is 1 to 16 letters, digits and underscores, compared whatever its case. A unique id
+is written with hyphens or without. An entry with none or more than one of `name`, `uuid`
+and `ip`, a name or an address that is not one, an entry twice, or a key that is not listed,
+is an error that names the entry.
+
 ## `[commands]`
 
 The commands players type in game that the proxy answers itself.
@@ -213,3 +245,8 @@ The commands players type in game that the proxy answers itself.
 logins that start after it: players already connected keep their server and their
 session. A server removed from the file keeps its players until they leave. `listen`
 is the exception: the proxy keeps listening where it started until a restart.
+
+The bans and the whitelist (the file of `[access]`) are read again at the same time. If that
+file cannot be read, nothing is reloaded, the configuration included. A player who is banned by
+what the file now says is disconnected, with the reason; a player who is not on a whitelist
+that is now on stays.

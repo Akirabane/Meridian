@@ -241,6 +241,13 @@ header-timeout-ms = 3000
 enabled = false
 bind = "127.0.0.1:9100"
 
+# The bans and the whitelist have a file of their own, which the console changes (ban,
+# pardon, whitelist) and which is read at the start and at `reload`. It is not here, so
+# that this file is never rewritten. Nothing is banned and the whitelist is off until it
+# says so. A relative path is taken from this file's folder.
+[access]
+# file = "access.toml"
+
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.
 [commands]

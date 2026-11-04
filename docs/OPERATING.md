@@ -267,6 +267,10 @@ or `debug`. There is no log file or rotation: let the service manager or a redir
 | `switch <player> <server>` | Moves a player while they stay connected |
 | `send <player\|all> <server>` | The same, for one player or each player in turn |
 | `kick <player> [reason]` | Disconnects a player |
+| `ban <name\|uuid\|ip> [reason]` | Bans a player name, an account, an address or a range (`203.0.113.0/24`), and disconnects the players it holds (section 5.8) |
+| `pardon <name\|uuid\|ip>` | Lifts a ban |
+| `banlist` | Lists the bans |
+| `whitelist <add\|remove> <name\|uuid>`, `whitelist list`, `whitelist <on\|off>` | Manages the whitelist (section 5.8) |
 | `reload` | Reads the configuration again and applies it to the next logins |
 | `end` | Stops the proxy |
 
@@ -399,6 +403,66 @@ proxy runs under every one of its restrictions, so start it once and read `journ
 before relying on it. The Dockerfile was not built, because no Docker engine was running where it
 was written: the first `docker build` may need a change, such as the Rust version.
 
+### 5.8 Bans and the whitelist
+
+The proxy keeps one list of bans and one whitelist for the whole network, applied before any
+server is asked for the player. They are off until you use them: with no `access.toml`, nothing
+changes. What they are and where they are kept is in [CONFIG.md](CONFIG.md) (`[access]`).
+
+| Command | Effect |
+| --- | --- |
+| `ban <name\|uuid\|ip> [reason]` | A name (any case), an account's unique id, an address, or a range such as `203.0.113.0/24` or `2001:db8::/32`. The players it holds who are connected are disconnected with the reason. Banning something already banned is refused |
+| `pardon <name\|uuid\|ip>` | Lifts the ban of that name, id, address or range (the same range, not an address inside it) |
+| `banlist` | The bans, with their reasons |
+| `whitelist add <name\|uuid>`, `whitelist remove <name\|uuid>` | Changes the whitelist. It takes no address |
+| `whitelist on`, `whitelist off` | Turns it on or off. While it is on only the players on it join. `whitelist list` shows its state and entries |
+
+Each change is written to the file at once, by writing the whole file beside it and replacing
+the old one. If the file cannot be written (a full disk, no right to the folder), the ban or
+the entry still applies in memory and the command says it is not on disk, so that a ban is
+never held back; fix the folder and make the change again, or it is lost at the next start.
+The file is read at the start, where a file that cannot be read stops the proxy (running
+without a ban it holds would let in who it keeps out), and at `reload` (the console command or SIGHUP, which
+run the same code), where one that cannot be read changes nothing. You may edit it by hand and `reload`.
+
+When it applies:
+
+- An **address** is checked as the connection is taken, before a byte is read from it, like
+  `connections-per-minute`. The connection is closed without a word, so a banned address is
+  not told the reason. Behind a load balancer, it is the player's address from the PROXY
+  header that is checked (section 5.6), never the balancer's.
+- A **name** and a **unique id** are checked once the player is identified (after the account
+  check in online mode), before a place under `max-players` is taken or a server is tried. The
+  player is told `You are banned from this server.` and the reason, or `You are not
+  whitelisted on this server.`. An address ban is checked again here, so a player who got past
+  the first check is still refused, with the reason.
+- A **ban** disconnects the connected players it holds when it is made, and at a `reload`. The
+  **whitelist** applies to those who join: turning it on, or removing someone, does not
+  disconnect a player already connected; `kick` does.
+- A ban comes before the whitelist and before a second login of the same player.
+
+What they can and cannot tell about a player:
+
+- With `auth-mode = "online"` the name and the unique id are those of the account, checked. Ban
+  and whitelist by unique id: a name changes hands, and a name entry matches whoever holds it
+  when they join.
+- In offline mode, and for the unverified players of the hybrid mode, **the name is whatever
+  the client says it is**. A ban by name stops that name only: the player comes back under
+  another. A **whitelist by name is not a barrier**: anyone who types a listed name joins as
+  them. The unique id is derived from the name as typed (`Alex` and `alex` have different ids),
+  so a ban by unique id stops only the spelling it was made for. Use the whitelist as a security
+  measure only in online mode, and the bans by address for what you cannot stop by name.
+- An address is the player's, or a shared one (a school, a mobile carrier, a VPN). A range
+  that is wider than needed bans people who did nothing.
+
+Not done: the commands in game (they wait for the permissions), a duration or an expiry, a
+record of who banned and when, and the sync with the servers' own lists. Horizon's management
+protocol does serve its allowlist, bans and IP bans (`horizon-server/src/management.rs`,
+methods `allowlist/*`, `bans/*`, `ip_bans/*`), so a sync is possible later; none is made, and
+the servers keep their own lists, which the proxy does not read or change. Refusals are counted
+as `meridian_login_failures_total{reason="banned"}` and `{reason="not_whitelisted"}` (section
+8.1).
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it
@@ -465,6 +529,8 @@ Before the first player:
       same role.
 - [ ] Someone can type commands on the proxy's console when it is needed (section 5.4), and
       the log is kept somewhere.
+- [ ] If you use the bans or the whitelist: `access.toml` is in a folder the proxy can write, is
+      kept with the configuration, and a test ban and `pardon` of a test name work (section 5.8).
 - [ ] The proxy's service is restarted by something when it dies. It does not restart itself,
       and players who were on it are disconnected.
 - [ ] You know how to roll back: the previous binary and the previous `meridian.toml`.
@@ -500,7 +566,7 @@ the gauges are worked out when the page is read.
 | `meridian_backend_state{backend,state}` | 1 for the state the balancer sees: `open`, `closed`, `draining` (drained, restarting, or not accepting transfers) or `not_offered` (no recent report) |
 | `meridian_connections_total`, `meridian_connections_throttled_total` | Connections accepted, and the ones closed unread for opening too many in a minute |
 | `meridian_logins_total` | Players who ended on a server |
-| `meridian_login_failures_total{reason}` | Logins that did not: `protocol` (the handshake or login broke the protocol, or the connection failed), `duplicate`, `full`, `no_route`, `unreachable`. A refusal by the authentication, and a server list ping, are not counted here |
+| `meridian_login_failures_total{reason}` | Logins that did not: `protocol` (the handshake or login broke the protocol, or the connection failed), `duplicate`, `full`, `no_route`, `unreachable`, `banned` (including a connection closed for its address), `not_whitelisted`. A refusal by the authentication, and a server list ping, are not counted here |
 | `meridian_transfers_total` | Transfers that succeeded |
 | `meridian_transfer_failures_total{step}` | Transfers that failed, by step: `check`, `prepare`, `freeze`, `hand_over`, `commit` |
 | `meridian_transfer_duration_seconds{phase}` | A histogram (buckets from 0.05 s to 10 s) of the phases of a successful transfer: `prepare`, `freeze`, `hand_over`, `commit`, and `total` (which includes reaching the sidecars) |
@@ -614,7 +680,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Several proxies, or a proxy that restarts without dropping players | Nothing | A second proxy for the same servers: the counts and the caps are per proxy, and players on a proxy that dies are dropped |
 | Placing players | Caps, a drain, balancing among lobbies and `/play` for games, evacuation of a restarting server | Moving a group from a lobby to a game, matchmaking, a decision on who starts a move |
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
-| Player management | `kick`, `max-players`, `on-duplicate`, the server's own whitelist and bans on each server | A ban list, permissions or a player database in the proxy (permissions are planned) |
+| Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for them, an expiry on a ban, a sync with the servers' lists, permissions or a player database in the proxy (permissions are planned) |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
 | Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence | A recorded run of Horizon's `server/stopping` notice, which the sidecar now hears and the proxy feeds to the detector (opt in: `--management-properties`, `sidecar-notices`) |
 | Report of a server's state | The sidecar's `status` request and the proxy's reading of `players`, `capacity`, `accepts_transfers` | A Horizon command that answers it. Today balancing counts the proxy's own sessions |
@@ -646,6 +712,9 @@ switch, and keep the proxy's log and both servers' logs.
   Tab.
 - SIGTERM and SIGHUP are handled on Unix only (section 5.3); on Windows only Ctrl+C stops the
   proxy. The console is standard input (section 5.4).
+- The bans and the whitelist by name are as strong as the login: in offline mode, and for the
+  unverified players of the hybrid mode, a name is not proof of who is playing (section 5.8). A
+  ban by address is closed without a reason.
 - A proxy that dies drops its players, and nothing runs a second proxy for them.
 
 ## 13. How this page was checked
