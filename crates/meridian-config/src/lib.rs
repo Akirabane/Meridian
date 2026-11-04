@@ -11,6 +11,7 @@ mod favicon;
 mod metrics;
 mod permissions;
 mod proxy_protocol;
+mod queue;
 mod restart;
 mod sidecar;
 
@@ -26,6 +27,7 @@ pub use permissions::{
     check_group_name, check_node, node,
 };
 pub use proxy_protocol::{ProxyProtocol, ProxyProtocolMode, TrustedNet};
+pub use queue::{MAX_QUEUE_WAIT_SECONDS, QUEUE_SILENCE_LIMIT_MS, QueueSettings};
 pub use restart::Restart;
 pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
 
@@ -36,6 +38,7 @@ use commands::FileCommands;
 use metrics::FileMetrics;
 use permissions::FilePermissionSettings;
 use proxy_protocol::FileProxyProtocol;
+use queue::FileQueue;
 use restart::FileRestart;
 
 use serde::Deserialize;
@@ -217,6 +220,8 @@ pub struct Config {
     pub access: AccessSettings,
     /// The `[permissions]` table.
     pub permissions: PermissionSettings,
+    /// The `[queue]` table.
+    pub queue: QueueSettings,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -271,6 +276,7 @@ impl Default for Config {
             metrics: Metrics::default(),
             access: AccessSettings::default(),
             permissions: PermissionSettings::default(),
+            queue: QueueSettings::default(),
         }
     }
 }
@@ -313,6 +319,7 @@ impl std::fmt::Debug for Config {
             metrics,
             access,
             permissions,
+            queue,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -354,6 +361,7 @@ impl std::fmt::Debug for Config {
             .field("metrics", metrics)
             .field("access", access)
             .field("permissions", permissions)
+            .field("queue", queue)
             .finish()
     }
 }
@@ -406,6 +414,8 @@ struct File {
     access: FileAccess,
     #[serde(default)]
     permissions: FilePermissionSettings,
+    #[serde(default)]
+    queue: FileQueue,
 }
 
 #[derive(Deserialize)]
@@ -598,6 +608,7 @@ impl Config {
             metrics: file.metrics.into_settings()?,
             access: file.access.into_settings(folder),
             permissions: file.permissions.into_settings(folder),
+            queue: file.queue.into_settings(),
         };
         config.validate()?;
         Ok(config)
@@ -669,6 +680,7 @@ impl Config {
         self.restart.validate()?;
         self.proxy_protocol.validate()?;
         self.metrics.validate(self.listen)?;
+        self.queue.validate(self.connect_timeout_ms)?;
         for s in &self.sidecars {
             if self.backend(&s.backend).is_none() {
                 return Err(ConfigError::UnknownBackend {
@@ -934,7 +946,10 @@ mod proxy_protocol_tests;
 
 #[cfg(test)]
 mod access_tests;
+
 #[cfg(test)]
 mod permissions_tests;
+#[cfg(test)]
+mod queue_tests;
 #[cfg(test)]
 mod sidecar_tests;

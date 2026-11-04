@@ -120,6 +120,9 @@ const PHASES: [&str; 5] = ["prepare", "freeze", "hand_over", "commit", "total"];
 /// How a backend came to be thought of as going down (`restart::Cause`).
 const CAUSES: [&str; 3] = ["announced", "panel", "unreachable"];
 
+/// How a player's wait in the login queue ended (`queue::Left`).
+const QUEUE_ENDS: [&str; 3] = ["served", "timeout", "gone"];
+
 /// What the proxy counts. Everything is an atomic counter or a gauge set by one store.
 #[derive(Default)]
 pub struct Metrics {
@@ -137,6 +140,9 @@ pub struct Metrics {
     restarts: [AtomicU64; CAUSES.len()],
     status_rounds: AtomicU64,
     last_status_round_micros: AtomicU64,
+    queue_entered: AtomicU64,
+    queue_refused: AtomicU64,
+    queue_waits: [Histogram; QUEUE_ENDS.len()],
 }
 
 impl Metrics {
@@ -201,6 +207,26 @@ impl Metrics {
         self.restarts[i].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A player entered the login queue.
+    pub fn queue_entered(&self) {
+        self.queue_entered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A player was refused at once: the queue was at its longest.
+    pub fn queue_refused(&self) {
+        self.queue_refused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A player left the login queue after `waited`.
+    pub fn queue_left(&self, how: crate::queue::Left, waited: Duration) {
+        let i = match how {
+            crate::queue::Left::Served => 0,
+            crate::queue::Left::TimedOut => 1,
+            crate::queue::Left::Gone => 2,
+        };
+        self.queue_waits[i].observe(waited);
+    }
+
     /// A round of questions to the sidecars took `took`.
     pub fn status_round(&self, took: Duration) {
         self.status_rounds.fetch_add(1, Ordering::Relaxed);
@@ -213,6 +239,16 @@ impl Metrics {
 
 #[cfg(test)]
 impl Metrics {
+    /// The queue's counters: entered, refused at once, and left by how (served, timeout,
+    /// gone).
+    pub fn queue_counts(&self) -> (u64, u64, [u64; 3]) {
+        (
+            self.queue_entered.load(Ordering::Relaxed),
+            self.queue_refused.load(Ordering::Relaxed),
+            [0, 1, 2].map(|i| self.queue_waits[i].count()),
+        )
+    }
+
     /// How many logins failed for `why`.
     pub fn failures_of(&self, why: LoginFailure) -> u64 {
         let i = LoginFailure::ALL.iter().position(|f| *f == why).unwrap();
@@ -427,6 +463,62 @@ pub fn render(proxy: &Proxy) -> String {
             &mut out,
             "meridian_transfer_duration_seconds",
             &format!("phase=\"{phase}\""),
+        );
+    }
+
+    family(
+        &mut out,
+        "meridian_queue_length",
+        "gauge",
+        "Players waiting for a place (login queue).",
+    );
+    let _ = writeln!(out, "meridian_queue_length {}", sessions.queue.len());
+    family(
+        &mut out,
+        "meridian_queue_entered_total",
+        "counter",
+        "Players who entered the login queue.",
+    );
+    let _ = writeln!(
+        out,
+        "meridian_queue_entered_total {}",
+        get(&m.queue_entered)
+    );
+    family(
+        &mut out,
+        "meridian_queue_refused_total",
+        "counter",
+        "Players refused at once because the login queue was at its longest.",
+    );
+    let _ = writeln!(
+        out,
+        "meridian_queue_refused_total {}",
+        get(&m.queue_refused)
+    );
+    family(
+        &mut out,
+        "meridian_queue_left_total",
+        "counter",
+        "Players who left the login queue, by how: served, timeout or gone.",
+    );
+    for (end, wait) in QUEUE_ENDS.iter().zip(&m.queue_waits) {
+        let _ = writeln!(
+            out,
+            "meridian_queue_left_total{{cause=\"{end}\"}} {}",
+            wait.count()
+        );
+    }
+    family(
+        &mut out,
+        "meridian_queue_wait_seconds",
+        "histogram",
+        "Time spent in the login queue, by how the wait ended.",
+    );
+    for (end, wait) in QUEUE_ENDS.iter().zip(&m.queue_waits) {
+        wait.render(
+            &mut out,
+            "meridian_queue_wait_seconds",
+            &format!("cause=\"{end}\""),
         );
     }
 

@@ -128,6 +128,12 @@ impl Commands {
                 permissions::commands::perm,
             ),
             command(
+                "queue",
+                "queue",
+                "lists the players who wait for a place, when the queue is on",
+                crate::queue::command,
+            ),
+            command(
                 "reload",
                 "reload",
                 "reads the configuration file again and applies what it can",
@@ -745,6 +751,7 @@ mod tests {
             "pardon",
             "banlist",
             "whitelist",
+            "queue",
             "reload",
             "end",
         ] {

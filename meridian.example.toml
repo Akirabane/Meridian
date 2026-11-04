@@ -256,6 +256,17 @@ bind = "127.0.0.1:9100"
 [permissions]
 # file = "permissions.toml"
 
+# A line for the players who find no place: the proxy is full (max-players) or every
+# lobby is at its hard cap. Off: they are refused with "The server is full". On: they
+# wait, first come first served, until a place is free, then are refused the same way.
+# The wait is limited to 20 s, and wait-seconds plus connect-timeout-ms to 27 s, because
+# the player's client gives up after 30 s without a packet and the proxy sends none
+# while it waits. Bans, the whitelist and the connection limit come before the line.
+[queue]
+enabled = false
+wait-seconds = 15
+max-length = 50
+
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.
 [commands]

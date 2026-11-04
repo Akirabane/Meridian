@@ -286,6 +286,23 @@ of `name` and `uuid`, a group that is not written (`default` excepted), a node t
 a node both allowed and denied in one group, or a key that is not listed, is an error that
 names it.
 
+## `[queue]`
+
+A line for the players who find no place. Off by default: a player who finds the proxy full
+(`max-players`) or every lobby at its hard cap is refused with "The server is full", as before
+([OPERATING.md](OPERATING.md), section 5.10). With it on, they wait, first come first served, until
+a place is free or their wait runs out, and are then refused with the same words.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `enabled` | `false` | Whether a player who finds no place waits for one | `true` or `false` |
+| `wait-seconds` | `15` | The most a player waits, in seconds | When on: more than 0, at most 20, and `wait-seconds` plus `connect-timeout-ms` at most 27 seconds. The player's client gives up after 30 seconds of silence and the proxy sends it nothing while it waits |
+| `max-length` | `50` | The most players waiting at once. The next is refused at once | When on: more than 0 |
+
+A reload applies `enabled`, `wait-seconds` and `max-length` to the players who arrive after it,
+and `max-players` to the players who wait as well: raising it serves the line at once. Turning
+the queue off does not send away the players already in it.
+
 ## `[commands]`
 
 The commands players type in game that the proxy answers itself.

@@ -273,6 +273,7 @@ or `debug`. There is no log file or rotation: let the service manager or a redir
 | `pardon <name\|uuid\|ip>` | Lifts a ban |
 | `banlist` | Lists the bans |
 | `whitelist <add\|remove> <name\|uuid>`, `whitelist list`, `whitelist <on\|off>` | Manages the whitelist (section 5.8) |
+| `queue` | The players who wait for a place, in order, and for how long (section 5.10) |
 | `reload` | Reads the configuration again and applies it to the next logins |
 | `end` | Stops the proxy |
 
@@ -534,6 +535,61 @@ Not done: in-game commands to manage the groups, a permission for the backends' 
 proxy decides only what it answers), a group for a kind of login (verified or not), a rank that
 expires, and a link with the servers' own operator levels.
 
+### 5.10 Waiting for a place when the network is full
+
+Off by default. Without it, a player who finds the proxy at `max-players`, or every lobby at its
+hard cap, is refused with "The server is full". With it, they wait:
+
+```toml
+[queue]
+enabled = true
+wait-seconds = 15   # at most 20
+max-length = 50
+```
+
+- **Order.** First come, first served. A player who arrives while others wait goes behind them,
+  even if a place is free at that instant: the place is for the first in the line, who is woken
+  when it is given back. Nobody is let in ahead of the line.
+- **Before the line.** The connection limit, the bans, the whitelist, the login itself (online
+  checks included) and the check for a second login all come first. A refused player never
+  waits, and the line holds only players who logged in.
+- **What wakes the line.** A session ending (a place given back), a reload that changes
+  `max-players`, and the proxy stopping. Nothing polls: the thread of each waiting player sleeps
+  on a condition variable. Once a second it looks up to see whether the player is still there
+  (their connection is read for a millisecond), because nothing else tells it. A player who
+  closes the connection leaves the line at that tick, and costs no place and no server login.
+  The waiting adds no thread: it is the thread the connection already had, and the line is
+  limited by `max-length`.
+- **When every lobby is at its hard cap** (balancing on) the player waits as well, at the head of
+  the line if they had their turn: they give the place back, and try the lobbies again at each
+  event and at each tick. A lobby that has room again because it was undrained, or because a
+  server came back, is seen at the next tick (within a second). While the player at the head waits
+  for a lobby, those behind wait too; they would all be sent to the same lobbies.
+- **How long.** `wait-seconds`, at most 20. The player's client gives up when nothing reaches it
+  for 30 seconds (vanilla's read timeout), and the proxy sends it nothing while it waits. After
+  the wait the proxy still has to reach a server (`connect-timeout-ms`, 5 s by default), so the
+  configuration is refused if `wait-seconds` plus `connect-timeout-ms` is more than 27 s. When the
+  wait runs out the player gets the refusal that was always given.
+- **What the player sees.** The client waits where the login left it (no real client was tried).
+  The proxy tells it nothing
+  about its position, and sends it no keep-alive: this is the first level, which only holds the
+  login. The packets the client sends while it waits (its settings, its brand) are kept and
+  passed to the server it ends up on.
+- **Look at it.** The console's `queue` lists who waits, in order, and for how long. The metrics
+  page (section 8.1) has `meridian_queue_length`, `meridian_queue_entered_total`,
+  `meridian_queue_refused_total` (the line was at its longest),
+  `meridian_queue_left_total{cause}` (`served`, `timeout`, `gone`) and the histogram
+  `meridian_queue_wait_seconds{cause}`. A login that ends in the refusal after a wait is also
+  counted in `meridian_login_failures_total{reason="full"}`.
+- **Reload.** `enabled`, `wait-seconds` and `max-length` apply to the players who arrive after
+  it. A new `max-players` applies to those who wait too: raising it serves the line at once.
+  Turning the queue off leaves the players already in it to be served or time out.
+
+Not done: a message with the player's position, a wait longer than the client's silence allows
+(that needs the connection held in the configuration phase with keep-alive packets), a line
+for each group or each role, and priority for some players. It has not run against a real
+client or real servers; the tests use pipes and a stand-in backend.
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it
@@ -753,6 +809,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Service files and packages | `meridian` for Linux and Windows x86_64 in release archives, with a checksum file and an attestation. A systemd unit and a Dockerfile for the proxy, in the repository (section 5.7) | A published image, a package, and a unit or an image for the sidecar or the panel. The unit and the Dockerfile were not run on a real host. The sidecar and the panel are built from the sources |
 | Several proxies, or a proxy that restarts without dropping players | Nothing | A second proxy for the same servers: the counts and the caps are per proxy, and players on a proxy that dies are dropped |
 | Placing players | Caps, a drain, balancing among lobbies and `/play` for games, evacuation of a restarting server | Moving a group from a lobby to a game, matchmaking, a decision on who starts a move |
+| Waiting when full | `[queue]`: a bounded line, first come first served, for a full proxy or lobbies at their hard cap (section 5.10) | A longer wait with a message of position, a line per group or role, priority |
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
 | Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), groups of permissions with `perm`, `/send`, `/glist` and `/alert` in game (section 5.9), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for the bans and the groups, an expiry on a ban or a rank, a sync with the servers' lists, a player database in the proxy |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
