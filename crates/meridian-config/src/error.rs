@@ -145,6 +145,8 @@ pub enum ConfigError {
     ZeroSilentRounds,
     /// `[restart] grace-seconds` is zero.
     ZeroRestartGrace,
+    /// `[fallback] max-attempts` is zero.
+    ZeroFallbackAttempts,
     /// `[proxy-protocol] mode` is `optional` or `required` and `trusted` is empty.
     ProxyProtocolWithoutTrusted,
     /// An entry of `[proxy-protocol] trusted` is not an address or a range.
@@ -400,6 +402,9 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::ZeroRestartGrace => {
                 write!(f, "[restart] grace-seconds must be more than 0")
+            }
+            ConfigError::ZeroFallbackAttempts => {
+                write!(f, "[fallback] max-attempts must be more than 0")
             }
             ConfigError::ProxyProtocolWithoutTrusted => write!(
                 f,

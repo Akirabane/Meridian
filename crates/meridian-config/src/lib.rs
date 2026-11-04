@@ -7,6 +7,7 @@ mod auth;
 mod balancing;
 mod commands;
 mod error;
+mod fallback;
 mod favicon;
 mod metrics;
 mod permissions;
@@ -20,6 +21,7 @@ pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
+pub use fallback::Fallback;
 pub use favicon::{FAVICON_SIDE, Favicon, MAX_FAVICON_BYTES};
 pub use metrics::Metrics;
 pub use permissions::{
@@ -35,6 +37,7 @@ use access::FileAccess;
 use auth::FileAuth;
 use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
+use fallback::FileFallback;
 use metrics::FileMetrics;
 use permissions::FilePermissionSettings;
 use proxy_protocol::FileProxyProtocol;
@@ -212,6 +215,8 @@ pub struct Config {
     pub balancing: Balancing,
     /// The `[restart]` table.
     pub restart: Restart,
+    /// The `[fallback]` table.
+    pub fallback: Fallback,
     /// The `[proxy-protocol]` table.
     pub proxy_protocol: ProxyProtocol,
     /// The `[metrics]` table.
@@ -272,6 +277,7 @@ impl Default for Config {
             balanced: Vec::new(),
             balancing: Balancing::default(),
             restart: Restart::default(),
+            fallback: Fallback::default(),
             proxy_protocol: ProxyProtocol::default(),
             metrics: Metrics::default(),
             access: AccessSettings::default(),
@@ -315,6 +321,7 @@ impl std::fmt::Debug for Config {
             balanced,
             balancing,
             restart,
+            fallback,
             proxy_protocol,
             metrics,
             access,
@@ -357,6 +364,7 @@ impl std::fmt::Debug for Config {
             .field("balanced", balanced)
             .field("balancing", balancing)
             .field("restart", restart)
+            .field("fallback", fallback)
             .field("proxy_protocol", proxy_protocol)
             .field("metrics", metrics)
             .field("access", access)
@@ -406,6 +414,8 @@ struct File {
     balancing: FileBalancing,
     #[serde(default)]
     restart: FileRestart,
+    #[serde(default)]
+    fallback: FileFallback,
     #[serde(default)]
     proxy_protocol: FileProxyProtocol,
     #[serde(default)]
@@ -604,6 +614,7 @@ impl Config {
             balanced,
             balancing: file.balancing.into_settings(),
             restart: file.restart.into_settings(),
+            fallback: file.fallback.into_settings(),
             proxy_protocol: file.proxy_protocol.into_settings()?,
             metrics: file.metrics.into_settings()?,
             access: file.access.into_settings(folder),
@@ -678,6 +689,7 @@ impl Config {
         self.commands.validate(self)?;
         self.validate_balancing()?;
         self.restart.validate()?;
+        self.fallback.validate()?;
         self.proxy_protocol.validate()?;
         self.metrics.validate(self.listen)?;
         self.queue.validate(self.connect_timeout_ms)?;
@@ -953,3 +965,6 @@ mod permissions_tests;
 mod queue_tests;
 #[cfg(test)]
 mod sidecar_tests;
+
+#[cfg(test)]
+mod fallback_tests;

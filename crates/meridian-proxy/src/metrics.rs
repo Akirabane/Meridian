@@ -122,6 +122,13 @@ const CAUSES: [&str; 3] = ["announced", "panel", "unreachable"];
 
 /// How a player's wait in the login queue ended (`queue::Left`).
 const QUEUE_ENDS: [&str; 3] = ["served", "timeout", "gone"];
+/// The ways a player's server can be lost, and what became of the player.
+const FALLBACKS: [(&str, &str); 4] = [
+    ("kick", "moved"),
+    ("crash", "moved"),
+    ("kick", "failed"),
+    ("crash", "failed"),
+];
 
 /// What the proxy counts. Everything is an atomic counter or a gauge set by one store.
 #[derive(Default)]
@@ -138,6 +145,7 @@ pub struct Metrics {
     evacuated: AtomicU64,
     stayed: AtomicU64,
     restarts: [AtomicU64; CAUSES.len()],
+    fallbacks: [AtomicU64; FALLBACKS.len()],
     status_rounds: AtomicU64,
     last_status_round_micros: AtomicU64,
     queue_entered: AtomicU64,
@@ -195,6 +203,14 @@ impl Metrics {
         self.evacuations.fetch_add(1, Ordering::Relaxed);
         self.evacuated.fetch_add(moved as u64, Ordering::Relaxed);
         self.stayed.fetch_add(stayed as u64, Ordering::Relaxed);
+    }
+
+    /// A player whose server was lost in the game was moved to another (`moved`), or could
+    /// not be and was disconnected.
+    pub fn fallback(&self, loss: &meridian_handoff::Loss, moved: bool) {
+        let kick = matches!(loss, meridian_handoff::Loss::Kicked(_));
+        let i = usize::from(!moved) * 2 + usize::from(!kick);
+        self.fallbacks[i].fetch_add(1, Ordering::Relaxed);
     }
 
     /// A backend was found to be going down.
@@ -555,6 +571,20 @@ pub fn render(proxy: &Proxy) -> String {
         let _ = writeln!(
             out,
             "meridian_restarts_detected_total{{cause=\"{cause}\"}} {}",
+            get(counter)
+        );
+    }
+
+    family(
+        &mut out,
+        "meridian_fallbacks_total",
+        "counter",
+        "Players whose server was lost in the game: moved to another, or disconnected for want of one.",
+    );
+    for ((cause, result), counter) in FALLBACKS.iter().zip(&m.fallbacks) {
+        let _ = writeln!(
+            out,
+            "meridian_fallbacks_total{{cause=\"{cause}\",result=\"{result}\"}} {}",
             get(counter)
         );
     }

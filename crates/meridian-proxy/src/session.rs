@@ -22,7 +22,7 @@ use meridian_net::{
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 /// How the proxy reaches a backend: [`meridian_net::backend::connect`] when it
@@ -71,6 +71,9 @@ pub struct Sessions {
     pub permissions: Arc<crate::permissions::Lists>,
     /// The players who wait for a place.
     pub queue: crate::queue::LoginQueue,
+    /// The configuration in force, which a reload replaces: set by the proxy that owns these
+    /// sessions, for what a session decides long after its login (the fallback).
+    live: OnceLock<Arc<RwLock<Arc<Config>>>>,
 }
 
 /// What placement reads, held apart from [`Sessions`] so that a command typed in
@@ -338,6 +341,19 @@ impl Sessions {
     }
 
     /// What placement reads, for a command that outlives this borrow.
+    /// Makes `live` the configuration that [`Sessions::current_config`] reads.
+    pub fn follow_config(&self, live: Arc<RwLock<Arc<Config>>>) {
+        let _ = self.live.set(live);
+    }
+
+    /// The configuration in force now, or `login`'s when the sessions follow none (tests).
+    pub fn current_config(&self, login: &Config) -> Arc<Config> {
+        match self.live.get() {
+            Some(live) => Arc::clone(&live.read().unwrap_or_else(|e| e.into_inner())),
+            None => Arc::new(login.clone()),
+        }
+    }
+
     pub fn shared(&self) -> Shared {
         Shared {
             open: Arc::clone(&self.open),
@@ -648,6 +664,9 @@ fn place(
             .set_read_timeout(Some(client::READ_TIMEOUT));
     }
     line.served();
+    // What the fallback needs of the login, which the session takes over.
+    let profile = session.profile.clone();
+    let virtual_host = session.virtual_host.clone();
     let (relay, handle) = match Session::new(session, link, &backend.name) {
         Ok(session) => session,
         Err(e) => {
@@ -700,7 +719,22 @@ fn place(
         backend.name
     );
     let started = Instant::now();
-    match relay.run() {
+    let policy = sessions.current_config(config).fallback.clone();
+    let mut replace = crate::fallback::replacer(crate::fallback::Context {
+        sessions,
+        connect,
+        config,
+        handle: &handle,
+        profile: &profile,
+        virtual_host: virtual_host.as_deref(),
+        auth,
+        peer,
+    });
+    let fallback = meridian_handoff::Fallback {
+        on_kick: policy.on_kick,
+        on_crash: policy.on_crash,
+    };
+    match relay.run_with(fallback, &mut replace) {
         Ok(report) => info!(
             "{peer}: {name} ({}) left backend \"{}\" after {:.1} s: \
              {} packets, {} bytes to the player; {} packets, {} bytes to the backend",
@@ -887,6 +921,12 @@ pub(crate) mod tests {
             online_mode: false,
             compression_threshold: 256,
             forwarding_secret: SECRET.into(),
+            // These tests relay a session to the backend's close; the fallback has its own.
+            fallback: meridian_config::Fallback {
+                on_kick: false,
+                on_crash: false,
+                ..meridian_config::Fallback::default()
+            },
             ..Config::default()
         }
     }
