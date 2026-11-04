@@ -155,6 +155,15 @@ pub enum ConfigError {
     InvalidMetricsBind(String),
     /// `[metrics]` is on and listens where the proxy takes players.
     MetricsOnListen(std::net::SocketAddr),
+    /// `[queue] wait-seconds` is zero.
+    ZeroQueueWait,
+    /// `[queue] max-length` is zero.
+    ZeroQueueLength,
+    /// `[queue] wait-seconds` leaves the client waiting too long in silence.
+    QueueWaitTooLong {
+        wait_seconds: u64,
+        connect_timeout_ms: u64,
+    },
     /// `favicon` names a file that is not a usable 64x64 PNG.
     InvalidFavicon {
         path: std::path::PathBuf,
@@ -412,6 +421,17 @@ impl fmt::Display for ConfigError {
                 f,
                 "[metrics] bind = \"{address}\" is where the proxy takes players (listen): \
                  give the metrics a port of their own"
+            ),
+            ConfigError::ZeroQueueWait => write!(f, "[queue] wait-seconds must be more than 0"),
+            ConfigError::ZeroQueueLength => write!(f, "[queue] max-length must be more than 0"),
+            ConfigError::QueueWaitTooLong {
+                wait_seconds,
+                connect_timeout_ms,
+            } => write!(
+                f,
+                "[queue] wait-seconds = {wait_seconds} is too long: the player's client sees nothing                  from the proxy while it waits and gives up after 30 seconds, so the wait (at most                  {}) plus connect-timeout-ms ({connect_timeout_ms} ms) must stay under {} ms",
+                crate::queue::MAX_QUEUE_WAIT_SECONDS,
+                crate::queue::QUEUE_SILENCE_LIMIT_MS
             ),
             ConfigError::InvalidFavicon { path, reason } => {
                 write!(f, "favicon {}: {reason}", path.display())

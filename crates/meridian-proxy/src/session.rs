@@ -7,6 +7,7 @@ use crate::commands;
 use crate::health::Health;
 use crate::log::{debug, info, warning};
 use crate::metrics::{LoginFailure, Metrics};
+use crate::queue;
 use crate::route::{self, Full};
 use crate::status::Statuses;
 use crate::switching::{self, Switcher};
@@ -68,6 +69,8 @@ pub struct Sessions {
     pub access: crate::access::Lists,
     /// The groups of permissions and the players in them.
     pub permissions: Arc<crate::permissions::Lists>,
+    /// The players who wait for a place.
+    pub queue: crate::queue::LoginQueue,
 }
 
 /// What placement reads, held apart from [`Sessions`] so that a command typed in
@@ -187,11 +190,13 @@ pub(crate) enum NotOpened {
 }
 
 /// A place taken under the player limit, given back when it is dropped.
-pub(crate) struct Admission<'a>(&'a AtomicUsize);
+pub(crate) struct Admission<'a>(&'a AtomicUsize, &'a crate::queue::LoginQueue);
 
 impl Drop for Admission<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
+        // The next player in the line may have a place now.
+        self.1.wake();
     }
 }
 
@@ -220,11 +225,16 @@ impl Sessions {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Ok(Admission(&self.admitted)),
+                Ok(_) => return Ok(Admission(&self.admitted, &self.queue)),
                 // Another login took or gave back a place: check again.
                 Err(actual) => now = actual,
             }
         }
+    }
+
+    /// Whether the proxy has begun to close: new sessions are refused.
+    pub(crate) fn closing(&self) -> bool {
+        self.closing.load(Ordering::Relaxed)
     }
 
     /// How many players hold a place under the limit.
@@ -379,6 +389,8 @@ impl Sessions {
     pub fn close_all(&self) -> usize {
         let open = self.lock();
         self.closing.store(true, Ordering::Relaxed);
+        // Players who wait for a place are told as well.
+        self.queue.wake();
         for Entry { handle, .. } in open.values() {
             // `multiplayer.disconnect.server_shutdown`: the "Server closed" of the
             // player's own language.
@@ -487,15 +499,49 @@ pub(crate) fn serve(
             }
         }
     }
-    let Ok(_admission) = sessions.admit(config.max_players) else {
-        info!(
-            "{peer}: {name} ({}) refused: the proxy has its {} players",
-            hyphenated(uuid),
-            config.max_players
-        );
-        sessions.metrics().login_failed(LoginFailure::Full);
-        refuse(session.connection, Full::MESSAGE);
-        return;
+    let line = queue::Line::new(&sessions.queue, sessions.metrics(), &config.queue, &name);
+    place(session, peer, config, connect, sessions, identity, line);
+}
+
+/// A player who passed the ban list and the check for a second login: a place under the
+/// player limit (after a wait in the queue when there is none and the queue is on), the
+/// first backend that answers among the ones the routes allow, then the relay.
+fn place(
+    mut session: ClientSession,
+    peer: SocketAddr,
+    config: &Config,
+    connect: &Connect,
+    sessions: &Sessions,
+    identity: Identity,
+    mut line: queue::Line<'_>,
+) {
+    let name = session.profile.name.clone();
+    let uuid = session.profile.uuid;
+    // The limit is read at each try: a reload while the player waits changes it.
+    let max_players = || sessions.queue.max_players(config.max_players);
+    let stopping = || sessions.closing();
+    let taken = line.take(
+        || sessions.admit(max_players()).ok(),
+        &mut queue::Who {
+            connection: &mut session.connection,
+            stopping: &stopping,
+        },
+    );
+    let _admission = match taken {
+        Ok(admission) => admission,
+        Err(why) => {
+            let reason = format!("the proxy has its {} players", max_players());
+            queue::turn_away(
+                why,
+                session.connection,
+                sessions,
+                peer,
+                &name,
+                uuid,
+                &reason,
+            );
+            return;
+        }
     };
     // Counted as online in the server list from now until the session ends.
     let _seat = client::Seat::take(&name, uuid);
@@ -559,7 +605,26 @@ pub(crate) fn serve(
             }
         }
     }
-    let Some((backend, link, reservation)) = joined else {
+    let Some((backend, mut link, reservation)) = joined else {
+        if balanced.full && line.enabled() {
+            // Every lobby is at its hard cap. A player who can wait keeps their turn, gives
+            // their place back and tries again when something changes.
+            drop(_seat);
+            drop(_admission);
+            let stopping = || sessions.closing();
+            let mut who = queue::Who {
+                connection: &mut session.connection,
+                stopping: &stopping,
+            };
+            match line.await_room(&mut who) {
+                Ok(()) => return place(session, peer, config, connect, sessions, identity, line),
+                Err(why) => {
+                    let reason = "every lobby is at its hard cap";
+                    queue::turn_away(why, session.connection, sessions, peer, &name, uuid, reason);
+                    return;
+                }
+            }
+        }
         if balanced.full {
             info!(
                 "{peer}: {name} ({}) refused: every lobby is at its hard cap",
@@ -573,6 +638,16 @@ pub(crate) fn serve(
         }
         return;
     };
+    // The wait, if there was one, is over: the player leaves the line and the backend
+    // gets what they sent meanwhile.
+    if line.was_queued() {
+        line.forward_early(&mut link.connection);
+        let _ = session
+            .connection
+            .reader
+            .set_read_timeout(Some(client::READ_TIMEOUT));
+    }
+    line.served();
     let (relay, handle) = match Session::new(session, link, &backend.name) {
         Ok(session) => session,
         Err(e) => {
@@ -748,7 +823,7 @@ fn cannot_reach(tried: &[String]) -> String {
 /// Tells a player in the configuration phase why the session ends, then gives
 /// them a moment to read it and close, so that the reason is not lost to a reset
 /// connection.
-fn refuse(mut connection: Connection, reason: &str) {
+pub(crate) fn refuse(mut connection: Connection, reason: &str) {
     let packet = configuration::Clientbound::Disconnect(configuration::Disconnect {
         reason: text::literal(reason),
     });
@@ -1674,6 +1749,179 @@ pub(crate) mod tests {
         assert_eq!(sessions.admitted(), 1, "only the place already held");
         drop(held);
         assert_eq!(sessions.admitted(), 0);
+    }
+
+    /// A proxy with room for one player, whose queue is on.
+    fn queued(wait_seconds: u64, max_length: u32) -> Config {
+        Config {
+            max_players: 1,
+            queue: meridian_config::QueueSettings {
+                enabled: true,
+                wait_seconds,
+                max_length,
+            },
+            ..routed()
+        }
+    }
+
+    /// With the queue on, a player who finds the proxy full waits, and gets the place
+    /// that is given back, then goes to their backend.
+    #[test]
+    fn a_player_waits_for_a_place_and_gets_it() {
+        let config = queued(5, 3);
+        let sessions = Sessions::default();
+        let held = sessions.admit(1).unwrap();
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        let started = Instant::now();
+        let (tried, _) = std::thread::scope(|scope| {
+            let sessions = &sessions;
+            scope.spawn(move || {
+                while sessions.queue.len() == 0 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                drop(held);
+            });
+            route_one(
+                &config,
+                sessions,
+                &*connect,
+                &backends,
+                logged_in("Steve", client::AuthKind::Offline, None),
+                vec![Step::ExpectClose],
+            )
+        });
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(tried, ["127.0.0.1:25601"]);
+        assert_eq!(sessions.queue.len(), 0);
+        assert_eq!(sessions.admitted(), 0);
+        assert_eq!(sessions.metrics().queue_counts(), (1, 0, [1, 0, 0]));
+        assert_eq!(sessions.metrics().failures_of(LoginFailure::Full), 0);
+    }
+
+    /// A wait that runs out is the refusal a full proxy always gave.
+    #[test]
+    fn a_wait_that_runs_out_refuses_the_player() {
+        let config = queued(1, 3);
+        let sessions = Sessions::default();
+        let _held = sessions.admit(1).unwrap();
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        let started = Instant::now();
+        let (tried, trace) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Steve", client::AuthKind::Offline, None),
+            refused(),
+        );
+        assert!(started.elapsed() >= Duration::from_millis(950));
+        assert!(tried.is_empty());
+        assert_eq!(refusal(&trace), "The server is full");
+        assert_eq!(sessions.queue.len(), 0);
+        assert_eq!(sessions.admitted(), 1, "only the place already held");
+        assert_eq!(sessions.metrics().queue_counts(), (1, 0, [0, 1, 0]));
+        assert_eq!(sessions.metrics().failures_of(LoginFailure::Full), 1);
+    }
+
+    /// A player who closes the connection while they wait is out of the line, and
+    /// costs no place and no backend.
+    #[test]
+    fn a_player_who_leaves_the_queue_costs_nothing() {
+        let config = queued(10, 3);
+        let sessions = Sessions::default();
+        let _held = sessions.admit(1).unwrap();
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        let started = Instant::now();
+        let (tried, _) = route_one(
+            &config,
+            &sessions,
+            &*connect,
+            &backends,
+            logged_in("Steve", client::AuthKind::Offline, None),
+            vec![Step::Close],
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(tried.is_empty());
+        assert_eq!(sessions.queue.len(), 0);
+        assert_eq!(sessions.admitted(), 1);
+        assert_eq!(sessions.metrics().queue_counts(), (1, 0, [0, 0, 1]));
+    }
+
+    /// With the line at its longest, the next player is refused at once, and the one
+    /// who waits is served when the place comes.
+    #[test]
+    fn a_full_queue_refuses_at_once() {
+        let config = queued(10, 1);
+        let sessions = Sessions::default();
+        let held = sessions.admit(1).unwrap();
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        std::thread::scope(|scope| {
+            let (alex, alex_end) = logged_in("Alex", client::AuthKind::Offline, None);
+            let alex_peer = meridian_testkit::peer::spawn(
+                alex_end,
+                vec![Step::ExpectClose],
+                Dir::ToClient,
+                Recorder::new(),
+            );
+            let serving = scope.spawn(|| serve(alex, peer(), &config, &*connect, &sessions));
+            while sessions.queue.len() == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let started = Instant::now();
+            let (tried, trace) = route_one(
+                &config,
+                &sessions,
+                &*connect,
+                &backends,
+                logged_in("Bob", client::AuthKind::Offline, None),
+                refused(),
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(tried.is_empty());
+            assert_eq!(refusal(&trace), "The server is full");
+            assert_eq!(sessions.queue.len(), 1, "Alex still waits");
+            drop(held);
+            serving.join().unwrap();
+            alex_peer.join().unwrap().unwrap();
+        });
+        let (entered, refused_at_once, left) = sessions.metrics().queue_counts();
+        assert_eq!((entered, refused_at_once, left), (1, 1, [1, 0, 0]));
+        for thread in backends.threads.lock().unwrap().drain(..) {
+            thread.join().unwrap().unwrap();
+        }
+    }
+
+    /// A reload that raises `max-players` serves the player who waits.
+    #[test]
+    fn a_reload_that_raises_the_limit_serves_the_queue() {
+        let config = queued(10, 3);
+        let sessions = Sessions::default();
+        let _held = sessions.admit(1).unwrap();
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        let (tried, _) = std::thread::scope(|scope| {
+            let sessions = &sessions;
+            scope.spawn(move || {
+                while sessions.queue.len() == 0 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                sessions.queue.set_max_players(2);
+            });
+            route_one(
+                &config,
+                sessions,
+                &*connect,
+                &backends,
+                logged_in("Steve", client::AuthKind::Offline, None),
+                vec![Step::ExpectClose],
+            )
+        });
+        assert_eq!(tried, ["127.0.0.1:25601"]);
+        assert_eq!(sessions.queue.len(), 0);
     }
 
     /// The limit counts places as they are taken, not sessions as they open.

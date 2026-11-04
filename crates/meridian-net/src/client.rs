@@ -31,7 +31,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The read timeout left on the connection for the rest of the session:
 /// vanilla's 30 s.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `ServerHandshakePacketListenerImpl`: a client older than this protocol is told
 /// it is outdated, any other mismatch that it is incompatible.

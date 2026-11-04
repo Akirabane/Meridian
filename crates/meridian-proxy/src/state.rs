@@ -68,6 +68,8 @@ impl Proxy {
 
     /// Puts `config` in force for the logins that start from now on.
     pub fn set_config(&self, config: Config) {
+        // Players who wait for a place see the new limit at once.
+        self.sessions.queue.set_max_players(config.max_players);
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(config);
     }
 

@@ -11,6 +11,7 @@ mod metrics;
 mod notices;
 mod permissions;
 mod placing;
+mod queue;
 mod restart;
 // Used by the session once routing is wired in; until then only its tests call it.
 #[cfg_attr(not(test), allow(dead_code))]

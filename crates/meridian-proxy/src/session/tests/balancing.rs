@@ -215,6 +215,81 @@ fn a_player_is_told_the_server_is_full_when_every_lobby_has_its_hard_cap() {
     assert_eq!(sessions.admitted(), 0);
 }
 
+fn waiting_up_to(mut config: Config, wait_seconds: u64) -> Config {
+    config.queue = meridian_config::QueueSettings {
+        enabled: true,
+        wait_seconds,
+        max_length: 5,
+    };
+    config
+}
+
+/// With the queue on, a player who finds every lobby at its hard cap waits, and is placed
+/// when one has room again, in their turn.
+#[test]
+fn a_player_waits_for_a_lobby_to_have_room() {
+    let config = waiting_up_to(balanced(true, 1, 1), 5);
+    let sessions = Sessions::default();
+    let held = [
+        hold(&sessions, &config, "lobby"),
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "west"),
+    ];
+    let started = Instant::now();
+    let (tried, _) = std::thread::scope(|scope| {
+        let sessions = &sessions;
+        scope.spawn(move || {
+            while sessions.queue.len() == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        login_one(
+            &config,
+            sessions,
+            vec![(LOBBY, true), (EAST, true), (WEST, true)],
+            None,
+            vec![Step::ExpectClose],
+        )
+    });
+    assert!(!tried.is_empty(), "the player was placed");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(sessions.queue.len(), 0);
+    assert_eq!(sessions.admitted(), 0);
+    assert_eq!(sessions.metrics().queue_counts(), (1, 0, [1, 0, 0]));
+}
+
+/// Lobbies that stay full: the wait ends in the refusal there always was.
+#[test]
+fn a_wait_for_a_lobby_that_runs_out_refuses_the_player() {
+    let config = waiting_up_to(balanced(true, 1, 1), 1);
+    let sessions = Sessions::default();
+    let _held = [
+        hold(&sessions, &config, "lobby"),
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "west"),
+    ];
+    let started = Instant::now();
+    let (tried, trace) = login_one(
+        &config,
+        &sessions,
+        vec![(LOBBY, true), (EAST, true), (WEST, true)],
+        None,
+        refused(),
+    );
+    assert!(started.elapsed() >= Duration::from_millis(950));
+    assert!(tried.is_empty(), "{tried:?}");
+    assert_eq!(refusal(&trace), Full::MESSAGE);
+    assert_eq!(sessions.queue.len(), 0);
+    assert_eq!(sessions.admitted(), 0, "no place is kept while waiting");
+    assert_eq!(sessions.metrics().queue_counts(), (1, 0, [0, 1, 0]));
+}
+
 /// A lobby that does not answer: the player goes to the next, and the place
 /// reserved on the first is given back.
 #[test]
