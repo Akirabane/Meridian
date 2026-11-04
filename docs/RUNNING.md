@@ -98,6 +98,10 @@ first chunk batch, packet by packet. It leaves out the packets that depend on
 timing or on the mobs that happened to be around: the time of day, pings,
 keep-alives and entity packets. It compares ids, not contents. The program prints
 a `RESULT` line and exits with 0 only when the player stayed its time and left.
+If the server takes the player back to the configuration phase while they play, as the
+proxy does to move a player whose server was lost ([OPERATING.md](OPERATING.md), section
+5.11), the player acknowledges, goes through the new configuration phase and is back in
+the world; the `RESULT` line says how many times in `moves=`.
 
 ## 5. What was seen
 

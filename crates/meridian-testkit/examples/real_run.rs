@@ -11,10 +11,12 @@
 //! The last line printed by `run` starts with `RESULT` and says how the session
 //! ended: `clean` (the client left after its time), `disconnect` (the server sent a
 //! disconnect, whose text follows), `closed` (the connection was closed with no
-//! packet) or `error`. The exit status is 0 only for `clean`.
+//! packet) or `error`. The exit status is 0 only for `clean`. `moves` counts the times the
+//! server took the player back to the configuration phase while they played, as a proxy does
+//! to move a player whose server was lost, and the player came out of it.
 use horizon_protocol::ids;
 use meridian_testkit::{
-    live::{End, Options, session},
+    live::{End, Moves, Options, session_counting},
     trace::{Dir, Recorder},
 };
 use std::{fmt::Write as _, process::ExitCode, time::Instant};
@@ -66,7 +68,8 @@ fn run(args: &[String]) -> ExitCode {
     };
     let recorder = Recorder::new();
     let started = Instant::now();
-    let end = session(&o, &recorder);
+    let moves = Moves::default();
+    let end = session_counting(&o, &recorder, &moves);
     let trace = recorder.trace();
     if let Some(path) = &out {
         let mut text = String::new();
@@ -84,10 +87,11 @@ fn run(args: &[String]) -> ExitCode {
         End::Error(e) => ("error", e.clone(), 1),
     };
     println!(
-        "RESULT {word} packets={} bytes={} seconds={:.1} {detail}",
+        "RESULT {word} packets={} bytes={} seconds={:.1} moves={} {detail}",
         trace.count(Dir::ToClient),
         trace.bytes(Dir::ToClient),
-        started.elapsed().as_secs_f32()
+        started.elapsed().as_secs_f32(),
+        moves.done()
     );
     ExitCode::from(code)
 }
