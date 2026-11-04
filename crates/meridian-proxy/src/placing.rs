@@ -264,6 +264,48 @@ fn in_roles(
     Err(none.to_owned())
 }
 
+/// Where a player on the drained `from` can go: the best server of the same role by the
+/// rule of the login, never `from`, and never one that serves the other kind of player
+/// than `from` does (DESIGN.md section 15.3). A place is reserved on it. `Err` is why
+/// the player has nowhere to go.
+pub fn elsewhere(config: &Config, shared: &Shared, from: &str) -> Result<Reservation, String> {
+    let Some(limits) = config.balanced(from) else {
+        return Err(format!("{from} has no role"));
+    };
+    let role = limits.role;
+    // Without routes, groups choose nothing. With them, the players of `from` are of the
+    // kind its group is for.
+    let kind = (!config.routes.is_empty())
+        .then(|| {
+            config
+                .groups
+                .iter()
+                .find(|g| g.backends.iter().any(|b| b == from))
+        })
+        .flatten()
+        .map(|g| g.auth);
+    let retry = Duration::from_secs(config.backend_retry_seconds);
+    let now = Instant::now();
+    shared
+        .balancer
+        .retain(|name| config.balanced(name).is_some());
+    let servers: Vec<Server<'_>> = config
+        .servers_with_role(role)
+        .filter(|s| s.backend != from)
+        .filter(|s| kind.is_none_or(|k| !crate::route::serves_other_kind(config, &s.backend, k)))
+        .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
+        .collect();
+    shared
+        .balancer
+        .reserve(
+            &servers,
+            || shared.counts(),
+            config.balancing.margin,
+            config.balancing.tie_break,
+        )
+        .map_err(|NoRoom| format!("no other server of role {} has room", role.name()))
+}
+
 /// Connects to `name` with the place already reserved. Whatever happens, `name` is
 /// not tried again for this login.
 #[allow(clippy::too_many_arguments)]
