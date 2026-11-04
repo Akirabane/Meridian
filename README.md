@@ -223,6 +223,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   role, the caps and the drain.
 - [docs/RESTART.md](docs/RESTART.md): detecting that a server is about to restart, and
   sending its players elsewhere.
+- [docs/PARITY.md](docs/PARITY.md): what Velocity and BungeeCord do, function by function, where
+  Meridian stands, and what to build next.
 - [docs/BUILD.md](docs/BUILD.md): building and testing.
 - [crates/meridian-panel](crates/meridian-panel/README.md): a local panel to try the
   proxy with three Horizon servers on one machine.
