@@ -81,15 +81,21 @@ pub enum LoginFailure {
     NoRoute,
     /// No backend of the list took the player.
     Unreachable,
+    /// The player, their account or their address is banned (docs/OPERATING.md).
+    Banned,
+    /// The whitelist is on and the player is not on it.
+    NotWhitelisted,
 }
 
 impl LoginFailure {
-    const ALL: [LoginFailure; 5] = [
+    const ALL: [LoginFailure; 7] = [
         LoginFailure::Protocol,
         LoginFailure::Duplicate,
         LoginFailure::Full,
         LoginFailure::NoRoute,
         LoginFailure::Unreachable,
+        LoginFailure::Banned,
+        LoginFailure::NotWhitelisted,
     ];
 
     fn label(self) -> &'static str {
@@ -99,6 +105,8 @@ impl LoginFailure {
             LoginFailure::Full => "full",
             LoginFailure::NoRoute => "no_route",
             LoginFailure::Unreachable => "unreachable",
+            LoginFailure::Banned => "banned",
+            LoginFailure::NotWhitelisted => "not_whitelisted",
         }
     }
 }

@@ -11,7 +11,7 @@ use crate::route::{self, Full};
 use crate::status::Statuses;
 use crate::switching::{self, Switcher};
 use horizon_protocol::{connection::Connection, packets::configuration, text};
-use meridian_config::{Config, OnDuplicate};
+use meridian_config::{Config, OnDuplicate, Refusal};
 use meridian_handoff::{Session, SessionHandle as Handle};
 use meridian_net::{
     Profile,
@@ -64,6 +64,8 @@ pub struct Sessions {
     pub balancer: Arc<Balancer>,
     /// What the backends last reported of themselves, read by the balancer.
     pub statuses: Arc<Statuses>,
+    /// The bans and the whitelist.
+    pub access: crate::access::Lists,
 }
 
 /// What placement reads, held apart from [`Sessions`] so that a command typed in
@@ -409,6 +411,18 @@ pub(crate) fn serve(
 ) {
     let name = session.profile.name.clone();
     let uuid = session.profile.uuid;
+    // A ban or the whitelist is settled before anything else: a refused player costs no
+    // place, and no backend is asked for them.
+    if let Some(refusal) = sessions.access.refusal(&name, uuid, peer.ip()) {
+        let (why, failure) = match &refusal {
+            Refusal::Banned(_) => ("banned", LoginFailure::Banned),
+            Refusal::NotWhitelisted => ("not whitelisted", LoginFailure::NotWhitelisted),
+        };
+        info!("{peer}: {name} ({}) refused: {why}", hyphenated(uuid));
+        sessions.metrics().login_failed(failure);
+        refuse(session.connection, &refusal.message());
+        return;
+    }
     // A second login of a connected player is settled before anything else, so
     // a refused one costs no place and no backend login.
     let identity = Identity::of(&session);
@@ -728,6 +742,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::thread::JoinHandle;
 
+    mod access;
     mod balancing;
 
     const SECRET: &str = "a shared secret";

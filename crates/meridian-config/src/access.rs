@@ -264,16 +264,20 @@ impl Access {
             .find(|b| matches!(&b.target, Target::Net(net) if net.contains(address)))
     }
 
-    /// Why the player called `name`, with unique id `uuid`, from `address`, may not
-    /// join, if they may not: a ban of their name, account or address first, then
-    /// the whitelist when it is on.
-    pub fn refusal(&self, name: &str, uuid: [u8; 16], address: IpAddr) -> Option<Refusal> {
-        let banned = self.bans.iter().find(|b| match &b.target {
+    /// The ban that holds the player called `name`, with unique id `uuid`, from
+    /// `address`: one of their name, their account or their address.
+    pub fn ban_of(&self, name: &str, uuid: [u8; 16], address: IpAddr) -> Option<&Ban> {
+        self.bans.iter().find(|b| match &b.target {
             Target::Name(n) => n.eq_ignore_ascii_case(name),
             Target::Uuid(u) => *u == uuid,
             Target::Net(net) => net.contains(address),
-        });
-        if let Some(ban) = banned {
+        })
+    }
+
+    /// Why the player called `name`, with unique id `uuid`, from `address`, may not
+    /// join, if they may not: a ban first, then the whitelist when it is on.
+    pub fn refusal(&self, name: &str, uuid: [u8; 16], address: IpAddr) -> Option<Refusal> {
+        if let Some(ban) = self.ban_of(name, uuid, address) {
             return Some(Refusal::Banned(ban.reason.clone()));
         }
         let listed = self.allowed.iter().any(|t| match t {

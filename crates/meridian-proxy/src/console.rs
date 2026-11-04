@@ -5,6 +5,7 @@
 //! The commands are a table of [`Command`]s, each a name, a usage line, a line of
 //! help and the function that runs it. [`Commands::register`] adds one, so the
 //! proxy's own extensions can add theirs later.
+use crate::access;
 use crate::log::{debug, info, warning};
 use crate::session::{Player, hyphenated};
 use crate::state::Proxy;
@@ -90,6 +91,30 @@ impl Commands {
                 kick,
             ),
             command(
+                "ban",
+                "ban <name|uuid|ip> [reason]",
+                "bans a player, an account or an address (or a range, as 203.0.113.0/24), and ends the sessions it holds",
+                access::commands::ban,
+            ),
+            command(
+                "pardon",
+                "pardon <name|uuid|ip>",
+                "lifts a ban",
+                access::commands::pardon,
+            ),
+            command(
+                "banlist",
+                "banlist",
+                "lists the bans",
+                access::commands::banlist,
+            ),
+            command(
+                "whitelist",
+                "whitelist <add|remove> <name|uuid> | list | on | off",
+                "lets in only the players of the whitelist while it is on",
+                access::commands::whitelist,
+            ),
+            command(
                 "reload",
                 "reload",
                 "reads the configuration file again and applies what it can",
@@ -173,7 +198,7 @@ pub fn start(proxy: Arc<Proxy>) -> std::io::Result<JoinHandle<()>> {
         })
 }
 
-fn usage(command: &str, commands: &Commands) -> String {
+pub(crate) fn usage(command: &str, commands: &Commands) -> String {
     match commands.find(command) {
         Some(c) => format!("usage: {}", c.usage),
         None => format!("usage: {command}"),
@@ -475,7 +500,23 @@ pub fn reload_file(proxy: &Proxy) -> Reply {
             proxy.config_path.display()
         )
     })?;
-    Ok(apply(proxy, new))
+    // The bans and the whitelist are read before anything is applied, so that a file
+    // that cannot be read changes nothing.
+    let file = new.access.file.clone();
+    let lists = access::read(file.as_deref()).map_err(|e| {
+        format!("not reloaded, the bans and the whitelist are unchanged in use: {e}")
+    })?;
+    let mut lines = apply(proxy, new);
+    if let Some(lists) = lists {
+        let more = access::commands::reloaded(proxy, lists, file);
+        if !more.is_empty() {
+            if lines.len() == 1 {
+                lines = vec!["reloaded:".to_owned()];
+            }
+            lines.extend(more);
+        }
+    }
+    Ok(lines)
 }
 
 /// Puts a checked configuration in force and says what changed. No player is
@@ -671,7 +712,19 @@ mod tests {
         let proxy = proxy();
         let lines = run(&proxy, "help");
         for name in [
-            "help", "list", "servers", "drain", "undrain", "switch", "send", "kick", "reload",
+            "help",
+            "list",
+            "servers",
+            "drain",
+            "undrain",
+            "switch",
+            "send",
+            "kick",
+            "ban",
+            "pardon",
+            "banlist",
+            "whitelist",
+            "reload",
             "end",
         ] {
             assert!(
