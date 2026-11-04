@@ -6,6 +6,7 @@ mod auth;
 mod balancing;
 mod commands;
 mod error;
+mod metrics;
 mod proxy_protocol;
 mod restart;
 mod sidecar;
@@ -14,6 +15,7 @@ pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
+pub use metrics::Metrics;
 pub use proxy_protocol::{ProxyProtocol, ProxyProtocolMode, TrustedNet};
 pub use restart::Restart;
 pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
@@ -21,6 +23,7 @@ pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
 use auth::FileAuth;
 use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
+use metrics::FileMetrics;
 use proxy_protocol::FileProxyProtocol;
 use restart::FileRestart;
 
@@ -192,6 +195,8 @@ pub struct Config {
     pub restart: Restart,
     /// The `[proxy-protocol]` table.
     pub proxy_protocol: ProxyProtocol,
+    /// The `[metrics]` table.
+    pub metrics: Metrics,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -242,6 +247,7 @@ impl Default for Config {
             balancing: Balancing::default(),
             restart: Restart::default(),
             proxy_protocol: ProxyProtocol::default(),
+            metrics: Metrics::default(),
         }
     }
 }
@@ -280,6 +286,7 @@ impl std::fmt::Debug for Config {
             balancing,
             restart,
             proxy_protocol,
+            metrics,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -317,6 +324,7 @@ impl std::fmt::Debug for Config {
             .field("balancing", balancing)
             .field("restart", restart)
             .field("proxy_protocol", proxy_protocol)
+            .field("metrics", metrics)
             .finish()
     }
 }
@@ -362,6 +370,8 @@ struct File {
     restart: FileRestart,
     #[serde(default)]
     proxy_protocol: FileProxyProtocol,
+    #[serde(default)]
+    metrics: FileMetrics,
 }
 
 #[derive(Deserialize)]
@@ -539,6 +549,7 @@ impl Config {
             balancing: file.balancing.into_settings(),
             restart: file.restart.into_settings(),
             proxy_protocol: file.proxy_protocol.into_settings()?,
+            metrics: file.metrics.into_settings()?,
         };
         config.validate()?;
         Ok(config)
@@ -609,6 +620,7 @@ impl Config {
         self.validate_balancing()?;
         self.restart.validate()?;
         self.proxy_protocol.validate()?;
+        self.metrics.validate(self.listen)?;
         for s in &self.sidecars {
             if self.backend(&s.backend).is_none() {
                 return Err(ConfigError::UnknownBackend {
@@ -846,6 +858,9 @@ mod commands_tests;
 
 #[cfg(test)]
 mod balancing_tests;
+
+#[cfg(test)]
+mod metrics_tests;
 
 #[cfg(test)]
 mod restart_tests;

@@ -219,6 +219,14 @@ mode = "off"
 # Milliseconds a trusted connection has to send the whole header.
 header-timeout-ms = 3000
 
+# A page of counters in the Prometheus text format (GET /metrics) and a health check
+# (GET /healthz: 200 while the proxy takes players, 503 once it is stopping). Off by
+# default. It has no password and no TLS: keep it on the loopback, or behind a firewall
+# that only lets your monitor in. Read when the proxy starts; a reload does not change it.
+[metrics]
+enabled = false
+bind = "127.0.0.1:9100"
+
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.
 [commands]

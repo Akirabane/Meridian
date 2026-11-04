@@ -388,17 +388,60 @@ fn server_of<'n>(
     })
 }
 
-/// What the console says of a balanced backend: its role, its players against its
-/// caps, whether the balancer offers it, and how quickly it answered. `None` for a
-/// backend with no role. `on` is the players its sessions count, and `restarting` why the
-/// proxy believes the backend is going down, if it does (docs/RESTART.md).
-pub fn describe(
+/// Whether the balancer offers a backend to new players, and if not why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Offer {
+    /// Under its soft cap.
+    Open,
+    /// At its soft cap: only an overflow or a named choice goes there.
+    Closed,
+    /// The detector believes it is going down, for this reason.
+    Restarting(String),
+    /// Drained from the console.
+    Drained,
+    /// It reports that it does not accept transfers.
+    NoTransfers,
+    /// Its last report is older than `state-max-age-seconds`.
+    Stale,
+}
+
+impl Offer {
+    /// The word the metrics give for it: `draining` covers the three ways a backend is
+    /// kept from new players on purpose.
+    pub fn state(&self) -> &'static str {
+        match self {
+            Offer::Open => "open",
+            Offer::Closed => "closed",
+            Offer::Restarting(_) | Offer::Drained | Offer::NoTransfers => "draining",
+            Offer::Stale => "not_offered",
+        }
+    }
+}
+
+/// A balanced backend as the balancer sees it now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Standing {
+    pub role: Role,
+    /// The players it counts: the sessions on it and the places reserved for players
+    /// being sent there.
+    pub players: usize,
+    pub soft_cap: u32,
+    pub hard_cap: u32,
+    pub ping: Option<Duration>,
+    pub offer: Offer,
+}
+
+/// `name` as the balancer sees it: its role, its players against its caps, and
+/// whether it is offered. `None` for a backend with no role. `on` is the players its
+/// sessions count, and `restarting` why the proxy believes the backend is going down,
+/// if it does (docs/RESTART.md).
+pub fn standing(
     config: &Config,
     shared: &Shared,
     name: &str,
     on: usize,
     restarting: Option<&str>,
-) -> Option<String> {
+) -> Option<Standing> {
     let limits = config.balanced(name)?;
     let now = Instant::now();
     let retry = Duration::from_secs(config.backend_retry_seconds);
@@ -408,33 +451,64 @@ pub fn describe(
     let report = shared.statuses.report(name, max_age, now);
     // The detector drained it; an operator who offered it again is believed over the detector.
     let restarting = restarting.filter(|_| shared.balancer.is_drained(name));
-    let offered = if let Some(why) = restarting {
-        format!("draining (restarting: {why})")
+    let offer = if let Some(why) = restarting {
+        Offer::Restarting(why.to_owned())
     } else if shared.balancer.is_drained(name) {
-        "draining (drained from the console)".to_owned()
+        Offer::Drained
     } else if matches!(report, Report::Fresh(s) if s.accepts_transfers == Some(false)) {
-        "draining (it does not accept transfers)".to_owned()
+        Offer::NoTransfers
     } else if report == Report::Stale {
-        format!(
-            "not offered (no report for {} s)",
-            config.balancing.state_max_age_seconds
-        )
+        Offer::Stale
     } else if shared
         .balancer
         .is_closed_now(&candidate, config.balancing.margin)
     {
-        "closed (soft cap reached)".to_owned()
+        Offer::Closed
     } else {
-        "open".to_owned()
+        Offer::Open
+    };
+    Some(Standing {
+        role: limits.role,
+        players: candidate.players,
+        soft_cap: candidate.soft_cap,
+        hard_cap: candidate.hard_cap,
+        ping: candidate.ping,
+        offer,
+    })
+}
+
+/// What the console says of a balanced backend: its role, its players against its
+/// caps, whether the balancer offers it, and how quickly it answered. `None` for a
+/// backend with no role. See [`standing`] for the arguments.
+pub fn describe(
+    config: &Config,
+    shared: &Shared,
+    name: &str,
+    on: usize,
+    restarting: Option<&str>,
+) -> Option<String> {
+    let standing = standing(config, shared, name, on, restarting)?;
+    let now = Instant::now();
+    let retry = Duration::from_secs(config.backend_retry_seconds);
+    let offered = match &standing.offer {
+        Offer::Restarting(why) => format!("draining (restarting: {why})"),
+        Offer::Drained => "draining (drained from the console)".to_owned(),
+        Offer::NoTransfers => "draining (it does not accept transfers)".to_owned(),
+        Offer::Stale => format!(
+            "not offered (no report for {} s)",
+            config.balancing.state_max_age_seconds
+        ),
+        Offer::Closed => "closed (soft cap reached)".to_owned(),
+        Offer::Open => "open".to_owned(),
     };
     let mut line = format!(
         "role {}, {}/{} (hard {}): {offered}",
-        limits.role.name(),
-        candidate.players,
-        candidate.soft_cap,
-        candidate.hard_cap
+        standing.role.name(),
+        standing.players,
+        standing.soft_cap,
+        standing.hard_cap
     );
-    if let Some(ping) = candidate.ping {
+    if let Some(ping) = standing.ping {
         line.push_str(&format!(", ping {} ms", ping.as_millis()));
     }
     if let Some(passed) = shared.health.describe(name, retry, now) {

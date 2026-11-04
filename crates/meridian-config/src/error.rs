@@ -149,6 +149,10 @@ pub enum ConfigError {
     InvalidTrustedAddress { entry: String, reason: String },
     /// `[proxy-protocol] header-timeout-ms` is zero.
     ZeroProxyProtocolTimeout,
+    /// `[metrics] bind` is not an address with a port.
+    InvalidMetricsBind(String),
+    /// `[metrics]` is on and listens where the proxy takes players.
+    MetricsOnListen(std::net::SocketAddr),
 }
 
 impl fmt::Display for ConfigError {
@@ -389,6 +393,15 @@ impl fmt::Display for ConfigError {
             ConfigError::ZeroProxyProtocolTimeout => {
                 write!(f, "[proxy-protocol] header-timeout-ms must be more than 0")
             }
+            ConfigError::InvalidMetricsBind(value) => write!(
+                f,
+                "[metrics] bind = \"{value}\" is not a host:port address with a port above 0"
+            ),
+            ConfigError::MetricsOnListen(address) => write!(
+                f,
+                "[metrics] bind = \"{address}\" is where the proxy takes players (listen): \
+                 give the metrics a port of their own"
+            ),
             ConfigError::MaxPlayersTooLarge(n) => write!(
                 f,
                 "max-players = {n} is too large: the most is {}, and 0 means no limit",

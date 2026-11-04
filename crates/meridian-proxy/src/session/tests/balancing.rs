@@ -205,6 +205,12 @@ fn a_player_is_told_the_server_is_full_when_every_lobby_has_its_hard_cap() {
     );
     assert!(tried.is_empty(), "{tried:?}");
     assert_eq!(refusal(&trace), Full::MESSAGE);
+    assert_eq!(
+        sessions
+            .metrics()
+            .failures_of(crate::metrics::LoginFailure::Full),
+        1
+    );
     assert_eq!(sessions.admitted(), 0);
 }
 

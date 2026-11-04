@@ -212,6 +212,7 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
             while !proxy.stopping() {
                 let config = proxy.config();
                 if config.balancing.enabled {
+                    let round = Instant::now();
                     poll(&config, &ask_sidecar, &proxy.sessions.statuses);
                     crate::restart::observe_round(
                         &config,
@@ -222,6 +223,7 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
                     if config.balancing.tie_break == meridian_config::TieBreak::Ping {
                         measure(&config, &*proxy.probe, &proxy.sessions.statuses);
                     }
+                    proxy.sessions.metrics().status_round(round.elapsed());
                 }
                 let wait = Duration::from_secs(config.balancing.probe_interval_seconds);
                 let until = Instant::now() + wait;

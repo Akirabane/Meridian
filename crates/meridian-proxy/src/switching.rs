@@ -3,10 +3,12 @@
 //! `meridian-handoff`'s; this module finds the sidecars of the two backends in the
 //! configuration, reaches them, and says how it went, step by step, in the log.
 use crate::log::{error, info, warning};
+use crate::metrics::{self, Metrics};
 use meridian_config::{Config, Sidecar};
 use meridian_handoff::{Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend};
 use meridian_net::backend::BackendOptions;
 use meridian_sidecar::client::SidecarClient;
+use std::cell::Cell;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +23,9 @@ pub type Controls =
 pub struct Switcher {
     pub controls: Arc<Controls>,
     pub digests: Digests,
+    /// What the proxy counts, here because every part of the proxy that moves players
+    /// reaches the sessions through the switcher (`Sessions::metrics`).
+    pub metrics: Arc<Metrics>,
 }
 
 impl Default for Switcher {
@@ -28,6 +33,7 @@ impl Default for Switcher {
         Switcher {
             controls: Arc::new(sidecar_control),
             digests: Digests::default(),
+            metrics: Arc::default(),
         }
     }
 }
@@ -104,6 +110,33 @@ pub fn switch(
     player_address: IpAddr,
     target: &str,
 ) -> Result<Moved, String> {
+    // The step a failure happened at: anything before the switch itself is a check.
+    let step = Cell::new(metrics::step_label(meridian_handoff::Step::Check));
+    let result = attempt(
+        config,
+        switcher,
+        handle,
+        name,
+        player_address,
+        target,
+        &step,
+    );
+    match &result {
+        Ok(moved) => switcher.metrics.transfer_done(&moved.done, moved.took),
+        Err(_) => switcher.metrics.transfer_failed(step.get()),
+    }
+    result
+}
+
+fn attempt(
+    config: &Config,
+    switcher: &Switcher,
+    handle: &SessionHandle,
+    name: &str,
+    player_address: IpAddr,
+    target: &str,
+    step: &Cell<&'static str>,
+) -> Result<Moved, String> {
     let from = handle.backend();
     let failed = |why: String| format!("{name} could not move from {from} to {target}: {why}");
     let Some(backend) = config.backend(target) else {
@@ -168,7 +201,10 @@ pub fn switch(
         &switcher.digests,
         &settings,
     )
-    .map_err(|failure| failed(failure.to_string()))?;
+    .map_err(|failure| {
+        step.set(metrics::step_label(failure.step));
+        failed(failure.to_string())
+    })?;
     // The new server has the player placed; the old one would not let them go, so it
     // saves its own copy when the proxy closes its connection, and the two servers'
     // files differ. Nothing undoes that: the operator is told, in the log and on the
@@ -184,6 +220,7 @@ pub fn switch(
             to = backend.name,
         );
         error!("{alert}");
+        switcher.metrics.alert();
         alert
     });
     Ok(Moved {
