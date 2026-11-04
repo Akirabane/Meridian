@@ -82,6 +82,11 @@ impl Statuses {
 
     /// Whether `backend` was failing before this success, which is worth saying.
     fn recovered(&self, backend: &str) -> bool {
+        self.failing(backend)
+    }
+
+    /// Whether the last attempt to read `backend`'s state failed.
+    pub fn failing(&self, backend: &str) -> bool {
         self.lock().failing.contains(backend)
     }
 
@@ -179,6 +184,12 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
                 let config = proxy.config();
                 if config.balancing.enabled {
                     poll(&config, &ask_sidecar, &proxy.sessions.statuses);
+                    crate::restart::observe_round(
+                        &config,
+                        &proxy.sessions.statuses,
+                        &proxy.restarts,
+                        Instant::now(),
+                    );
                     if config.balancing.tie_break == meridian_config::TieBreak::Ping {
                         measure(&config, &*proxy.probe, &proxy.sessions.statuses);
                     }

@@ -1,6 +1,7 @@
 //! What the accept loop, the players' threads and the console share: the
 //! configuration, which the console can reload, the sessions being relayed, the
 //! stop flag, and how backends are reached.
+use crate::restart::{Detector, LogOnly, Settings};
 use crate::session::{Connect, Sessions};
 use crate::throttle::Throttle;
 use meridian_config::Config;
@@ -26,20 +27,29 @@ pub struct Proxy {
     pub probe: Arc<Probe>,
     /// The connections each address opened this minute.
     pub throttle: Throttle,
+    /// Which backends are going down (docs/RESTART.md).
+    pub restarts: Detector,
 }
 
 impl Proxy {
     /// The state of a running proxy: backends are reached over TCP, and `stop`
     /// is the flag Ctrl+C sets.
     pub fn new(config: Config, config_path: PathBuf, stop: Arc<AtomicBool>) -> Self {
+        let sessions = Sessions::default();
+        let restarts = Detector::new(
+            Arc::clone(&sessions.balancer),
+            Arc::new(LogOnly),
+            Settings::default(),
+        );
         Self {
             config: RwLock::new(Arc::new(config)),
             config_path,
-            sessions: Sessions::default(),
+            sessions,
             stop,
             connect: Arc::new(backend::connect),
             probe: Arc::new(tcp_probe),
             throttle: Throttle::default(),
+            restarts,
         }
     }
 
