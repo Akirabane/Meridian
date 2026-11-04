@@ -147,7 +147,7 @@ pub use control::{
     Arrival, Exported, Imported, Outcome, PlayerControl, Record, record_dimension, record_handover,
     uuid_text,
 };
-pub use session::{Session, SessionHandle};
+pub use session::{Fallback, Loss, Replacement, Session, SessionHandle};
 pub use switch::{
     After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,
 };

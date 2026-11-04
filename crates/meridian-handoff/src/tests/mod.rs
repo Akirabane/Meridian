@@ -31,6 +31,7 @@ fn target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<TargetSaw, S
 }
 
 mod configure;
+mod fallback;
 mod session;
 mod switch;
 
