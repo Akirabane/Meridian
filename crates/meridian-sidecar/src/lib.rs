@@ -35,6 +35,22 @@ pub enum Error {
     Endpoint(String),
     /// The sidecar refused the request, and said why.
     Refused(String),
+    /// The sidecar could not get the backend's answer (no answer in time, the
+    /// endpoint closed, its file unreadable while the backend restarts). Unlike a
+    /// [`Error::Refused`], the backend never said no, and may or may not have acted.
+    Unreached(String),
+}
+
+impl Error {
+    /// Whether the request or its answer may have been lost on the way, so that
+    /// asking again makes sense for a request that can safely be repeated. A refusal
+    /// is an answer, and a signature that does not match will not heal.
+    pub fn is_lost(&self) -> bool {
+        matches!(
+            self,
+            Error::Io(_) | Error::Timeout | Error::Endpoint(_) | Error::Unreached(_)
+        )
+    }
 }
 
 impl fmt::Display for Error {
@@ -45,6 +61,7 @@ impl fmt::Display for Error {
             Error::Wire(e) => write!(f, "{e}"),
             Error::Endpoint(why) => f.write_str(why),
             Error::Refused(why) => write!(f, "the sidecar refused: {why}"),
+            Error::Unreached(why) => write!(f, "the sidecar got no answer from the backend: {why}"),
         }
     }
 }

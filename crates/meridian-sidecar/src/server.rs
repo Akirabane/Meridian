@@ -128,6 +128,7 @@ fn answer(body: &str, settings: &Settings) -> Value {
             json!({ "ok": false, "error": map["error"] })
         }
         Ok(result) => json!({ "ok": true, "result": result }),
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        // The backend never answered: the proxy may ask again what can be asked twice.
+        Err(e) => json!({ "ok": false, "error": e.to_string(), "unreached": true }),
     }
 }

@@ -103,6 +103,9 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
         backend_count(config.backends.len()),
         config.default_backend
     );
+    for warning in switching::startup_warnings(&config) {
+        warning!("{warning}");
+    }
     let proxy = Arc::new(Proxy::new(config, path, stop));
     // Without a console the proxy still runs: it then stops on Ctrl+C alone.
     if let Err(e) = console::start(Arc::clone(&proxy)) {

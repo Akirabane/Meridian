@@ -7,7 +7,7 @@ requests of a switch (DESIGN.md section 6, decision 8):
 | Request | Line on the server's endpoint | What the backend does |
 | --- | --- | --- |
 | `expect` (`seconds`) | `player-expect <uuid> [seconds]` | holds the player when they log in through the proxy within that time (10 s by default, 60 at most) |
-| `export` (`freeze`) | `player-export <uuid> [freeze]` | gives the player's record, to move to another backend; with `freeze`, stops acting on the player's own inputs until a release, and the record carries the `handover` id that starts the hand-over (asked again, it gives the same record). Without `freeze` it is a read, with a null `handover` |
+| `export` (`freeze`) | `player-export <uuid> [freeze]` | gives the player's record, to move to another backend; with `freeze`, stops acting on the player's own inputs until a release, and the record carries the `handover` id that starts the hand-over, with `freeze_ticks_left` beside it (asked again, it gives the same record and does not freeze again). Without `freeze` it is a read, with a null `handover` |
 | `import` (`record`, `parts`, `announce`, `place`, `arrival`) | `player-import <uuid> {"record":…,"parts":[…],"announce":…,"place":…}`, and with an `arrival` its `"position"`, `"rotation"`, `"velocity"` and `"on_ground"` beside the record | puts the record on the held player, whole or in parts, and lets them into the world; the record must carry the `handover` of its export (a record without one is refused by the sidecar and by the backend); with `place` false the player stays held, and the reply's `placed` says which. An `arrival` (`{"position": [x, y, z], "rotation": [yaw, pitch], "velocity": [vx, vy, vz], "on_ground": bool}`, the last two optional) puts the player there instead of the record's place: the backend reads only the record's player compound. It goes with the `position` part only, and numbers the backend would refuse are refused before it is sent |
 | `confirm` (`handover`) | `player-confirm <uuid> <handover>` | places a held player whose record was imported with `place` false (refused when no player is held, its record was not imported, or it is another hand-over's) |
 | `release` (`handover`; `moved` with `announce`, or `abort`) | `player-release <uuid> <handover> moved [announce]`, `player-release <uuid> <handover> abort` | ends a switch: the player has gone for good, or stays. The source refuses `moved` once the freeze has run out |
@@ -40,6 +40,14 @@ A request from the proxy is one JSON object with an `op`, for example:
 {"op": "confirm", "uuid": "123e4567-e89b-12d3-a456-426614174000", "handover": "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69"}
 {"op": "release", "uuid": "123e4567-e89b-12d3-a456-426614174000", "handover": "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69", "outcome": "moved", "announce": true}
 ```
+
+When the sidecar cannot get the backend's answer (no answer in time, the endpoint
+closed, its file unreadable while the backend restarts), its reply is
+`{"ok": false, "error": "...", "unreached": true}`: the backend never said no, and
+may or may not have acted. `SidecarClient::recover` makes the connection ready to
+ask again after that, or after a connection that broke, by opening a new one; the
+proxy asks again only for an export of a frozen player, which the server answers with
+the same record each time. A refusal is an answer, and `recover` then does nothing.
 
 Options left out take Horizon's defaults; any other field is refused.
 
