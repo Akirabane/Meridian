@@ -197,6 +197,9 @@ pub struct TargetWorld {
     /// moves the view's centre before the position, and sends the chunks around
     /// the new place in a batch after it, as Horizon does.
     pub recenter: bool,
+    /// The operator level the target gives the player at login, as the entity event
+    /// 24 plus the level sent before the command tree; none sends no event.
+    pub permission: Option<u8>,
 }
 
 impl Default for TargetWorld {
@@ -207,6 +210,7 @@ impl Default for TargetWorld {
             import_sends_position: true,
             chatter: Duration::ZERO,
             recenter: false,
+            permission: None,
         }
     }
 }
@@ -269,6 +273,15 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
         send_typed(&mut c, &position(1, 40.0));
         // The target's own entity 5 is the client's player id.
         send_typed(&mut c, &add_entity(CLIENT_ID, 500));
+        if let Some(level) = world.permission {
+            send_typed(
+                &mut c,
+                &C::EntityEvent(play::EntityEvent {
+                    id: TARGET_ID,
+                    event: 24 + level as i8,
+                }),
+            );
+        }
         send(&mut c, pc::COMMANDS, &[0, 0]);
         send(&mut c, pc::CHUNK_BATCH_FINISHED, &varint(9));
         // A whole answer, with the place: a server cannot read one without it.

@@ -239,6 +239,15 @@ effects, post effects and the inventory (`lan/hub.rs:889-960`). Level info
 (`send_level_info`, `lan/hub.rs:1217-1249`) is the border, the time, the default
 spawn, the weather, `LEVEL_CHUNKS_LOAD_START` and the tick rate.
 
+The permission level is the entity event 24 plus the level (`lan/hub.rs`,
+`send_permission_level`), sent once, at login, and not again when the held player is
+placed. The client learns its level from it alone, and the views keep no entity
+events, so the proxy keeps the target's event and sends it after the delta, with the
+client's entity id and before the command tree, on every switch: a client that went
+from a server where it is not an operator to one where it is (or back) would
+otherwise keep the first server's level and refuse what it may do (`prepare.rs`,
+`permission_event`).
+
 For Meridian this has three consequences:
 
 - `LEVEL_CHUNKS_LOAD_START` (`lan/hub.rs:1238-1243`) is what makes the client
