@@ -205,6 +205,20 @@ silent-rounds = 3
 # Seconds a backend that was told to stop may go on answering before it counts as back.
 grace-seconds = 60
 
+# The PROXY protocol, version 1 or 2: the header a layer 4 load balancer (HAProxy, nginx
+# stream, a host's balancer) in front of the proxy writes to say who the player is. Off by
+# default. Anyone who may send the header can claim any address, so it is read only from
+# the addresses listed in "trusted", and a mode other than "off" needs that list. See
+# docs/OPERATING.md.
+[proxy-protocol]
+# "off": no header is read. "optional": a connection from a trusted address may begin with
+# a header or not. "required": it must, and a connection from any other address is closed.
+mode = "off"
+# The addresses or ranges of the load balancers. Not a range of every address.
+# trusted = ["10.0.0.5", "192.168.0.0/16"]
+# Milliseconds a trusted connection has to send the whole header.
+header-timeout-ms = 3000
+
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.
 [commands]

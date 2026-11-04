@@ -261,6 +261,43 @@ or `debug`. There is no log file or rotation: let the service manager or a redir
 `switch` and `send` are the operator's own choice and ignore the balancer's caps. `reload` keeps the current configuration if the new file is invalid. `listen` cannot be changed
 by a reload. A server removed from the file keeps its players until they leave.
 
+### 5.6 Behind a load balancer
+
+A layer 4 load balancer (HAProxy in `mode tcp`, nginx `stream`, a host's TCP balancer) in
+front of the proxy hides the player's address: every connection comes from the balancer. With
+the PROXY protocol the balancer writes the real address at the start of the connection.
+
+```toml
+[proxy-protocol]
+mode = "required"
+trusted = ["10.0.0.5"]        # the balancer's address, or the range of its addresses
+header-timeout-ms = 3000
+```
+
+Rules the proxy keeps, so that a player cannot choose their address:
+
+- The header is read **only** from `trusted` addresses. From any other address the proxy does
+  not look for one, and in `required` it closes the connection at once. A direct client that
+  writes a header gets nothing from it.
+- `trusted` cannot be empty with `optional` or `required`, and cannot be a range of every
+  address (`/0`). Do not list a range that players can be in.
+- Make the balancer the only way in: firewall the proxy's port so that only the balancer can
+  reach it, or `required` closes the others anyway. In `optional` a player who connects
+  directly is a player, with their own address.
+- Set the balancer to send the header (HAProxy: `send-proxy` or `send-proxy-v2` on the
+  `server` line; nginx: `proxy_protocol on;` in the `stream` server). Version 1 and 2 are
+  both read. A balancer's health check that connects and closes is closed quietly (debug
+  level), and a header with no address (`LOCAL`) leaves the connection's own address.
+
+The address in the header is the one in the proxy's log (`203.0.113.9:51234: Alex (...) joined
+backend "lobby"`), the one `connections-per-minute` and the hybrid lookups count, and the
+one forwarded to the servers. The Horizon servers do not see the PROXY header:
+the proxy speaks to them with the forwarding of section 3.
+
+Test it before opening: connect through the balancer, and check that the proxy's log shows
+your own address and not the balancer's. Then connect straight to the proxy's port from a
+machine that is not trusted and check, with `required`, that the connection is closed.
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are three ways the proxy learns of it
@@ -306,6 +343,9 @@ Before the first player:
       (20 per address by default) and `connect-timeout-ms` set on purpose.
 - [ ] `auth-mode` is `"online"` unless the network is closed, and you read what an unverified
       player is ([README](../README.md#login-modes)).
+- [ ] Behind a load balancer: `[proxy-protocol]` is on with `trusted` set to the balancer's
+      addresses only, the balancer sends the header, the proxy's port is closed to everyone
+      else, and the proxy's log shows a test player's own address (section 5.6).
 - [ ] Sidecars listen on `127.0.0.1`, and the proxy reaches them over a private network, a
       VPN or a tunnel. Never `--insecure-remote` over the internet.
 - [ ] If you switch players: the Horizon build has `[transfer]` and `max_freeze_seconds` is
@@ -421,7 +461,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Encryption between the player and the proxy | The game's own encryption of the login in online mode (`auth-mode = "online"`). The Minecraft Java protocol has no TLS, so there is no certificate to configure | Nothing to add on this leg |
 | Encryption between the proxy and a server | A signed login (the forwarding secret). After the login the leg is plain TCP: the proxy refuses a server that asks the player to authenticate | Encryption. Keep servers on a private network or a VPN |
 | TLS for the sidecar | A signed, replay-proof exchange, listening on `127.0.0.1` by default; `--allow-remote` with `--insecure-remote` is refused without both | TLS. The proxy must reach each sidecar over a trusted network or a tunnel |
-| The real address of a player behind a TCP load balancer (PROXY protocol) | The address the proxy sees is what the per-address limits and the forwarded data use | The PROXY protocol, which is planned. Behind a load balancer every player has the balancer's address, so `connections-per-minute` counts them together |
+| The real address of a player behind a TCP load balancer (PROXY protocol) | `[proxy-protocol]`: versions 1 and 2, read only from the balancers you list, `optional` or `required`. The address is used for the log, the connection limits and the address forwarded to the servers (section 5.6) | Nothing for the PROXY protocol itself. The servers behind the proxy still see the proxy; the player's address reaches them in the forwarded data |
 | Metrics | `list` and `servers` on the console, and the log | A metrics endpoint, counters and a health check page. A monitor can ask the proxy's server list status on its port to know it is up |
 | Operating without a terminal | The panel types commands for a proxy it starts | A remote console or administration port, a signal for `reload`, a handler for SIGTERM |
 | Logs | One line per event on standard error, in UTC | A log file, rotation, a structured format. Let the service manager keep them |

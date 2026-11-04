@@ -6,6 +6,7 @@ mod auth;
 mod balancing;
 mod commands;
 mod error;
+mod proxy_protocol;
 mod restart;
 mod sidecar;
 
@@ -13,12 +14,14 @@ pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
+pub use proxy_protocol::{ProxyProtocol, ProxyProtocolMode, TrustedNet};
 pub use restart::Restart;
 pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
 
 use auth::FileAuth;
 use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
+use proxy_protocol::FileProxyProtocol;
 use restart::FileRestart;
 
 use serde::Deserialize;
@@ -187,6 +190,8 @@ pub struct Config {
     pub balancing: Balancing,
     /// The `[restart]` table.
     pub restart: Restart,
+    /// The `[proxy-protocol]` table.
+    pub proxy_protocol: ProxyProtocol,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -236,6 +241,7 @@ impl Default for Config {
             balanced: Vec::new(),
             balancing: Balancing::default(),
             restart: Restart::default(),
+            proxy_protocol: ProxyProtocol::default(),
         }
     }
 }
@@ -273,6 +279,7 @@ impl std::fmt::Debug for Config {
             balanced,
             balancing,
             restart,
+            proxy_protocol,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -309,6 +316,7 @@ impl std::fmt::Debug for Config {
             .field("balanced", balanced)
             .field("balancing", balancing)
             .field("restart", restart)
+            .field("proxy_protocol", proxy_protocol)
             .finish()
     }
 }
@@ -352,6 +360,8 @@ struct File {
     balancing: FileBalancing,
     #[serde(default)]
     restart: FileRestart,
+    #[serde(default)]
+    proxy_protocol: FileProxyProtocol,
 }
 
 #[derive(Deserialize)]
@@ -528,6 +538,7 @@ impl Config {
             balanced,
             balancing: file.balancing.into_settings(),
             restart: file.restart.into_settings(),
+            proxy_protocol: file.proxy_protocol.into_settings()?,
         };
         config.validate()?;
         Ok(config)
@@ -597,6 +608,7 @@ impl Config {
         self.commands.validate(self)?;
         self.validate_balancing()?;
         self.restart.validate()?;
+        self.proxy_protocol.validate()?;
         for s in &self.sidecars {
             if self.backend(&s.backend).is_none() {
                 return Err(ConfigError::UnknownBackend {
@@ -837,6 +849,9 @@ mod balancing_tests;
 
 #[cfg(test)]
 mod restart_tests;
+
+#[cfg(test)]
+mod proxy_protocol_tests;
 
 #[cfg(test)]
 mod sidecar_tests;

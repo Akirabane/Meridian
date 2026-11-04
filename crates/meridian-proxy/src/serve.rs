@@ -6,6 +6,7 @@ use crate::log::{debug, info, warning};
 use crate::session;
 use crate::state::Proxy;
 use horizon_protocol::connection::Connection;
+use meridian_config::ProxyProtocolMode;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -64,9 +65,26 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
         }
         match accepted {
             Ok((stream, peer)) => {
-                let per_minute = proxy.config().connections_per_minute;
-                if proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
-                    start_player(stream, peer, proxy, &active);
+                let config = proxy.config();
+                let per_minute = config.connections_per_minute;
+                let table = &config.proxy_protocol;
+                if table.trusts(peer.ip()) {
+                    // A load balancer's connection: the player is who its PROXY header
+                    // says, which is read on the player's own thread, so the limit is
+                    // counted there, on that address and not on the balancer's.
+                    let header = HeaderRead {
+                        required: table.mode == ProxyProtocolMode::Required,
+                        timeout: Duration::from_millis(table.header_timeout_ms),
+                        per_minute,
+                    };
+                    start_player(stream, peer, proxy, &active, Some(header));
+                } else if table.mode == ProxyProtocolMode::Required {
+                    // Not a balancer, and the proxy takes players only through one: the
+                    // address of a direct client is never taken for a player's.
+                    debug!("{peer}: not a trusted address, and a PROXY header is required; closed");
+                    drop(stream);
+                } else if proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
+                    start_player(stream, peer, proxy, &active, None);
                 } else {
                     // Closed before a byte is read: the cheapest answer, and a
                     // client in a loop learns nothing more from a reason.
@@ -144,11 +162,19 @@ fn wake_address(listening: SocketAddr) -> SocketAddr {
     address
 }
 
+/// What to do with the PROXY header of a connection from a trusted address.
+struct HeaderRead {
+    required: bool,
+    timeout: Duration,
+    per_minute: u32,
+}
+
 fn start_player(
     stream: TcpStream,
     peer: SocketAddr,
     proxy: &Arc<Proxy>,
     active: &Arc<AtomicUsize>,
+    header: Option<HeaderRead>,
 ) {
     debug!("{peer}: connected");
     // On some systems an accepted socket inherits the listener's non-blocking mode.
@@ -162,11 +188,66 @@ fn start_player(
         .name(format!("player {peer}"))
         .spawn(move || {
             let _guard = guard;
+            let peer = match header {
+                None => peer,
+                Some(header) => match player_address(&stream, peer, &header, &proxy) {
+                    Some(player) => player,
+                    None => return,
+                },
+            };
             handle(stream, peer, &proxy);
         });
     if let Err(e) = spawned {
         warning!("{peer}: cannot start a thread for the connection: {e}");
     }
+}
+
+/// The address of the player behind `balancer`, a trusted address: the source its PROXY
+/// header gives, or `balancer`'s own when the header says nothing (a health check) or, when
+/// the header is optional, is not there. `None` when the connection is to be closed: the
+/// header is malformed, too long or late, or the player's address is over the limit. Nothing
+/// is written back, since the sender is a balancer and not a Minecraft client.
+fn player_address(
+    stream: &TcpStream,
+    balancer: SocketAddr,
+    header: &HeaderRead,
+    proxy: &Proxy,
+) -> Option<SocketAddr> {
+    use meridian_net::proxy_protocol::{Error, Header, read_header};
+    let player = match read_header(stream, header.required, header.timeout) {
+        Ok(Some(Header::Proxied { source, .. })) => {
+            debug!("{balancer}: the player is {source}");
+            source
+        }
+        Ok(Some(Header::Local)) => {
+            debug!(
+                "{balancer}: a PROXY header with no player address; the connection's own stands"
+            );
+            balancer
+        }
+        Ok(None) => balancer,
+        // A balancer's health check connects and closes, or says nothing: not worth a line
+        // above the debug level.
+        Err(e @ (Error::Closed | Error::Timeout)) => {
+            debug!("{balancer}: {e}; closed");
+            return None;
+        }
+        Err(e) => {
+            warning!("{balancer}: {e}; closed");
+            return None;
+        }
+    };
+    if !proxy
+        .throttle
+        .allow(player.ip(), header.per_minute, Instant::now())
+    {
+        debug!(
+            "{player}: over {} connections this minute; closed",
+            header.per_minute
+        );
+        return None;
+    }
+    Some(player)
 }
 
 /// One player's connection, from the first byte to the close. The configuration
@@ -371,6 +452,317 @@ mod tests {
                 Err(e) => panic!("refused after {} connections: {e}", waiting.len()),
             }
         }
+    }
+
+    // ---- The PROXY protocol ----
+
+    use meridian_config::{AuthMode, ProxyProtocol, TrustedNet};
+    use meridian_testkit::{client::FakeClient, trace::Recorder};
+    use std::io::Write;
+    use std::net::IpAddr;
+    use std::sync::Mutex;
+
+    const V1_FROM_203: &[u8] = b"PROXY TCP4 203.0.113.9 198.51.100.2 51234 25565\r\n";
+
+    /// A version 2 header for the IPv4 source `ip`:`port`.
+    fn v2_from(ip: [u8; 4], port: u16) -> Vec<u8> {
+        let mut header = b"\r\n\r\n\0\r\nQUIT\n".to_vec();
+        header.extend([0x21, 0x11, 0x00, 12]);
+        header.extend(ip);
+        header.extend([198, 51, 100, 2]);
+        header.extend(port.to_be_bytes());
+        header.extend(25565u16.to_be_bytes());
+        header
+    }
+
+    /// A proxy whose backend is a stand-in that writes down the address of each player
+    /// it is asked to log in and then refuses: the player is told so, and the test has
+    /// what the proxy would have forwarded.
+    fn recording_proxy(
+        table: ProxyProtocol,
+        extra: Config,
+    ) -> (Arc<Proxy>, Arc<Mutex<Vec<IpAddr>>>) {
+        let config = Config {
+            backends: vec![Backend {
+                name: "lobby".into(),
+                address: "127.0.0.1:25566".into(),
+            }],
+            default_backend: "lobby".into(),
+            online_mode: false,
+            auth_mode: AuthMode::Offline,
+            forwarding_secret: "secret".into(),
+            proxy_protocol: table,
+            ..extra
+        };
+        let mut proxy = Proxy::new(
+            config,
+            "meridian.toml".into(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        proxy.connect = Arc::new(move |_, _, options| {
+            record.lock().unwrap().push(options.player_address);
+            Err(meridian_net::Error::Io(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "refused",
+            )))
+        });
+        (Arc::new(proxy), seen)
+    }
+
+    fn table(mode: ProxyProtocolMode, trusted: &[&str]) -> ProxyProtocol {
+        ProxyProtocol {
+            mode,
+            trusted: trusted
+                .iter()
+                .map(|t| TrustedNet::parse(t).unwrap())
+                .collect(),
+            header_timeout_ms: 1_000,
+        }
+    }
+
+    /// Runs `proxy` on a listener; `test` gets its address.
+    fn serving(proxy: &Arc<Proxy>, test: impl FnOnce(SocketAddr)) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = {
+            let proxy = Arc::clone(proxy);
+            thread::spawn(move || serve(listener, &proxy))
+        };
+        test(address);
+        proxy.stop();
+        server.join().unwrap().unwrap();
+    }
+
+    /// Connects, writes `first`, then logs in as a player. The proxy reaches the stand-in
+    /// backend or closes the connection before that.
+    fn join_after(address: SocketAddr, first: &[u8]) {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(first).unwrap();
+        let mut connection = Connection::from_stream(stream).unwrap();
+        let _ = FakeClient::named("Alex").run(&mut connection, &Recorder::new());
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn a_trusted_balancers_header_gives_the_address_the_backends_are_told() {
+        for mode in [ProxyProtocolMode::Optional, ProxyProtocolMode::Required] {
+            for header in [V1_FROM_203.to_vec(), v2_from([203, 0, 113, 9], 51234)] {
+                let (proxy, seen) = recording_proxy(table(mode, &["127.0.0.1"]), Config::default());
+                serving(&proxy, |address| join_after(address, &header));
+                assert_eq!(*seen.lock().unwrap(), [ip("203.0.113.9")], "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_optional_header_may_be_left_out_by_a_trusted_address() {
+        let (proxy, seen) = recording_proxy(
+            table(ProxyProtocolMode::Optional, &["127.0.0.0/8"]),
+            Config::default(),
+        );
+        serving(&proxy, |address| join_after(address, &[]));
+        // The connection's own address: this machine.
+        assert_eq!(*seen.lock().unwrap(), [ip("127.0.0.1")]);
+    }
+
+    /// A header with no player in it (a balancer's own check) leaves the connection's address.
+    #[test]
+    fn a_header_with_no_player_address_leaves_the_connections() {
+        let (proxy, seen) = recording_proxy(
+            table(ProxyProtocolMode::Required, &["127.0.0.1"]),
+            Config::default(),
+        );
+        serving(&proxy, |address| join_after(address, b"PROXY UNKNOWN\r\n"));
+        assert_eq!(*seen.lock().unwrap(), [ip("127.0.0.1")]);
+    }
+
+    /// The point of the trusted list: a client that is not a listed balancer cannot give
+    /// itself an address, whatever it sends and whatever the mode.
+    #[test]
+    fn a_header_from_an_untrusted_address_is_never_believed() {
+        for mode in [
+            ProxyProtocolMode::Off,
+            ProxyProtocolMode::Optional,
+            ProxyProtocolMode::Required,
+        ] {
+            // The trusted address is another machine's. In `off`, the list is not even
+            // consulted.
+            let (proxy, seen) = recording_proxy(table(mode, &["192.0.2.1"]), Config::default());
+            serving(&proxy, |address| join_after(address, V1_FROM_203));
+            assert!(
+                seen.lock().unwrap().is_empty(),
+                "{mode:?}: a header from an untrusted address was used: {:?}",
+                seen.lock().unwrap()
+            );
+        }
+        // The same, with a version 2 header.
+        let (proxy, seen) = recording_proxy(
+            table(ProxyProtocolMode::Optional, &["192.0.2.1"]),
+            Config::default(),
+        );
+        serving(&proxy, |address| {
+            join_after(address, &v2_from([203, 0, 113, 9], 1));
+        });
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// With no table, as before: a header is just bytes the proxy does not understand.
+    #[test]
+    fn with_the_protocol_off_a_header_is_not_read_and_a_player_is_as_before() {
+        let (proxy, seen) = recording_proxy(ProxyProtocol::default(), Config::default());
+        serving(&proxy, |address| join_after(address, &[]));
+        assert_eq!(*seen.lock().unwrap(), [ip("127.0.0.1")]);
+        let (proxy, seen) = recording_proxy(ProxyProtocol::default(), Config::default());
+        serving(&proxy, |address| join_after(address, V1_FROM_203));
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_required_header_closes_an_untrusted_address_at_once() {
+        let (proxy, seen) = recording_proxy(
+            table(ProxyProtocolMode::Required, &["192.0.2.1"]),
+            Config::default(),
+        );
+        serving(&proxy, |address| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let _ = stream.write_all(V1_FROM_203);
+            let mut rest = Vec::new();
+            let closed = stream.read_to_end(&mut rest);
+            assert!(
+                matches!(closed, Ok(0))
+                    || closed
+                        .as_ref()
+                        .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
+                "{closed:?}"
+            );
+        });
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_trusted_connection_with_a_bad_header_is_closed_and_no_backend_is_asked() {
+        for (mode, bad) in [
+            (
+                ProxyProtocolMode::Required,
+                &b"PROXY TCP4 not-an-address 198.51.100.2 1 2\r\n"[..],
+            ),
+            (
+                ProxyProtocolMode::Optional,
+                b"PROXY TCP4 203.0.113.9 198.51.100.2 1\r\n",
+            ),
+            // No header where one is required.
+            (ProxyProtocolMode::Required, &[0x10, 0x00, 0xff, 0x05, 0x01]),
+            // A version 2 header with more than the bound.
+            (
+                ProxyProtocolMode::Required,
+                b"\r\n\r\n\0\r\nQUIT\n\x21\x11\xff\xff",
+            ),
+        ] {
+            let (proxy, seen) = recording_proxy(table(mode, &["127.0.0.1"]), Config::default());
+            serving(&proxy, |address| {
+                let mut stream = TcpStream::connect(address).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                stream.write_all(bad).unwrap();
+                let mut rest = Vec::new();
+                let closed = stream.read_to_end(&mut rest);
+                assert!(
+                    matches!(closed, Ok(0))
+                        || closed
+                            .as_ref()
+                            .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
+                    "{closed:?}"
+                );
+                // Nothing is written back to a balancer.
+                assert!(rest.is_empty(), "{rest:?}");
+            });
+            assert!(seen.lock().unwrap().is_empty(), "{mode:?}");
+        }
+    }
+
+    /// A header that never comes does not hold the connection.
+    #[test]
+    fn a_header_that_does_not_come_in_time_closes_the_connection() {
+        let mut table = table(ProxyProtocolMode::Required, &["127.0.0.1"]);
+        table.header_timeout_ms = 200;
+        let (proxy, seen) = recording_proxy(table, Config::default());
+        serving(&proxy, |address| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream.write_all(b"PROXY TCP4 203.0").unwrap();
+            let started = Instant::now();
+            let mut rest = Vec::new();
+            let closed = stream.read_to_end(&mut rest);
+            assert!(
+                matches!(closed, Ok(0))
+                    || closed
+                        .as_ref()
+                        .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
+                "{closed:?}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(5));
+        });
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// The limit per address is the player's, not the balancer's: every player of a
+    /// balancer shares its address, and would be limited together otherwise.
+    #[test]
+    fn the_connection_limit_counts_the_players_address_and_not_the_balancers() {
+        let (proxy, _) = recording_proxy(
+            table(ProxyProtocolMode::Required, &["127.0.0.1"]),
+            Config {
+                connections_per_minute: 1,
+                ..Config::default()
+            },
+        );
+        serving(&proxy, |address| {
+            let open = |source: [u8; 4]| {
+                let mut stream = TcpStream::connect(address).unwrap();
+                stream.write_all(&v2_from(source, 1000)).unwrap();
+                stream
+            };
+            // Whether the proxy is still waiting for the player's handshake (open) or
+            // has closed the connection (over the limit).
+            let state = |stream: &mut TcpStream| {
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(400)))
+                    .unwrap();
+                let mut byte = [0u8; 1];
+                match stream.read(&mut byte) {
+                    Ok(0) => "closed",
+                    Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "closed",
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        "open"
+                    }
+                    other => panic!("{other:?}"),
+                }
+            };
+            let mut first = open([203, 0, 113, 9]);
+            assert_eq!(state(&mut first), "open");
+            // Another player behind the same balancer.
+            let mut second = open([203, 0, 113, 10]);
+            assert_eq!(state(&mut second), "open");
+            // The first player's address again, in the same minute.
+            let mut again = open([203, 0, 113, 9]);
+            assert_eq!(state(&mut again), "closed");
+        });
     }
 
     #[test]

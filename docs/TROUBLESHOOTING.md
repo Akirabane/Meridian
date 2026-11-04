@@ -44,6 +44,20 @@ What the player sees, then what the log says.
 | The connection closes right after the server list | `WARN <peer>: <error>; closing the connection` | The client sent something the proxy does not accept | Read `<error>`; with `MERIDIAN_LOG=debug`, look at the lines before it |
 | Nothing: the connection is closed without a message | `DEBUG <peer>: over <n> connections this minute; closed` | `connections-per-minute` (20 by default) reached for that address. Server list pings count | Raise the limit, or `0` for none. Many players behind one NAT address can reach it |
 
+Behind a load balancer (`[proxy-protocol]`, [OPERATING.md](OPERATING.md) section 5.6):
+
+| The log says | Cause | Action |
+| --- | --- | --- |
+| `WARN <balancer>: malformed PROXY header: <why>; closed` | A trusted address sent bytes that begin like a header and are not one: a wrong version, a bad address or port, a missing line break, a header for UDP | Check the balancer's setting (`send-proxy` or `send-proxy-v2`), and that nothing else writes to that port |
+| `WARN <balancer>: the connection does not begin with a PROXY header; closed` | `mode = "required"` and the balancer sent none | Turn on the header at the balancer, or use `"optional"` while you change it |
+| `WARN <balancer>: the PROXY header is longer than is accepted; closed` | A header over 107 bytes (version 1) or over 536 after the first 16 (version 2) | A balancer adding large extensions; remove them |
+| `DEBUG <peer>: not a trusted address, and a PROXY header is required; closed` | `mode = "required"` and a connection from an address that is not in `trusted` | Expected for anyone but the balancers. If it is the balancer, add its address (as the proxy sees it) to `trusted` |
+| `DEBUG <balancer>: the PROXY header did not arrive in time; closed` or `the connection closed inside the PROXY header` | A silent or short connection (a health check), or a slow balancer | None for a check; raise `header-timeout-ms` if real players are cut |
+| Players all show the balancer's address in the log | The mode is `"off"`, or the balancer's address is not in `trusted` (the proxy then treats its header as nothing), or the balancer sends no header | Check the mode and `trusted`; use `MERIDIAN_LOG=debug`, which shows `the player is <address>` for each header read |
+| A player's login fails with `expected a handshake, got packet <n>` right after a change | The balancer sends the header and the proxy has `mode = "off"` (or the address is not trusted), so the header is read as game data | Turn the mode on and list the balancer |
+| `[proxy-protocol] mode is not "off", but trusted is empty: ...` at start | A mode with no list | List the balancers' addresses |
+| `[proxy-protocol] trusted has "<x>": ...` at start | An entry is not an address or a range, or is a range of every address | Fix the entry |
+
 Reasons after `cannot join backend`:
 
 | `<error>` | Cause | Action |
