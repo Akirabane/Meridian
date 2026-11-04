@@ -153,6 +153,21 @@ Without the table, nothing moves a player.
 
 A reload applies the three keys to the next reading.
 
+## `[fallback]`
+
+What the proxy does with a player whose server is lost while they are in the game: the
+connection to it closes or breaks, or it disconnects the player. The player stays connected and
+is moved to another server, with a loading screen; see [OPERATING.md](OPERATING.md), section 5.11.
+Without the table both kinds of loss are made good, with at most three servers tried.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `on-kick` | `true` | Move a player whom their server disconnects, and show them the reason in the chat, instead of disconnecting them | `true` or `false` |
+| `on-crash` | `true` | Move a player whose server's connection closes or breaks | `true` or `false` |
+| `max-attempts` | `3` | The most servers the proxy tries for a player in a row, counting each server it connects to and each one that is lost in turn, until a server keeps the player for a minute. Past it the player is disconnected with a message | More than 0 |
+
+A reload applies `max-attempts` to the next loss, and `on-kick` and `on-crash` to the players who log in after it.
+
 ## `[proxy-protocol]`
 
 Whether the proxy reads the [PROXY protocol](https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt)

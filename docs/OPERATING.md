@@ -590,6 +590,58 @@ Not done: a message with the player's position, a wait longer than the client's 
 for each group or each role, and priority for some players. It has not run against a real
 client or real servers; the tests use pipes and a stand-in backend.
 
+### 5.11 When a server is lost
+
+A server can end a player's session without the proxy having asked for it: it crashes, the
+network to it breaks, or it disconnects the player (a kick, a shutdown, a rule of its own). With
+`[fallback]` on, which it is by default, the player is not disconnected: they are moved to
+another server, and the chat tells them why.
+
+```toml
+[fallback]
+on-kick = true
+on-crash = true
+max-attempts = 3
+```
+
+- **What the player sees.** The game goes back to its loading screen, as when a server changes
+  their dimension, and joins the new server like a new arrival: nothing is carried over from the
+  lost server, whose state is gone, so the player is where the new server puts them. Once they are
+  in, a chat line says what happened: `You lost the connection to lobby. You were moved to east.`
+  or, for a kick, `You were disconnected from lobby: <the server's reason>. You were moved to east.`
+- **Where to.** The servers a login would try for this player, in the same order and by the same
+  rules: the forced host's, or the route's group, or the default server, then the `try` list; the
+  servers that are down or failed lately last; and with `[balancing] enabled` the caps, the drain
+  and the roles decide among the lobbies (section 5.2). Not the server that was lost, nor one that
+  lost this player a moment ago.
+- **No loop.** At most `max-attempts` servers are tried in a row: each server connected to counts,
+  and so does each one that loses the player in turn. A server that keeps the player for a minute
+  ends the run and the count starts again. If no server is left, or the count is spent, the player
+  is disconnected with a message that says the server was lost and that no other could take them
+  (for a kick, the server's own reason comes first).
+- **When it does not apply.** The proxy ended the session itself (`kick`, `ban`, a stop of the
+  proxy, a second login that replaced this one); the player left; a switch of this player is under
+  way (`switch`, `/server`, `drain --move`); the backend's disconnect was already passed on because
+  `on-kick` is off; or the player is still in the configuration phase, at login, where the
+  client cannot be taken back to its start. In those cases the session ends as it always did. A
+  player who was refused or is waiting in the queue (section 5.10) is not in the game yet, and
+  nothing here touches them.
+- **Look at it.** Each loss is one line in the log: `lost backend "lobby" (the connection was
+  lost: ...); moved to "east"`, or `... no other server took them` as a warning. The metrics page
+  (section 8.1) has `meridian_fallbacks_total{cause,result}`, with `cause` `kick` or `crash` and
+  `result` `moved` or `failed`.
+- **Reload.** A new server list and a new `max-attempts` apply to the next loss, including that of
+  a player who was already connected. `on-kick` and `on-crash` apply to the players who log in
+  after the reload; the others keep what they logged in with.
+
+Limits: the move is a new login, so it needs the servers to take a player who joins like any
+other; it does not use the sidecars and does not wait for a transfer module. A player whose
+server is lost takes the full configuration phase again, which a vanilla client accepts from the
+game as it does when a server reconfigures it, but this was not run with a real client: the tests
+use a stand-in client and servers. A player in the middle of a switch, or at login, is not
+saved by it. Their inventory, position and the rest of what was unsaved on the lost server are
+whatever that server had last written.
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it
@@ -702,6 +754,7 @@ the gauges are worked out when the page is read.
 | `meridian_transfer_duration_seconds{phase}` | A histogram (buckets from 0.05 s to 10 s) of the phases of a successful transfer: `prepare`, `freeze`, `hand_over`, `commit`, and `total` (which includes reaching the sidecars) |
 | `meridian_transfer_alerts_total` | The `ALERT` of the log: a source refused to let the player go after the target placed them. Alert on any increase (section 10) |
 | `meridian_evacuations_total`, `meridian_evacuated_players_total{result}` | Evacuations of a server that had players, and the players moved or left where they were |
+| `meridian_fallbacks_total{cause,result}` | Players whose server was lost in the game: `cause` is `kick` or `crash`, `result` is `moved` or `failed` (section 5.11) |
 | `meridian_restarts_detected_total{cause}` | Servers found to be going down: `announced`, `panel`, `unreachable` |
 | `meridian_status_rounds_total`, `meridian_status_round_duration_seconds` | Rounds of questions to the sidecars (with `[balancing] enabled`), and how long the last took |
 
@@ -825,8 +878,10 @@ switch, and keep the proxy's log and both servers' logs.
 - Movement through the proxy, many players and long sessions were not tried against a real
   server. The hybrid mode's name lookup and the online mode's account check have not been
   tried against the real services in a recorded run.
-- A server that stops without warning disconnects its players. They are not sent to the
-  fallback list, which applies at login only. Only a planned restart moves them.
+- A server that stops without warning, or disconnects a player, moves them to another server
+  (section 5.11) as a new arrival, with a loading screen, and what was unsaved on the lost server
+  is lost. This has not run with a real client. A planned restart moves its players without a
+  loading screen, with the transfer module (section 6). A player still logging in is not moved.
 - Horizon's `server/stopping` notice and the panel's announcement are the signals for an early
   warning. The first is fed only when the sidecar is given `--management-properties` and the backend
   has `sidecar-notices = true`; the sidecar reads the management protocol on its own machine and

@@ -35,7 +35,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | In-game commands | Done | `/server`, `/hub`, `/lobby`, `/play`; and `/send`, `/glist`, `/alert` for the players who have the permission; moving starts a seamless switch |
 | Load balancing | Done | Servers with a `role` are filled in order, with caps and a drain ([docs/LOAD-BALANCING.md](docs/LOAD-BALANCING.md)). Off by default |
 | Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests; no run on real servers is recorded yet ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for the first). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were still open on 2026-11-04 |
-| A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere (`drain <server> --move`, the panel's `[drain-before-stop]`, `[restart] evacuate`; [docs/RESTART.md](docs/RESTART.md)). A server that stops without warning disconnects its players: the fallback list applies at login only |
+| A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere (`drain <server> --move`, the panel's `[drain-before-stop]`, `[restart] evacuate`; [docs/RESTART.md](docs/RESTART.md)). A server that stops without warning, or kicks a player, no longer drops them: they are moved to another server with a loading screen (`[fallback]`, [OPERATING.md](docs/OPERATING.md) section 5.11) |
 | Pass-through of a backend's status | Planned | The proxy shows its own |
 | PROXY protocol (version 1 and 2) from a load balancer | Done | `[proxy-protocol]`, read only from the addresses you list; off by default ([docs/CONFIG.md](docs/CONFIG.md)) |
 | Bans and whitelist | Done | By name, unique id, address or range; a file of their own, read at the start and at `reload` ([docs/OPERATING.md](docs/OPERATING.md), section 5.8) |
@@ -210,8 +210,10 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 - Moving players between servers needs Horizon servers with the transfer module and a
   sidecar for each; without them a move answers which step failed and the player stays.
   The switch has not been tried on a real network.
-- A player whose server stops without warning is disconnected, not sent to the fallback.
-  Only a planned restart moves them ([docs/RESTART.md](docs/RESTART.md)).
+- A player whose server stops without warning, or kicks them, is moved to another server as a
+  new arrival, with a loading screen and without what the lost server had not saved; this has not
+  run with a real client. Only a planned restart moves them without a loading screen
+  ([docs/RESTART.md](docs/RESTART.md)).
 - The console is standard input: there is no remote console. On Unix, SIGTERM stops the
   proxy and SIGHUP reloads it; on Windows only Ctrl+C stops it.
   The sidecar has no TLS, so it listens on

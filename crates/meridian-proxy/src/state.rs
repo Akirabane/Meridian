@@ -40,6 +40,7 @@ impl Proxy {
         let sessions = Arc::new(Sessions::default());
         let settings = Settings::from(&config.restart);
         let config = Arc::new(RwLock::new(Arc::new(config)));
+        sessions.follow_config(Arc::clone(&config));
         let restarts = Detector::new(
             Arc::clone(&sessions.balancer),
             Arc::new(Counted {

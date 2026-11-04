@@ -8,6 +8,24 @@
 //! preparing go into the switch's target view instead (see `prepare`). One thread
 //! copies the client's packets to the active lane.
 //!
+//! # When the backend goes away
+//!
+//! A session started with [`Session::run_with`] can keep the player when the active
+//! backend is lost without the proxy having wanted it: the connection closed or broke,
+//! or the backend disconnected the player in the play phase. The backend's own
+//! disconnect is not passed on. The session asks for a [`Replacement`] and moves the
+//! client the way a backend itself returns it to the configuration phase: it sends
+//! Start Configuration, drops what the client sends until it acknowledges, and then
+//! the replacement is the active lane and its configuration phase reaches the client as
+//! the first backend's did, with a loading screen. Nothing is exported: the lost
+//! backend is gone, and the player arrives on the replacement as a new arrival.
+//! The ghost, the numbering and the configuration digest start again from the
+//! replacement's packets.
+//!
+//! The client is not moved when the proxy ended the session itself ([`SessionHandle::close`]
+//! and [`SessionHandle::disconnect`]), when the client left, when a switch is under way, or
+//! when the client is in the configuration phase, where it cannot be taken back to the start.
+//!
 //! The locks are always taken in the same order, so that none waits on another
 //! in a circle: a target's prepare state, then what goes to the client ([`Down`]),
 //! then what goes to the backend ([`Up`]), then a lane's writer.
@@ -35,6 +53,52 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
+use std::time::{Duration, Instant};
+
+/// How long the client has to acknowledge that it goes back to the configuration phase,
+/// when the player is moved off a backend that was lost.
+#[cfg(not(test))]
+const ACKNOWLEDGE_WITHIN: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const ACKNOWLEDGE_WITHIN: Duration = Duration::from_millis(400);
+
+/// What a session does when the backend a player is on is lost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fallback {
+    /// Move the player when the backend disconnects them.
+    pub on_kick: bool,
+    /// Move the player when the connection to the backend closes or breaks.
+    pub on_crash: bool,
+}
+
+/// How the player's backend was lost.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Loss {
+    /// The connection closed or broke, for this reason.
+    Crashed(String),
+    /// The backend disconnected the player, with this reason as plain text.
+    Kicked(String),
+}
+
+/// A backend to move the player to, already logged in and in its configuration phase.
+pub struct Replacement {
+    pub link: BackendLink,
+    /// Its name.
+    pub backend: String,
+    /// Shown to the player in the chat once they are in the replacement's world.
+    pub notice: Option<String>,
+    /// Held until the player is on the replacement, then dropped: a place reserved on it.
+    pub keep: Option<Box<dyn std::any::Any + Send>>,
+}
+
+/// A replacement waiting for the client to acknowledge.
+struct Pending {
+    lane: Arc<Lane>,
+    reader: ConnReader,
+    backend: String,
+    notice: Option<String>,
+    keep: Option<Box<dyn std::any::Any + Send>>,
+}
 
 /// A session ready to be relayed. [`Session::new`] also gives the
 /// [`SessionHandle`] that switches it to another backend, or ends it, from another
@@ -64,6 +128,18 @@ pub(crate) struct Shared {
     pub client_gone: AtomicBool,
     /// The session is over: the client is closed.
     pub ended: AtomicBool,
+    /// The proxy ended the session ([`SessionHandle::close`], [`SessionHandle::disconnect`]).
+    closing: AtomicBool,
+    /// What to do when the backend is lost, from [`Session::run_with`].
+    fallback_kick: AtomicBool,
+    fallback_crash: AtomicBool,
+    /// The player is being moved off a lost backend: what the client sends is dropped
+    /// until it acknowledges.
+    reconnecting: AtomicBool,
+    pending: Mutex<Option<Pending>>,
+    /// The backend's disconnect was passed on to the client: the close that follows it is
+    /// the end the backend meant, not a loss.
+    disconnected: AtomicBool,
 }
 
 /// What goes to the client.
@@ -89,6 +165,8 @@ pub(crate) struct Down {
     /// Packets the ghost could not read, for the log of the next switch.
     pub unreadable: Vec<String>,
     pub flow: Flow,
+    /// Said in the chat once the next Login arrives: why the player was moved.
+    notice: Option<String>,
 }
 
 /// What goes to the backend.
@@ -116,6 +194,8 @@ pub(crate) struct Lane {
 pub(crate) enum Event {
     Client(End),
     Lane(u64, End),
+    /// The client acknowledged, and the replacement is the active lane.
+    Resumed,
 }
 
 /// How a copy stopped.
@@ -124,6 +204,11 @@ pub(crate) enum End {
     Closed,
     /// The side read from sent something that could not be read.
     Broken(horizon_protocol::Error),
+    /// The client could not be written to.
+    ClientGone,
+    /// The backend disconnected the player in the play phase, for this reason (plain
+    /// text). Its packet was not passed to the client.
+    Kicked(String),
 }
 
 impl Session {
@@ -159,6 +244,7 @@ impl Session {
                 config_digest: None,
                 unreadable: Vec::new(),
                 flow: Flow::default(),
+                notice: None,
             }),
             up: Mutex::new(Up {
                 lane: Arc::clone(&lane),
@@ -175,6 +261,12 @@ impl Session {
             switching: AtomicBool::new(false),
             client_gone: AtomicBool::new(false),
             ended: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            fallback_kick: AtomicBool::new(false),
+            fallback_crash: AtomicBool::new(false),
+            reconnecting: AtomicBool::new(false),
+            pending: Mutex::new(None),
+            disconnected: AtomicBool::new(false),
         });
         let handle = SessionHandle(Arc::clone(&shared));
         Ok((
@@ -197,11 +289,30 @@ impl Session {
     /// says what it carried. A switch under way when the client leaves finishes
     /// on its own thread (DESIGN.md decision 10).
     pub fn run(self) -> Result<Report> {
+        self.run_with(Fallback::default(), &mut |_| Err(String::new()))
+    }
+
+    /// As [`Session::run`], and when the active backend is lost in the way `fallback`
+    /// names, `replace` is asked for another to move the player to (see the module
+    /// documentation). `replace` runs on the thread that calls this. It answers the
+    /// replacement, or the message that is shown to the player when there is none, before
+    /// they are disconnected.
+    pub fn run_with(
+        self,
+        fallback: Fallback,
+        replace: &mut dyn FnMut(&Loss) -> std::result::Result<Replacement, String>,
+    ) -> Result<Report> {
         let Session {
             shared,
             client_reader,
             first: (lane, backend_reader),
         } = self;
+        shared
+            .fallback_kick
+            .store(fallback.on_kick, Ordering::SeqCst);
+        shared
+            .fallback_crash
+            .store(fallback.on_crash, Ordering::SeqCst);
         let (events, ended) = mpsc::channel();
         *lock(&shared.events) = Some(events.clone());
         let to_backend = {
@@ -215,16 +326,44 @@ impl Session {
         };
         spawn_lane(&shared, lane, backend_reader)?;
         let mut first = None;
-        for event in ended.iter() {
+        // When the client must have acknowledged, while a player is being moved.
+        let mut deadline: Option<Instant> = None;
+        loop {
+            let event = match deadline {
+                None => match ended.recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
+                Some(by) => {
+                    match ended.recv_timeout(by.saturating_duration_since(Instant::now())) {
+                        Ok(event) => event,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            give_up_moving(
+                                &shared,
+                                "The server you were on is gone, and your game did not follow.",
+                            );
+                            first = Some(End::Closed);
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            };
             match event {
                 Event::Client(end) => {
                     shared.client_gone.store(true, Ordering::SeqCst);
                     first = Some(end);
                     break;
                 }
+                Event::Resumed => deadline = None,
                 Event::Lane(id, end) if id == shared.down().active => {
-                    first = Some(end);
-                    break;
+                    match lost(&shared, end, replace) {
+                        Lost::Over(end) => {
+                            first = Some(end);
+                            break;
+                        }
+                        Lost::Moving => deadline = Some(Instant::now() + ACKNOWLEDGE_WITHIN),
+                    }
                 }
                 // A lane that is not active, or no longer: an old backend after a
                 // switch, or a target the switch gave up.
@@ -235,6 +374,10 @@ impl Session {
         shared.client_gone.store(true, Ordering::SeqCst);
         shared.client_closer.close();
         shared.ended.store(true, Ordering::SeqCst);
+        // A replacement the client never took.
+        if let Some(pending) = lock(&shared.pending).take() {
+            pending.lane.closer.close();
+        }
         // A switch under way closes the lanes itself when it is done.
         if !shared.switching.load(Ordering::SeqCst) {
             shared.up().lane.closer.close();
@@ -245,9 +388,180 @@ impl Session {
             to_backend: shared.up().flow,
         };
         match first {
-            Some(End::Closed) | None => Ok(report),
             Some(End::Broken(e)) => Err(e.into()),
+            _ => Ok(report),
         }
+    }
+}
+
+/// What became of a lost backend.
+enum Lost {
+    /// The session ends, in this way.
+    Over(End),
+    /// The client was told to go back to the configuration phase, and a replacement waits
+    /// for its acknowledgement.
+    Moving,
+}
+
+/// Decides what to do when the active backend's lane ended in `end`: a replacement, or the
+/// end of the session.
+fn lost(
+    shared: &Arc<Shared>,
+    end: End,
+    replace: &mut dyn FnMut(&Loss) -> std::result::Result<Replacement, String>,
+) -> Lost {
+    let loss = match &end {
+        End::Kicked(reason) => Loss::Kicked(reason.clone()),
+        End::Closed if shared.fallback_crash.load(Ordering::SeqCst) => {
+            Loss::Crashed("the connection closed".to_owned())
+        }
+        End::Broken(e) if shared.fallback_crash.load(Ordering::SeqCst) => {
+            Loss::Crashed(e.to_string())
+        }
+        _ => return Lost::Over(end),
+    };
+    // The proxy ended it, the client left or a switch is under way: not a loss to make good.
+    let wanted_end = shared.closing.load(Ordering::SeqCst)
+        || shared.disconnected.load(Ordering::SeqCst)
+        || shared.client_gone.load(Ordering::SeqCst)
+        || shared.switching.load(Ordering::SeqCst);
+    let play = shared.down().phase == Phase::Play;
+    if wanted_end || !play {
+        // A kick that was held back is shown now, as the backend sent it.
+        if let End::Kicked(reason) = &end {
+            say_goodbye(shared, reason);
+        }
+        return Lost::Over(match end {
+            End::Kicked(_) => End::Closed,
+            other => other,
+        });
+    }
+    match replace(&loss) {
+        Err(message) => {
+            say_goodbye(shared, &message);
+            Lost::Over(End::Closed)
+        }
+        Ok(replacement) => match begin_moving(shared, replacement) {
+            Ok(()) => Lost::Moving,
+            Err(e) => {
+                say_goodbye(
+                    shared,
+                    "The server you were on is gone, and no other could take you.",
+                );
+                Lost::Over(e)
+            }
+        },
+    }
+}
+
+/// Disconnects the player with `message`, in the phase they are in.
+fn say_goodbye(shared: &Shared, message: &str) {
+    let reason = configuration::Disconnect {
+        reason: text::literal(message),
+    };
+    let mut down = shared.down();
+    let body = match down.phase {
+        Phase::Configuration => configuration::Clientbound::Disconnect(reason).encode(),
+        Phase::Play => play::Clientbound::Disconnect(reason).encode(),
+    };
+    let _ = down.writer.send(&body);
+}
+
+/// Ends the wait for an acknowledgement that did not come.
+fn give_up_moving(shared: &Shared, message: &str) {
+    shared.reconnecting.store(false, Ordering::SeqCst);
+    if let Some(pending) = lock(&shared.pending).take() {
+        pending.lane.closer.close();
+    }
+    say_goodbye(shared, message);
+}
+
+/// Sends the client back to the configuration phase and keeps `replacement` for when it
+/// acknowledges.
+fn begin_moving(shared: &Arc<Shared>, replacement: Replacement) -> std::result::Result<(), End> {
+    let Replacement {
+        link,
+        backend,
+        notice,
+        keep,
+    } = replacement;
+    let (reader, writer) = link.connection.split();
+    let closer = reader
+        .closer()
+        .map_err(|e| End::Broken(horizon_protocol::Error::new(e.to_string())))?;
+    let lane = Arc::new(Lane {
+        id: shared.lane_id(),
+        writer: Mutex::new(writer),
+        closer,
+        target: None,
+    });
+    *lock(&shared.pending) = Some(Pending {
+        lane,
+        reader,
+        backend,
+        notice,
+        keep,
+    });
+    // Before the packet, so that the client's acknowledgement finds it set.
+    shared.reconnecting.store(true, Ordering::SeqCst);
+    {
+        let mut down = shared.down();
+        let mut body = Vec::new();
+        encode(&mut body, ids::play::clientbound::START_CONFIGURATION, &[]);
+        if down.writer.send(&body).is_err() {
+            shared.reconnecting.store(false, Ordering::SeqCst);
+            if let Some(pending) = lock(&shared.pending).take() {
+                pending.lane.closer.close();
+            }
+            return Err(End::ClientGone);
+        }
+        down.phase = Phase::Configuration;
+    }
+    // The lost backend's connection is of no use any more.
+    shared.up().lane.closer.close();
+    Ok(())
+}
+
+/// The client acknowledged: the replacement becomes the active lane, and everything that
+/// described the first backend's session starts again from it.
+fn activate(shared: &Arc<Shared>) {
+    let Some(pending) = lock(&shared.pending).take() else {
+        shared.reconnecting.store(false, Ordering::SeqCst);
+        return;
+    };
+    let Pending {
+        lane,
+        reader,
+        backend,
+        notice,
+        keep,
+    } = pending;
+    {
+        let mut down = shared.down();
+        let mut up = shared.up();
+        down.active = lane.id;
+        down.backend = backend;
+        down.ghost = View::ghost();
+        down.swap = Swap::new(0, 0);
+        down.dimension = None;
+        down.secure_chat = None;
+        down.digest = DigestBuilder::default();
+        down.config_digest = None;
+        down.unreadable.clear();
+        down.notice = notice;
+        up.lane = Arc::clone(&lane);
+        up.swap = Swap::new(0, 0);
+        up.teleports = Teleports::default();
+        up.client_pose = None;
+    }
+    shared.disconnected.store(false, Ordering::SeqCst);
+    shared.reconnecting.store(false, Ordering::SeqCst);
+    if spawn_lane(shared, Arc::clone(&lane), reader).is_err() {
+        lane.closer.close();
+    }
+    drop(keep);
+    if let Some(events) = lock(&shared.events).clone() {
+        let _ = events.send(Event::Resumed);
     }
 }
 
@@ -294,6 +608,7 @@ impl SessionHandle {
     /// Tells the player why the session ends, in the phase their client reads,
     /// then closes it.
     pub fn disconnect(&self, reason: configuration::Disconnect) {
+        self.0.closing.store(true, Ordering::SeqCst);
         {
             let mut down = self.0.down();
             let body = match down.phase {
@@ -307,6 +622,7 @@ impl SessionHandle {
 
     /// Closes the session without a word.
     pub fn close(&self) {
+        self.0.closing.store(true, Ordering::SeqCst);
         self.0.client_closer.close();
         self.0.up().lane.closer.close();
     }
@@ -342,7 +658,7 @@ pub(crate) fn spawn_lane(shared: &Arc<Shared>, lane: Arc<Lane>, reader: ConnRead
             if let Some(target) = &lane.target {
                 target.closed(match &end {
                     End::Broken(e) => Some(e),
-                    End::Closed => None,
+                    End::Closed | End::ClientGone | End::Kicked(_) => None,
                 });
             }
             if let Some(events) = events {
@@ -371,6 +687,21 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
         if down.active != lane.id {
             continue;
         }
+        // The backend disconnects the player: with the fallback on, the player is moved
+        // instead, and is not shown the disconnect.
+        if down.phase == Phase::Play
+            && id == ids::play::clientbound::DISCONNECT
+            && shared.fallback_kick.load(Ordering::SeqCst)
+            && !shared.closing.load(Ordering::SeqCst)
+            && !shared.switching.load(Ordering::SeqCst)
+            && !shared.client_gone.load(Ordering::SeqCst)
+            && let Ok(play::Clientbound::Disconnect(d)) = play::Clientbound::decode(id, &payload)
+        {
+            return End::Kicked(text::plain(&d.reason, &Default::default()));
+        }
+        if id == ids::play::clientbound::DISCONNECT && down.phase == Phase::Play {
+            shared.disconnected.store(true, Ordering::SeqCst);
+        }
         let payload = if down.phase == Phase::Play
             && !down.swap.is_identity()
             && meridian_rewrite::clientbound_has_ids(id)
@@ -381,7 +712,7 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
         };
         encode(&mut body, id, &payload);
         if down.writer.send(&body).is_err() {
-            return End::Closed;
+            return End::ClientGone;
         }
         add(&mut down.flow, &body);
         match down.phase {
@@ -402,6 +733,16 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
                     continue;
                 }
                 follow(&mut down, id, &payload);
+                // Why the player was moved, once the new world has begun.
+                if id == ids::play::clientbound::LOGIN
+                    && let Some(notice) = down.notice.take()
+                {
+                    let chat = play::Clientbound::SystemChat(play::SystemChat {
+                        content: text::literal(&notice),
+                        overlay: false,
+                    });
+                    let _ = down.writer.send(&chat.encode());
+                }
                 let packet = Packet { id, payload };
                 // A packet the ghost cannot read leaves it as it was; it is noted
                 // for the log of the next switch.
@@ -441,7 +782,7 @@ fn follow(down: &mut Down, id: i32, payload: &[u8]) {
 }
 
 /// Copies the client's packets to the active lane until reading or writing fails.
-fn copy_to_backend(mut from: ConnReader, shared: &Shared) -> End {
+fn copy_to_backend(mut from: ConnReader, shared: &Arc<Shared>) -> End {
     use ids::{configuration::serverbound as cfg, play::serverbound as s};
     let mut body = Vec::new();
     let mut sending = Phase::Configuration;
@@ -452,6 +793,16 @@ fn copy_to_backend(mut from: ConnReader, shared: &Shared) -> End {
             Err(e) if e.is_end_of_stream() => return End::Closed,
             Err(e) => return End::Broken(e),
         };
+        // A player being moved off a lost backend: what they sent for it is dropped, up to
+        // their acknowledgement, which is not passed on either: the replacement is in its
+        // configuration phase already.
+        if shared.reconnecting.load(Ordering::SeqCst) && sending == Phase::Play {
+            if id == s::CONFIGURATION_ACKNOWLEDGED {
+                sending = Phase::Configuration;
+                activate(shared);
+            }
+            continue;
+        }
         if sending == Phase::Play && answer_command(id, &payload, shared) {
             continue;
         }
