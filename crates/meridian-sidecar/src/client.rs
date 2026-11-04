@@ -1,7 +1,7 @@
 //! The proxy's side of the signed exchange: one connection to one sidecar, and a
 //! function for each player request.
 use crate::Error;
-use crate::request::{Arrival, Outcome, Request, ServerStatus};
+use crate::request::{Arrival, NoticeReport, Outcome, Request, ServerStatus};
 use crate::wire::{self, Challenge, Direction, Expected};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
@@ -229,6 +229,18 @@ impl SidecarClient {
         let answer = self.request(&Request::Status {})?;
         ServerStatus::from_value(&answer)
             .map_err(|why| Error::Endpoint(format!("the status is not usable: {why}")))
+    }
+
+    /// The notices of the backend's management protocol after number `after` (none
+    /// without it: the answer then only says where the count stands), waiting up to `wait`
+    /// for one when there are none. The connection's timeout must be longer than `wait`.
+    pub fn notices(&mut self, after: Option<u64>, wait: Duration) -> Result<NoticeReport, Error> {
+        let answer = self.request(&Request::Notices {
+            after,
+            wait_ms: Some(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+        })?;
+        NoticeReport::from_value(&answer)
+            .map_err(|why| Error::Endpoint(format!("the notices are not usable: {why}")))
     }
 
     /// Forgets an expected or held player. With a `handover`, only the arrival of the

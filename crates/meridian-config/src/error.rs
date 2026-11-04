@@ -39,6 +39,8 @@ pub enum ConfigError {
     SidecarWithoutSecret(String),
     /// A backend has a `sidecar-secret-file` and no `sidecar`.
     SecretWithoutSidecar(String),
+    /// A backend has `sidecar-notices` and no `sidecar`.
+    NoticesWithoutSidecar(String),
     /// A sidecar's address is not `host:port`.
     InvalidSidecarAddress {
         backend: String,
@@ -204,6 +206,10 @@ impl fmt::Display for ConfigError {
                 f,
                 "backend \"{backend}\" has a sidecar but no sidecar-secret-file: the secret \
                  is kept in a file of its own, never in the configuration"
+            ),
+            ConfigError::NoticesWithoutSidecar(backend) => write!(
+                f,
+                "backend \"{backend}\" has sidecar-notices but no sidecar address"
             ),
             ConfigError::SecretWithoutSidecar(backend) => write!(
                 f,

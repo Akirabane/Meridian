@@ -26,9 +26,8 @@ This note says what Meridian has for that, what it lacks, and what the detector 
 
 ## What is missing
 
-- Nothing in Meridian listens to the management protocol: the proxy is plain `std` threads
-  with no WebSocket and no TLS client, and the sidecar relays only the player requests and
-  `status`.
+- The proxy is plain `std` threads with no WebSocket and no TLS client. The sidecar, which
+  runs on the server's machine, is the one that listens (see below).
 - The panel restarts servers (`Supervisor::restart`) but does not tell the proxy. It is a
   separate process from the proxy.
 - Nothing moves players off a draining backend. `drain` only closes the door.
@@ -37,7 +36,7 @@ This note says what Meridian has for that, what it lacks, and what the detector 
 
 | Signal | When it comes | Cost | Status |
 |---|---|---|---|
-| `server/stopping` (the backend announces) | Before the game stops, with the players still on it | A WebSocket and TLS client, in the sidecar (it is on the backend's machine and can reach `127.0.0.1`) | Parsed (`restart::notice`) and handled (`Detector::handle_notification`); not fed by anything yet |
+| `server/stopping` (the backend announces) | Before the game stops, with the players still on it | A WebSocket and TLS client, in the sidecar (it is on the backend's machine and can reach `127.0.0.1`) | Fed: the sidecar listens and the proxy asks it (`notices.rs`, "How the announcement reaches the proxy"); off unless set up on both sides |
 | The panel restarts it | Before the stop | The panel tells the proxy | `Detector::announce(.., Cause::Panel, ..)`; not fed yet |
 | The sidecar does not answer for `silent-rounds` (3) rounds in a row | After the backend is already down | None: it reads what the poller already knows | Wired |
 
@@ -85,14 +84,71 @@ it. The proxy's is `Evacuator`:
   for each ("`Carol stays on east: no other server of role lobby has room`") and the count
   of those moved and those who stayed.
 
+## How the announcement reaches the proxy
+
+```text
+Horizon server ──(management protocol: WebSocket, JSON-RPC)──▶ sidecar ──(signed `notices` request)──▶ proxy ──▶ Detector
+```
+
+It is off unless both ends are set up.
+
+- **The sidecar** is started with `--management-properties PATH`, the backend's
+  `server.properties`. It reads `management-server-enabled`, `-host`, `-port`, `-secret`
+  and `-tls-enabled` from it (again at every connection, since a server that restarts may
+  have other settings), connects, and keeps the two notifications that matter
+  (`minecraft:notification/server/stopping` and `.../started`, with or without the prefix)
+  in a queue of 32. The server has to have its management protocol on
+  (`management-server-enabled=true` and a port above 0 in `server.properties`, or in
+  `server.toml`'s `[properties]`). Horizon's supervisor serves it, so the connection
+  stays up while the game restarts.
+- **The proxy** has `sidecar-notices = true` on the backend. It asks the sidecar, over the
+  signed exchange, `{"op":"notices","after":N,"wait_ms":2000}`: the sidecar holds the
+  request until a notice with a number above `N` comes, or `wait_ms` is over (30 s at most).
+  The answer is `{"enabled":…,"watching":…,"last":N,"notices":[{"seq":…,"line":…,"age_ms":…}]}`.
+  The first request has no `after` and only learns where the count stands, so what was
+  heard before the proxy asked is not replayed. The proxy keeps the number of the last
+  notice it took: an answer that is lost loses nothing, and a notice is never taken twice.
+  A sidecar that started its count again (it was restarted) is read from the start. A
+  notice heard more than two minutes ago is taken but not acted on.
+- Each notice goes to `Detector::handle_notification`: `stopping` marks the backend draining
+  and calls the evacuation, `started` ends the restart. The proxy only asks the sidecars of
+  backends with a role, while `[balancing] enabled` is on, the same ones the poller reads.
+  Nothing in `balance.rs` or `placing.rs` is involved.
+
+What the operator is told, once for each change and never at every try: the sidecar cannot be
+reached, it does not listen (it was not given `--management-properties`), or it is not
+connected to the server's management protocol (it is off on the server, or the server is
+down). The secret of the management protocol is in none of these messages, in no error and
+in no `Debug` output.
+
+Waiting and bounds:
+
+- After a failure the sidecar waits 1 s before it connects again, then twice as long each
+  time, to 30 s, and the wait starts again from 1 s once a connection was made. The proxy
+  does the same with a sidecar it cannot reach.
+- A WebSocket message is at most 256 KiB; a longer one ends the connection. Fragmented
+  messages are put together within that limit, binary ones are dropped, and ping is answered.
+  Only the two notifications are kept; the rest of what the server sends is read and thrown
+  away.
+
+What is and is not checked:
+
+- **The certificate is not verified.** A Horizon server has TLS on by default and, without a
+  keystore, makes a self-signed certificate of its own, so there is no authority to check it
+  against. The sidecar therefore accepts any certificate, and for that reason it connects
+  only to an address on its own machine: a `management-server-host` that is not `127.0.0.1`,
+  `::1` or a name that resolves to them alone is refused, with no connection made. The TLS is
+  there so that the sidecar speaks what the server serves; the server is trusted by being on
+  the same machine, and the sidecar proves itself to the server by the secret (a bearer
+  token, as Horizon takes it).
+- The server's `Sec-WebSocket-Accept` is not checked (it needs SHA-1, which nothing else in
+  Meridian uses). The upgrade must be answered `101`.
+- TLS is rustls on ring, which the workspace already had through the account lookups of
+  `meridian-net`: the lock file gains no crate for it.
+
 ## What is left to wire
 
-1. `server/stopping`: the sidecar opens the management WebSocket of its backend (it needs
-   the backend's `management-server-*` settings and secret) and tells the proxy. That is a
-   new message of the sidecar's wire, so it is left to the work that changes the wire. The
-   proxy then calls `Detector::handle_notification(backend, line, now)`, or
-   `announce(backend, Cause::Announced, now)` if the sidecar sends the fact and not the line.
-2. The panel: it tells the proxy before a restart, through the same channel, as
+1. The panel: it tells the proxy before a restart, through the same channel, as
    `Cause::Panel`.
 
 The evacuation of a backend that was drained by the operator before the restart sends its

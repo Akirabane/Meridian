@@ -7,6 +7,7 @@ mod evacuate;
 mod health;
 mod log;
 mod metrics;
+mod notices;
 mod placing;
 mod restart;
 // Used by the session once routing is wired in; until then only its tests call it.
@@ -119,6 +120,10 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
     // The page of counters and the health check, when `[metrics]` is on.
     if let Some(Err(e)) = metrics::spawn(&proxy) {
         warning!("cannot serve the metrics: {e}");
+    }
+    // Hears the backends' own announcements of their stop, for the sidecars set to give them.
+    if let Err(e) = notices::spawn(&proxy) {
+        warning!("cannot start the thread that reads what the backends announce: {e}");
     }
     match serve::serve(listener, &proxy) {
         Ok(()) => {

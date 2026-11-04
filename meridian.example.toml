@@ -109,6 +109,11 @@ address = "127.0.0.1:25566"
 # relative to this file, it holds at least 16 bytes, and each backend has its own.
 # sidecar = "127.0.0.1:25580"
 # sidecar-secret-file = "secrets/lobby.key"
+# Whether the proxy asks the sidecar what the server announces of its own stop (its
+# management protocol's server/stopping), so that it stops being offered before it goes
+# (docs/RESTART.md). Off by default; the sidecar needs --management-properties too, and
+# the backend has a role, with [balancing] enabled.
+# sidecar-notices = false
 # The role of the backend for load balancing: "lobby", "sublobby" (a waiting room
 # where players are grouped) or "game". Without a role the backend is not balanced.
 # Only "lobby" is used so far, by [balancing] below: see docs/LOAD-BALANCING.md.

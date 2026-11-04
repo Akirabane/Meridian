@@ -62,11 +62,13 @@ fn a_sidecar_is_read_with_its_secret_file_from_the_configurations_folder() {
                 backend: "lobby".into(),
                 address: "127.0.0.1:25580".into(),
                 secret_file: dir.join("a.key"),
+                notices: false,
             },
             Sidecar {
                 backend: "east".into(),
                 address: "127.0.0.1:25581".into(),
                 secret_file: dir.join("secrets/b.key"),
+                notices: false,
             },
         ]
     );
@@ -239,4 +241,30 @@ fn the_freeze_a_switch_may_use_has_a_limit_and_a_margin() {
     assert_eq!(config.switch_commit_margin_ms, 0);
     let e = Config::from_toml_str(&text("switch-freeze-limit-ms = 0", "", "")).unwrap_err();
     assert!(matches!(e, ConfigError::ZeroFreezeLimit), "{e}");
+}
+
+#[test]
+fn a_sidecar_gives_notices_only_when_the_backend_says_so() {
+    let dir = folder("notices");
+    let config = load(
+        &dir,
+        "",
+        "sidecar = \"127.0.0.1:25580\"\nsidecar-secret-file = \"a.key\"\nsidecar-notices = true",
+        "sidecar = \"127.0.0.1:25581\"\nsidecar-secret-file = \"secrets/b.key\"",
+    )
+    .unwrap();
+    let notices: Vec<(&str, bool)> = config
+        .sidecars
+        .iter()
+        .map(|s| (s.backend.as_str(), s.notices))
+        .collect();
+    assert_eq!(notices, [("lobby", true), ("east", false)]);
+    // Without a sidecar there is nobody to ask.
+    let e = load(&dir, "", "sidecar-notices = true", "").unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::NoticesWithoutSidecar(b) if b == "lobby"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("sidecar-notices"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

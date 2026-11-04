@@ -70,6 +70,18 @@ The sidecar listens on `127.0.0.1:25580` unless `--listen` says otherwise. It re
 the endpoint file again for every request, so it keeps working after the server
 restarts on another port with another token.
 
+## Telling the proxy that the server is stopping
+
+With `--management-properties <dir>/server.properties` the sidecar also listens to the
+server's management protocol (JSON-RPC over a WebSocket, TLS on by default, the
+`management-server-secret` as a bearer token) and keeps its `server/stopping` and
+`server/started` notifications for the proxy, which asks for them with the `notices` request:
+`{"op": "notices", "after": N, "wait_ms": W}` answers the notices numbered above `N` after
+waiting up to `W` ms for one. It is off without the option. The server is on this machine:
+a `management-server-host` that is not a loopback address is refused, since a certificate the
+server made itself is not verified. The secret is in no log and no error. See
+[docs/RESTART.md](../../docs/RESTART.md), "How the announcement reaches the proxy".
+
 ## What the connection protects, and what it does not
 
 Each connection starts with a random challenge from the sidecar. Every request

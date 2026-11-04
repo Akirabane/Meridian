@@ -18,6 +18,10 @@ pub struct Sidecar {
     /// The file that holds the secret, already resolved against the folder of
     /// the configuration file.
     pub secret_file: PathBuf,
+    /// Whether the proxy asks this sidecar for the notices it hears from the backend's
+    /// management protocol (`server/stopping`, `server/started`). Off by default: the
+    /// sidecar must be set up to listen as well.
+    pub notices: bool,
 }
 
 impl Sidecar {

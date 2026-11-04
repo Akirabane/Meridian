@@ -2,7 +2,8 @@
 //! passes each one to the backend's control endpoint, and signs the answer.
 use crate::Error;
 use crate::endpoint::Endpoint;
-use crate::request::Request;
+use crate::management::Notices;
+use crate::request::{NoticeHeard, NoticeReport, Request};
 use crate::wire::{self, Direction, Expected};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, Write};
@@ -27,6 +28,9 @@ pub struct Settings {
     /// Whether connections may come from other machines without TLS, in which
     /// case each one is logged with a warning.
     pub insecure_remote: bool,
+    /// The notices heard from the backend's management protocol, when the sidecar listens
+    /// to it.
+    pub notices: Option<Arc<Notices>>,
 }
 
 /// How often the accept loop looks at the stop flag.
@@ -116,6 +120,9 @@ fn answer(body: &str, settings: &Settings) -> Value {
         Ok(request) => request,
         Err(e) => return json!({ "ok": false, "error": format!("not a player request: {e}") }),
     };
+    if let Request::Notices { after, wait_ms } = &request {
+        return notices_answer(settings, *after, *wait_ms);
+    }
     // A request that cannot be a well-formed line never reaches the backend.
     let line = match request.endpoint_line() {
         Ok(line) => line,
@@ -131,4 +138,31 @@ fn answer(body: &str, settings: &Settings) -> Value {
         // The backend never answered: the proxy may ask again what can be asked twice.
         Err(e) => json!({ "ok": false, "error": e.to_string(), "unreached": true }),
     }
+}
+
+/// The answer to a notices request, from what the sidecar heard of the backend's
+/// management protocol. It waits up to `wait_ms` for a notice, on this connection's own
+/// thread, so the other connections do not wait with it.
+fn notices_answer(settings: &Settings, after: Option<u64>, wait_ms: Option<u64>) -> Value {
+    let report = match &settings.notices {
+        None => NoticeReport::default(),
+        Some(notices) => {
+            let heard = notices.heard(after, Duration::from_millis(wait_ms.unwrap_or(0)));
+            NoticeReport {
+                enabled: true,
+                watching: heard.watching,
+                last: heard.last,
+                notices: heard
+                    .notices
+                    .into_iter()
+                    .map(|n| NoticeHeard {
+                        seq: n.seq,
+                        line: n.line,
+                        age: n.age,
+                    })
+                    .collect(),
+            }
+        }
+    };
+    json!({ "ok": true, "result": report.to_value() })
 }
