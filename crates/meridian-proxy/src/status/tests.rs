@@ -134,6 +134,39 @@ fn a_failure_keeps_the_last_answer_and_a_backend_that_never_answered_stays_unkno
     );
 }
 
+/// A backend that answers "unknown request" is alive: it does not count as failing, so
+/// the restart detector does not take it for a backend going down, and it stays unknown.
+#[test]
+fn a_backend_that_does_not_know_the_request_is_alive_and_stays_unknown() {
+    let statuses = Statuses::default();
+    let ask = |_: &Sidecar, _: Duration| {
+        Err("the sidecar refused: unknown request \"status\"".to_owned())
+    };
+    for _ in 0..5 {
+        poll(&config(), &ask, &statuses);
+        assert!(!statuses.failing("lobby"));
+    }
+    assert_eq!(
+        statuses.report("lobby", AGE, Instant::now()),
+        Report::Unknown
+    );
+    // It is said once, and again only after a real report in between.
+    assert!(!statuses.unreported("lobby"));
+    statuses.record("lobby", status(1), Instant::now());
+    assert!(statuses.unreported("lobby"));
+}
+
+/// Any other refusal, such as a sidecar that closes the connection, is still a failure.
+#[test]
+fn another_refusal_is_still_a_failure() {
+    let statuses = Statuses::default();
+    let ask = |_: &Sidecar, _: Duration| {
+        Err("the sidecar refused: the sidecar closed the connection".to_owned())
+    };
+    poll(&config(), &ask, &statuses);
+    assert!(statuses.failing("lobby"));
+}
+
 #[test]
 fn a_failure_is_worth_saying_once_until_the_backend_answers_again() {
     let statuses = Statuses::default();
