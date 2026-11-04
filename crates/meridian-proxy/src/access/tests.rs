@@ -278,6 +278,29 @@ fn a_reload_reads_the_file_again_and_ends_the_sessions_it_bans() {
     );
     // A second reload with nothing changed says so.
     assert_eq!(run(&proxy, "reload"), ["reloaded: nothing changed"]);
+    // SIGHUP runs `reload_file`, the code of the command: it reads the lists too.
+    std::fs::write(
+        dir.join("access.toml"),
+        "whitelist = false
+[[ban]]
+name = \"Notch\"
+",
+    )
+    .unwrap();
+    let lines = crate::console::reload_file(&proxy).unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("bans and whitelist read again: 1 ban")),
+        "{lines:?}"
+    );
+    assert!(
+        proxy
+            .sessions
+            .access
+            .refusal("Notch", [0; 16], "198.51.100.1".parse().unwrap())
+            .is_some()
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
