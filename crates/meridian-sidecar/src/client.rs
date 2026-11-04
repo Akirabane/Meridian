@@ -155,23 +155,28 @@ impl SidecarClient {
         })
     }
 
-    /// Places a held player whose record was imported with `place` false.
-    pub fn confirm(&mut self, uuid: &str) -> Result<Value, Error> {
+    /// Places a held player whose record was imported with `place` false;
+    /// `handover` is the id of that record.
+    pub fn confirm(&mut self, uuid: &str, handover: &str) -> Result<Value, Error> {
         self.request(&Request::Confirm {
             uuid: uuid.to_owned(),
+            handover: handover.to_owned(),
         })
     }
 
-    /// Ends a switch on this backend; `announce` (with [`Outcome::Moved`] only)
-    /// tells the others the player left.
+    /// Ends a switch on this backend; `handover` is the id its export with freeze
+    /// gave, and `announce` (with [`Outcome::Moved`] only) tells the others the player
+    /// left.
     pub fn release(
         &mut self,
         uuid: &str,
+        handover: &str,
         outcome: Outcome,
         announce: bool,
     ) -> Result<Value, Error> {
         self.request(&Request::Release {
             uuid: uuid.to_owned(),
+            handover: handover.to_owned(),
             outcome,
             announce,
         })
@@ -186,10 +191,13 @@ impl SidecarClient {
             .map_err(|why| Error::Endpoint(format!("the status is not usable: {why}")))
     }
 
-    /// Forgets an expected or held player.
-    pub fn drop_player(&mut self, uuid: &str) -> Result<Value, Error> {
+    /// Forgets an expected or held player. With a `handover`, only the arrival of the
+    /// record with that id, which must be the imported one; before any import there
+    /// is no id to name.
+    pub fn drop_player(&mut self, uuid: &str, handover: Option<&str>) -> Result<Value, Error> {
         self.request(&Request::Drop {
             uuid: uuid.to_owned(),
+            handover: handover.map(str::to_owned),
         })
     }
 }

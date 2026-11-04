@@ -19,7 +19,11 @@
 //!    the client. The world is taken as sent once a chunk batch has come and no
 //!    other followed for a short while.
 //! 2. **Freeze.** The source freezes the player and gives their record
-//!    (`player-export freeze`). The client still gets the source's packets.
+//!    (`player-export freeze`), which carries the id of the hand-over (`handover`).
+//!    The requests that end the hand-over name it: the record goes to the target as
+//!    it is, and the confirm, the release and, once the record was imported, the
+//!    drop name the id. A server that gives none is given up on. The client still
+//!    gets the source's packets.
 //! 3. **Hand over.** The target takes the record without placing the player
 //!    (`player-import` with `"place": false`) and sends the held player's
 //!    connection what the import changes. The record's position is left out by
@@ -34,10 +38,14 @@
 //!    session's locks: the delta from the ghost to the target view goes to the
 //!    client, then the target's command tree, recipes, advancements and the
 //!    player's own synced data; the target becomes the active backend. Last, the
-//!    target places the player (`player-confirm`).
+//!    target places the player (`player-confirm`), and its reply comes once the
+//!    player's file is on its disk.
 //! 4. **Commit.** The source lets the player go (`player-release moved`) and its
 //!    connection closes. Its last packets, the disconnect among them, never reach
-//!    the client.
+//!    the client. A source that refuses (the freeze ran out, so the player played on
+//!    there and the target's record is older) fails the switch: the client is
+//!    disconnected with a message, the source keeps the player, and the target
+//!    closes the copy it placed ([`After::Disconnected`]).
 //!
 //! Before the first packet of the delta, any failure leaves the player where they
 //! were: the target forgets them (`player-drop`, which also cancels an import not
@@ -59,7 +67,7 @@
 //!
 //! Checking on the prepare connection never puts the player in the target's world.
 //! Horizon's documentation of the held player (`docs/server.md`, "Players arriving
-//! from another server", fork `feat/held-player` at 190362346) says a player who
+//! from another server") says a player who
 //! logs in after `player-expect` gets the join sequence and the level around it,
 //! "but it is not placed: no join message, no player-list entry for the others, not
 //! among the entities they are shown, not simulated, and nothing else it sends is
@@ -76,11 +84,12 @@
 //! Each step is told to [`Settings::trace`] with the time since the switch began,
 //! for the proxy's log.
 //!
-//! Horizon lets a freeze go after some seconds (ten, then thirty), and a held player nobody takes
-//! after a minute; `player-expect` holds a place for 60 seconds at most. The
-//! freeze, the import and the hand-over to the client must fit in the first of
-//! these: the world is fetched before the freeze, so what is left is three requests
-//! and the delta.
+//! Horizon lets a freeze go after `max_freeze_seconds` (30 by default), and a held
+//! player nobody takes after `max_hold_seconds` (60); `player-expect` holds a place
+//! for 60 seconds at most. The freeze, the import and the hand-over to the client
+//! must fit in the first of these: the world is fetched before the freeze, so what is
+//! left is three requests and the delta. [`Settings::freeze_limit`] gives up before,
+//! and must stay below the server's `max_freeze_seconds`.
 //!
 //! # Known limits
 //!
@@ -106,7 +115,9 @@ mod session;
 mod switch;
 
 pub use configure::{ClientConfiguration, Digest, DigestBuilder, configure};
-pub use control::{Arrival, Imported, Outcome, PlayerControl, Record, record_dimension, uuid_text};
+pub use control::{
+    Arrival, Imported, Outcome, PlayerControl, Record, record_dimension, record_handover, uuid_text,
+};
 pub use session::{Session, SessionHandle};
 pub use switch::{
     After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,

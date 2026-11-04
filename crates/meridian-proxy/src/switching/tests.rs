@@ -70,7 +70,11 @@ impl PlayerControl for FakeSidecar {
             hook();
         }
         self.answer("export", "export".into())?;
-        Ok(serde_json::json!({ "version": 1, "dimension": OVERWORLD }))
+        Ok(serde_json::json!({
+            "version": 1,
+            "handover": "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "dimension": OVERWORLD
+        }))
     }
 
     fn import(
@@ -86,15 +90,15 @@ impl PlayerControl for FakeSidecar {
             .map(|()| Imported::default())
     }
 
-    fn confirm(&mut self, _: &str) -> Result<(), String> {
+    fn confirm(&mut self, _: &str, _: &str) -> Result<(), String> {
         self.answer("confirm", "confirm".into())
     }
 
-    fn release(&mut self, _: &str, outcome: Outcome, _: bool) -> Result<(), String> {
+    fn release(&mut self, _: &str, _: &str, outcome: Outcome, _: bool) -> Result<(), String> {
         self.answer("release", format!("release {outcome:?}"))
     }
 
-    fn drop_player(&mut self, _: &str) -> Result<(), String> {
+    fn drop_player(&mut self, _: &str, _: Option<&str>) -> Result<(), String> {
         self.answer("drop", "drop".into())
     }
 }

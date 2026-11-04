@@ -184,12 +184,14 @@ next ticks. If the switch fails before you are placed, the target logs
 On the source (`$banc\lobby\logs\latest.log`):
 
 ```
-player-release Alex (<uuid>): ok, moved ..., was frozen true
+player-release Alex (<uuid>): ok, moved ...
 Alex lost connection: moved to another server
 ```
 
-`was frozen false` means the freeze (30 s at most) ran out before the hand-over
-ended. A refused request logs a `WARN` line with `refused:` and the reason. No line
+A `moved` the server refuses means the freeze (30 s by default, `max_freeze_seconds`)
+ran out before the hand-over ended: the proxy then fails the switch and says so
+("commit: the old server would not let the player go"). A refused request logs a
+`WARN` line with `refused:` and the reason. No line
 ever shows the player's record. Copy these lines into your notes for the switch.
 
 ## F. Collecting the logs for a bug report

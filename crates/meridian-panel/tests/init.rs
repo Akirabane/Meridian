@@ -73,6 +73,8 @@ fn init_writes_a_coherent_bench_without_accepting_the_eula() {
         assert!(toml.contains(&format!("port = {port}")));
         assert!(toml.contains("bind = \"127.0.0.1\""));
         assert!(toml.contains("online_mode = false"));
+        // The switches need the server's transfer module, which is off by default.
+        assert!(toml.contains("[transfer]\nenabled = true"));
     }
     // Each server has its sidecar, with a secret of its own that the proxy and
     // the sidecar read from the same file.

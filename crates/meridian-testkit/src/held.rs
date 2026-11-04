@@ -1,6 +1,6 @@
 //! Two small worlds for switch tests: a source the player joins first, and a
 //! fake target that answers as Horizon's held player is documented to
-//! (`docs/server.md`, "Players arriving from another server"). The test plays the
+//! (`docs/server.md`, "A proxy moving a player between two servers"). The test plays the
 //! player and the source by hand on two pipes; the target runs on a TCP port of
 //! its own, since a switch logs the player in on it over a new connection.
 //!

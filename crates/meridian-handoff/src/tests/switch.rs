@@ -89,13 +89,12 @@ fn a_player_is_switched_to_the_target() {
             "target expect Some(10)",
             "source export freeze=true",
             "target import parts=all-but-position announce=Some(true) place=false",
-            "target confirm",
-            "source release Moved announce=true",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved announce=true",
         ]
     );
     assert_eq!(handle.backend(), "target");
     assert_eq!((done.chunks, done.entities, done.extras), (9, 1, 1));
-    assert_eq!(done.warning, None);
 
     let packets = after_switch(&mut player);
     let ids: Vec<i32> = packets.iter().map(|(id, _)| *id).collect();
@@ -338,7 +337,7 @@ fn a_refused_import_lets_the_source_go_on() {
             "target expect Some(10)",
             "source export freeze=true",
             "target import parts=all-but-position announce=Some(true) place=false",
-            "source release Abort announce=false",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
             "target drop",
         ]
     );
@@ -380,8 +379,8 @@ fn a_carried_position_that_never_comes_cancels_the_import() {
             "target expect Some(10)",
             "source export freeze=true",
             "target import parts=all announce=Some(true) place=false at=[8.0, 70.0, 8.0] look=[0.0, 0.0] velocity=None ground=None",
-            "source release Abort announce=false",
-            "target drop",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+            "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
         ]
     );
     still_on_source(&mut bench);
@@ -420,9 +419,9 @@ fn a_refused_confirmation_disconnects_the_player() {
             "target expect Some(10)",
             "source export freeze=true",
             "target import parts=all-but-position announce=Some(true) place=false",
-            "target confirm",
-            "source release Abort announce=false",
-            "target drop",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+            "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
         ]
     );
     // The delta, then the disconnect, then the end.
@@ -432,6 +431,100 @@ fn a_refused_confirmation_disconnects_the_player() {
     }
     assert_eq!(last, pc::DISCONNECT);
     run.join().unwrap().unwrap();
+}
+
+/// The target has placed the player and the file is on its disk, but the source
+/// refuses to let them go: its freeze ran out, and the player played on there since
+/// the export. The transfer fails: the client is disconnected, the source keeps the
+/// player and the target closes the copy it has.
+#[test]
+fn a_source_that_refuses_moved_fails_the_transfer() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).refusing("release", "the hand-over is over"),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::Commit, After::Disconnected)
+    );
+    assert!(
+        failure.reason.contains("the hand-over is over"),
+        "{failure}"
+    );
+    assert!(failure.reason.contains("keeps them"), "{failure}");
+    // The release is asked once, as `moved`, with the id of the export: there is no
+    // abort to follow, since a refused hand-over has nothing left to end.
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=all-but-position announce=Some(true) place=false",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved announce=true",
+            "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+        ]
+    );
+    // The client is told, then its connection ends; the target's side closes too.
+    let mut last = 0;
+    while let Ok((id, _)) = player.recv() {
+        last = id;
+    }
+    assert_eq!(last, pc::DISCONNECT);
+    run.join().unwrap().unwrap();
+    drop(target_thread);
+}
+
+/// A server that freezes the player and gives no hand-over id cannot be asked to let
+/// them go, nor give the target a record it takes: the switch is given up before
+/// anything is imported.
+#[test]
+fn an_export_without_a_hand_over_id_is_given_up() {
+    for record in [
+        json!({ "version": 1, "dimension": OVERWORLD, "player": "AAAA" }),
+        json!({ "version": 1, "handover": null, "dimension": OVERWORLD, "player": "AAAA" }),
+        json!({ "version": 1, "handover": "not an id", "dimension": OVERWORLD, "player": "AAAA" }),
+    ] {
+        let mut bench = bench();
+        let log = Log::default();
+        let (address, _imported, _target) = target(TargetWorld::default());
+        let mut source = FakeControl::new("source", &log);
+        source.record = record;
+        let failure = switch(
+            &bench.handle,
+            target_backend(&address, &options()),
+            &mut source,
+            &mut FakeControl::new("target", &log),
+            &Digests::default(),
+            &settings(),
+        )
+        .unwrap_err();
+        assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+        assert!(failure.reason.contains("no hand-over id"), "{failure}");
+        // No release is asked (there is no id to name) and nothing was imported.
+        assert_eq!(
+            log.lines(),
+            [
+                "target expect Some(10)",
+                "source export freeze=true",
+                "target drop"
+            ]
+        );
+        still_on_source(&mut bench);
+    }
 }
 
 /// The player leaves while the source exports them: their record goes into the
@@ -469,7 +562,7 @@ fn a_player_who_leaves_during_the_freeze_is_saved_on_the_target() {
             "target expect Some(10)",
             "source export freeze=true",
             "target import parts=all-but-position announce=Some(false) place=true",
-            "source release Moved announce=true",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved announce=true",
         ]
     );
     run.join().unwrap().unwrap();
@@ -503,7 +596,7 @@ fn a_freeze_that_lasts_too_long_is_given_up() {
         [
             "target expect Some(10)",
             "source export freeze=true",
-            "source release Abort announce=false",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
             "target drop",
         ]
     );

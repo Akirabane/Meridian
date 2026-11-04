@@ -1,18 +1,22 @@
 //! The player requests of a switch, as the proxy asks them, and the line each one
 //! becomes on the backend's control endpoint.
 //!
-//! The lines are those of Horizon's held-player work (its `docs/server.md`,
-//! "Players arriving from another server"):
+//! The lines are those of Horizon's player transfers (its `docs/server.md`,
+//! "A proxy moving a player between two servers"):
 //!
 //! | Request | Line |
 //! | --- | --- |
 //! | expect | `player-expect <uuid> [seconds]` |
 //! | export | `player-export <uuid> [freeze]` |
 //! | import | `player-import <uuid> <json>`, the JSON `{"record": ..., "parts": [...], "announce": bool, "place": bool}`, and with an [`Arrival`] its `position`, `rotation`, `velocity` and `on_ground` |
-//! | confirm | `player-confirm <uuid>` |
-//! | release | `player-release <uuid> moved [announce]` or `player-release <uuid> abort` |
-//! | drop | `player-drop <uuid>` |
+//! | confirm | `player-confirm <uuid> <handover>` |
+//! | release | `player-release <uuid> <handover> moved [announce]` or `player-release <uuid> <handover> abort` |
+//! | drop | `player-drop <uuid> [handover]` |
 //! | status | `status` (a placeholder: see [`STATUS_LINE`]) |
+//!
+//! `<handover>` is the id that a `player-export` with `freeze` puts in its record
+//! (32 hexadecimal digits). The import names it through the record it carries; the
+//! confirm, the release and, once the record was imported, the drop name it themselves.
 //!
 //! A player record is carried as it is: the sidecar never reads it.
 use serde::{Deserialize, Serialize};
@@ -20,6 +24,10 @@ use serde_json::{Map, Value};
 
 /// The longest a player can be expected for, in seconds, as Horizon allows it.
 pub const MAX_EXPECT_SECONDS: u64 = 60;
+
+/// The longest command line Horizon's control endpoint takes, line break included:
+/// 16 MiB. A longer one is refused and the connection closed.
+pub const MAX_LINE: usize = 16 << 20;
 
 /// One player request. `uuid` is 32 hexadecimal digits, with or without dashes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -41,9 +49,10 @@ pub enum Request {
     },
     /// Put a record on the held player and let them into the world: every part
     /// of it, or only `parts`; the others are told the player came unless
-    /// `announce` is false. With `place` false, the player stays held after the
-    /// record is applied, until a [`Request::Confirm`] places them or a
-    /// [`Request::Drop`] cancels the arrival.
+    /// `announce` is false. The record is the one a [`Request::Export`] with `freeze`
+    /// gave, with its `handover` id: the target refuses one without or with another's.
+    /// With `place` false, the player stays held after the record is applied, until a
+    /// [`Request::Confirm`] places them or a [`Request::Drop`] cancels the arrival.
     Import {
         uuid: String,
         record: Value,
@@ -58,19 +67,29 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arrival: Option<Arrival>,
     },
-    /// Place a held player whose record was imported with `place` false.
-    Confirm { uuid: String },
+    /// Place a held player whose record was imported with `place` false. The
+    /// `handover` is the id of the record that was imported.
+    Confirm { uuid: String, handover: String },
     /// The switch is over: the player has `Moved` away for good, or the switch
     /// was abandoned (`Abort`) and the player stays. `announce` (with `Moved`
-    /// only) sends the others the "left the game" line.
+    /// only) sends the others the "left the game" line. The `handover` is the id the
+    /// export with `freeze` gave; the source refuses `Moved` once the freeze has
+    /// run out.
     Release {
         uuid: String,
+        handover: String,
         outcome: Outcome,
         #[serde(default, skip_serializing_if = "is_false")]
         announce: bool,
     },
-    /// Forget an expected or held player.
-    Drop { uuid: String },
+    /// Forget an expected or held player. With a `handover`, only the arrival of
+    /// that record: it must be the imported record's, so that a late drop leaves a
+    /// newer arrival alone. Before any import there is no id to name.
+    Drop {
+        uuid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handover: Option<String>,
+    },
     /// The state of the backend: how many players it has, how many it can take,
     /// and whether it accepts transfers. Read only, and it names no player.
     // A struct variant, so that a field it does not have is refused like for the others.
@@ -212,7 +231,36 @@ pub fn normalize_uuid(text: &str) -> Option<String> {
     ))
 }
 
+/// A hand-over id as Horizon writes it, 32 lowercase hexadecimal digits, from 32
+/// hexadecimal digits of either case. `None` for anything else.
+pub fn normalize_handover(text: &str) -> Option<String> {
+    (text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| text.to_ascii_lowercase())
+}
+
+/// The hand-over id of a record, as an export with `freeze` puts it in. `None` for
+/// a record without one (an export without `freeze` has `null`) or with one that is
+/// not an id.
+pub fn record_handover(record: &Value) -> Option<String> {
+    normalize_handover(record.get("handover")?.as_str()?)
+}
+
 impl Request {
+    /// The hand-over the request names, as a line writes it.
+    fn handover(&self) -> Result<Option<String>, String> {
+        let named = match self {
+            Request::Confirm { handover, .. } | Request::Release { handover, .. } => handover,
+            Request::Drop {
+                handover: Some(handover),
+                ..
+            } => handover,
+            _ => return Ok(None),
+        };
+        normalize_handover(named).map(Some).ok_or_else(|| {
+            format!("{named:?} is not a hand-over id: 32 hexadecimal digits, as an export gives it")
+        })
+    }
+
     /// The player the request is about; `None` for a request that names no one.
     fn uuid(&self) -> Option<&str> {
         match self {
@@ -220,8 +268,8 @@ impl Request {
             | Request::Export { uuid, .. }
             | Request::Import { uuid, .. }
             | Request::Release { uuid, .. }
-            | Request::Confirm { uuid }
-            | Request::Drop { uuid } => Some(uuid),
+            | Request::Confirm { uuid, .. }
+            | Request::Drop { uuid, .. } => Some(uuid),
             Request::Status {} => None,
         }
     }
@@ -230,12 +278,26 @@ impl Request {
     /// cannot be one. What is checked here is what the line's form needs; the
     /// backend checks the rest, such as the record and the names of the parts.
     pub fn endpoint_line(&self) -> Result<String, String> {
+        let line = self.line()?;
+        // The endpoint reads the line and its break in 16 MiB at most; it answers a
+        // longer one with an error and closes the connection.
+        if line.len() + 1 > MAX_LINE {
+            return Err(format!(
+                "the request is longer than the {} MiB a backend takes",
+                MAX_LINE >> 20
+            ));
+        }
+        Ok(line)
+    }
+
+    fn line(&self) -> Result<String, String> {
         let Some(named) = self.uuid() else {
             return Ok(STATUS_LINE.to_owned());
         };
         let uuid = normalize_uuid(named).ok_or_else(|| {
             format!("{named:?} is not a unique id: 32 hexadecimal digits, with or without dashes")
         })?;
+        let handover = self.handover()?.unwrap_or_default();
         Ok(match self {
             Request::Expect { seconds: None, .. } => format!("player-expect {uuid}"),
             Request::Expect {
@@ -261,6 +323,15 @@ impl Request {
             } => {
                 if !record.is_object() {
                     return Err("a record is a JSON object, as player-export gives it".into());
+                }
+                // The target takes a record only with the hand-over id of an export
+                // with freeze, and no other.
+                if record_handover(record).is_none() {
+                    return Err(
+                        "the record has no hand-over id: export it with freeze, and import it as \
+                         it was given"
+                            .into(),
+                    );
                 }
                 if let Some(arrival) = arrival {
                     arrival.check()?;
@@ -299,17 +370,17 @@ impl Request {
                 outcome: Outcome::Moved,
                 announce: false,
                 ..
-            } => format!("player-release {uuid} moved"),
+            } => format!("player-release {uuid} {handover} moved"),
             Request::Release {
                 outcome: Outcome::Moved,
                 announce: true,
                 ..
-            } => format!("player-release {uuid} moved announce"),
+            } => format!("player-release {uuid} {handover} moved announce"),
             Request::Release {
                 outcome: Outcome::Abort,
                 announce: false,
                 ..
-            } => format!("player-release {uuid} abort"),
+            } => format!("player-release {uuid} {handover} abort"),
             Request::Release {
                 outcome: Outcome::Abort,
                 announce: true,
@@ -319,8 +390,9 @@ impl Request {
                     "announce goes with moved only: an aborted switch keeps the player".into(),
                 );
             }
-            Request::Confirm { .. } => format!("player-confirm {uuid}"),
-            Request::Drop { .. } => format!("player-drop {uuid}"),
+            Request::Confirm { .. } => format!("player-confirm {uuid} {handover}"),
+            Request::Drop { handover: None, .. } => format!("player-drop {uuid}"),
+            Request::Drop { .. } => format!("player-drop {uuid} {handover}"),
             Request::Status {} => STATUS_LINE.to_owned(),
         })
     }
@@ -333,6 +405,7 @@ mod tests {
 
     const PLAIN: &str = "123E4567E89B12D3A456426614174000";
     const DASHED: &str = "123e4567-e89b-12d3-a456-426614174000";
+    const HANDOVER: &str = "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69";
 
     fn line(request: Request) -> String {
         request.endpoint_line().unwrap()
@@ -360,15 +433,36 @@ mod tests {
     fn requests_read_and_write_with_their_op() {
         let request = Request::Release {
             uuid: DASHED.into(),
+            handover: HANDOVER.into(),
             outcome: Outcome::Moved,
             announce: true,
         };
         let text = serde_json::to_string(&request).unwrap();
         assert_eq!(
             text,
-            format!(r#"{{"op":"release","uuid":"{DASHED}","outcome":"moved","announce":true}}"#)
+            format!(
+                r#"{{"op":"release","uuid":"{DASHED}","handover":"{HANDOVER}","outcome":"moved","announce":true}}"#
+            )
         );
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+        // A drop may leave the hand-over out, a confirm and a release may not.
+        assert_eq!(
+            serde_json::from_str::<Request>(&format!(r#"{{"op":"drop","uuid":"{DASHED}"}}"#))
+                .unwrap(),
+            Request::Drop {
+                uuid: DASHED.into(),
+                handover: None
+            }
+        );
+        for without in [
+            format!(r#"{{"op":"confirm","uuid":"{DASHED}"}}"#),
+            format!(r#"{{"op":"release","uuid":"{DASHED}","outcome":"abort"}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(&without).is_err(),
+                "{without}"
+            );
+        }
         // Options left out take their defaults.
         assert_eq!(
             serde_json::from_str::<Request>(&format!(r#"{{"op":"export","uuid":"{DASHED}"}}"#))
@@ -436,6 +530,7 @@ mod tests {
         let record = json!({
             "version": 1,
             "data_version": 5023,
+            "handover": HANDOVER,
             "uuid": DASHED,
             "name": "Alex",
             "player": "AAEC",
@@ -483,6 +578,72 @@ mod tests {
         assert!(e.contains("JSON object"), "{e}");
     }
 
+    /// The target takes a record with the id of an export with freeze only: one
+    /// without, with a `null` (an export without freeze), or with a bad one is not sent.
+    #[test]
+    fn an_import_needs_the_hand_over_id_of_its_record() {
+        for handover in [
+            json!(null),
+            json!(""),
+            json!(7),
+            json!("9f2c4be0a1d34e6b8c0f1e2d3c4b5a6"),
+            json!("9f2c4be0-a1d3-4e6b-8c0f-1e2d3c4b5a69"),
+            json!("9f2c4be0a1d34e6b8c0f1e2d3c4b5a6g"),
+        ] {
+            let e = Request::Import {
+                uuid: PLAIN.into(),
+                record: json!({ "version": 1, "handover": handover }),
+                parts: None,
+                announce: None,
+                place: None,
+                arrival: None,
+            }
+            .endpoint_line()
+            .unwrap_err();
+            assert!(e.contains("no hand-over id"), "{handover}: {e}");
+        }
+        let e = Request::Import {
+            uuid: PLAIN.into(),
+            record: json!({ "version": 1 }),
+            parts: None,
+            announce: None,
+            place: None,
+            arrival: None,
+        }
+        .endpoint_line()
+        .unwrap_err();
+        assert!(e.contains("export it with freeze"), "{e}");
+        // The id is read in either case and the record is sent as it is.
+        let upper = json!({ "handover": HANDOVER.to_uppercase() });
+        assert_eq!(record_handover(&upper).as_deref(), Some(HANDOVER));
+    }
+
+    /// The endpoint takes 16 MiB a line, break included, and closes on a longer one.
+    #[test]
+    fn a_line_longer_than_the_endpoint_takes_is_not_sent() {
+        let import = |padding: usize| {
+            let mut line = Request::Import {
+                uuid: PLAIN.into(),
+                record: json!({ "handover": HANDOVER, "player": "" }),
+                parts: None,
+                announce: None,
+                place: None,
+                arrival: None,
+            };
+            let Request::Import { record, .. } = &mut line else {
+                unreachable!()
+            };
+            record["player"] = Value::String("A".repeat(padding));
+            line.endpoint_line()
+        };
+        let empty = import(0).unwrap().len();
+        let room = MAX_LINE - 1 - empty;
+        // The longest line that still fits, with its break, and one byte more.
+        assert_eq!(import(room).unwrap().len() + 1, MAX_LINE);
+        let e = import(room + 1).unwrap_err();
+        assert!(e.contains("16 MiB"), "{e}");
+    }
+
     /// An arrival goes to the backend as the import's own fields, beside the
     /// record, and crosses the proxy's exchange with the sidecar as it is.
     #[test]
@@ -495,7 +656,7 @@ mod tests {
         };
         let request = Request::Import {
             uuid: PLAIN.into(),
-            record: json!({ "version": 1 }),
+            record: json!({ "version": 1, "handover": HANDOVER }),
             parts: None,
             announce: None,
             place: Some(false),
@@ -506,7 +667,7 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "record": { "version": 1 },
+                "record": { "version": 1, "handover": HANDOVER },
                 "place": false,
                 "position": [12.5, 71.0, -3.5],
                 "rotation": [45.0, 10.0],
@@ -519,7 +680,7 @@ mod tests {
         // Velocity and the ground are optional.
         let bare = Request::Import {
             uuid: PLAIN.into(),
-            record: json!({ "version": 1 }),
+            record: json!({ "version": 1, "handover": HANDOVER }),
             parts: Some(vec!["position".into()]),
             announce: None,
             place: None,
@@ -546,7 +707,7 @@ mod tests {
         let import = |parts: Option<Vec<String>>, arrival: Arrival| {
             Request::Import {
                 uuid: PLAIN.into(),
-                record: json!({}),
+                record: json!({ "handover": HANDOVER }),
                 parts,
                 announce: None,
                 place: None,
@@ -582,54 +743,106 @@ mod tests {
     fn release_says_moved_or_abort_and_announce_goes_with_moved() {
         let release = |outcome, announce| Request::Release {
             uuid: DASHED.into(),
+            handover: HANDOVER.into(),
             outcome,
             announce,
         };
         assert_eq!(
             line(release(Outcome::Moved, false)),
-            format!("player-release {DASHED} moved")
+            format!("player-release {DASHED} {HANDOVER} moved")
         );
         assert_eq!(
             line(release(Outcome::Moved, true)),
-            format!("player-release {DASHED} moved announce")
+            format!("player-release {DASHED} {HANDOVER} moved announce")
         );
         assert_eq!(
             line(release(Outcome::Abort, false)),
-            format!("player-release {DASHED} abort")
+            format!("player-release {DASHED} {HANDOVER} abort")
         );
         assert!(release(Outcome::Abort, true).endpoint_line().is_err());
     }
 
     #[test]
-    fn confirm_is_its_unique_id() {
+    fn confirm_is_its_unique_id_and_its_hand_over() {
         assert_eq!(
-            line(Request::Confirm { uuid: PLAIN.into() }),
-            format!("player-confirm {DASHED}")
+            line(Request::Confirm {
+                uuid: PLAIN.into(),
+                handover: HANDOVER.to_uppercase()
+            }),
+            format!("player-confirm {DASHED} {HANDOVER}")
         );
-        let text = format!(r#"{{"op":"confirm","uuid":"{DASHED}"}}"#);
+        let text = format!(r#"{{"op":"confirm","uuid":"{DASHED}","handover":"{HANDOVER}"}}"#);
         assert_eq!(
             serde_json::from_str::<Request>(&text).unwrap(),
             Request::Confirm {
-                uuid: DASHED.into()
+                uuid: DASHED.into(),
+                handover: HANDOVER.into()
             }
         );
     }
 
     #[test]
-    fn drop_is_its_unique_id() {
+    fn drop_is_its_unique_id_and_maybe_a_hand_over() {
         assert_eq!(
-            line(Request::Drop { uuid: PLAIN.into() }),
+            line(Request::Drop {
+                uuid: PLAIN.into(),
+                handover: None
+            }),
             format!("player-drop {DASHED}")
+        );
+        assert_eq!(
+            line(Request::Drop {
+                uuid: PLAIN.into(),
+                handover: Some(HANDOVER.into())
+            }),
+            format!("player-drop {DASHED} {HANDOVER}")
         );
     }
 
     #[test]
     fn a_bad_unique_id_never_becomes_a_line() {
         for uuid in ["Alex", "", "123e4567-e89b-12d3-a456-4266141740 0", "x stop"] {
-            let e = Request::Drop { uuid: uuid.into() }
-                .endpoint_line()
-                .unwrap_err();
+            let e = Request::Drop {
+                uuid: uuid.into(),
+                handover: None,
+            }
+            .endpoint_line()
+            .unwrap_err();
             assert!(e.contains("is not a unique id"), "{uuid}: {e}");
+        }
+    }
+
+    /// A hand-over id is text in a line: anything but 32 hexadecimal digits is
+    /// refused, so that it can never add a word or a command.
+    #[test]
+    fn a_bad_hand_over_never_becomes_a_line() {
+        for handover in [
+            "",
+            "9f2c4be0a1d34e6b8c0f1e2d3c4b5a6",
+            "9f2c4be0a1d34e6b8c0f1e2d3c4b5a690",
+            "9f2c4be0-a1d3-4e6b-8c0f-1e2d3c4b5a69",
+            "9f2c4be0a1d34e6b8c0f1e2d3c4b5a6g",
+            "9f2c4be0a1d34e6b8c0f1e2d3c4b5a6 moved",
+        ] {
+            for request in [
+                Request::Confirm {
+                    uuid: DASHED.into(),
+                    handover: handover.into(),
+                },
+                Request::Release {
+                    uuid: DASHED.into(),
+                    handover: handover.into(),
+                    outcome: Outcome::Abort,
+                    announce: false,
+                },
+                Request::Drop {
+                    uuid: DASHED.into(),
+                    handover: Some(handover.into()),
+                },
+            ] {
+                let e = request.endpoint_line().unwrap_err();
+                assert!(e.contains("is not a hand-over id"), "{handover:?}: {e}");
+            }
         }
     }
 

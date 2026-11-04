@@ -1,7 +1,9 @@
 //! The switch itself: prepare, freeze, hand over, commit (DESIGN.md section 5).
 use crate::{
     configure::{Digest, configure},
-    control::{Arrival, Outcome, PlayerControl, Record, record_dimension, uuid_text},
+    control::{
+        Arrival, Outcome, PlayerControl, Record, record_dimension, record_handover, uuid_text,
+    },
     prepare::Target,
     session::{Lane, SessionHandle, Shared, add, encode, lock, spawn_lane},
 };
@@ -95,8 +97,6 @@ pub struct Done {
     pub entities: usize,
     /// How long each step took: prepare, freeze, hand over, commit.
     pub times: [Duration; 4],
-    /// Something that went wrong after the client was handed over.
-    pub warning: Option<String>,
 }
 
 /// The parts of a record `player-import` knows (Horizon's `docs/server.md`).
@@ -224,6 +224,11 @@ struct Run<'a> {
     parts: Option<Vec<String>>,
     /// Whether the player's place goes to the target.
     carry: bool,
+    /// The id of the hand-over, which the export with freeze gave and the requests
+    /// that end it name. `None` until the export.
+    handover: Option<String>,
+    /// Whether the target took the record: its later requests name the hand-over.
+    imported: bool,
 }
 
 impl Run<'_> {
@@ -235,9 +240,35 @@ impl Run<'_> {
         }
     }
 
+    /// The target forgets the held player. Once it holds a record, the drop names the
+    /// hand-over, so that it cuts that arrival and no other; before, it goes by the
+    /// player's unique id.
+    fn drop_target(&mut self) -> Result<(), String> {
+        let handover = self.handover.clone().filter(|_| self.imported);
+        self.target.drop_player(&self.uuid, handover.as_deref())
+    }
+
+    /// The target places the player whose record it holds.
+    fn confirm_target(&mut self) -> Result<(), String> {
+        match self.handover.clone() {
+            Some(handover) => self.target.confirm(&self.uuid, &handover),
+            None => Err("the export gave no hand-over id".into()),
+        }
+    }
+
+    /// The source ends the hand-over: the player is gone for good, or stays.
+    fn release_source(&mut self, outcome: Outcome, announce: bool) -> Result<(), String> {
+        match self.handover.clone() {
+            Some(handover) => self
+                .source
+                .release(&self.uuid, &handover, outcome, announce),
+            None => Err("the export gave no hand-over id".into()),
+        }
+    }
+
     /// Lets go of the target: it forgets the held player, and its lane closes.
     fn abandon_target(&mut self) {
-        let _ = self.target.drop_player(&self.uuid);
+        let _ = self.drop_target();
         if let Some(lane) = &self.lane {
             lane.closer.close();
         }
@@ -245,7 +276,7 @@ impl Run<'_> {
 
     /// The source lets the frozen player go on, and the target is let go.
     fn abort(&mut self) {
-        let _ = self.source.release(&self.uuid, Outcome::Abort, false);
+        let _ = self.release_source(Outcome::Abort, false);
         self.abandon_target();
     }
 
@@ -289,19 +320,21 @@ impl Run<'_> {
                     self.arrival(),
                 )
                 .is_ok(),
-            None => self.target.confirm(&self.uuid).is_ok(),
+            None => self.confirm_target().is_ok(),
         };
         if !placed {
-            let _ = self.target.drop_player(&self.uuid);
+            let _ = self.drop_target();
         }
         if let Some(lane) = &self.lane {
             lane.closer.close();
         }
         let reason = if placed {
-            let _ = self.source.release(&self.uuid, Outcome::Moved, announce);
+            // A source that refuses (the freeze ran out) has the player's later
+            // state, which it saves when its connection closes just below.
+            let _ = self.release_source(Outcome::Moved, announce);
             "the player left during the switch; their record was saved on the target"
         } else {
-            let _ = self.source.release(&self.uuid, Outcome::Abort, false);
+            let _ = self.release_source(Outcome::Abort, false);
             "the player left during the switch; the target would not take their record, so \
              the source keeps them"
         };
@@ -338,6 +371,8 @@ pub fn switch(
         lane: None,
         parts: settings.parts(),
         carry: settings.carry_position,
+        handover: None,
+        imported: false,
     };
     if shared.switching.swap(true, Ordering::SeqCst) {
         return Err(run.fail(Step::Check, "a switch of this player is already under way"));
@@ -412,13 +447,13 @@ pub fn switch(
     let digest = match configured {
         Ok(digest) => digest,
         Err(why) => {
-            let _ = run.target.drop_player(&run.uuid);
+            let _ = run.drop_target();
             return Err(run.fail(Step::Prepare, why));
         }
     };
     digests.set(target.name, digest);
     if let Some(kind) = session_digest.differs(&digest) {
-        let _ = run.target.drop_player(&run.uuid);
+        let _ = run.drop_target();
         return Err(run.fail(Step::Prepare, differs(target.name, kind)));
     }
     note("prepare: the target configures clients as the first server did (digest)");
@@ -426,7 +461,7 @@ pub fn switch(
     let closer = match reader.closer() {
         Ok(closer) => closer,
         Err(e) => {
-            let _ = run.target.drop_player(&run.uuid);
+            let _ = run.drop_target();
             return Err(run.fail(Step::Prepare, e.to_string()));
         }
     };
@@ -511,6 +546,20 @@ pub fn switch(
             ));
         }
     };
+    // The id of the hand-over, which the requests that end it name. A server that
+    // freezes the player without giving one cannot be asked to let them go: it does
+    // not do the transfers this proxy asks for, and lets the freeze go by itself.
+    match record_handover(&record) {
+        Some(handover) => run.handover = Some(handover),
+        None => {
+            run.abandon_target();
+            return Err(run.fail(
+                Step::Freeze,
+                "the player's server gave no hand-over id with their record: it does not take \
+                 part in transfers as this proxy asks",
+            ));
+        }
+    }
     if record_dimension(&record) != target_dimension.as_deref() {
         run.abort();
         return Err(run.fail(
@@ -565,6 +614,7 @@ pub fn switch(
             ));
         }
     };
+    run.imported = true;
     note(&match (settings.carry_position, arrival) {
         (false, _) => "hand over: the target took the record, all but the position".to_owned(),
         (true, Some(arrival)) => format!(
@@ -714,13 +764,16 @@ pub fn switch(
          bytes; {chunks} chunks, {entities} entities)"
     ));
     // The client has the target's world: the target places the player.
-    if let Err(e) = run.target.confirm(&run.uuid) {
+    let disconnect = || {
         session.disconnect(horizon_protocol::packets::configuration::Disconnect {
             reason: horizon_protocol::text::literal(&format!(
                 "The switch to {} failed; join again to go on where you were.",
                 target.name
             )),
         });
+    };
+    if let Err(e) = run.confirm_target() {
+        disconnect();
         run.abort();
         source_lane.closer.close();
         return Err(Failure {
@@ -732,22 +785,29 @@ pub fn switch(
     note("hand over: the target placed the player");
     let handed = Instant::now();
 
-    // Commit.
-    let warning = run
-        .source
-        .release(&run.uuid, Outcome::Moved, settings.announce_departure)
-        .err()
-        .map(|e| {
-            format!(
-                "the old server did not let the player go ({e}); its connection was closed, \
-                 which saves them there too"
-            )
+    // Commit. The target has the player's file on disk, so the source may let go. A
+    // source that refuses has no hand-over any more: the freeze ran out, and the
+    // player played on there since the export, so the record the target placed is the
+    // older one. The switch fails: the source keeps the player, as the later state, and
+    // the target closes its copy, which it saves as it is.
+    if let Err(e) = run.release_source(Outcome::Moved, settings.announce_departure) {
+        note("commit: the source would not let the player go");
+        disconnect();
+        run.abandon_target();
+        source_lane.closer.close();
+        return Err(Failure {
+            step: Step::Commit,
+            reason: format!(
+                "the old server would not let the player go ({e}): their freeze had run out, so \
+                 the old server keeps them as they are there; the copy {} placed is older and \
+                 stays in its player file",
+                target.name
+            ),
+            after: After::Disconnected,
         });
+    }
     source_lane.closer.close();
-    note(match &warning {
-        None => "commit: the source let the player go",
-        Some(_) => "commit: the source did not let the player go; its connection was closed",
-    });
+    note("commit: the source let the player go");
     let committed = Instant::now();
     Ok(Done {
         delta_packets,
@@ -761,7 +821,6 @@ pub fn switch(
             handed - frozen,
             committed - handed,
         ],
-        warning,
     })
 }
 
