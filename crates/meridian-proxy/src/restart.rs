@@ -10,15 +10,19 @@
 //! handed to an [`Evacuate`], which moves them to the lobby or to another game server.
 //!
 //! The marking is undone when the backend is back, but only if the detector made it:
-//! a backend the operator had drained stays drained.
+//! a backend the operator had drained, or drains while it restarts, stays drained.
+//!
+//! The evacuation is [`Evacuator`]: it moves the players one at a time with the logic of
+//! `drain --move`, and only when `[restart] evacuate` is on.
 use crate::balance::Balancer;
+use crate::evacuate::Outcome;
 use crate::log::{info, warning};
+use crate::session::Sessions;
+use crate::status::Statuses;
 use meridian_config::Config;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
-
-use crate::status::Statuses;
 
 /// How the proxy came to know that a backend is going down.
 // Nothing sends this yet: the sidecar or the panel will (docs/RESTART.md).
@@ -50,19 +54,6 @@ pub trait Evacuate: Send + Sync {
     fn evacuate(&self, backend: &str, cause: Cause);
 }
 
-/// The evacuation until the players can be moved: it says what would be moved. The
-/// players stay on the backend, as they do when the operator drains it.
-pub struct LogOnly;
-
-impl Evacuate for LogOnly {
-    fn evacuate(&self, backend: &str, cause: Cause) {
-        info!(
-            "backend \"{backend}\" is going down ({}): its players stay on it, nothing moves them yet",
-            cause.describe()
-        );
-    }
-}
-
 /// What the detector waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -77,15 +68,22 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        Self::from(&meridian_config::Restart::default())
+    }
+}
+
+impl From<&meridian_config::Restart> for Settings {
+    fn from(restart: &meridian_config::Restart) -> Self {
         Self {
-            misses: 3,
-            window: Duration::from_secs(60),
+            misses: restart.silent_rounds,
+            window: Duration::from_secs(restart.grace_seconds),
         }
     }
 }
 
 /// A backend that is going down, from the notice to its return.
 struct Episode {
+    cause: Cause,
     since: Instant,
     /// It stopped answering after the notice: it did go down.
     missed: bool,
@@ -105,7 +103,7 @@ struct State {
 pub struct Detector {
     balancer: Arc<Balancer>,
     evacuate: Arc<dyn Evacuate>,
-    settings: Settings,
+    settings: Mutex<Settings>,
     state: Mutex<State>,
 }
 
@@ -114,9 +112,18 @@ impl Detector {
         Self {
             balancer,
             evacuate,
-            settings,
+            settings: Mutex::new(settings),
             state: Mutex::default(),
         }
+    }
+
+    /// Puts `settings` in force from the next round, as a reload of the configuration does.
+    pub fn configure(&self, settings: Settings) {
+        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
+    fn settings(&self) -> Settings {
+        *self.settings.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// `backend` is going down, as far as `cause` shows. It stops being offered to new
@@ -131,6 +138,7 @@ impl Detector {
         state.episodes.insert(
             backend.to_owned(),
             Episode {
+                cause,
                 since: now,
                 // It was marked for not answering: it already went quiet.
                 missed: cause == Cause::Unreachable,
@@ -168,11 +176,12 @@ impl Detector {
     /// Several rounds without an answer make it going down; an answer after that, or an
     /// answer long enough after the notice, makes it back.
     pub fn observe(&self, backend: &str, answered: bool, now: Instant) {
+        let settings = self.settings();
         let mut state = self.lock();
         if answered {
             state.misses.remove(backend);
             let over = state.episodes.get(backend).is_some_and(|e| {
-                e.missed || now.saturating_duration_since(e.since) >= self.settings.window
+                e.missed || now.saturating_duration_since(e.since) >= settings.window
             });
             drop(state);
             if over {
@@ -190,7 +199,7 @@ impl Detector {
             return;
         }
         drop(state);
-        if misses >= self.settings.misses {
+        if misses >= settings.misses {
             self.announce(backend, Cause::Unreachable, now);
         }
     }
@@ -211,6 +220,22 @@ impl Detector {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_restarting(&self, backend: &str) -> bool {
         self.lock().episodes.contains_key(backend)
+    }
+
+    /// For the console's list of backends: why `backend` is going down, if it is.
+    pub fn describe(&self, backend: &str) -> Option<String> {
+        self.lock()
+            .episodes
+            .get(backend)
+            .map(|e| e.cause.describe().to_owned())
+    }
+
+    /// The operator drained `backend`: it stays drained when the backend is back, even if
+    /// the detector had drained it first.
+    pub fn keep_drained(&self, backend: &str) {
+        if let Some(episode) = self.lock().episodes.get_mut(backend) {
+            episode.ours = false;
+        }
     }
 
     /// Forgets the backends `keep` refuses, such as one a reload removed.
@@ -250,9 +275,95 @@ pub fn notice(line: &str) -> Option<Notice> {
     }
 }
 
+/// How the players of a backend are sent away when the evacuation is on:
+/// [`crate::evacuate::send_away`] in a running proxy, a stand-in in tests.
+type Away = dyn Fn(&Sessions, &Config, &str) -> Option<Outcome> + Send + Sync;
+
+/// The evacuation of a running proxy: with `[restart] evacuate` on, the players of a
+/// backend that is going down are sent to other servers of its role, one at a time, as
+/// `drain <backend> --move` sends them. With it off, which is the default, they stay and
+/// the backend is only marked draining.
+///
+/// The moves take a pause each, so they run on a thread of their own and do not hold the
+/// poller. A player with nowhere to go stays on the backend and is named in the log.
+pub struct Evacuator {
+    sessions: Arc<Sessions>,
+    config: Arc<RwLock<Arc<Config>>>,
+    away: Arc<Away>,
+}
+
+impl Evacuator {
+    pub fn new(sessions: Arc<Sessions>, config: Arc<RwLock<Arc<Config>>>) -> Self {
+        Self::with(sessions, config, Arc::new(crate::evacuate::send_away))
+    }
+
+    fn with(sessions: Arc<Sessions>, config: Arc<RwLock<Arc<Config>>>, away: Arc<Away>) -> Self {
+        Self {
+            sessions,
+            config,
+            away,
+        }
+    }
+
+    fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// The evacuation, on this thread: `None` when it is off or nobody is on `backend`.
+    fn run(&self, backend: &str, cause: Cause) -> Option<Outcome> {
+        let config = self.config();
+        if !config.restart.evacuate {
+            info!(
+                "backend \"{backend}\" is going down ({}): its players stay on it ([restart] evacuate is off)",
+                cause.describe()
+            );
+            return None;
+        }
+        let Some(outcome) = (self.away)(&self.sessions, &config, backend) else {
+            info!("backend \"{backend}\" is going down: nobody is on it");
+            return None;
+        };
+        info!(
+            "backend \"{backend}\" is going down: {} moved, {} stayed",
+            outcome.moved,
+            outcome.stayed.len()
+        );
+        for (name, why) in &outcome.stayed {
+            warning!("{name} stays on {backend}: {why}");
+        }
+        Some(outcome)
+    }
+}
+
+impl Evacuate for Evacuator {
+    fn evacuate(&self, backend: &str, cause: Cause) {
+        if !self.config().restart.evacuate {
+            self.run(backend, cause);
+            return;
+        }
+        // The detector holds this as an `Arc<dyn Evacuate>` and the thread outlives the
+        // call: it takes the same handles.
+        let evacuation = Evacuator::with(
+            Arc::clone(&self.sessions),
+            Arc::clone(&self.config),
+            Arc::clone(&self.away),
+        );
+        let backend = backend.to_owned();
+        let spawned = std::thread::Builder::new()
+            .name("restart evacuation".into())
+            .spawn(move || {
+                evacuation.run(&backend, cause);
+            });
+        if let Err(e) = spawned {
+            warning!("cannot start the evacuation: {e}");
+        }
+    }
+}
+
 /// One round of the sidecars' states, as the poller left them: every backend with a
 /// role either answered or is failing, and the detector is told which.
 pub fn observe_round(config: &Config, statuses: &Statuses, detector: &Detector, now: Instant) {
+    detector.configure(Settings::from(&config.restart));
     detector.retain(|b| config.balanced(b).is_some());
     for sidecar in &config.sidecars {
         if config.balanced(&sidecar.backend).is_some() {

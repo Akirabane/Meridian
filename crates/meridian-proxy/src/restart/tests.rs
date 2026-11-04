@@ -1,8 +1,9 @@
 use super::*;
 use crate::status::poll;
-use meridian_config::{BalancedServer, Role, Sidecar};
+use meridian_config::{BalancedServer, Restart, Role, Sidecar};
 use meridian_sidecar::request::ServerStatus;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 /// An evacuation that only writes down what it was asked.
 #[derive(Default)]
@@ -265,4 +266,210 @@ fn the_rounds_of_the_poller_drain_a_backend_whose_sidecar_goes_quiet() {
     poll(&config, &all_up, &statuses);
     observe_round(&config, &statuses, &detector, at(now, 20));
     assert!(!balancer.is_drained("east"));
+}
+
+#[test]
+fn the_detector_says_why_a_backend_is_going_down() {
+    let (detector, _, _) = detector();
+    let now = Instant::now();
+    assert_eq!(detector.describe("east"), None);
+    detector.announce("east", Cause::Announced, now);
+    assert_eq!(detector.describe("east").unwrap(), "it announced its stop");
+    detector.back("east");
+    assert_eq!(detector.describe("east"), None);
+    detector.announce("east", Cause::Panel, now);
+    assert_eq!(
+        detector.describe("east").unwrap(),
+        "the panel is restarting it"
+    );
+    detector.back("east");
+    detector.announce("east", Cause::Unreachable, now);
+    assert_eq!(detector.describe("east").unwrap(), "it stopped answering");
+}
+
+/// The operator drains a backend that the detector drained first: it is theirs now.
+#[test]
+fn a_drain_by_the_operator_during_a_restart_outlasts_it() {
+    let (detector, balancer, _) = detector();
+    let now = Instant::now();
+    detector.announce("east", Cause::Announced, now);
+    assert!(balancer.is_drained("east"));
+    detector.keep_drained("east");
+    detector.back("east");
+    assert!(balancer.is_drained("east"));
+    // Nothing to keep for a backend that is not going down.
+    detector.keep_drained("lobby");
+    assert!(!balancer.is_drained("lobby"));
+}
+
+#[test]
+fn new_settings_apply_to_the_next_round() {
+    let (detector, balancer, _) = detector();
+    let now = Instant::now();
+    detector.configure(Settings {
+        misses: 1,
+        window: Duration::from_secs(10),
+    });
+    detector.observe("east", false, now);
+    assert!(balancer.is_drained("east"), "one miss is enough now");
+    detector.configure(Settings {
+        misses: 3,
+        window: Duration::from_secs(10),
+    });
+    detector.announce("lobby", Cause::Announced, now);
+    detector.observe("lobby", true, at(now, 10));
+    assert!(!balancer.is_drained("lobby"), "the window is 10 s now");
+}
+
+#[test]
+fn the_rounds_follow_the_restart_table_of_the_configuration() {
+    let (detector, balancer, recorded) = detector();
+    let config = Config {
+        restart: Restart {
+            evacuate: false,
+            silent_rounds: 1,
+            grace_seconds: 5,
+        },
+        ..config()
+    };
+    let statuses = Statuses::default();
+    let down = |_: &Sidecar, _: Duration| Err("down".to_owned());
+    poll(&config, &down, &statuses);
+    observe_round(&config, &statuses, &detector, Instant::now());
+    assert!(balancer.is_drained("east") && balancer.is_drained("lobby"));
+    assert_eq!(recorded.calls().len(), 2);
+}
+
+// ---- The evacuation ----
+
+/// A stand-in for `send_away` that writes down where it was asked to send players from.
+struct Away {
+    asked: Arc<Mutex<Vec<String>>>,
+    result: fn() -> Option<Outcome>,
+}
+
+impl Away {
+    fn new(result: fn() -> Option<Outcome>) -> (Self, Arc<Mutex<Vec<String>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                asked: Arc::clone(&asked),
+                result,
+            },
+            asked,
+        )
+    }
+
+    fn evacuator(self, evacuate: bool) -> Evacuator {
+        let config = Config {
+            restart: Restart {
+                evacuate,
+                ..Restart::default()
+            },
+            ..config()
+        };
+        Evacuator::with(
+            Arc::new(Sessions::default()),
+            Arc::new(RwLock::new(Arc::new(config))),
+            Arc::new(move |_: &Sessions, _: &Config, backend: &str| {
+                self.asked.lock().unwrap().push(backend.to_owned());
+                (self.result)()
+            }),
+        )
+    }
+}
+
+fn two_moved_one_stayed() -> Option<Outcome> {
+    Some(Outcome {
+        lines: vec!["Alice: east to lobby".into(), "Bob: east to lobby".into()],
+        moved: 2,
+        stayed: vec![(
+            "Carol".into(),
+            "no other server of role lobby has room".into(),
+        )],
+    })
+}
+
+/// The evacuation is off until the operator turns it on: the players stay, and the
+/// backend is only marked draining.
+#[test]
+fn the_evacuation_is_off_by_default() {
+    let (away, asked) = Away::new(two_moved_one_stayed);
+    let evacuator = away.evacuator(false);
+    assert!(evacuator.run("east", Cause::Announced).is_none());
+    evacuator.evacuate("east", Cause::Announced);
+    assert!(asked.lock().unwrap().is_empty());
+    assert!(!Restart::default().evacuate);
+    assert!(!Config::default().restart.evacuate);
+}
+
+#[test]
+fn the_evacuation_sends_the_players_of_the_backend_away_when_it_is_on() {
+    let (away, asked) = Away::new(two_moved_one_stayed);
+    let evacuator = away.evacuator(true);
+    let outcome = evacuator.run("east", Cause::Panel).unwrap();
+    assert_eq!(*asked.lock().unwrap(), ["east"]);
+    assert_eq!(outcome.moved, 2);
+    // The player with nowhere to go stays, and is told apart.
+    assert_eq!(outcome.stayed.len(), 1);
+    assert_eq!(outcome.stayed[0].0, "Carol");
+}
+
+#[test]
+fn nobody_on_the_backend_is_not_an_evacuation() {
+    let (away, asked) = Away::new(|| None);
+    let evacuator = away.evacuator(true);
+    assert!(evacuator.run("east", Cause::Announced).is_none());
+    assert_eq!(asked.lock().unwrap().len(), 1);
+}
+
+/// The moves have pauses, so they run on a thread of their own: the poller that announced
+/// the restart does not wait for them.
+#[test]
+fn the_evacuation_runs_off_the_thread_that_announced_the_restart() {
+    let (sent, received) = mpsc::channel();
+    let sent = Mutex::new(sent);
+    let caller = std::thread::current().id();
+    let evacuator = Evacuator::with(
+        Arc::new(Sessions::default()),
+        Arc::new(RwLock::new(Arc::new(Config {
+            restart: Restart {
+                evacuate: true,
+                ..Restart::default()
+            },
+            ..config()
+        }))),
+        Arc::new(move |_: &Sessions, _: &Config, backend: &str| {
+            let _ = sent
+                .lock()
+                .unwrap()
+                .send((backend.to_owned(), std::thread::current().id()));
+            None
+        }),
+    );
+    evacuator.evacuate("east", Cause::Unreachable);
+    let (backend, thread) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(backend, "east");
+    assert_ne!(thread, caller);
+}
+
+/// The detector and the evacuation together: the backend is draining when the
+/// evacuation starts, so no player is sent back to it.
+#[test]
+fn the_backend_is_draining_when_the_evacuation_starts() {
+    let balancer = Arc::new(Balancer::default());
+    let seen = Arc::new(Mutex::new(None));
+    struct Check(Arc<Balancer>, Arc<Mutex<Option<bool>>>);
+    impl Evacuate for Check {
+        fn evacuate(&self, backend: &str, _: Cause) {
+            *self.1.lock().unwrap() = Some(self.0.is_drained(backend));
+        }
+    }
+    let detector = Detector::new(
+        Arc::clone(&balancer),
+        Arc::new(Check(Arc::clone(&balancer), Arc::clone(&seen))),
+        Settings::default(),
+    );
+    detector.announce("east", Cause::Announced, Instant::now());
+    assert_eq!(*seen.lock().unwrap(), Some(true));
 }

@@ -139,6 +139,10 @@ pub enum ConfigError {
     ZeroStateMaxAge,
     /// `[balancing] probe-interval-seconds` is zero.
     ZeroProbeInterval,
+    /// `[restart] silent-rounds` is zero.
+    ZeroSilentRounds,
+    /// `[restart] grace-seconds` is zero.
+    ZeroRestartGrace,
 }
 
 impl fmt::Display for ConfigError {
@@ -360,6 +364,12 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::ZeroProbeInterval => {
                 write!(f, "[balancing] probe-interval-seconds must be more than 0")
+            }
+            ConfigError::ZeroSilentRounds => {
+                write!(f, "[restart] silent-rounds must be more than 0")
+            }
+            ConfigError::ZeroRestartGrace => {
+                write!(f, "[restart] grace-seconds must be more than 0")
             }
             ConfigError::MaxPlayersTooLarge(n) => write!(
                 f,

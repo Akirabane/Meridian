@@ -132,6 +132,21 @@ still missing.
 | `tie-break` | `"ping"` | How a tie between equally full servers is broken: `"ping"` (the one the proxy measured as quickest to connect to) or `"order"` (the one listed first). With `"order"` the proxy does not measure | `"ping"` or `"order"` |
 | `probe-interval-seconds` | `10` | Seconds between two readings of the state of each server with a role and a sidecar, through its sidecar, and between two measures of the time a connection to each server with a role takes | More than 0 |
 
+## `[restart]`
+
+What the proxy does when a backend with a role is about to restart ([RESTART.md](RESTART.md)).
+Whatever these say, such a backend is marked draining as soon as the proxy believes it is
+going down, and offered again when it is back. The players stay on it unless `evacuate` is on.
+Without the table, nothing moves a player.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `evacuate` | `false` | Whether the players of a backend that is going down are sent to other servers of its role, one at a time, as `drain <server> --move` sends them. A player with nowhere to go stays and is named in the log. Off, the players stay on the backend | `true` or `false` |
+| `silent-rounds` | `3` | How many readings in a row (one every `[balancing] probe-interval-seconds`) its sidecar may leave unanswered before the backend counts as going down. Needs `[balancing] enabled` and a sidecar | More than 0 |
+| `grace-seconds` | `60` | Seconds a backend that was told to stop may go on answering before it counts as back: it answers for a while as it shuts down | More than 0 |
+
+A reload applies the three keys to the next reading.
+
 ## `[commands]`
 
 The commands players type in game that the proxy answers itself.

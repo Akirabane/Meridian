@@ -390,8 +390,15 @@ fn server_of<'n>(
 
 /// What the console says of a balanced backend: its role, its players against its
 /// caps, whether the balancer offers it, and how quickly it answered. `None` for a
-/// backend with no role. `on` is the players its sessions count.
-pub fn describe(config: &Config, shared: &Shared, name: &str, on: usize) -> Option<String> {
+/// backend with no role. `on` is the players its sessions count, and `restarting` why the
+/// proxy believes the backend is going down, if it does (docs/RESTART.md).
+pub fn describe(
+    config: &Config,
+    shared: &Shared,
+    name: &str,
+    on: usize,
+    restarting: Option<&str>,
+) -> Option<String> {
     let limits = config.balanced(name)?;
     let now = Instant::now();
     let retry = Duration::from_secs(config.backend_retry_seconds);
@@ -399,7 +406,11 @@ pub fn describe(config: &Config, shared: &Shared, name: &str, on: usize) -> Opti
     let server = server_of(config, shared, name, &[], true, (retry, now))?;
     let candidate = server.with_players(on + shared.balancer.reserved(name));
     let report = shared.statuses.report(name, max_age, now);
-    let offered = if shared.balancer.is_drained(name) {
+    // The detector drained it; an operator who offered it again is believed over the detector.
+    let restarting = restarting.filter(|_| shared.balancer.is_drained(name));
+    let offered = if let Some(why) = restarting {
+        format!("draining (restarting: {why})")
+    } else if shared.balancer.is_drained(name) {
         "draining (drained from the console)".to_owned()
     } else if matches!(report, Report::Fresh(s) if s.accepts_transfers == Some(false)) {
         "draining (it does not accept transfers)".to_owned()

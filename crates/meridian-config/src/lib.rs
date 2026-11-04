@@ -6,17 +6,20 @@ mod auth;
 mod balancing;
 mod commands;
 mod error;
+mod restart;
 mod sidecar;
 
 pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
+pub use restart::Restart;
 pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
 
 use auth::FileAuth;
 use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
+use restart::FileRestart;
 
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -182,6 +185,8 @@ pub struct Config {
     pub balanced: Vec<BalancedServer>,
     /// The `[balancing]` table.
     pub balancing: Balancing,
+    /// The `[restart]` table.
+    pub restart: Restart,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -230,6 +235,7 @@ impl Default for Config {
             switch_commit_margin_ms: 2_000,
             balanced: Vec::new(),
             balancing: Balancing::default(),
+            restart: Restart::default(),
         }
     }
 }
@@ -266,6 +272,7 @@ impl std::fmt::Debug for Config {
             switch_commit_margin_ms,
             balanced,
             balancing,
+            restart,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -301,6 +308,7 @@ impl std::fmt::Debug for Config {
             .field("switch_commit_margin_ms", switch_commit_margin_ms)
             .field("balanced", balanced)
             .field("balancing", balancing)
+            .field("restart", restart)
             .finish()
     }
 }
@@ -342,6 +350,8 @@ struct File {
     switch_commit_margin_ms: Option<u64>,
     #[serde(default)]
     balancing: FileBalancing,
+    #[serde(default)]
+    restart: FileRestart,
 }
 
 #[derive(Deserialize)]
@@ -517,6 +527,7 @@ impl Config {
                 .unwrap_or(defaults.switch_commit_margin_ms),
             balanced,
             balancing: file.balancing.into_settings(),
+            restart: file.restart.into_settings(),
         };
         config.validate()?;
         Ok(config)
@@ -585,6 +596,7 @@ impl Config {
         }
         self.commands.validate(self)?;
         self.validate_balancing()?;
+        self.restart.validate()?;
         for s in &self.sidecars {
             if self.backend(&s.backend).is_none() {
                 return Err(ConfigError::UnknownBackend {
@@ -822,6 +834,9 @@ mod commands_tests;
 
 #[cfg(test)]
 mod balancing_tests;
+
+#[cfg(test)]
+mod restart_tests;
 
 #[cfg(test)]
 mod sidecar_tests;

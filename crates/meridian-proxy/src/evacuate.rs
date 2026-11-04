@@ -6,8 +6,10 @@
 //! The choice of the target is the balancer's ([`crate::placing::elsewhere`]); the move
 //! itself is `mover`'s, so the loop is tested here without a sidecar or a socket.
 use crate::balance::Reservation;
+use crate::log::{info, warning};
 use crate::placing;
-use crate::session::{Player, Shared};
+use crate::session::{Player, Sessions, Shared};
+use crate::switching;
 use meridian_config::Config;
 use std::time::Duration;
 
@@ -84,6 +86,62 @@ pub fn run(
         drop(place);
     }
     out
+}
+
+/// Sends the players who are on `server` now to other servers of its role, one at a time,
+/// and waits for the last move. `None` when nobody is on it. The console's `drain --move`
+/// and the evacuation of a backend that is going down (docs/RESTART.md) are this.
+pub fn send_away(sessions: &Sessions, config: &Config, server: &str) -> Option<Outcome> {
+    let players: Vec<Player> = sessions
+        .players()
+        .into_iter()
+        .filter(|p| p.backend == server)
+        .collect();
+    if players.is_empty() {
+        return None;
+    }
+    Some(run(
+        config,
+        &sessions.shared(),
+        server,
+        &players,
+        &mut |player, target| move_one(sessions, config, player, target),
+        PAUSE,
+        &mut std::thread::sleep,
+    ))
+}
+
+/// Moves one player to `target` and tells them how it went: the console's line, or why it
+/// failed.
+fn move_one(
+    sessions: &Sessions,
+    config: &Config,
+    player: &Player,
+    target: &str,
+) -> Result<String, String> {
+    let Some((player, handle)) = sessions.session(&player.name) else {
+        return Err(format!("{} left before the switch", player.name));
+    };
+    match switching::switch(
+        config,
+        &sessions.switcher,
+        &handle,
+        &player.name,
+        player.address.ip(),
+        target,
+    ) {
+        Ok(moved) => {
+            let line = moved.describe(&player.name);
+            info!("{line}");
+            handle.tell(&format!("You are now on {}.", moved.to));
+            Ok(line)
+        }
+        Err(why) => {
+            warning!("{why}");
+            handle.tell(&format!("Could not move you to {target}. {why}"));
+            Err(why)
+        }
+    }
 }
 
 #[cfg(test)]

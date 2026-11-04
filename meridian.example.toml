@@ -192,6 +192,19 @@ tie-break = "ping"
 # sidecar, and between two measures of the time a connection to it takes.
 probe-interval-seconds = 10
 
+# What the proxy does when a backend with a role is about to restart: it is marked
+# draining, and offered again when it is back. See docs/RESTART.md.
+[restart]
+# Whether the players of a backend that is going down are sent to other backends of its
+# role, one at a time, as "drain <backend> --move" sends them. Off by default: the
+# players then stay on the backend.
+evacuate = false
+# How many readings in a row its sidecar may leave unanswered before the backend counts
+# as going down. Needs [balancing] enabled and a sidecar.
+silent-rounds = 3
+# Seconds a backend that was told to stop may go on answering before it counts as back.
+grace-seconds = 60
+
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.
 [commands]
