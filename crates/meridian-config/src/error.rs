@@ -155,6 +155,11 @@ pub enum ConfigError {
     InvalidMetricsBind(String),
     /// `[metrics]` is on and listens where the proxy takes players.
     MetricsOnListen(std::net::SocketAddr),
+    /// `favicon` names a file that is not a usable 64x64 PNG.
+    InvalidFavicon {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -408,6 +413,9 @@ impl fmt::Display for ConfigError {
                 "[metrics] bind = \"{address}\" is where the proxy takes players (listen): \
                  give the metrics a port of their own"
             ),
+            ConfigError::InvalidFavicon { path, reason } => {
+                write!(f, "favicon {}: {reason}", path.display())
+            }
             ConfigError::MaxPlayersTooLarge(n) => write!(
                 f,
                 "max-players = {n} is too large: the most is {}, and 0 means no limit",

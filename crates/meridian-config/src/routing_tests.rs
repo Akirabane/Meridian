@@ -105,11 +105,13 @@ fn forced_hosts_are_read_in_lower_case() {
         [
             ForcedHost {
                 host: "play.example.com".into(),
-                backend: "hub".into()
+                backend: "hub".into(),
+                motd: None,
             },
             ForcedHost {
                 host: "open.example.com".into(),
-                backend: "open".into()
+                backend: "open".into(),
+                motd: None,
             },
         ]
     );

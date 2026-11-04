@@ -6,6 +6,7 @@ mod auth;
 mod balancing;
 mod commands;
 mod error;
+mod favicon;
 mod metrics;
 mod proxy_protocol;
 mod restart;
@@ -15,6 +16,7 @@ pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
+pub use favicon::{FAVICON_SIDE, Favicon, MAX_FAVICON_BYTES};
 pub use metrics::Metrics;
 pub use proxy_protocol::{ProxyProtocol, ProxyProtocolMode, TrustedNet};
 pub use restart::Restart;
@@ -48,6 +50,9 @@ pub struct ForcedHost {
     pub host: String,
     /// The backend it leads to.
     pub backend: String,
+    /// The line the server list shows to clients that connect through this host, in
+    /// place of [`Config::motd`]; `None` shows the proxy's.
+    pub motd: Option<String>,
 }
 
 /// How the proxy decides whether to check a player's account (`auth-mode`,
@@ -125,6 +130,8 @@ pub struct Config {
     pub default_backend: String,
     /// The line shown in the server list.
     pub motd: String,
+    /// The picture the server list shows (`favicon`), already read from its file.
+    pub favicon: Option<Favicon>,
     /// Whether players are checked against the session service. Kept for the code
     /// that reads it today: it is `false` exactly when `auth_mode` is
     /// [`AuthMode::Offline`], and [`Config::validate`] refuses any other pairing.
@@ -222,6 +229,7 @@ impl Default for Config {
             backends: Vec::new(),
             default_backend: String::new(),
             motd: "A Meridian proxy".to_owned(),
+            favicon: None,
             online_mode: true,
             compression_threshold: 256,
             connect_timeout_ms: 5_000,
@@ -261,6 +269,7 @@ impl std::fmt::Debug for Config {
             backends,
             default_backend,
             motd,
+            favicon,
             online_mode,
             compression_threshold,
             connect_timeout_ms,
@@ -298,6 +307,7 @@ impl std::fmt::Debug for Config {
             .field("backends", backends)
             .field("default_backend", default_backend)
             .field("motd", motd)
+            .field("favicon", favicon)
             .field("online_mode", online_mode)
             .field("compression_threshold", compression_threshold)
             .field("connect_timeout_ms", connect_timeout_ms)
@@ -338,6 +348,7 @@ struct File {
     backends: Vec<FileBackend>,
     default_backend: Option<String>,
     motd: Option<String>,
+    favicon: Option<PathBuf>,
     online_mode: Option<bool>,
     compression_threshold: Option<i32>,
     connect_timeout_ms: Option<u64>,
@@ -394,6 +405,7 @@ struct FileRoute {
 struct FileForcedHost {
     host: String,
     backend: String,
+    motd: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -491,6 +503,10 @@ impl Config {
             backends,
             default_backend,
             motd: file.motd.unwrap_or(defaults.motd),
+            favicon: file
+                .favicon
+                .map(|path| Favicon::read(favicon::resolve(folder, &path)))
+                .transpose()?,
             online_mode: auth_mode != AuthMode::Offline,
             compression_threshold: file
                 .compression_threshold
@@ -508,6 +524,7 @@ impl Config {
                 .map(|f| ForcedHost {
                     host: f.host.to_ascii_lowercase(),
                     backend: f.backend,
+                    motd: f.motd,
                 })
                 .collect(),
             auth_mode,
@@ -757,11 +774,24 @@ impl Config {
     /// The backend forced for the host name a client put in its handshake, if any.
     /// Case does not matter, and a final dot is ignored.
     pub fn forced_backend(&self, host: &str) -> Option<&str> {
+        self.forced_host(host).map(|f| f.backend.as_str())
+    }
+
+    /// The forced host a client's handshake host name matches, by the same rules as
+    /// [`Config::forced_backend`].
+    pub fn forced_host(&self, host: &str) -> Option<&ForcedHost> {
         let host = host.strip_suffix('.').unwrap_or(host);
         self.forced_hosts
             .iter()
             .find(|f| f.host.eq_ignore_ascii_case(host))
-            .map(|f| f.backend.as_str())
+    }
+
+    /// The line the server list shows to a client whose handshake carried `host`: the
+    /// `motd` of the forced host it matches, or the proxy's own.
+    pub fn motd_for(&self, host: Option<&str>) -> &str {
+        host.and_then(|h| self.forced_host(h))
+            .and_then(|f| f.motd.as_deref())
+            .unwrap_or(&self.motd)
     }
 
     /// Refuses a reference to a backend that is not configured; `setting` says
@@ -855,6 +885,9 @@ mod tests;
 
 #[cfg(test)]
 mod routing_tests;
+
+#[cfg(test)]
+mod favicon_tests;
 
 #[cfg(test)]
 mod auth_tests;

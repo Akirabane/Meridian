@@ -189,7 +189,11 @@ fn accept_with(
     };
     match intention.intent {
         handshake::STATUS => {
-            serve_status(&mut connection, config)?;
+            serve_status(
+                &mut connection,
+                config,
+                virtual_host(&intention.host).as_deref(),
+            )?;
             Ok(None)
         }
         handshake::LOGIN => log_in(
@@ -592,7 +596,7 @@ fn disconnect(connection: &mut Connection, reason_json: &str) {
 /// `ServerStatusPacketListenerImpl`: one status answer, then the pong, and the
 /// connection ends. A second status request ends it too, and so does a client
 /// that closes without pinging.
-fn serve_status(connection: &mut Connection, config: &Config) -> Result<()> {
+fn serve_status(connection: &mut Connection, config: &Config, host: Option<&str>) -> Result<()> {
     let mut answered = false;
     loop {
         let (id, payload) = match connection.recv() {
@@ -605,7 +609,7 @@ fn serve_status(connection: &mut Connection, config: &Config) -> Result<()> {
             status::Serverbound::StatusRequest(_) => {
                 answered = true;
                 let sample = players_sample(config.status_sample as usize);
-                let json = status_json(config, players_online(), &sample);
+                let json = status_json(config, host, players_online(), &sample);
                 let response = status::Clientbound::StatusResponse(status::StatusResponse { json });
                 connection.send(&response.encode())?;
             }
@@ -622,22 +626,33 @@ fn serve_status(connection: &mut Connection, config: &Config) -> Result<()> {
 /// a backend: a status request is the cheapest and most frequent connection there
 /// is, and it must not open a second one. So the version is the one the proxy
 /// speaks, which is Horizon's, the players are those the proxy relays, with a
-/// sample of their names, and the description is the proxy's own.
-fn status_json(config: &Config, online: usize, sample: &[(String, [u8; 16])]) -> String {
+/// sample of their names, and the description is the proxy's own, or the one of
+/// the forced host the client connected through (`host`, from its handshake). The
+/// favicon is the proxy's, when there is one.
+fn status_json(
+    config: &Config,
+    host: Option<&str>,
+    online: usize,
+    sample: &[(String, [u8; 16])],
+) -> String {
     let sample: Vec<serde_json::Value> = sample
         .iter()
         .map(|(name, uuid)| serde_json::json!({ "name": name, "id": hyphenated(*uuid) }))
         .collect();
-    serde_json::json!({
+    let mut status = serde_json::json!({
         "version": {
             "name": horizon_protocol::GAME_VERSION,
             "protocol": horizon_protocol::PROTOCOL_VERSION,
         },
         "players": { "max": max_shown(config, online), "online": online, "sample": sample },
-        "description": config.motd,
+        "description": config.motd_for(host),
         "enforcesSecureChat": false,
-    })
-    .to_string()
+    });
+    // One picture for the whole proxy, whatever host the client typed.
+    if let Some(favicon) = &config.favicon {
+        status["favicon"] = favicon.data_uri.clone().into();
+    }
+    status.to_string()
 }
 
 /// The player limit the server list shows: `max-players`, or one more than the
@@ -701,9 +716,13 @@ mod tests {
     }
 
     fn handshake(client: &mut Connection, protocol: i32, intent: i32) {
+        handshake_to(client, "localhost", protocol, intent);
+    }
+
+    fn handshake_to(client: &mut Connection, host: &str, protocol: i32, intent: i32) {
         let intention = handshake::Serverbound::Intention(handshake::Intention {
             protocol,
-            host: "localhost".into(),
+            host: host.into(),
             port: 25565,
             intent,
         });
@@ -753,6 +772,93 @@ mod tests {
         assert!(accepted.join().unwrap().unwrap().is_none());
     }
 
+    /// The whole status exchange of a client that typed `host`, as the JSON it gets.
+    fn status_for(config: &Config, host: &str) -> serde_json::Value {
+        let (mut client, accepted) = proxy(config.clone());
+        handshake_to(
+            &mut client,
+            host,
+            horizon_protocol::PROTOCOL_VERSION,
+            handshake::STATUS,
+        );
+        client
+            .send(&status::Serverbound::StatusRequest(Default::default()).encode())
+            .unwrap();
+        let status::Clientbound::StatusResponse(response) = status_reply(&mut client) else {
+            panic!("expected a status response");
+        };
+        drop(client);
+        assert!(accepted.join().unwrap().unwrap().is_none());
+        serde_json::from_str(&response.json).unwrap()
+    }
+
+    fn with_motds() -> Config {
+        use meridian_config::ForcedHost;
+        let forced = |host: &str, motd: Option<&str>| ForcedHost {
+            host: host.into(),
+            backend: "east".into(),
+            motd: motd.map(str::to_owned),
+        };
+        Config {
+            motd: "Global".into(),
+            forced_hosts: vec![
+                forced("a.example.com", Some("Motd A")),
+                forced("plain.example.com", None),
+            ],
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn a_forced_host_shows_its_own_motd_and_any_other_host_the_global_one() {
+        let config = with_motds();
+        assert_eq!(
+            status_for(&config, "a.example.com")["description"],
+            "Motd A"
+        );
+        // Matched as a login is: case, a final dot, what a mod loader appends.
+        assert_eq!(
+            status_for(&config, "A.Example.COM.")["description"],
+            "Motd A"
+        );
+        assert_eq!(
+            status_for(&config, "a.example.com\u{0}FML3\u{0}")["description"],
+            "Motd A"
+        );
+        // A forced host with no motd, an unknown host and the address all show the global one.
+        assert_eq!(
+            status_for(&config, "plain.example.com")["description"],
+            "Global"
+        );
+        assert_eq!(
+            status_for(&config, "other.example.com")["description"],
+            "Global"
+        );
+        assert_eq!(status_for(&config, "127.0.0.1")["description"], "Global");
+        assert_eq!(status_for(&config, "")["description"], "Global");
+    }
+
+    #[test]
+    fn the_status_carries_the_favicon_when_there_is_one_whatever_the_host() {
+        let mut config = with_motds();
+        assert!(
+            status_for(&config, "a.example.com")
+                .get("favicon")
+                .is_none()
+        );
+        config.favicon = Some(meridian_config::Favicon {
+            path: "icon.png".into(),
+            data_uri: "data:image/png;base64,AAAA".into(),
+        });
+        for host in ["a.example.com", "other.example.com", "localhost"] {
+            assert_eq!(
+                status_for(&config, host)["favicon"],
+                "data:image/png;base64,AAAA",
+                "{host}"
+            );
+        }
+    }
+
     #[test]
     fn a_status_answered_without_a_ping_ends_when_the_client_leaves() {
         let (mut client, accepted) = proxy(Config::default());
@@ -787,7 +893,7 @@ mod tests {
     #[test]
     fn the_status_counts_the_players_online() {
         let json: serde_json::Value =
-            serde_json::from_str(&status_json(&Config::default(), 3, &[])).unwrap();
+            serde_json::from_str(&status_json(&Config::default(), None, 3, &[])).unwrap();
         assert_eq!(json["players"]["online"], 3);
         assert_eq!(json["enforcesSecureChat"], false);
     }
@@ -798,7 +904,8 @@ mod tests {
             max_players: 50,
             ..Config::default()
         };
-        let json: serde_json::Value = serde_json::from_str(&status_json(&limited, 3, &[])).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&status_json(&limited, None, 3, &[])).unwrap();
         assert_eq!(json["players"]["max"], 50);
         // Without a limit, the list still needs a number: one more than online.
         let unlimited = Config {
@@ -806,7 +913,7 @@ mod tests {
             ..Config::default()
         };
         let json: serde_json::Value =
-            serde_json::from_str(&status_json(&unlimited, 3, &[])).unwrap();
+            serde_json::from_str(&status_json(&unlimited, None, 3, &[])).unwrap();
         assert_eq!(json["players"]["max"], 4);
     }
 
@@ -817,7 +924,7 @@ mod tests {
             ("Steve".to_owned(), [0x22; 16]),
         ];
         let json: serde_json::Value =
-            serde_json::from_str(&status_json(&Config::default(), 2, &sample)).unwrap();
+            serde_json::from_str(&status_json(&Config::default(), None, 2, &sample)).unwrap();
         assert_eq!(json["players"]["sample"][0]["name"], "Alex");
         assert_eq!(
             json["players"]["sample"][0]["id"],
@@ -825,14 +932,14 @@ mod tests {
         );
         assert_eq!(json["players"]["sample"][1]["name"], "Steve");
         let json: serde_json::Value =
-            serde_json::from_str(&status_json(&Config::default(), 0, &[])).unwrap();
+            serde_json::from_str(&status_json(&Config::default(), None, 0, &[])).unwrap();
         assert_eq!(json["players"]["sample"], serde_json::json!([]));
     }
 
     #[test]
     fn the_status_announces_horizons_protocol() {
         let json: serde_json::Value =
-            serde_json::from_str(&status_json(&Config::default(), 0, &[])).unwrap();
+            serde_json::from_str(&status_json(&Config::default(), None, 0, &[])).unwrap();
         assert_eq!(
             json["version"]["protocol"],
             horizon_protocol::PROTOCOL_VERSION

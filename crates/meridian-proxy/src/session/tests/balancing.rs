@@ -69,6 +69,7 @@ fn forced_east(config: &mut Config) {
     config.forced_hosts = vec![ForcedHost {
         host: "east.example.com".into(),
         backend: "east".into(),
+        motd: None,
     }];
 }
 
