@@ -25,6 +25,7 @@ console's `reload` keeps the configuration in use when the new one is invalid.
 | --- | --- | --- | --- |
 | `listen` | `"0.0.0.0:25565"` | The address players connect to | An IP address with a port, such as `"0.0.0.0:25565"` or `"[::]:25565"`. A reload cannot change it: it needs a restart |
 | `motd` | `"A Meridian proxy"` | The line shown in the server list | None |
+| `favicon` | none | A PNG file whose picture the server list shows beside the proxy, one for every host. A relative path is taken from the folder of the configuration file. It is read at the start and at each `reload`; a bad file stops the start, or makes the `reload` refused and the previous picture stays | A PNG file of 64 by 64 pixels, at most 16384 bytes (16 KiB), ending with its `IEND` chunk. The header is read; the pixels are not decoded |
 | `max-players` | `20` | The most players the proxy takes at once, also shown in the server list. `0` means no limit, and the list then shows one more than the players online | At most 2147483647 |
 | `status-sample` | `12` | How many player names the server list shows, the longest online first | At most 100 |
 | `on-duplicate` | `"refuse"` | What a second login of a connected player does: `"refuse"` it ("You are already connected to this proxy"), or `"replace"` the session already open | `"refuse"` or `"replace"` |
@@ -78,6 +79,7 @@ server. Empty by default.
 | --- | --- | --- |
 | `host` | The host name the player typed in their server list. Case does not matter; it is kept in lower case | Not empty; no port, no path, no space and no final dot; each host once |
 | `backend` | The server it leads to | A configured server |
+| `motd` | The line the server list shows to a player who typed this host, in place of the top-level `motd`. Left out, the top-level `motd` is shown. The host is matched as it is for the server choice: case does not matter, a final dot is ignored, and what a mod loader adds after the host is dropped. A reload applies it. There is no favicon per host: the `favicon` above is the same for all | None |
 
 ## `[[group]]` and `[[route]]`
 

@@ -29,7 +29,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Player limit and duplicate logins | Done | `max-players`; a second login is refused or replaces the first |
 | Connection limit per address | Done | Counted before any packet is read |
 | Backend health | Done | A server that just failed is tried last for a while |
-| Server list status | Done | The proxy's own message, player count, limit and a sample of names |
+| Server list status | Done | The proxy's own message (or the one of the forced host the player typed), a favicon, player count, limit and a sample of names |
 | Console | Done | `list`, `servers`, `drain [--move]`, `undrain`, `switch`, `send`, `kick`, `reload`, `end`, `help` |
 | Reload | Done | Without a restart; `listen` needs a restart |
 | In-game commands | Done | `/server`, `/hub`, `/lobby`; moving starts a seamless switch |

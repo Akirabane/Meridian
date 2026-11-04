@@ -1232,6 +1232,7 @@ pub(crate) mod tests {
             forced_hosts: vec![meridian_config::ForcedHost {
                 host: "east.example.com".into(),
                 backend: "east".into(),
+                motd: None,
             }],
             ..routed()
         };

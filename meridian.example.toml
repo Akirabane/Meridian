@@ -9,6 +9,12 @@ listen = "0.0.0.0:25565"
 # The line shown in the server list.
 motd = "A Meridian proxy"
 
+# The picture the server list shows beside the proxy: a PNG file of 64 by 64
+# pixels, at most 16 KiB. A relative path is taken from the folder of this file. It
+# is read at the start and at each reload; a file that does not fit stops the start
+# (or refuses the reload). There is none unless this line is written.
+# favicon = "favicon.png"
+
 # The most players the proxy takes at once, also shown in the server list.
 # 0 means no limit.
 max-players = 20
@@ -131,9 +137,12 @@ address = "127.0.0.1:25567"
 
 # A host name that sends players straight to one backend. The host is the name
 # players type in their server list, without a port; case does not matter.
+# A forced host may also have its own motd, shown in the server list to the players
+# who typed this host; without one, the motd above is shown.
 [[forced-host]]
 host = "east.example.com"
 backend = "east"
+motd = "The east server"
 
 # Groups of backends, each for one kind of player: "verified" (the session
 # service confirmed the account) or "unverified" (a name the proxy let in without

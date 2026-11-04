@@ -30,12 +30,12 @@ servers.
 | Function | Status | Where in Meridian, or what is missing | Difficulty | Value | Horizon |
 | --- | --- | --- | --- | --- | --- |
 | Fallback when a backend refuses the player at login | exists | Each candidate is tried in turn; a login refusal from the backend (`Disconnect` in the login phase) is an error and moves on to the next: `meridian-net/src/backend.rs:99`, `meridian-proxy/src/session.rs:480`. A server that failed is tried last for `backend-retry-seconds`: `health.rs:42` | n/a | high | None |
-| Fallback list (`try`) | exists | `route.rs:96-99` (the list follows the default server or the group), `meridian-config/src/lib.rs:345` | n/a | high | None |
+| Fallback list (`try`) | exists | `route.rs:96-99` (the list follows the default server or the group), `meridian-config/src/lib.rs:357` | n/a | high | None |
 | Fallback when a backend kicks or crashes a player already in the game | **missing** | When the backend ends the session, the relay returns and the player is disconnected: `session.rs:573` is the last thing a session does. The fallback list applies at login only ([OPERATING.md](OPERATING.md) section 12). A kick in the configuration phase after the login (`LoginFinished`) is not seen by the login loop either | hard | high | None for a cold move (a new login and configuration on the fallback, with a loading screen, as those proxies do); the transfer module for a move without one, and a source that is gone cannot export a record, so what the player gets then is to be decided |
 | Planned restart without dropping players | exists | `drain <server> --move`, `[restart] evacuate`: `evacuate.rs:51`, `evacuate.rs:98`, detector `restart.rs:103`, announcement from the server `notices.rs:257` and `meridian-sidecar/src/management.rs:178-189` | n/a | high | The transfer module for the move; the server's own `server/stopping` announcement for the early warning (not tried in a recorded run) |
-| Forced hosts | exists | `meridian-config/src/lib.rs:759` (`forced_backend`), used first by `route.rs:65`; `[[forced-host]]` at `lib.rs:348` | n/a | medium | None |
-| Groups of servers by kind of player | exists | `[[group]]`, `[[route]]`: `route.rs:59-111`, `lib.rs:664`. These groups pick servers for verified and unverified players; they are not groups of players | n/a | medium | None |
-| MOTD per route or per forced host | **missing** | One `motd` for the whole proxy: `meridian-config/src/lib.rs:127`, `meridian-net/src/client.rs:637`. The status handler is given the configuration only (`client.rs:595`), not the host the client typed, which the handshake carries | easy | medium | None |
+| Forced hosts | exists | `meridian-config/src/lib.rs:776` (`forced_backend`), used first by `route.rs:65`; `[[forced-host]]` at `lib.rs:360` | n/a | medium | None |
+| Groups of servers by kind of player | exists | `[[group]]`, `[[route]]`: `route.rs:59-111`, `lib.rs:681`. These groups pick servers for verified and unverified players; they are not groups of players | n/a | medium | None |
+| MOTD per forced host | exists | `motd` on `[[forced-host]]`: `meridian-config/src/lib.rs:55`, read at `lib.rs:527`; `Config::motd_for` (`lib.rs:791`) finds the host by the rules of `forced_backend` (`lib.rs:782`, one lookup for both). The handshake's host reaches the status handler: `client.rs:192-196` (`virtual_host`, as for a login), `client.rs:599` (`serve_status`), `client.rs:648`. Without a `motd` on the host the global one is shown. Tests: `client.rs:813`, `favicon_tests.rs`. A MOTD per *route* (per kind of player) does not exist: a status request has no account | n/a | medium | None |
 | Hub command and default server | exists | `/hub`, `/lobby`, `hub-backend`: `commands.rs:65`, `meridian-config/src/commands.rs:86` | n/a | high | None |
 | Load balancing among lobbies | exists | `placing.rs:44` (`login`), `balance.rs:413`; roles, caps, drain ([LOAD-BALANCING.md](LOAD-BALANCING.md)). Beyond what the two proxies do natively | n/a | high | The server's own count: balancing counts the proxy's sessions today |
 
@@ -43,11 +43,11 @@ servers.
 
 | Function | Status | Where in Meridian, or what is missing | Difficulty | Value | Horizon |
 | --- | --- | --- | --- | --- | --- |
-| Own message of the day, online count, shown maximum, sample of names | exists | `client.rs:595-641` (`serve_status`, `status_json`), `max_shown` at `client.rs:645`, `status-sample` at `lib.rs:167` | n/a | high | None |
-| Total players of the network | partial | The count is the players this proxy relays: `client.rs:608` (`players_online`). With one proxy it is the total. It is not summed over the servers, nor over several proxies | easy (one proxy); hard (several, see section 6) | medium | None |
-| Favicon | **missing** | No `favicon` in the code, the configuration or the docs. The status reply has `version`, `players`, `description`, `enforcesSecureChat` only: `client.rs:631-639` | easy | medium | None |
-| Ping passthrough (a server's own reply) | **missing** | The proxy answers alone, by design, so that a ping opens no second connection: `client.rs:621-624`. [README.md](../README.md) lists it as planned. The sidecar's `status` request exists (`status.rs:207` polls it) and could feed a cached answer | medium | medium | The server's own status, or a Horizon command that reports it |
-| Version shown | partial | Always Horizon's: `client.rs:632-635`. Fine with one game version | easy to change | low | None |
+| Own message of the day, online count, shown maximum, sample of names | exists | `client.rs:599-657` (`serve_status`, `status_json`), `max_shown` at `client.rs:660`, `status-sample` at `lib.rs:174` | n/a | high | None |
+| Total players of the network | partial | The count is the players this proxy relays: `client.rs:612` (`players_online`). With one proxy it is the total. It is not summed over the servers, nor over several proxies | easy (one proxy); hard (several, see section 6) | medium | None |
+| Favicon | exists | `favicon = "file.png"`: `meridian-config/src/lib.rs:134`, `favicon.rs:41` (read at the start and at each `reload`) and `favicon.rs:57` (a 64x64 PNG of at most 16 KiB, read from its header, ending with `IEND`; an invalid file stops the start or refuses the reload). The status reply carries it as `data:image/png;base64,...`: `client.rs:653`. One picture for the whole proxy, none per forced host. Test: `client.rs:842` | n/a | medium | None |
+| Ping passthrough (a server's own reply) | **missing** | The proxy answers alone, by design, so that a ping opens no second connection: `client.rs:625-632`. [README.md](../README.md) lists it as planned. The sidecar's `status` request exists (`status.rs:207` polls it) and could feed a cached answer | medium | medium | The server's own status, or a Horizon command that reports it |
+| Version shown | partial | Always Horizon's: `client.rs:643-646`. Fine with one game version | easy to change | low | None |
 | Query protocol | missing, out of scope | Stated out of scope in [DESIGN.md](DESIGN.md) section 14 | medium | low | None |
 
 ## 3. Commands and messages
@@ -70,7 +70,7 @@ servers.
 | Function | Status | Where in Meridian, or what is missing | Difficulty | Value | Horizon |
 | --- | --- | --- | --- | --- | --- |
 | Kick | exists | Console `kick`: `console.rs:435`, `session.rs:326`. Players are told why | n/a | high | None |
-| Duplicate login (refuse or replace) | exists | `on-duplicate`: `meridian-config/src/lib.rs:210`, `session.rs:211` | n/a | medium | None |
+| Duplicate login (refuse or replace) | exists | `on-duplicate`: `meridian-config/src/lib.rs:217`, `session.rs:211` | n/a | medium | None |
 | Player limit | exists | `max-players`: `route.rs:144` (`admit`), `session.rs:174` | n/a | high | None |
 | Permissions and ranks | **missing** | No permission code in the proxy, the configuration or the console (the matches for "permission" are the player's op level inside a switch, `meridian-handoff/src/prepare.rs:25`). `/server` only shows the servers open to the kind of player: `commands.rs:95` (`open_to`). README: "Permissions file: planned" | medium | high | None for the proxy's own commands |
 | Bans at the proxy (name, unique id, address) | **missing** | No ban code. [DESIGN.md](DESIGN.md) section 14 plans it for J7. Servers keep their own bans | medium | high | None |
@@ -106,7 +106,7 @@ servers.
 | Groups of players (parties) | **missing** | No party code. The `[[group]]` of the routing is a group of servers | medium (a party that moves together uses `send`) | medium | The transfer module for a group move without a loading screen |
 | Matchmaking | partial | `/play` finds a server of role `game` with room: `commands.rs:78`, `placing.rs:212`. No pairing of players, no ready check, no session that fills then closes | hard | medium | The server's own state (`accepts_transfers`, `players`) from a Horizon command that does not exist yet |
 | Moving a player without a loading screen | partial | The seamless switch is built and tested on fake servers: `meridian-handoff`, `switching.rs`. No run on real servers is recorded | n/a | high | The transfer module; a real run ([TESTING-FORK.md](TESTING-FORK.md)) |
-| Carrying the position at a transfer (#8735) | partial | `switch-carry-position`, off by default: `meridian-config/src/lib.rs:179`, `meridian-handoff/src/switch.rs:169` and `:200`. It needs servers that take the place in the import request, "Horizon from fork commit 46bfe5de0" ([CONFIG.md](CONFIG.md)). The repository lists #8735 among the open pull requests but does not say which one adds the place | easy (the proxy side is done) | high | The pull request that takes the place in the import; both servers in the same dimension |
+| Carrying the position at a transfer (#8735) | partial | `switch-carry-position`, off by default: `meridian-config/src/lib.rs:186`, `meridian-handoff/src/switch.rs:169` and `:200`. It needs servers that take the place in the import request, "Horizon from fork commit 46bfe5de0" ([CONFIG.md](CONFIG.md)). The repository lists #8735 among the open pull requests but does not say which one adds the place | easy (the proxy side is done) | high | The pull request that takes the place in the import; both servers in the same dimension |
 
 ## 7. Protocol
 
@@ -127,7 +127,7 @@ in production.
 | --- | --- | --- | --- |
 | 1 | SIGTERM stop, then SIGHUP reload (section 5) | easy, then medium | `systemctl stop` and `docker stop` send SIGTERM; today the proxy may be killed with sessions open. SIGTERM is a feature flag of a crate already used; SIGHUP needs the two signals told apart |
 | 2 | Service unit and container image, in the release (section 5) | easy | The first thing an operator asks for, and it needs no change to the proxy. Nothing else on the list has so small a cost for its value |
-| 3 | Favicon and a MOTD per forced host (section 2, section 1) | easy | Seen by every player, before they join. The status handler needs the handshake's host; the favicon is one field of the reply. Ping passthrough can come later, from the sidecar's cached state |
+| 3 | Favicon and a MOTD per forced host (section 2, section 1): done, both exist | easy | Seen by every player, before they join. The status handler needs the handshake's host; the favicon is one field of the reply. Ping passthrough can come later, from the sidecar's cached state |
 | 4 | Bans and whitelist at the proxy (section 4) | medium | Applied before any server is asked, in one place for the whole network. A file read at the start and at `reload`, with `ban`, `pardon` and `whitelist` on the console. The sync with Horizon's management protocol comes after, once it is known what that protocol offers |
 | 5 | A permissions file (section 4) | medium | The base of everything an operator types in game. Without it every in-game command is for everyone or for nobody |
 | 6 | `/send`, `/glist`, `/alert` in game (section 3) | easy, after 5 | The console already has the logic (`console.rs:198`, `:362`) and the relay can write a chat line to a player (`relay.rs:306`). It becomes a command through the permissions |

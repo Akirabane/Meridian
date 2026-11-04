@@ -387,6 +387,7 @@ fn a_forced_host_still_comes_first_with_balancing_on() {
     config.forced_hosts = vec![meridian_config::ForcedHost {
         host: "play.example.com".into(),
         backend: "west".into(),
+        motd: None,
     }];
     assert_eq!(
         names(candidates(&config, Some("play.example.com"), VERIFIED)),

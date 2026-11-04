@@ -484,6 +484,12 @@ fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
     if new.motd != old.motd {
         lines.push(format!("motd: {}", new.motd));
     }
+    if new.favicon != old.favicon {
+        lines.push(match &new.favicon {
+            Some(f) => format!("favicon: {}", f.path.display()),
+            None => "favicon: none".to_owned(),
+        });
+    }
     for b in &new.backends {
         match old.backend(&b.name) {
             None => lines.push(format!("backend {} added at {}", b.name, b.address)),
