@@ -2,6 +2,12 @@
 //! follows the configuration phase, answers what a server needs answered, stays
 //! in the world for a number of seconds, and leaves. It is the client of a real
 //! run, and it is tested here against the fake backend over a real socket.
+//!
+//! When the server sends it back to the configuration phase while it plays (Start
+//! Configuration, which a proxy does to move a player whose server was lost), it does as
+//! a vanilla client does: it acknowledges, sends its information again, goes through the
+//! new configuration phase with the code it uses at login, and is back in the world at
+//! Finish Configuration. [`Moves`] counts those returns.
 use crate::{
     client::FakeClient,
     trace::{Dir, Recorder},
@@ -11,7 +17,24 @@ use horizon_protocol::{
     ids,
     packets::{Empty, configuration, play},
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 use std::time::{Duration, Instant};
+
+/// How many times the server took the player back to the configuration phase and the
+/// player came out of it, in the world again. Clones count together, so a test keeps one
+/// and reads it while the session runs.
+#[derive(Clone, Debug, Default)]
+pub struct Moves(Arc<AtomicU32>);
+
+impl Moves {
+    /// The returns to the world so far.
+    pub fn done(&self) -> u32 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 /// Where to connect, who to be, and for how long.
 #[derive(Clone, Debug)]
@@ -39,6 +62,12 @@ pub enum End {
 /// Runs one session. Every packet the server sent after the login is recorded
 /// as going to the client.
 pub fn session(o: &Options, recorder: &Recorder) -> End {
+    session_counting(o, recorder, &Moves::default())
+}
+
+/// As [`session`], and counts in `moves` each return from a configuration phase the server
+/// began while the player was in the world.
+pub fn session_counting(o: &Options, recorder: &Recorder, moves: &Moves) -> End {
     let mut connection = match Connection::connect(&o.host, o.port, Duration::from_secs(5)) {
         Ok(c) => c,
         Err(e) => return End::Error(format!("cannot connect: {e}")),
@@ -56,16 +85,12 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
         .reader
         .set_read_timeout(Some(Duration::from_millis(250)));
     let send = |connection: &mut Connection, body: Vec<u8>| connection.send(&body);
-    let information = configuration::ClientInformation::new(4);
-    if send(
-        &mut connection,
-        configuration::Serverbound::ClientInformation(information).encode(),
-    )
-    .is_err()
-    {
+    if send(&mut connection, client_information()).is_err() {
         return End::Closed;
     }
     let mut playing = false;
+    // The configuration phase the server began while the player played, not the first.
+    let mut reconfiguring = false;
     let mut play_started = Instant::now();
     let mut said = false;
     loop {
@@ -139,6 +164,22 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
                 ids::play::clientbound::DISCONNECT => {
                     return End::Disconnect(disconnect_text(&payload));
                 }
+                // The server takes the player back to the configuration phase: the
+                // acknowledgement is the last thing sent as a player, and the information
+                // is the first thing sent in the new phase, as a vanilla client does.
+                ids::play::clientbound::START_CONFIGURATION => {
+                    playing = false;
+                    reconfiguring = true;
+                    if send(
+                        &mut connection,
+                        play::Serverbound::ConfigurationAcknowledged(Empty).encode(),
+                    )
+                    .is_err()
+                    {
+                        return End::Closed;
+                    }
+                    Some(client_information())
+                }
                 _ => None,
             }
         } else {
@@ -171,7 +212,11 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
                 ),
                 ids::configuration::clientbound::FINISH_CONFIGURATION => {
                     playing = true;
-                    play_started = Instant::now();
+                    if std::mem::take(&mut reconfiguring) {
+                        moves.0.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        play_started = Instant::now();
+                    }
                     Some(configuration::Serverbound::FinishConfiguration(Empty).encode())
                 }
                 ids::configuration::clientbound::DISCONNECT => {
@@ -186,6 +231,11 @@ pub fn session(o: &Options, recorder: &Recorder) -> End {
             return End::Closed;
         }
     }
+}
+
+/// The client's settings, which it sends at the start of each configuration phase.
+fn client_information() -> Vec<u8> {
+    configuration::Serverbound::ClientInformation(configuration::ClientInformation::new(4)).encode()
 }
 
 /// The text of a disconnect packet's reason.
@@ -282,6 +332,105 @@ mod tests {
             ]
         );
         assert!(recorder.trace().count(Dir::ToClient) >= 2);
+    }
+
+    /// The server takes the player back to the configuration phase while they play, as a
+    /// proxy does to move a player whose server was lost: the player acknowledges, sends
+    /// its information, answers the new configuration, and plays again, still answering
+    /// keep-alives.
+    #[test]
+    fn a_player_goes_back_to_configuration_when_the_server_says_so_and_plays_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::from_stream(stream).unwrap();
+            FakeBackend::default()
+                .run(&mut connection, &Recorder::new())
+                .map_err(|e| format!("login: {e}"))?;
+            connection
+                .reader
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .map_err(|e| e.to_string())?;
+            let send = |connection: &mut Connection, id: i32, payload: &[u8]| {
+                connection
+                    .send(&crate::body(id, payload))
+                    .map_err(|e| e.to_string())
+            };
+            let mut seen = Vec::new();
+            let mut next = |connection: &mut Connection| -> Result<i32, String> {
+                let (id, _) = connection.recv().map_err(|e| e.to_string())?;
+                seen.push(id);
+                Ok(id)
+            };
+            // The first configuration phase and the world.
+            next(&mut connection)?;
+            send(
+                &mut connection,
+                ids::configuration::clientbound::FINISH_CONFIGURATION,
+                &[],
+            )?;
+            next(&mut connection)?;
+            // The server takes the player back to the configuration phase.
+            send(
+                &mut connection,
+                ids::play::clientbound::START_CONFIGURATION,
+                &[],
+            )?;
+            next(&mut connection)?; // the acknowledgement
+            next(&mut connection)?; // the information
+            send(
+                &mut connection,
+                ids::configuration::clientbound::SELECT_KNOWN_PACKS,
+                &[0],
+            )?;
+            next(&mut connection)?; // the packs
+            send(
+                &mut connection,
+                ids::configuration::clientbound::FINISH_CONFIGURATION,
+                &[],
+            )?;
+            next(&mut connection)?;
+            // The world again: a keep-alive must come back.
+            send(
+                &mut connection,
+                ids::play::clientbound::KEEP_ALIVE,
+                &8_i64.to_be_bytes(),
+            )?;
+            next(&mut connection)?;
+            loop {
+                match connection.recv() {
+                    Err(e) if e.is_end_of_stream() => return Ok(seen),
+                    Err(e) => return Err(e.to_string()),
+                    Ok(_) => {}
+                }
+            }
+        });
+        let moves = Moves::default();
+        let end = session_counting(
+            &Options {
+                host: "127.0.0.1".into(),
+                port,
+                name: "Quiet".into(),
+                seconds: 1,
+            },
+            &Recorder::new(),
+            &moves,
+        );
+        assert_eq!(end, End::Clean);
+        assert_eq!(moves.done(), 1);
+        assert_eq!(
+            backend.join().unwrap().unwrap(),
+            vec![
+                ids::configuration::serverbound::CLIENT_INFORMATION,
+                ids::configuration::serverbound::FINISH_CONFIGURATION,
+                ids::play::serverbound::CONFIGURATION_ACKNOWLEDGED,
+                ids::configuration::serverbound::CLIENT_INFORMATION,
+                ids::configuration::serverbound::SELECT_KNOWN_PACKS,
+                ids::configuration::serverbound::FINISH_CONFIGURATION,
+                ids::play::serverbound::KEEP_ALIVE,
+            ]
+        );
     }
 
     /// A server that is not there is reported, not waited for. Port 0 is one

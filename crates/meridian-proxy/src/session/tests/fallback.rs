@@ -442,3 +442,110 @@ fn a_player_who_never_joined_is_not_moved() {
     play_through(&with_fallback(3), &sessions, &connect, &threads, client);
     assert_eq!(*tried.lock().unwrap(), [LOBBY, EAST, WEST]);
 }
+
+// ---- With the scripted player of a real run, over TCP.
+
+/// The scripted player of a real run follows the proxy's order to go back to the
+/// configuration phase, joins the second server, and the proxy lists it there. `kick` makes
+/// the first server disconnect the player instead of dropping the connection.
+fn followed_over_tcp(kick: bool) {
+    use crate::state::Proxy;
+    use ids::configuration as cfg;
+    use meridian_testkit::live::{End, Moves, Options, session_counting};
+    use std::sync::atomic::AtomicBool;
+
+    let mut lobby = vec![Step::Expect {
+        id: cfg::serverbound::CLIENT_INFORMATION,
+    }];
+    lobby.extend(joins(5, FIRST));
+    if kick {
+        lobby.push(server_packet(&packets::Clientbound::Disconnect(
+            horizon_protocol::packets::configuration::Disconnect {
+                reason: text::literal("You have been kicked"),
+            },
+        )));
+        lobby.push(Step::ExpectClose);
+    } else {
+        lobby.push(Step::Close);
+    }
+    let mut east = vec![Step::Expect {
+        id: cfg::serverbound::CLIENT_INFORMATION,
+    }];
+    east.extend(joins(7, SECOND));
+    east.push(Step::ExpectClose);
+    let (connect, tried, threads) = scripted(vec![(LOBBY, vec![lobby]), (EAST, vec![east])]);
+    let mut proxy = Proxy::new(
+        with_fallback(3),
+        "meridian.toml".into(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    proxy.connect = connect;
+    let proxy = Arc::new(proxy);
+    let listener = crate::serve::listen("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = {
+        let proxy = Arc::clone(&proxy);
+        std::thread::spawn(move || crate::serve::serve(listener, &proxy))
+    };
+
+    let moves = Moves::default();
+    let recorder = Recorder::new();
+    let player = {
+        let (moves, recorder) = (moves.clone(), recorder.clone());
+        std::thread::spawn(move || {
+            session_counting(
+                &Options {
+                    host: "127.0.0.1".into(),
+                    port,
+                    name: "Eve".into(),
+                    // Long enough to be moved, short of the scripted player's `list`.
+                    seconds: 2,
+                },
+                &recorder,
+                &moves,
+            )
+        })
+    };
+    // The proxy lists the player on the second server.
+    let until = Instant::now() + Duration::from_secs(10);
+    let on = |backend: &str| {
+        proxy
+            .sessions
+            .players()
+            .iter()
+            .any(|p| p.name == "Eve" && p.backend == backend)
+    };
+    while !(on("east") && moves.done() == 1) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(on("east"), "{:?}", proxy.sessions.players());
+    assert_eq!(moves.done(), 1, "the player came back to the world once");
+    assert!(!on("lobby"));
+
+    // The player stays its time and leaves cleanly: it was not disconnected on the way.
+    assert_eq!(player.join().unwrap(), End::Clean);
+    // The chat line that says why the player was moved was among what they were sent.
+    assert!(
+        recorder
+            .trace()
+            .ids(Dir::ToClient)
+            .contains(&ids::play::clientbound::SYSTEM_CHAT),
+        "no chat line"
+    );
+    assert_eq!(*tried.lock().unwrap(), [LOBBY, EAST]);
+    proxy.stop();
+    server.join().unwrap().unwrap();
+    for thread in threads.lock().unwrap().drain(..) {
+        let _ = thread.join();
+    }
+}
+
+#[test]
+fn the_scripted_player_follows_the_move_after_a_crash() {
+    followed_over_tcp(false);
+}
+
+#[test]
+fn the_scripted_player_follows_the_move_after_a_kick() {
+    followed_over_tcp(true);
+}
