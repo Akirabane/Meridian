@@ -193,6 +193,7 @@ fn world(sidecars: Sidecars) -> World {
     proxy.sessions = Arc::new(Sessions::with_switcher(Arc::new(Switcher {
         controls: Arc::new(controls),
         digests: Digests::default(),
+        metrics: Arc::default(),
     })));
     // Alex, relayed between the test's two pipes, joins lobby's world.
     let (proxy_client, mut player) = pipe();
@@ -307,6 +308,40 @@ fn the_console_switches_a_player_from_end_to_end() {
     );
     let list = Commands::builtin().execute(&proxy, "list");
     assert!(list[1].contains(" on east for "), "{list:?}");
+    // One transfer, timed in each phase, no alert.
+    let page = crate::metrics::render(&proxy);
+    assert!(
+        page.contains(
+            "
+meridian_transfers_total 1
+"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains(
+            "
+meridian_transfer_duration_seconds_count{phase=\"prepare\"} 1
+"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains(
+            "
+meridian_transfer_duration_seconds_count{phase=\"total\"} 1
+"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains(
+            "
+meridian_transfer_alerts_total 0
+"
+        ),
+        "{page}"
+    );
     let (chat, live) = client_after_switch(&mut player);
     assert_eq!(chat, ["You are now on east."]);
     // The target's player 9 is the client's 5.
@@ -421,6 +456,24 @@ fn a_failed_switch_says_where_it_failed() {
         ]
     );
     assert_eq!(log.lines(), ["east expect"]);
+    // A failure at the first step: counted as a failure of that step, not as a transfer.
+    let page = crate::metrics::render(&proxy);
+    assert!(
+        page.contains(
+            "
+meridian_transfers_total 0
+"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains(
+            "
+meridian_transfer_failures_total{step=\"prepare\"} 1
+"
+        ),
+        "{page}"
+    );
     let (id, payload) = player.recv().unwrap();
     assert!(
         chat(id, &payload)
@@ -602,6 +655,24 @@ fn a_source_that_keeps_the_player_is_an_alert_not_a_failure() {
     );
     let list = Commands::builtin().execute(&proxy, "list");
     assert!(list[1].contains(" on east for "), "{list:?}");
+    // The alert is counted, and the transfer is a success all the same.
+    let page = crate::metrics::render(&proxy);
+    assert!(
+        page.contains(
+            "
+meridian_transfer_alerts_total 1
+"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains(
+            "
+meridian_transfers_total 1
+"
+        ),
+        "{page}"
+    );
     // The player is told they are on east, and plays on there.
     let (chat, live) = client_after_switch(&mut player);
     assert_eq!(chat, ["You are now on east."]);

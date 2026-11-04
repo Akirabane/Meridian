@@ -179,6 +179,21 @@ address of the connection. The limit `connections-per-minute` is counted on the 
 for a trusted connection, not on the balancer's. A reload applies the table to the connections
 that come after it.
 
+## `[metrics]`
+
+A page of counters in the Prometheus text format, and a health check
+([OPERATING.md](OPERATING.md), section 8). Off by default. It is a small HTTP server of
+the proxy's own, with two paths: `GET /metrics` and `GET /healthz`. There is no password
+and no TLS, so it listens on the loopback unless you say otherwise.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `enabled` | `false` | Whether the proxy serves the page | `true` or `false` |
+| `bind` | `"127.0.0.1:9100"` | The address and port it listens on. An address other machines can reach is logged as a warning at start | A `host:port`; with `enabled`, a port above 0 that is not the one in `listen` |
+
+The page names no player: its labels are the names of the servers in this file and fixed
+words. A reload does not change it: `enabled` and `bind` are read when the proxy starts.
+
 ## `[commands]`
 
 The commands players type in game that the proxy answers itself.

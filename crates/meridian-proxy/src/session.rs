@@ -6,6 +6,7 @@ use crate::balance::Balancer;
 use crate::commands;
 use crate::health::Health;
 use crate::log::{debug, info, warning};
+use crate::metrics::{LoginFailure, Metrics};
 use crate::route::{self, Full};
 use crate::status::Statuses;
 use crate::switching::{self, Switcher};
@@ -75,6 +76,7 @@ pub struct Shared {
     pub health: Arc<Health>,
     pub balancer: Arc<Balancer>,
     pub statuses: Arc<Statuses>,
+    pub metrics: Arc<Metrics>,
 }
 
 impl Shared {
@@ -290,7 +292,13 @@ impl Sessions {
             health: Arc::clone(&self.health),
             balancer: Arc::clone(&self.balancer),
             statuses: Arc::clone(&self.statuses),
+            metrics: Arc::clone(self.metrics()),
         }
+    }
+
+    /// What the proxy counts, which the switcher holds for everything that moves players.
+    pub fn metrics(&self) -> &Arc<Metrics> {
+        &self.switcher.metrics
     }
 
     /// The player called `name`, whatever its case, and the handle of their
@@ -375,7 +383,10 @@ pub fn handle(
     match client::accept_from(connection, config, peer.ip()) {
         Ok(Some(session)) => serve(session, peer, config, connect, sessions),
         Ok(None) => debug!("{peer}: status answered, or login refused"),
-        Err(e) => warning!("{peer}: {e}; closing the connection"),
+        Err(e) => {
+            sessions.metrics().login_failed(LoginFailure::Protocol);
+            warning!("{peer}: {e}; closing the connection");
+        }
     }
 }
 
@@ -408,6 +419,7 @@ pub(crate) fn serve(
                     "{peer}: {name} ({}) refused: already connected",
                     hyphenated(uuid)
                 );
+                sessions.metrics().login_failed(LoginFailure::Duplicate);
                 refuse(session.connection, ALREADY_CONNECTED);
                 return;
             }
@@ -426,6 +438,7 @@ pub(crate) fn serve(
             hyphenated(uuid),
             config.max_players
         );
+        sessions.metrics().login_failed(LoginFailure::Full);
         refuse(session.connection, Full::MESSAGE);
         return;
     };
@@ -441,6 +454,7 @@ pub(crate) fn serve(
                 "{peer}: {name} ({}): no backend to send them to: {e}",
                 hyphenated(uuid)
             );
+            sessions.metrics().login_failed(LoginFailure::NoRoute);
             refuse(session.connection, "There is no server to join right now.");
             return;
         }
@@ -496,8 +510,10 @@ pub(crate) fn serve(
                 "{peer}: {name} ({}) refused: every lobby is at its hard cap",
                 hyphenated(uuid)
             );
+            sessions.metrics().login_failed(LoginFailure::Full);
             refuse(session.connection, Full::MESSAGE);
         } else {
+            sessions.metrics().login_failed(LoginFailure::Unreachable);
             refuse(session.connection, &cannot_reach(&candidates));
         }
         return;
@@ -532,6 +548,7 @@ pub(crate) fn serve(
                 "{peer}: {name} ({}) refused: already connected",
                 hyphenated(uuid)
             );
+            sessions.metrics().login_failed(LoginFailure::Duplicate);
             handle.disconnect(configuration::Disconnect {
                 reason: text::literal(ALREADY_CONNECTED),
             });
@@ -546,6 +563,7 @@ pub(crate) fn serve(
         );
     }
     drop(reservation);
+    sessions.metrics().login();
     info!(
         "{peer}: {name} ({}) joined backend \"{}\"",
         hyphenated(uuid),
@@ -1577,6 +1595,11 @@ pub(crate) mod tests {
         );
         assert!(tried.is_empty());
         assert_eq!(refusal(&trace), "The server is full");
+        assert_eq!(
+            sessions.metrics().failures_of(LoginFailure::Full),
+            1,
+            "counted as a login that failed for being full"
+        );
         assert_eq!(sessions.admitted(), 1, "only the place already held");
         drop(held);
         assert_eq!(sessions.admitted(), 0);

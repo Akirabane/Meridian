@@ -49,7 +49,8 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Moving the player's state between servers | Built, waiting on Horizon | The proxy and the sidecar ask Horizon's `player-*` requests ([docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md)); Horizon's pull requests for them were open on 2026-11-04 |
 | The switch itself | Built, tested on fakes | `switch`, `send`, `/server`, `/hub`, `/lobby`. Not yet run on real servers |
 | Proof that there is no loading screen | Planned | Milestones J4 and J5 of the design: two real servers with different maps |
-| Extensions, metrics | Planned | |
+| Metrics | Built | A Prometheus text page and a health check, off by default ([docs/OPERATING.md](docs/OPERATING.md), section 8.1) |
+| Extensions | Planned | |
 
 Nothing has been measured about load, memory or the number of players a proxy can
 carry. [docs/RUNNING.md](docs/RUNNING.md) describes the one run made against a real
@@ -193,8 +194,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   The switch has not been tried on a real network.
 - A player whose server stops without warning is disconnected, not sent to the fallback.
   Only a planned restart moves them ([docs/RESTART.md](docs/RESTART.md)).
-- The console is standard input: there is no remote console, no signal for `reload`, no
-  metrics endpoint. The sidecar has no TLS, so it listens on
+- The console is standard input: there is no remote console and no signal for `reload`.
+  The sidecar has no TLS, so it listens on
   `127.0.0.1` ([docs/OPERATING.md](docs/OPERATING.md), sections 11 and 12).
 - The proxy has been run against a real Horizon server with one scripted player at a
   time, in a debug build ([docs/RUNNING.md](docs/RUNNING.md)). Movement through the

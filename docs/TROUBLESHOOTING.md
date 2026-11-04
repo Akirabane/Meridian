@@ -24,6 +24,8 @@ standard error too, with the prefix `meridian-sidecar:`.
 | `backends "<a>" and "<b>" both have the sidecar <address>: ...` / `both use the secret file <path>: ...` | Two backends share a sidecar address or a secret | Each backend needs its own sidecar and its own secret file |
 | `the sidecar secret of backend "<name>": ...` | The secret file cannot be read, or holds fewer than 16 bytes | Write a secret of 16 bytes or more; the path is relative to the configuration file's folder |
 | `cannot listen on <address>: <error>` | The address is taken, or not one of this machine's, or needs a privilege | Free the port or change `listen`. A reload cannot change `listen` |
+| `cannot serve the metrics: <error>` | `[metrics] enabled` is on and the proxy could not listen on `bind`: the port is taken, or the address is not this machine's. The proxy runs without the page | Free the port or change `[metrics] bind`, then restart: a reload does not change it |
+| `the metrics page on <address> can be reached from other machines` | `[metrics] bind` is not a loopback address, and the page has no password | Bind it to `127.0.0.1`, or close the port to everyone but the monitor |
 | `cannot start the console: <error>` | The thread that reads standard input did not start | The proxy runs without a console, stops on Ctrl+C only |
 | `switch-freeze-limit-ms is <n> ms, but a Horizon server lets a frozen player go by itself after its max_freeze_seconds (30 s by default): ...` | The proxy's freeze limit is not below Horizon's default | Lower `switch-freeze-limit-ms`, or raise `max_freeze_seconds` in `[transfer]` on every server that has a sidecar |
 

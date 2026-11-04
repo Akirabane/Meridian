@@ -59,6 +59,7 @@ pub fn run(
 ) -> Outcome {
     let mut out = Outcome::default();
     let mut tried = false;
+    let affected = players.iter().filter(|p| p.backend == backend).count();
     for player in players.iter().filter(|p| p.backend == backend) {
         let place: Reservation = match placing::elsewhere(config, shared, backend) {
             Ok(place) => place,
@@ -84,6 +85,9 @@ pub fn run(
         }
         // The place is given back here, once the move has ended.
         drop(place);
+    }
+    if affected > 0 {
+        shared.metrics.evacuation(out.moved, out.stayed.len());
     }
     out
 }

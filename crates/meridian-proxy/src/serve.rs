@@ -67,6 +67,7 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
             Ok((stream, peer)) => {
                 let config = proxy.config();
                 let per_minute = config.connections_per_minute;
+                proxy.sessions.metrics().connection();
                 let table = &config.proxy_protocol;
                 if table.trusts(peer.ip()) {
                     // A load balancer's connection: the player is who its PROXY header
@@ -86,6 +87,7 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
                 } else if proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
                     start_player(stream, peer, proxy, &active, None);
                 } else {
+                    proxy.sessions.metrics().throttled();
                     // Closed before a byte is read: the cheapest answer, and a
                     // client in a loop learns nothing more from a reason.
                     debug!("{peer}: over {per_minute} connections this minute; closed");
@@ -241,6 +243,7 @@ fn player_address(
         .throttle
         .allow(player.ip(), header.per_minute, Instant::now())
     {
+        proxy.sessions.metrics().throttled();
         debug!(
             "{player}: over {} connections this minute; closed",
             header.per_minute
@@ -386,6 +389,25 @@ mod tests {
                     .as_ref()
                     .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
             "{closed:?}"
+        );
+
+        // Both were accepted; the second was closed for opening too many.
+        let page = crate::metrics::render(&proxy);
+        assert!(
+            page.contains(
+                "
+meridian_connections_total 2
+"
+            ),
+            "{page}"
+        );
+        assert!(
+            page.contains(
+                "
+meridian_connections_throttled_total 1
+"
+            ),
+            "{page}"
         );
 
         drop(first);

@@ -1,7 +1,7 @@
 //! What the accept loop, the players' threads and the console share: the
 //! configuration, which the console can reload, the sessions being relayed, the
 //! stop flag, and how backends are reached.
-use crate::restart::{Detector, Evacuator, Settings};
+use crate::restart::{Cause, Detector, Evacuate, Evacuator, Settings};
 use crate::session::{Connect, Sessions};
 use crate::throttle::Throttle;
 use meridian_config::Config;
@@ -42,7 +42,10 @@ impl Proxy {
         let config = Arc::new(RwLock::new(Arc::new(config)));
         let restarts = Detector::new(
             Arc::clone(&sessions.balancer),
-            Arc::new(Evacuator::new(Arc::clone(&sessions), Arc::clone(&config))),
+            Arc::new(Counted {
+                metrics: Arc::clone(sessions.metrics()),
+                inner: Evacuator::new(Arc::clone(&sessions), Arc::clone(&config)),
+            }),
             settings,
         );
         Self {
@@ -76,6 +79,20 @@ impl Proxy {
     /// Asks the proxy to stop, as Ctrl+C does.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The evacuation of a backend that is going down, counted once for each restart the
+/// detector finds: it calls the evacuation exactly then.
+struct Counted<E> {
+    metrics: Arc<crate::metrics::Metrics>,
+    inner: E,
+}
+
+impl<E: Evacuate> Evacuate for Counted<E> {
+    fn evacuate(&self, backend: &str, cause: Cause) {
+        self.metrics.restart_detected(cause);
+        self.inner.evacuate(backend, cause);
     }
 }
 

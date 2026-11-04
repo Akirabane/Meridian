@@ -367,7 +367,48 @@ Before the first player:
 
 ## 8. What to watch
 
-There is no metrics endpoint. What exists is the console and the log.
+The console and the log, and, if you turn it on, a page of counters and a health check.
+
+### 8.1 The metrics page
+
+Off by default. In `meridian.toml`:
+
+```toml
+[metrics]
+enabled = true
+bind = "127.0.0.1:9100"
+```
+
+Then `GET /metrics` gives the counters in the Prometheus text format, and `GET /healthz`
+answers `200 ok` while the proxy takes players and `503 stopping` once it has been asked
+to stop (Ctrl+C or `end`). It has no password and no TLS. Keep it on the loopback and let
+a monitor on the same machine read it, or bind it to a private address and close the port
+to everyone else. The proxy warns at start when the address can be reached from other
+machines. `enabled` and `bind` are read when the proxy starts, not by `reload`. The page
+costs the players nothing: the counters are atomic numbers bumped where things happen, and
+the gauges are worked out when the page is read.
+
+| Series | What it is |
+| --- | --- |
+| `meridian_players` | Players connected to the proxy |
+| `meridian_backend_players{backend}` | Players on each server |
+| `meridian_backend_soft_cap{backend}`, `meridian_backend_hard_cap{backend}` | The caps of each server that has a role |
+| `meridian_backend_state{backend,state}` | 1 for the state the balancer sees: `open`, `closed`, `draining` (drained, restarting, or not accepting transfers) or `not_offered` (no recent report) |
+| `meridian_connections_total`, `meridian_connections_throttled_total` | Connections accepted, and the ones closed unread for opening too many in a minute |
+| `meridian_logins_total` | Players who ended on a server |
+| `meridian_login_failures_total{reason}` | Logins that did not: `protocol` (the handshake or login broke the protocol, or the connection failed), `duplicate`, `full`, `no_route`, `unreachable`. A refusal by the authentication, and a server list ping, are not counted here |
+| `meridian_transfers_total` | Transfers that succeeded |
+| `meridian_transfer_failures_total{step}` | Transfers that failed, by step: `check`, `prepare`, `freeze`, `hand_over`, `commit` |
+| `meridian_transfer_duration_seconds{phase}` | A histogram (buckets from 0.05 s to 10 s) of the phases of a successful transfer: `prepare`, `freeze`, `hand_over`, `commit`, and `total` (which includes reaching the sidecars) |
+| `meridian_transfer_alerts_total` | The `ALERT` of the log: a source refused to let the player go after the target placed them. Alert on any increase (section 10) |
+| `meridian_evacuations_total`, `meridian_evacuated_players_total{result}` | Evacuations of a server that had players, and the players moved or left where they were |
+| `meridian_restarts_detected_total{cause}` | Servers found to be going down: `announced`, `panel`, `unreachable` |
+| `meridian_status_rounds_total`, `meridian_status_round_duration_seconds` | Rounds of questions to the sidecars (with `[balancing] enabled`), and how long the last took |
+
+No label carries a player's name, address or unique id. The counters start at zero when
+the proxy starts. A monitor that reads `/healthz` tells that the proxy is up and not
+stopping; it does not tell that a server is healthy, which `meridian_backend_state` and
+`servers` do.
 
 | Look at | What it tells you |
 | --- | --- |
@@ -462,7 +503,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Encryption between the proxy and a server | A signed login (the forwarding secret). After the login the leg is plain TCP: the proxy refuses a server that asks the player to authenticate | Encryption. Keep servers on a private network or a VPN |
 | TLS for the sidecar | A signed, replay-proof exchange, listening on `127.0.0.1` by default; `--allow-remote` with `--insecure-remote` is refused without both | TLS. The proxy must reach each sidecar over a trusted network or a tunnel |
 | The real address of a player behind a TCP load balancer (PROXY protocol) | `[proxy-protocol]`: versions 1 and 2, read only from the balancers you list, `optional` or `required`. The address is used for the log, the connection limits and the address forwarded to the servers (section 5.6) | Nothing for the PROXY protocol itself. The servers behind the proxy still see the proxy; the player's address reaches them in the forwarded data |
-| Metrics | `list` and `servers` on the console, and the log | A metrics endpoint, counters and a health check page. A monitor can ask the proxy's server list status on its port to know it is up |
+| Metrics | `list` and `servers` on the console, the log, and (when `[metrics]` is on) a Prometheus text page and a health check (section 8.1) | Authentication and TLS on that page, a push to a monitoring service, per-player or per-packet figures, and the relay's latency and bytes |
 | Operating without a terminal | The panel types commands for a proxy it starts | A remote console or administration port, a signal for `reload`, a handler for SIGTERM |
 | Logs | One line per event on standard error, in UTC | A log file, rotation, a structured format. Let the service manager keep them |
 | Service files and packages | `meridian` for Linux and Windows x86_64 in release archives, with a checksum file and an attestation | A service unit, a container image or a package for the proxy, the sidecar or the panel. The sidecar and the panel are built from the sources |
@@ -510,6 +551,7 @@ this page, please report it):
 - `meridian-sidecar` options and `MERIDIAN_SIDECAR_SECRET`: `crates/meridian-sidecar/src/options.rs`.
 - `meridian-panel` commands and `[drain-before-stop]`: `crates/meridian-panel/src/main.rs`, `bench.rs`.
 - Configuration keys: `crates/meridian-config/src`, and [CONFIG.md](CONFIG.md).
+- The metrics page, its series and its labels (section 8.1): `crates/meridian-proxy/src/metrics.rs`.
 - Log and error messages: the strings in `crates/meridian-proxy/src`, `meridian-net/src`,
   `meridian-handoff/src` and `meridian-sidecar/src`.
 - Horizon's side (`forwarding.secret`, the log line): Horizon's `docs/hosting.md`, "Behind a
