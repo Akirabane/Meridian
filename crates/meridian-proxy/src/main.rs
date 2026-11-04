@@ -15,6 +15,8 @@ mod restart;
 mod route;
 mod serve;
 mod session;
+#[cfg(unix)]
+mod signals;
 mod state;
 mod status;
 mod switching;
@@ -98,17 +100,26 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    info!(
-        "meridian {} listening on {}, {}, default backend \"{}\"",
-        env!("CARGO_PKG_VERSION"),
-        config.listen,
-        backend_count(config.backends.len()),
-        config.default_backend
-    );
     for warning in switching::startup_warnings(&config) {
         warning!("{warning}");
     }
+    let (listen, backends, default_backend) = (
+        config.listen,
+        backend_count(config.backends.len()),
+        config.default_backend.clone(),
+    );
     let proxy = Arc::new(Proxy::new(config, path, stop));
+    // SIGTERM stops the proxy and SIGHUP reloads it, where the system has them. Set before
+    // the line below, which says the proxy is up, so that a signal sent once it is read
+    // is not lost.
+    #[cfg(unix)]
+    if let Err(e) = signals::spawn(&proxy) {
+        warning!("cannot watch for SIGTERM and SIGHUP: {e}");
+    }
+    info!(
+        "meridian {} listening on {listen}, {backends}, default backend \"{default_backend}\"",
+        env!("CARGO_PKG_VERSION"),
+    );
     // Without a console the proxy still runs: it then stops on Ctrl+C alone.
     if let Err(e) = console::start(Arc::clone(&proxy)) {
         warning!("cannot start the console: {e}");

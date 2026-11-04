@@ -209,7 +209,7 @@ The commands players type in game that the proxy answers itself.
 
 ## What a reload changes
 
-`reload` in the console reads the file again. When it is valid, it applies to the
+`reload` in the console, or SIGHUP on Unix, reads the file again. When it is valid, it applies to the
 logins that start after it: players already connected keep their server and their
 session. A server removed from the file keeps its players until they leave. `listen`
 is the exception: the proxy keeps listening where it started until a restart.

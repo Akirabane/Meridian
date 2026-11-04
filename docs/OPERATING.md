@@ -230,15 +230,23 @@ their sessions, and waits up to five seconds. The players see the connection clo
 sends them no message. The log says `stopping: no new connections are accepted`, then
 `all connections are closed` and `stopped`.
 
-The proxy handles Ctrl+C (SIGINT). It does not install a handler for SIGTERM, so a service
-manager's default stop signal ends it at once without closing sessions cleanly. Under systemd,
-set `KillSignal=SIGINT`.
+On Linux and the other Unix systems the proxy also handles two signals, which is what a service
+manager sends:
+
+| Signal | What the proxy does |
+| --- | --- |
+| `SIGTERM` | Stops, exactly as Ctrl+C does. This is what `systemctl stop` and `docker stop` send, so a service needs no `KillSignal=` setting. The log says `SIGTERM: stopping` first |
+| `SIGHUP` | Reads the configuration file again, exactly as the console's `reload` does (section 5.4; [CONFIG.md](CONFIG.md), "What a reload changes"). The log says `SIGHUP: reloading <file>`, then one `reload: ...` line for each change. A file that does not pass the checks changes nothing, and the log says `reload: not reloaded, <file> is unchanged in use: <why>` at the warning level. |
+
+On Windows only Ctrl+C (and `end` in the console) stops the proxy, and there is no signal for
+`reload`. A second SIGTERM while the proxy is stopping does nothing; SIGKILL, which no program
+can catch, ends the proxy at once and drops its players.
 
 ### 5.4 The console is standard input
 
 All operator commands (`list`, `servers`, `drain`, `reload`, `switch`, `end`...) are typed on
-the proxy's standard input. There is no signal for `reload`, no administration port and no
-remote console. A proxy started without a terminal keeps running but has no console (the log
+the proxy's standard input. On Unix, `kill -HUP` runs `reload` (section 5.3). There is no
+administration port and no remote console. A proxy started without a terminal keeps running but has no console (the log
 does not say so at the default level). To keep one on a server, run the proxy in `tmux` or
 `screen`, or under the panel, which types the commands for you, or read its standard input from
 a pipe you write to.
@@ -509,7 +517,7 @@ switch, and keep the proxy's log and both servers' logs.
 | TLS for the sidecar | A signed, replay-proof exchange, listening on `127.0.0.1` by default; `--allow-remote` with `--insecure-remote` is refused without both | TLS. The proxy must reach each sidecar over a trusted network or a tunnel |
 | The real address of a player behind a TCP load balancer (PROXY protocol) | `[proxy-protocol]`: versions 1 and 2, read only from the balancers you list, `optional` or `required`. The address is used for the log, the connection limits and the address forwarded to the servers (section 5.6) | Nothing for the PROXY protocol itself. The servers behind the proxy still see the proxy; the player's address reaches them in the forwarded data |
 | Metrics | `list` and `servers` on the console, the log, and (when `[metrics]` is on) a Prometheus text page and a health check (section 8.1) | Authentication and TLS on that page, a push to a monitoring service, per-player or per-packet figures, and the relay's latency and bytes |
-| Operating without a terminal | The panel types commands for a proxy it starts | A remote console or administration port, a signal for `reload`, a handler for SIGTERM |
+| Operating without a terminal | The panel types commands for a proxy it starts. On Unix, SIGTERM stops the proxy and SIGHUP reloads it (section 5.3) | A remote console or administration port. On Windows, a signal for `reload` |
 | Logs | One line per event on standard error, in UTC | A log file, rotation, a structured format. Let the service manager keep them |
 | Service files and packages | `meridian` for Linux and Windows x86_64 in release archives, with a checksum file and an attestation | A service unit, a container image or a package for the proxy, the sidecar or the panel. The sidecar and the panel are built from the sources |
 | Several proxies, or a proxy that restarts without dropping players | Nothing | A second proxy for the same servers: the counts and the caps are per proxy, and players on a proxy that dies are dropped |
@@ -545,7 +553,8 @@ switch, and keep the proxy's log and both servers' logs.
   chat.
 - The proxy shows its own server-list message, not the server's. `/server` is not completed by
   Tab.
-- Nothing handles SIGTERM or SIGHUP. The console is standard input (section 5.4).
+- SIGTERM and SIGHUP are handled on Unix only (section 5.3); on Windows only Ctrl+C stops the
+  proxy. The console is standard input (section 5.4).
 - A proxy that dies drops its players, and nothing runs a second proxy for them.
 
 ## 13. How this page was checked

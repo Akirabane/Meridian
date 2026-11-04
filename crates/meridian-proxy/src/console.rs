@@ -463,6 +463,12 @@ fn reload(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
     if !args.is_empty() {
         return Err(usage("reload", commands));
     }
+    reload_file(proxy)
+}
+
+/// Reads the configuration file again and puts it in force: what `reload` does, and
+/// what SIGHUP does. A file that does not pass the checks changes nothing.
+pub fn reload_file(proxy: &Proxy) -> Reply {
     let new = Config::load(&proxy.config_path).map_err(|e| {
         format!(
             "not reloaded, {} is unchanged in use: {e}",
