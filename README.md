@@ -30,15 +30,16 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Connection limit per address | Done | Counted before any packet is read |
 | Backend health | Done | A server that just failed is tried last for a while |
 | Server list status | Done | The proxy's own message (or the one of the forced host the player typed), a favicon, player count, limit and a sample of names |
-| Console | Done | `list`, `servers`, `drain [--move]`, `undrain`, `switch`, `send`, `kick`, `reload`, `end`, `help` |
+| Console | Done | `list`, `servers`, `drain [--move]`, `undrain`, `switch`, `send`, `kick`, `ban`, `pardon`, `banlist`, `whitelist`, `alert`, `perm`, `reload`, `end`, `help` |
 | Reload | Done | Without a restart; `listen` needs a restart |
-| In-game commands | Done | `/server`, `/hub`, `/lobby`; moving starts a seamless switch |
+| In-game commands | Done | `/server`, `/hub`, `/lobby`, `/play`; and `/send`, `/glist`, `/alert` for the players who have the permission; moving starts a seamless switch |
 | Load balancing | Done | Servers with a `role` are filled in order, with caps and a drain ([docs/LOAD-BALANCING.md](docs/LOAD-BALANCING.md)). Off by default |
 | Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests; no run on real servers is recorded yet ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for the first). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were still open on 2026-11-04 |
 | A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere (`drain <server> --move`, the panel's `[drain-before-stop]`, `[restart] evacuate`; [docs/RESTART.md](docs/RESTART.md)). A server that stops without warning disconnects its players: the fallback list applies at login only |
 | Pass-through of a backend's status | Planned | The proxy shows its own |
 | PROXY protocol (version 1 and 2) from a load balancer | Done | `[proxy-protocol]`, read only from the addresses you list; off by default ([docs/CONFIG.md](docs/CONFIG.md)) |
-| Permissions file | Planned | |
+| Bans and whitelist | Done | By name, unique id, address or range; a file of their own, read at the start and at `reload` ([docs/OPERATING.md](docs/OPERATING.md), section 5.8) |
+| Permissions | Done | Groups with inheritance and nodes in `permissions.toml`, managed with `perm`; the commands in game check them. In offline mode a name proves nothing ([docs/OPERATING.md](docs/OPERATING.md), section 5.9) |
 
 ### The seamless switch
 
@@ -151,6 +152,9 @@ Type these in the terminal the proxy runs in.
 | `switch <player> <server>` | Moves a player to another server while they stay connected. The answer gives the time and bytes it took, or the step that failed and where the player is; the player is told too |
 | `send <player\|all> <server>` | The same, for one player or, with `all`, for each player in turn |
 | `kick <player> [reason]` | Disconnects a player, telling them why |
+| `ban <name\|uuid\|ip> [reason]`, `pardon`, `banlist`, `whitelist` | Bans and the whitelist, applied before any server is asked ([docs/OPERATING.md](docs/OPERATING.md), section 5.8) |
+| `alert [server:<name>] <message>` | Shows a message in the chat of the players online, or of those on one server |
+| `perm ...` | Manages the permission groups and the players in them ([docs/OPERATING.md](docs/OPERATING.md), section 5.9) |
 | `reload` | Reads the configuration file again and applies it to the next logins |
 | `end` | Stops the proxy, as Ctrl+C does |
 
@@ -165,6 +169,13 @@ configuration turns them on or off.
 | `/server` | Lists the servers the player may join, and says which one they are on |
 | `/server <name>` | Moves the player to a server. They are told when it starts and how it ended |
 | `/hub`, `/lobby` | Moves the player to the hub server |
+| `/play` | Moves the player to a game server (off unless listed in `[commands]`) |
+| `/send <player\|all\|server:name> <server>` | Moves players. Off unless listed in `[commands]`; needs the permission `meridian.send` |
+| `/glist [server]` | Lists the players online, by server. Needs `meridian.glist` |
+| `/alert [server:name] <message>` | Shows a message to the players online, or to those on one server. Needs `meridian.alert` |
+
+Who may type them is set by the permissions ([docs/OPERATING.md](docs/OPERATING.md), section 5.9):
+the first four stay open to everyone until a group denies them.
 
 ## Configuration
 
