@@ -37,7 +37,8 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests; no run on real servers is recorded yet ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for the first). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were still open on 2026-11-04 |
 | A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere (`drain <server> --move`, the panel's `[drain-before-stop]`, `[restart] evacuate`; [docs/RESTART.md](docs/RESTART.md)). A server that stops without warning disconnects its players: the fallback list applies at login only |
 | Pass-through of a backend's status | Planned | The proxy shows its own |
-| PROXY protocol, permissions file | Planned | |
+| PROXY protocol (version 1 and 2) from a load balancer | Done | `[proxy-protocol]`, read only from the addresses you list; off by default ([docs/CONFIG.md](docs/CONFIG.md)) |
+| Permissions file | Planned | |
 
 ### The seamless switch
 
@@ -193,7 +194,7 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 - A player whose server stops without warning is disconnected, not sent to the fallback.
   Only a planned restart moves them ([docs/RESTART.md](docs/RESTART.md)).
 - The console is standard input: there is no remote console, no signal for `reload`, no
-  metrics endpoint and no PROXY protocol. The sidecar has no TLS, so it listens on
+  metrics endpoint. The sidecar has no TLS, so it listens on
   `127.0.0.1` ([docs/OPERATING.md](docs/OPERATING.md), sections 11 and 12).
 - The proxy has been run against a real Horizon server with one scripted player at a
   time, in a debug build ([docs/RUNNING.md](docs/RUNNING.md)). Movement through the

@@ -5,6 +5,7 @@
 pub mod backend;
 pub mod client;
 pub mod login_policy;
+pub mod proxy_protocol;
 pub mod relay;
 
 use std::fmt;

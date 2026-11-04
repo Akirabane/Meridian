@@ -150,6 +150,35 @@ Without the table, nothing moves a player.
 
 A reload applies the three keys to the next reading.
 
+## `[proxy-protocol]`
+
+Whether the proxy reads the [PROXY protocol](https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt)
+header, version 1 or 2, that a layer 4 load balancer (HAProxy, nginx `stream`, a host's
+balancer) writes at the start of each connection to say who the player really is. The
+address it gives is the one the proxy uses for its log, for `connections-per-minute` and
+`[auth] lookups-per-minute`, and for the address of the player that it forwards to the
+servers. Off by default: the proxy then reads no header, as before.
+
+The header is whatever its sender writes, so anyone who may send it can claim any address.
+The proxy therefore reads it **only from the addresses in `trusted`**, never from a player's,
+and refuses `optional` and `required` without that list. From any other address, the proxy
+does not look for a header at all: a client that sends one gets nothing out of it.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `mode` | `"off"` | `"off"`: no header is read. `"optional"`: a connection from a trusted address may begin with a header or not, and one from any other address is a player's. `"required"`: a connection from a trusted address must begin with a header, and one from any other address is closed at once, so the proxy takes players only through the balancers | `"off"`, `"optional"` or `"required"` |
+| `trusted` | `[]` | The addresses of the load balancers, as IP addresses or ranges (`"10.0.0.5"`, `"192.168.0.0/16"`, `"2001:db8::/32"`). An IPv4 address written as IPv6 is the IPv4 address | Not empty unless `mode` is `"off"`; each entry an address or a range; a range of every address (`/0`) is refused |
+| `header-timeout-ms` | `3000` | Milliseconds a trusted connection has to send the whole header. A balancer that is silent for longer is closed | More than 0 |
+
+What the proxy accepts of a header is bounded: a version 1 line of at most 107 bytes, a
+version 2 header of 16 bytes and at most 536 more (the extensions are skipped, not read).
+A header that is malformed, too long, late or missing where it is required closes the connection
+without a reply and logs a warning with the balancer's address. A header that says nothing about
+the player (`LOCAL`, `UNKNOWN`, `UNSPEC`, a Unix socket: a balancer's own check) leaves the
+address of the connection. The limit `connections-per-minute` is counted on the player's address
+for a trusted connection, not on the balancer's. A reload applies the table to the connections
+that come after it.
+
 ## `[commands]`
 
 The commands players type in game that the proxy answers itself.

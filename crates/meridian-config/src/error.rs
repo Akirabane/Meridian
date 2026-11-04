@@ -143,6 +143,12 @@ pub enum ConfigError {
     ZeroSilentRounds,
     /// `[restart] grace-seconds` is zero.
     ZeroRestartGrace,
+    /// `[proxy-protocol] mode` is `optional` or `required` and `trusted` is empty.
+    ProxyProtocolWithoutTrusted,
+    /// An entry of `[proxy-protocol] trusted` is not an address or a range.
+    InvalidTrustedAddress { entry: String, reason: String },
+    /// `[proxy-protocol] header-timeout-ms` is zero.
+    ZeroProxyProtocolTimeout,
 }
 
 impl fmt::Display for ConfigError {
@@ -370,6 +376,18 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::ZeroRestartGrace => {
                 write!(f, "[restart] grace-seconds must be more than 0")
+            }
+            ConfigError::ProxyProtocolWithoutTrusted => write!(
+                f,
+                "[proxy-protocol] mode is not \"off\", but trusted is empty: list the addresses \
+                 of the load balancers that send the header, because anyone who may send it can \
+                 claim any address"
+            ),
+            ConfigError::InvalidTrustedAddress { entry, reason } => {
+                write!(f, "[proxy-protocol] trusted has {entry:?}: {reason}")
+            }
+            ConfigError::ZeroProxyProtocolTimeout => {
+                write!(f, "[proxy-protocol] header-timeout-ms must be more than 0")
             }
             ConfigError::MaxPlayersTooLarge(n) => write!(
                 f,
