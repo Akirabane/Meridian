@@ -40,6 +40,9 @@ struct State {
     pings: HashMap<String, (Instant, Duration)>,
     /// The backends whose last attempt failed, so that a failure is logged once.
     failing: HashSet<String>,
+    /// The backends that answered that they do not know the request, so that it is said
+    /// once.
+    unreported: HashSet<String>,
 }
 
 impl Statuses {
@@ -61,6 +64,16 @@ impl Statuses {
         let mut state = self.lock();
         state.reported.insert(backend.to_owned(), (at, status));
         state.failing.remove(backend);
+        state.unreported.remove(backend);
+    }
+
+    /// `backend` answered that it does not know the state request: it is alive but has
+    /// no state to give, so it is not failing. `true` the first time, which is when it is
+    /// worth saying.
+    fn unreported(&self, backend: &str) -> bool {
+        let mut state = self.lock();
+        state.failing.remove(backend);
+        state.unreported.insert(backend.to_owned())
     }
 
     /// What is known of `backend` at `now`, believing a report for `max_age`.
@@ -134,6 +147,16 @@ pub fn poll(
                     }
                     statuses.record(&sidecar.backend, status, Instant::now());
                 }
+                // The backend answered, with "unknown request": the Horizon server has no
+                // state to report yet. It is alive; it is treated as accepting players.
+                Err(why) if no_such_request(&why) => {
+                    if statuses.unreported(&sidecar.backend) {
+                        warning!(
+                            "backend \"{}\" does not answer the state request: its state is unknown, so it is treated as accepting players",
+                            sidecar.backend
+                        );
+                    }
+                }
                 Err(why) => {
                     if statuses.failed(&sidecar.backend) {
                         warning!(
@@ -145,6 +168,12 @@ pub fn poll(
             });
         }
     });
+}
+
+/// Whether `why`, the error of a state request, is the backend saying it does not know
+/// the request: that is an answer, not a silence.
+fn no_such_request(why: &str) -> bool {
+    why.starts_with("the sidecar refused: unknown request")
 }
 
 /// How a connection to a backend is timed: [`crate::state::Probe`].
