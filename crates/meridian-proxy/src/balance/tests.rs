@@ -280,3 +280,33 @@ fn a_server_removed_from_the_configuration_is_forgotten() {
     assert!(!gates.is_closed("a"));
     assert!(gates.is_closed("b"));
 }
+
+/// A table for the servers of role `game` (soft cap 4, hard cap 8, three servers): for
+/// the players already on each, the server the next player goes to and whether it is
+/// overflow. The fullest open server first, then the next one, then the emptiest as
+/// overflow, then nobody.
+#[test]
+fn game_servers_are_placed_by_their_caps() {
+    #[allow(clippy::type_complexity)]
+    let table: [([usize; 3], Result<(&str, bool), NoRoom>); 9] = [
+        ([0, 0, 0], Ok(("g1", false))),
+        ([3, 0, 0], Ok(("g1", false))),
+        ([4, 0, 0], Ok(("g2", false))),
+        ([4, 2, 0], Ok(("g2", false))),
+        ([4, 4, 3], Ok(("g3", false))),
+        ([4, 4, 4], Ok(("g1", true))),
+        ([6, 5, 8], Ok(("g2", true))),
+        ([8, 8, 7], Ok(("g3", true))),
+        ([8, 8, 8], Err(NoRoom)),
+    ];
+    for (counts, expected) in table {
+        let servers = [
+            server("g1", counts[0], 4, 8),
+            server("g2", counts[1], 4, 8),
+            server("g3", counts[2], 4, 8),
+        ];
+        let got = place(&servers, &mut Gates::default(), 0, TieBreak::Order)
+            .map(|p| (p.backend, p.overflow));
+        assert_eq!(got, expected, "players {counts:?}");
+    }
+}

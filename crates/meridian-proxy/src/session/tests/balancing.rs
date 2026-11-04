@@ -1002,3 +1002,108 @@ fn the_commands_are_unchanged_with_balancing_off() {
     );
     assert_eq!(sessions.balancer.reserved("east"), 1, "only the held place");
 }
+
+// ---- /play: the servers of role game ----
+
+/// The lobbies of `balanced` and two game servers, `arena` and `pit`, with balancing on and
+/// `/play` enabled.
+fn with_games(soft: u32, hard: u32) -> Config {
+    let mut config = balanced(true, soft, hard);
+    for name in ["arena", "pit"] {
+        config.backends.push(meridian_config::Backend {
+            name: name.into(),
+            address: "127.0.0.1:25605".into(),
+        });
+        config.balanced.push(BalancedServer {
+            backend: name.into(),
+            role: Role::Game,
+            soft_cap: soft,
+            hard_cap: hard,
+        });
+    }
+    config
+        .commands
+        .enabled
+        .push(meridian_config::ProxyCommand::Play);
+    config
+}
+
+#[test]
+fn play_fills_a_game_server_before_opening_the_next() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_games(2, 3);
+    // Nobody yet: the first game server listed.
+    let (target, place) = placing::game(&config, &shared, open_to_all, "lobby").unwrap();
+    assert_eq!(target, "arena");
+    assert!(!place.overflow);
+    drop(place);
+    // Pit has a player: it is the fullest open one, so it is filled first.
+    let _held = hold(&sessions, &config, "pit");
+    let (target, _place) = placing::game(&config, &shared, open_to_all, "lobby").unwrap();
+    assert_eq!(target, "pit");
+}
+
+#[test]
+fn play_goes_past_the_soft_cap_only_when_every_game_server_is_closed() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_games(1, 2);
+    let _held = [
+        hold(&sessions, &config, "arena"),
+        hold(&sessions, &config, "pit"),
+        hold(&sessions, &config, "pit"),
+    ];
+    // Arena (1/1) and pit (2/2): arena is the emptiest closed one with room.
+    let (target, place) = placing::game(&config, &shared, open_to_all, "lobby").unwrap();
+    assert_eq!(target, "arena");
+    assert!(place.overflow);
+}
+
+#[test]
+fn play_ignores_the_lobbies_and_says_so_when_no_game_server_has_room() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let config = with_games(1, 1);
+    let _held = [
+        hold(&sessions, &config, "arena"),
+        hold(&sessions, &config, "pit"),
+    ];
+    // The lobbies are empty, and still not an answer to /play.
+    assert_eq!(
+        placing::game(&config, &shared, open_to_all, "lobby").unwrap_err(),
+        "No game server has room right now."
+    );
+    // A drained game server is not offered.
+    let free = with_games(2, 2);
+    sessions.balancer.drain("arena");
+    let (target, _place) = placing::game(&free, &shared, open_to_all, "lobby").unwrap();
+    assert_eq!(target, "pit");
+}
+
+#[test]
+fn play_in_game_moves_to_the_game_server_and_keeps_a_place_until_the_switch_ends() {
+    let config = with_games(5, 5);
+    let sessions = Sessions::default();
+    let _held = hold(&sessions, &config, "pit");
+    let (hook, _alex) = typing(&config, &sessions);
+    assert_eq!(hook("play").as_deref(), Some("Moving you to pit..."));
+    wait_for_reserved(&sessions, "pit", 1);
+}
+
+#[test]
+fn play_in_game_tells_a_player_already_on_the_game_server_so() {
+    let config = with_games(5, 5);
+    let sessions = Sessions::default();
+    let (relay, handle, player, server) = idle_session_on("Alex", "arena");
+    let hook = commands_hook(
+        &config,
+        &sessions,
+        &handle,
+        "Alex",
+        meridian_config::AuthKind::Unverified,
+        peer(),
+    );
+    let _keep = (relay, handle, player, server);
+    assert_eq!(hook("play").as_deref(), Some("You are already on arena."));
+}

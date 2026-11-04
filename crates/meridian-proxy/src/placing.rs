@@ -196,12 +196,52 @@ pub fn hub(
     open_to: impl Fn(&str) -> bool,
     current: &str,
 ) -> Result<(String, Reservation), String> {
+    in_roles(
+        config,
+        shared,
+        &[Role::Lobby, Role::Sublobby],
+        open_to,
+        current,
+        "No lobby has room right now.",
+    )
+}
+
+/// Where `/play` leads for a player on `current`: the best open server of role `game`
+/// by the rule of the login (fill one up to its soft cap, then open the next, overflow
+/// up to the hard cap). A place is reserved. `Err` is the line the player is told.
+pub fn game(
+    config: &Config,
+    shared: &Shared,
+    open_to: impl Fn(&str) -> bool,
+    current: &str,
+) -> Result<(String, Reservation), String> {
+    in_roles(
+        config,
+        shared,
+        &[Role::Game],
+        open_to,
+        current,
+        "No game server has room right now.",
+    )
+}
+
+/// The best server of the first of `roles` that can take the player, as the login
+/// would choose among them, with a place reserved on it; `none` is what the player is
+/// told when no role can.
+fn in_roles(
+    config: &Config,
+    shared: &Shared,
+    roles: &[Role],
+    open_to: impl Fn(&str) -> bool,
+    current: &str,
+    none: &str,
+) -> Result<(String, Reservation), String> {
     let retry = Duration::from_secs(config.backend_retry_seconds);
     let now = Instant::now();
     shared
         .balancer
         .retain(|name| config.balanced(name).is_some());
-    for role in [Role::Lobby, Role::Sublobby] {
+    for &role in roles {
         let servers: Vec<Server<'_>> = config
             .servers_with_role(role)
             .filter(|s| open_to(&s.backend))
@@ -221,7 +261,7 @@ pub fn hub(
             return Ok((target, reservation));
         }
     }
-    Err("No lobby has room right now.".to_owned())
+    Err(none.to_owned())
 }
 
 /// Connects to `name` with the place already reserved. Whatever happens, `name` is

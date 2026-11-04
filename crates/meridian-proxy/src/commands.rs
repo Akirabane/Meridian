@@ -24,6 +24,8 @@ pub enum Answer {
     Move(String),
     /// Moves the player to the lobby the balancer finds for them.
     Hub,
+    /// Moves the player to the server of role `game` the balancer finds for them.
+    Play,
 }
 
 /// The hook the session asks about each command its player types. `typist`
@@ -33,14 +35,15 @@ pub fn hook(
     config: Arc<Config>,
     typist: impl Fn() -> Typist + Send + Sync + 'static,
     mover: impl Fn(&str) -> String + Send + Sync + 'static,
-    hubber: impl Fn(&Typist) -> String + Send + Sync + 'static,
+    placer: impl Fn(Role, &Typist) -> String + Send + Sync + 'static,
 ) -> Arc<CommandHook> {
     Arc::new(move |command: &str| {
         let typist = typist();
         match answer(&config, &typist, command)? {
             Answer::Say(line) => Some(line),
             Answer::Move(target) => Some(mover(&target)),
-            Answer::Hub => Some(hubber(&typist)),
+            Answer::Hub => Some(placer(Role::Lobby, &typist)),
+            Answer::Play => Some(placer(Role::Game, &typist)),
         }
     })
 }
@@ -69,6 +72,18 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
                 Answer::Hub
             }
             [] => move_to(config, typist, config.hub_backend()),
+            _ => Answer::Say(format!("Usage: /{first}")),
+        });
+    }
+    if settings.is_enabled(ProxyCommand::Play) && ProxyCommand::Play.words().contains(&first) {
+        return Some(match rest.as_slice() {
+            // The balancer places players on servers of role `game` only when it is on.
+            [] if config.balancing.enabled
+                && config.servers_with_role(Role::Game).next().is_some() =>
+            {
+                Answer::Play
+            }
+            [] => Answer::Say("There is no game server to play on.".to_owned()),
             _ => Answer::Say(format!("Usage: /{first}")),
         });
     }

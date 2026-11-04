@@ -31,6 +31,7 @@ fn said(answer: Option<Answer>) -> Option<String> {
         Answer::Say(line) => line,
         Answer::Move(target) => format!("move to {target}"),
         Answer::Hub => "move to the balancer's lobby".to_owned(),
+        Answer::Play => "move to the balancer's game server".to_owned(),
     })
 }
 
@@ -180,7 +181,7 @@ fn the_hook_answers_and_moves() {
         Arc::clone(&config),
         move || alex_on(&where_now.lock().unwrap()),
         |target: &str| format!("Moving you to {target}..."),
-        |_: &Typist| "Moving you to the lobby...".to_owned(),
+        |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
     );
     assert_eq!(
         hook("server east").as_deref(),
@@ -270,4 +271,63 @@ fn server_with_a_name_stays_a_named_move_with_balancing_on() {
         ask_on(&balanced(true, ""), "lobby", "server east").as_deref(),
         Some("move to east")
     );
+}
+
+// ---- /play with balancing ----
+
+const PLAY_ON: &str = "[commands]\nenabled = [\"server\", \"hub\", \"play\"]";
+
+/// `lobby` is a lobby and `east` a game server, balancing as given, `/play` turned on.
+fn with_game(enabled: bool, extra: &str) -> Config {
+    let mut config = config(&format!("{PLAY_ON}\n{extra}"));
+    config.balanced = [("lobby", Role::Lobby), ("east", Role::Game)]
+        .iter()
+        .map(|(b, role)| meridian_config::BalancedServer {
+            backend: (*b).into(),
+            role: *role,
+            soft_cap: 5,
+            hard_cap: 8,
+        })
+        .collect();
+    config.balancing.enabled = enabled;
+    config
+}
+
+/// `/play` is the balancer's, wherever the player is, when balancing is on and a server
+/// has the role game.
+#[test]
+fn play_is_left_to_the_balancer_when_balancing_is_on() {
+    let config = with_game(true, "");
+    for from in ["lobby", "east", "guests"] {
+        assert_eq!(
+            ask_on(&config, from, "play").as_deref(),
+            Some("move to the balancer's game server"),
+            "/play from {from}"
+        );
+    }
+}
+
+#[test]
+fn play_says_so_without_balancing_or_without_a_game_server() {
+    let none = Some("There is no game server to play on.");
+    assert_eq!(
+        ask_on(&with_game(false, ""), "lobby", "play").as_deref(),
+        none
+    );
+    let mut no_game = with_game(true, "");
+    no_game.balanced.retain(|b| b.role != Role::Game);
+    assert_eq!(ask_on(&no_game, "lobby", "play").as_deref(), none);
+    assert_eq!(
+        ask_on(&with_game(true, ""), "lobby", "play now").as_deref(),
+        Some("Usage: /play")
+    );
+}
+
+/// `/play` is opt-in: left out of `enabled`, it is the backend's command, as before.
+#[test]
+fn play_goes_to_the_backend_unless_it_is_enabled() {
+    let mut config = with_game(true, "");
+    config.commands.enabled = vec![ProxyCommand::Server, ProxyCommand::Hub];
+    assert_eq!(ask_on(&config, "lobby", "play"), None);
+    assert_eq!(ask_on(&balanced(true, ""), "lobby", "play"), None);
 }
