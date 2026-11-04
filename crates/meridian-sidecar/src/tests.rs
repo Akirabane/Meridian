@@ -208,10 +208,79 @@ fn a_silent_backend_is_reported_in_time() {
     let running = Running::start(Arc::new(|_| None), Duration::from_millis(300));
     let mut client = running.client(SECRET);
     let error = client.export(UUID, false).unwrap_err();
+    // The backend never said no: the request may be asked again, on this connection.
     assert!(
-        matches!(&error, Error::Refused(why) if why.contains("no answer in time")),
+        matches!(&error, Error::Unreached(why) if why.contains("no answer in time")),
         "{error}"
     );
+    assert!(error.is_lost());
+}
+
+/// An answer for the first command that comes too late (600 ms), and echoes at once
+/// after. The endpoint answers one command at a time.
+fn late_once() -> fake::Answer {
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Arc::new(move |line: &str| {
+        if asked.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(600));
+        }
+        Some(json!({ "echo": line }).to_string())
+    })
+}
+
+#[test]
+fn a_request_the_backend_never_answered_can_be_asked_again_on_the_same_connection() {
+    let running = Running::start(late_once(), Duration::from_millis(400));
+    let mut client = running.client(SECRET);
+    // Nothing was lost yet.
+    assert!(!client.recover().unwrap());
+    assert!(client.export(UUID, true).unwrap_err().is_lost());
+    assert!(client.recover().unwrap());
+    let again = client.export(UUID, true).unwrap();
+    assert_eq!(
+        again,
+        json!({ "echo": format!("player-export {DASHED} freeze") })
+    );
+    // An answer needs no second try.
+    assert!(!client.recover().unwrap());
+}
+
+#[test]
+fn a_connection_that_timed_out_is_reopened_to_ask_again() {
+    // The backend takes 750 ms to answer the first command; the proxy's side gives up
+    // after 500 ms. The endpoint answers one command at a time, so the second waits
+    // for the first to end, which is less than the 500 ms it has.
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let answer: fake::Answer = Arc::new(move |line: &str| {
+        if asked.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(750));
+        }
+        Some(json!({ "echo": line }).to_string())
+    });
+    let running = Running::start(answer, Duration::from_secs(5));
+    let mut client =
+        SidecarClient::connect(&running.address, SECRET, Duration::from_millis(500)).unwrap();
+    assert!(matches!(client.export(UUID, true), Err(Error::Timeout)));
+    // The connection is not used again as it is.
+    assert!(client.export(UUID, true).is_err());
+    // Recovering opens a new one, with its own challenge and numbers.
+    assert!(client.recover().unwrap());
+    assert_eq!(
+        client.export(UUID, true).unwrap(),
+        json!({ "echo": format!("player-export {DASHED} freeze") })
+    );
+}
+
+#[test]
+fn a_refusal_is_an_answer_and_is_not_asked_again() {
+    let running = Running::start(
+        Arc::new(|_| Some(r#"{"error":"that player is riding"}"#.to_owned())),
+        WAIT,
+    );
+    let mut client = running.client(SECRET);
+    let error = client.export(UUID, true).unwrap_err();
+    assert!(!error.is_lost(), "{error}");
+    assert!(!client.recover().unwrap());
 }
 
 #[test]

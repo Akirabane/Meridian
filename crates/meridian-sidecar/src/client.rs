@@ -18,6 +18,11 @@ pub struct SidecarClient {
     /// Set by any failure: the connection is not used again, so a reply that
     /// arrives late can never be taken for the answer to the next request.
     broken: bool,
+    /// Where it connected, and the time it allows, to connect again.
+    address: String,
+    timeout: Duration,
+    /// Whether the last request was lost on the way ([`Error::is_lost`]).
+    lost: bool,
 }
 
 impl SidecarClient {
@@ -45,6 +50,9 @@ impl SidecarClient {
             challenge,
             seq: 0,
             broken: false,
+            address: address.to_owned(),
+            timeout,
+            lost: false,
         })
     }
 
@@ -62,7 +70,28 @@ impl SidecarClient {
         ) {
             self.broken = true;
         }
+        self.lost = result.as_ref().is_err_and(Error::is_lost);
         result
+    }
+
+    /// After a request that was lost on the way ([`Error::is_lost`]), makes the
+    /// connection ready for the same request again: a new one, with a new challenge,
+    /// when the old one broke. `Ok(false)` when the last request was not lost (it
+    /// worked, or the backend refused it), so asking again would change nothing.
+    ///
+    /// The backend may have acted on the lost request, so only a request that can be
+    /// asked twice with one effect goes again: an export of a frozen player, which
+    /// answers the same record.
+    pub fn recover(&mut self) -> Result<bool, Error> {
+        if !self.lost {
+            return Ok(false);
+        }
+        if self.broken {
+            *self = SidecarClient::connect(&self.address, &self.secret, self.timeout)?;
+        } else {
+            self.lost = false;
+        }
+        Ok(true)
     }
 
     fn exchange(&mut self, request: &Request) -> Result<Value, Error> {
@@ -100,12 +129,17 @@ impl SidecarClient {
             .map_err(|e| Error::Endpoint(format!("the sidecar's reply is not JSON: {e}")))?;
         match answer.get("ok") {
             Some(Value::Bool(true)) => Ok(answer.get("result").cloned().unwrap_or(Value::Null)),
-            Some(Value::Bool(false)) => Err(Error::Refused(
-                answer
+            Some(Value::Bool(false)) => {
+                let why = answer
                     .get("error")
                     .map(|e| e.as_str().map_or_else(|| e.to_string(), str::to_owned))
-                    .unwrap_or_default(),
-            )),
+                    .unwrap_or_default();
+                if answer.get("unreached") == Some(&Value::Bool(true)) {
+                    Err(Error::Unreached(why))
+                } else {
+                    Err(Error::Refused(why))
+                }
+            }
             _ => Err(Error::Endpoint(format!(
                 "the sidecar's reply has no outcome: {answer}"
             ))),

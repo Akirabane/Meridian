@@ -81,6 +81,14 @@ struct FakeControl {
     hooks: HashMap<&'static str, Hook>,
     /// What the import answers about the player's chunk.
     recentered: Option<bool>,
+    /// The ticks the export says the freeze has left.
+    ticks_left: Option<u64>,
+    /// How many exports are lost on the way before one is answered.
+    lose_exports: u32,
+    /// Whether the last export was lost, so that the connection can be reopened.
+    lost: bool,
+    /// Whether the connection cannot be reopened.
+    cannot_reopen: bool,
 }
 
 impl FakeControl {
@@ -92,7 +100,22 @@ impl FakeControl {
             refuse: HashMap::new(),
             hooks: HashMap::new(),
             recentered: None,
+            // Horizon's default: 30 s of freeze.
+            ticks_left: Some(600),
+            lose_exports: 0,
+            lost: false,
+            cannot_reopen: false,
         }
+    }
+
+    fn with_ticks_left(mut self, ticks: Option<u64>) -> Self {
+        self.ticks_left = ticks;
+        self
+    }
+
+    fn losing_exports(mut self, count: u32) -> Self {
+        self.lose_exports = count;
+        self
     }
 
     fn refusing(mut self, request: &'static str, why: &str) -> Self {
@@ -122,9 +145,31 @@ impl PlayerControl for FakeControl {
         self.answer("expect", format!("expect {seconds:?}"))
     }
 
-    fn export(&mut self, _: &str, freeze: bool) -> Result<Record, String> {
+    fn export(&mut self, _: &str, freeze: bool) -> Result<Exported, String> {
+        if self.lose_exports > 0 {
+            self.lose_exports -= 1;
+            self.lost = true;
+            self.log
+                .push(format!("{} export freeze={freeze} (lost)", self.side));
+            return Err("no answer in time".to_owned());
+        }
+        self.lost = false;
         self.answer("export", format!("export freeze={freeze}"))
-            .map(|()| self.record.clone())
+            .map(|()| Exported {
+                record: self.record.clone(),
+                freeze_ticks_left: self.ticks_left,
+            })
+    }
+
+    fn recover(&mut self) -> Result<bool, String> {
+        if !std::mem::take(&mut self.lost) {
+            return Ok(false);
+        }
+        self.log.push(format!("{} reopen", self.side));
+        if self.cannot_reopen {
+            return Err("cannot reach the sidecar again: refused".to_owned());
+        }
+        Ok(true)
     }
 
     fn import(

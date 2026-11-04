@@ -56,8 +56,9 @@ pub enum After {
     /// The player left during the switch. Once their record was out of the
     /// source, it was imported into the target as a normal save (decision 10).
     Left,
-    /// The client had the target's world, but the target would not place the
-    /// player: the player was disconnected, and the source keeps them.
+    /// The client had the target's world, but the player was not placed there (the
+    /// target would not, or the freeze left was too short to go on): the player was
+    /// disconnected, and the source keeps them.
     Disconnected,
 }
 
@@ -97,6 +98,15 @@ pub struct Done {
     pub entities: usize,
     /// How long each step took: prepare, freeze, hand over, commit.
     pub times: [Duration; 4],
+    /// The id of the transfer: the source's hand-over id, which the logs of both
+    /// servers carry.
+    pub handover: String,
+    /// Set when the source refused to let the player go (`player-release moved`)
+    /// after the target had placed them, with its reason. The player is on the
+    /// target all the same: nothing can undo their placing, and the source keeps its
+    /// own copy, which it saves when its connection closes. The two servers' files
+    /// for the player differ from then on, which an operator has to know.
+    pub source_kept: Option<String>,
 }
 
 /// The parts of a record `player-import` knows (Horizon's `docs/server.md`).
@@ -131,9 +141,21 @@ pub struct Settings {
     /// (and with a carried position, the chunks around it).
     pub import_timeout: Duration,
     /// How long the player may stay frozen before the switch is given up. Horizon
-    /// lets a freeze go by itself after some seconds; the switch gives up before,
-    /// so that it can still let the source go on (`player-release abort`).
+    /// lets a freeze go by itself after `max_freeze_seconds`; the switch gives up
+    /// before, so that it can still let the source go on (`player-release abort`).
+    /// It must stay below that, and the freeze the export says is left is checked as
+    /// well (see [`Settings::commit_margin`]).
     pub freeze_limit: Duration,
+    /// The time kept in hand against the freeze the source says is left: the
+    /// transfer goes on to the placing of the player (`player-confirm`) only while
+    /// the freeze left outlasts this margin plus two requests as slow as the
+    /// slowest so far, which is what the confirm and the release take. Otherwise the
+    /// arrival is dropped and the source goes on.
+    pub commit_margin: Duration,
+    /// How many times the export is asked in all when its answer is lost (no answer
+    /// in time, a connection that broke). The source answers a repeated export of a
+    /// frozen player with the same record, and does not freeze again.
+    pub export_attempts: u32,
     /// Whether the player keeps the position of their record. Without it they
     /// arrive where the target puts them, in chunks the target already sent;
     /// with it, the target must first send the chunks around the new place.
@@ -154,6 +176,8 @@ impl Default for Settings {
             settle: Duration::from_millis(200),
             import_timeout: Duration::from_secs(3),
             freeze_limit: Duration::from_secs(8),
+            commit_margin: Duration::from_secs(2),
+            export_attempts: 3,
             carry_position: false,
             announce_arrival: true,
             announce_departure: true,
@@ -206,6 +230,60 @@ impl Drop for Switching<'_> {
         self.0.switching.store(false, Ordering::SeqCst);
         if self.0.ended.load(Ordering::SeqCst) {
             self.0.up().lane.closer.close();
+        }
+    }
+}
+
+/// Horizon counts a freeze in server ticks, 20 a second.
+const TICK_MS: u64 = 50;
+
+/// How long the player may stay frozen, from the export on.
+struct Freeze {
+    /// When the switch gives up whatever the source says: the freeze limit, counted
+    /// from the end of the prepare step.
+    limit_at: Instant,
+    /// When the source lets the freeze go by itself, as it said. `None` when it did
+    /// not say.
+    ends: Option<Instant>,
+    /// The time kept in hand (`Settings::commit_margin`).
+    margin: Duration,
+    /// The slowest request of the hand-over so far.
+    slowest: Duration,
+}
+
+impl Freeze {
+    /// What the rest of the transfer needs from the freeze left: the margin and the
+    /// confirm and the release, each about as slow as the slowest request so far.
+    fn need(&self) -> Duration {
+        self.margin + self.slowest * 2
+    }
+
+    /// The moment from which the hand-over goes no further: the freeze limit, or
+    /// the end of the freeze the source said less what the rest needs.
+    fn deadline(&self) -> Instant {
+        match self.ends.and_then(|ends| ends.checked_sub(self.need())) {
+            Some(by) => by.min(self.limit_at),
+            None => self.limit_at,
+        }
+    }
+
+    /// Why the hand-over goes no further, for the one who asked for the switch.
+    fn why_late(&self, limit: Duration) -> String {
+        match self.ends {
+            Some(ends)
+                if self.ends.and_then(|e| e.checked_sub(self.need())) < Some(self.limit_at) =>
+            {
+                format!(
+                    "the player's freeze has {} ms left on the old server, and the rest of the \
+                     transfer needs about {} ms",
+                    ends.saturating_duration_since(Instant::now()).as_millis(),
+                    self.need().as_millis()
+                )
+            }
+            _ => format!(
+                "the player stayed frozen for {} ms without being handed over",
+                limit.as_millis()
+            ),
         }
     }
 }
@@ -529,23 +607,66 @@ pub fn switch(
 
     // Freeze. From the export on, the switch must hand the player over, or give up
     // and let the source go on, before the source lets the freeze go by itself.
-    let thaw = prepared + settings.freeze_limit;
-    let too_long = || {
-        format!(
-            "the player stayed frozen for {} ms without being handed over",
-            settings.freeze_limit.as_millis()
-        )
-    };
-    let record = match run.source.export(&run.uuid, true) {
-        Ok(record) => record,
-        Err(e) => {
-            run.abandon_target();
-            return Err(run.fail(
-                Step::Freeze,
-                format!("the player's server would not give their record: {e}"),
-            ));
+    //
+    // An answer lost on the way is asked for again, a few times: the source answers
+    // an export of a player it froze with the same record and the same id, and does
+    // not freeze again, so it is safe whether or not the first request got there.
+    let limit_at = prepared + settings.freeze_limit;
+    let mut attempt = 0;
+    let (exported, sent) = loop {
+        attempt += 1;
+        let sent = Instant::now();
+        let e = match run.source.export(&run.uuid, true) {
+            Ok(exported) => break (exported, sent),
+            Err(e) => e,
+        };
+        let again = if attempt < settings.export_attempts && Instant::now() < limit_at {
+            run.source.recover()
+        } else {
+            Ok(false)
+        };
+        match again {
+            Ok(true) => note(&format!(
+                "freeze: the export got no answer ({e}); asking again ({} of {})",
+                attempt + 1,
+                settings.export_attempts
+            )),
+            Ok(false) | Err(_) => {
+                run.abandon_target();
+                let tried = if attempt > 1 {
+                    format!(" (asked {attempt} times)")
+                } else {
+                    String::new()
+                };
+                let more = again.err().map_or(String::new(), |why| format!("; {why}"));
+                return Err(run.fail(
+                    Step::Freeze,
+                    format!("the player's server would not give their record{tried}: {e}{more}"),
+                ));
+            }
         }
     };
+    let record = exported.record;
+    // The freeze the server says is left, counted from the moment the export was
+    // sent: the server counted from after it, so the end is never later than this.
+    let mut freeze = Freeze {
+        limit_at,
+        ends: exported.freeze_ticks_left.and_then(|ticks| {
+            sent.checked_add(Duration::from_millis(ticks.saturating_mul(TICK_MS)))
+        }),
+        margin: settings.commit_margin,
+        slowest: sent.elapsed(),
+    };
+    if let Some(ticks) = exported.freeze_ticks_left
+        && Duration::from_millis(ticks.saturating_mul(TICK_MS)) <= settings.freeze_limit
+    {
+        note(&format!(
+            "freeze: the old server lets the freeze go after {} ms, and the freeze limit is {} ms: \
+             the limit must be below the server's max_freeze_seconds",
+            ticks.saturating_mul(TICK_MS),
+            settings.freeze_limit.as_millis()
+        ));
+    }
     // The id of the hand-over, which the requests that end it name. A server that
     // freezes the player without giving one cannot be asked to let them go: it does
     // not do the transfers this proxy asks for, and lets the freeze go by itself.
@@ -586,9 +707,9 @@ pub fn switch(
         s.answer_teleports = false;
         s.positions
     };
-    if Instant::now() >= thaw {
+    if Instant::now() >= freeze.deadline() {
         run.abort();
-        return Err(run.fail(Step::Freeze, too_long()));
+        return Err(run.fail(Step::Freeze, freeze.why_late(settings.freeze_limit)));
     }
     // A carried position is where the client stands now, not where the source
     // froze the player: what the client did since the export is kept, so it is
@@ -615,6 +736,8 @@ pub fn switch(
         }
     };
     run.imported = true;
+    // The confirm and the release take about as long as the slowest request so far.
+    freeze.slowest = freeze.slowest.max(import_sent.elapsed());
     note(&match (settings.carry_position, arrival) {
         (false, _) => "hand over: the target took the record, all but the position".to_owned(),
         (true, Some(arrival)) => format!(
@@ -660,6 +783,7 @@ pub fn switch(
             .map(|_| ())
     };
     let late = Instant::now() + settings.import_timeout;
+    let thaw = freeze.deadline();
     let imported = if late < thaw {
         state.wait(
             late,
@@ -672,7 +796,7 @@ pub fn switch(
             settled,
         )
     } else {
-        state.wait(thaw, &too_long(), settled)
+        state.wait(thaw, &freeze.why_late(settings.freeze_limit), settled)
     };
     if let Err(why) = imported {
         // The player is still held: the target forgets them, the source keeps them.
@@ -691,11 +815,11 @@ pub fn switch(
             drop(s);
             return Err(run.left(Step::HandOver, None, settings.announce_departure));
         }
-        if Instant::now() >= thaw {
+        if Instant::now() >= freeze.deadline() {
             drop(down);
             drop(s);
             run.abort();
-            return Err(run.fail(Step::HandOver, too_long()));
+            return Err(run.fail(Step::HandOver, freeze.why_late(settings.freeze_limit)));
         }
         // What the delta goes from and to, for the log: a wrong inventory or
         // experience after a switch shows here first.
@@ -772,13 +896,27 @@ pub fn switch(
             )),
         });
     };
-    if let Err(e) = run.confirm_target() {
+    // Placing the player cannot be undone: only while the freeze left outlasts the
+    // confirm and the release does the switch go on to it. Otherwise the arrival is
+    // dropped, the source goes on, and the client, which has the target's world, is
+    // disconnected.
+    let placed = if Instant::now() >= freeze.deadline() {
+        Err(format!(
+            "{}; the arrival on {} was dropped",
+            freeze.why_late(settings.freeze_limit),
+            target.name
+        ))
+    } else {
+        run.confirm_target()
+            .map_err(|e| format!("{} would not place the player: {e}", target.name))
+    };
+    if let Err(reason) = placed {
         disconnect();
         run.abort();
         source_lane.closer.close();
         return Err(Failure {
             step: Step::HandOver,
-            reason: format!("{} would not place the player: {e}", target.name),
+            reason,
             after: After::Disconnected,
         });
     }
@@ -786,28 +924,25 @@ pub fn switch(
     let handed = Instant::now();
 
     // Commit. The target has the player's file on disk, so the source may let go. A
-    // source that refuses has no hand-over any more: the freeze ran out, and the
-    // player played on there since the export, so the record the target placed is the
-    // older one. The switch fails: the source keeps the player, as the later state, and
-    // the target closes its copy, which it saves as it is.
-    if let Err(e) = run.release_source(Outcome::Moved, settings.announce_departure) {
-        note("commit: the source would not let the player go");
-        disconnect();
-        run.abandon_target();
-        source_lane.closer.close();
-        return Err(Failure {
-            step: Step::Commit,
-            reason: format!(
-                "the old server would not let the player go ({e}): their freeze had run out, so \
-                 the old server keeps them as they are there; the copy {} placed is older and \
-                 stays in its player file",
-                target.name
-            ),
-            after: After::Disconnected,
-        });
-    }
+    // source that refuses has no hand-over any more: the freeze ran out, or a command
+    // killed the frozen player. The target has the player placed and nothing undoes
+    // that (`player-drop` takes only a held player), so the player stays on the
+    // target. The source's connection closes all the same, and the source saves its
+    // own copy when it does: the two servers' files differ from then on, and the
+    // caller tells the operator ([`Done::source_kept`]).
+    let source_kept = match run.release_source(Outcome::Moved, settings.announce_departure) {
+        Ok(()) => {
+            note("commit: the source let the player go");
+            None
+        }
+        Err(e) => {
+            note(&format!(
+                "commit: the source would not let the player go: {e}"
+            ));
+            Some(e)
+        }
+    };
     source_lane.closer.close();
-    note("commit: the source let the player go");
     let committed = Instant::now();
     Ok(Done {
         delta_packets,
@@ -821,6 +956,8 @@ pub fn switch(
             handed - frozen,
             committed - handed,
         ],
+        handover: run.handover.clone().unwrap_or_default(),
+        source_kept,
     })
 }
 

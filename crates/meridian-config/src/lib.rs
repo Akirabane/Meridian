@@ -168,6 +168,14 @@ pub struct Config {
     /// their client is at that moment. Without it they arrive where that server
     /// last had them, or at its spawn.
     pub switch_carry_position: bool,
+    /// Milliseconds a player may stay frozen on the old server during a switch before
+    /// it is given up. Each server lets a freeze go by itself after its own
+    /// `max_freeze_seconds` (30 s in Horizon by default), and this must be below it.
+    pub switch_freeze_limit_ms: u64,
+    /// Milliseconds kept in hand against the freeze the old server says is left:
+    /// the player is placed on the new server only while the freeze left outlasts
+    /// this and the time the last two requests are expected to take.
+    pub switch_commit_margin_ms: u64,
     /// The role and limits of the backends that have a role (`role`, `soft-cap`
     /// and `hard-cap` in `[[backends]]`). Read and checked; nothing uses them yet
     /// (docs/LOAD-BALANCING.md, step 1).
@@ -218,6 +226,8 @@ impl Default for Config {
             sidecars: Vec::new(),
             sidecar_timeout_ms: 5_000,
             switch_carry_position: false,
+            switch_freeze_limit_ms: 8_000,
+            switch_commit_margin_ms: 2_000,
             balanced: Vec::new(),
             balancing: Balancing::default(),
         }
@@ -252,6 +262,8 @@ impl std::fmt::Debug for Config {
             sidecars,
             sidecar_timeout_ms,
             switch_carry_position,
+            switch_freeze_limit_ms,
+            switch_commit_margin_ms,
             balanced,
             balancing,
         } = self;
@@ -285,6 +297,8 @@ impl std::fmt::Debug for Config {
             .field("sidecars", sidecars)
             .field("sidecar_timeout_ms", sidecar_timeout_ms)
             .field("switch_carry_position", switch_carry_position)
+            .field("switch_freeze_limit_ms", switch_freeze_limit_ms)
+            .field("switch_commit_margin_ms", switch_commit_margin_ms)
             .field("balanced", balanced)
             .field("balancing", balancing)
             .finish()
@@ -324,6 +338,8 @@ struct File {
     commands: FileCommands,
     sidecar_timeout_ms: Option<u64>,
     switch_carry_position: Option<bool>,
+    switch_freeze_limit_ms: Option<u64>,
+    switch_commit_margin_ms: Option<u64>,
     #[serde(default)]
     balancing: FileBalancing,
 }
@@ -493,6 +509,12 @@ impl Config {
             switch_carry_position: file
                 .switch_carry_position
                 .unwrap_or(defaults.switch_carry_position),
+            switch_freeze_limit_ms: file
+                .switch_freeze_limit_ms
+                .unwrap_or(defaults.switch_freeze_limit_ms),
+            switch_commit_margin_ms: file
+                .switch_commit_margin_ms
+                .unwrap_or(defaults.switch_commit_margin_ms),
             balanced,
             balancing: file.balancing.into_settings(),
         };
@@ -577,6 +599,9 @@ impl Config {
         }
         if self.connect_timeout_ms == 0 {
             return Err(ConfigError::ZeroConnectTimeout);
+        }
+        if self.switch_freeze_limit_ms == 0 {
+            return Err(ConfigError::ZeroFreezeLimit);
         }
         // The server list carries the limit as a signed 32-bit number.
         if i32::try_from(self.max_players).is_err() {

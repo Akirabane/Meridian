@@ -308,7 +308,7 @@ Each is one line; each answer is one JSON line, `{"ok": true, ...}` or
 | `player-export <uuid>` | source | The same read without a freeze: `handover` is null and the player goes on. The proxy does not use it for a switch |
 | `player-import <uuid> <json>` | target | The JSON is `{"record": ..., "parts": [...], "announce": bool, "place": bool}`. Checks the record's version, data version and `handover` id (a record without one, or another player's, is refused), applies it to the held player (body included) and sends that player the resulting changes. With `"place": false` the player stays held; otherwise it is placed at once. The reply comes only once the player's file is on the target's disk |
 | `player-confirm <uuid> <handover>` | target | Places a player imported with `place` false: files written first, then simulated, shown, announced |
-| `player-release <uuid> <handover> moved [announce]` | source | Removes the frozen player without saving their file and, by default, without a "left the game" message. Refused when the hand-over is over (the freeze ran out, the player died, or it is another hand-over's id): the player has played on there since the export, and the record the target has is older, so the proxy fails the switch |
+| `player-release <uuid> <handover> moved [announce]` | source | Removes the frozen player without saving their file and, by default, without a "left the game" message. Refused when the hand-over is over (the freeze ran out, the player died, or it is another hand-over's id): the target has already placed the player, so the proxy keeps the client there, closes the source's connection, and tells the operator (6.2.1) |
 | `player-release <uuid> <handover> abort` | source | Unfreezes the player; nothing happened |
 | `player-drop <uuid> [handover]` | target | Removes a held player whose switch was abandoned, without saving anything. After an import it names that record's `handover`, so a late drop leaves a newer arrival alone; before any import there is no id to name |
 
@@ -327,10 +327,75 @@ from the export goes in every request after it: in the record the import
 carries, then in the confirm, the release and the drop that follows an import.
 
 The commit comes after the reply of the import or the confirm, so the
-target's file is on disk before the source lets the player go. If the source
-refuses `moved`, the switch fails: the client is disconnected, the source keeps
-the player, and the copy the target placed stays in the target's player file
-(older than the source's).
+target's file is on disk before the source lets the player go. The next
+subsection says what the proxy does when time runs short, when an answer is
+lost, and when the source refuses `moved` after all.
+
+#### 6.2.1 Freeze, lost answers and a refused release
+
+**The freeze left.** A frozen player is let go by the server itself after its
+`max_freeze_seconds` (30 by default, `[transfer]` of `server.toml`), and an export
+with `freeze` says how long is left: `"freeze_ticks_left"`, in ticks of 50 ms,
+beside the record. The proxy counts that from the moment it sent the export, so it
+never believes in more time than there is. It places the player on the target
+(`player-confirm`) only while the freeze left outlasts the *margin*
+(`switch-commit-margin-ms`, 2 s by default) plus two requests as slow as the slowest
+it made so far (the export, the import), which is what the confirm and the release
+take. It checks that before the import, before it sends the client the delta, and
+again just before the confirm. When the time is short it does what any failure
+before the placing does: the target drops the arrival (`player-drop` with the
+hand-over id), the source is released with `abort`, and the player goes on where they
+were. If that happens after the client has the delta, the client is disconnected with
+a message and the source keeps the player. A release is not checked: once the
+player is placed, trying it can only help.
+
+**The freeze limit.** The proxy also gives up on its own after
+`switch-freeze-limit-ms` (8 s by default) from the end of the preparation. It must
+stay below every server's `max_freeze_seconds`, or the server would let the player
+go before the proxy gives up. The proxy cannot read a server's `server.toml`, so:
+at start it warns when the limit is not below Horizon's default of 30 s, and each
+switch tells its log when the freeze its server says is left is not longer than the
+limit. In both cases the freeze left that the export says is what rules, so a
+switch still ends in time; the warning is there so that the configuration says what
+is meant. Raise `max_freeze_seconds` on the servers before raising the limit.
+
+**A lost answer to the export.** When the export gets no answer in time or its
+connection to the sidecar breaks, the proxy opens a new connection to the sidecar and
+asks again, three times in all (and never past the freeze limit). The server answers
+an export of a player it froze with the same record and the same id, byte for byte,
+and does not freeze again, so asking twice is the same as asking once, whether or
+not the first request got there. Only a lost request is asked again: a refusal (the
+player is riding, asleep, dead) is an answer, and ends the switch. The sidecar tells
+the two apart: when it cannot get the backend's answer, its reply says
+`"unreached": true`. If the export is lost every time, the switch is given up and the
+target forgets the player; the source, which may have frozen them, lets the freeze
+go by itself after its `max_freeze_seconds`, and the player cannot move until then.
+Nothing else is asked again: an import and a confirm are not repeated.
+
+**A release refused after the placing.** The target then has the player placed and
+its files written, and nothing undoes that: `player-drop` takes only a held player.
+It happens when the freeze ran out between the confirm and the release (the proxy
+was late), or when an operator's `/kill` killed the frozen player. The proxy does
+what Horizon's documentation asks for this case: it keeps the client on the
+target, and closes its connection to the source, which then saves its own copy of
+the player. From then on the two servers' files for the player differ.
+Nothing is lost, but nothing is merged either, so the proxy tells the operator and
+does not pretend it is a plain success: the switch counts as done for the player
+(they are told they are on the target), and the log and the console carry an
+`ALERT` line with the transfer's hand-over id, which is also in both servers' logs
+(`hand-over <id>` on each `player-*` line):
+
+```
+ERROR ALERT Alex: transfer 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 from lobby to east: lobby would not
+      let the player go (<the server's reason>). Alex is on east, which placed them and saved
+      their files; lobby keeps its own copy and saves it, so the two servers' files for Alex now
+      differ: compare them and keep the one that is right. Both servers' logs name the transfer
+      9f2c4be0a1d34e6b8c0f1e2d3c4b5a69
+```
+
+To settle it, find the id in the two servers' logs, and decide which `players/data/<uuid>.dat`
+(and advancements and stats) to keep. The target's is the right one unless the player
+died on the source, or was changed there by a command, in the freeze's last seconds.
 
 ### 6.3 The record
 
@@ -367,6 +432,9 @@ A JSON object:
   (`null` for one without). The proxy reads it and sends it back in the requests
   that end the hand-over; the target refuses a record without it, and a second
   import of the same record is taken as a retry. The proxy never changes it.
+- An export with `freeze` also answers `freeze_ticks_left` beside the record (not in
+  it): the ticks before the server lets the freeze go by itself (6.2.1). A server
+  that does not say is trusted for the proxy's own limit alone.
 - The other fields above `player` are the ones the proxy reads for itself: it
   checks the dimension and the position against the target before it imports,
   and logs them. The target reads only the `player` compound and the

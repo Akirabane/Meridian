@@ -433,40 +433,51 @@ fn a_refused_confirmation_disconnects_the_player() {
     run.join().unwrap().unwrap();
 }
 
+/// The rest of a switch that went through: the client has the target's world, and
+/// what it does reaches the target.
+fn finish(
+    mut player: Connection,
+    target_thread: JoinHandle<Result<TargetSaw, String>>,
+    run: JoinHandle<meridian_net::Result<Report>>,
+) {
+    let packets = after_switch(&mut player);
+    assert!(!packets.iter().any(|(id, _)| *id == pc::DISCONNECT));
+    attack(&mut player, TARGET_ID);
+    let saw = target_thread.join().unwrap().unwrap();
+    assert_eq!(saw.attacked, CLIENT_ID);
+    run.join().unwrap().unwrap();
+}
+
 /// The target has placed the player and the file is on its disk, but the source
-/// refuses to let them go: its freeze ran out, and the player played on there since
-/// the export. The transfer fails: the client is disconnected, the source keeps the
-/// player and the target closes the copy it has.
+/// refuses to let them go: its freeze ran out, or a command killed the frozen player.
+/// Nothing undoes the placing, so the player stays on the target, the source's
+/// connection closes, and the switch tells the caller that the source kept its copy.
 #[test]
-fn a_source_that_refuses_moved_fails_the_transfer() {
+fn a_source_that_refuses_moved_leaves_the_player_on_the_target() {
     let Bench {
         handle,
         run,
-        mut player,
+        player,
         source: _source,
     } = bench();
     let log = Log::default();
     let (address, signal, target_thread) = target(TargetWorld::default());
-    let failure = switch(
+    let done = switch(
         &handle,
         target_backend(&address, &options()),
-        &mut FakeControl::new("source", &log).refusing("release", "the hand-over is over"),
+        &mut FakeControl::new("source", &log)
+            .refusing("release", "the hand-over is over")
+            .with_ticks_left(None),
         &mut target_control(&log, signal),
         &Digests::default(),
         &settings(),
     )
-    .unwrap_err();
-    assert_eq!(
-        (failure.step, failure.after),
-        (Step::Commit, After::Disconnected)
-    );
-    assert!(
-        failure.reason.contains("the hand-over is over"),
-        "{failure}"
-    );
-    assert!(failure.reason.contains("keeps them"), "{failure}");
-    // The release is asked once, as `moved`, with the id of the export: there is no
-    // abort to follow, since a refused hand-over has nothing left to end.
+    .unwrap();
+    assert_eq!(done.handover, HANDOVER);
+    assert_eq!(done.source_kept.as_deref(), Some("the hand-over is over"));
+    // The release is asked once, as `moved`, with the id of the export. There is no
+    // abort to follow (a refused hand-over has nothing left to end) and no drop of
+    // the target, which has the player placed.
     assert_eq!(
         log.lines(),
         [
@@ -475,17 +486,314 @@ fn a_source_that_refuses_moved_fails_the_transfer() {
             "target import parts=all-but-position announce=Some(true) place=false",
             "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
             "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved announce=true",
+        ]
+    );
+    assert_eq!(handle.backend(), "target");
+    finish(player, target_thread, run);
+}
+
+/// A switch that went through leaves nothing for an operator to look at.
+#[test]
+fn a_source_that_lets_the_player_go_keeps_nothing() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    let done = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap();
+    assert_eq!(done.handover, HANDOVER);
+    assert_eq!(done.source_kept, None);
+    finish(player, target_thread, run);
+}
+
+/// The answer to the export is lost on the way: the export is asked again on a
+/// reopened connection, and the switch goes on with the record that comes back.
+#[test]
+fn a_lost_export_is_asked_again() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    let steps = Log::default();
+    let traced = steps.clone();
+    let done = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).losing_exports(2),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            trace: Some(Arc::new(move |what: &str, _| traced.push(what.to_owned()))),
+            ..settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(done.handover, HANDOVER);
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true (lost)",
+            "source reopen",
+            "source export freeze=true (lost)",
+            "source reopen",
+            "source export freeze=true",
+            "target import parts=all-but-position announce=Some(true) place=false",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved announce=true",
+        ]
+    );
+    let told = steps.lines();
+    assert!(
+        told.iter()
+            .any(|line| line.contains("asking again (2 of 3)")),
+        "{told:?}"
+    );
+    assert!(
+        told.iter()
+            .any(|line| line.contains("asking again (3 of 3)")),
+        "{told:?}"
+    );
+    finish(player, target_thread, run);
+}
+
+/// An export whose answer never comes is asked a few times, no more: the target
+/// forgets the player, and the source, which may have frozen them, lets the freeze go
+/// by itself.
+#[test]
+fn an_export_that_is_always_lost_is_given_up() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, _imported, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).losing_exports(10),
+        &mut FakeControl::new("target", &log),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+    assert!(failure.reason.contains("asked 3 times"), "{failure}");
+    assert!(failure.reason.contains("no answer in time"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true (lost)",
+            "source reopen",
+            "source export freeze=true (lost)",
+            "source reopen",
+            "source export freeze=true (lost)",
+            "target drop",
+        ]
+    );
+    still_on_source(&mut bench);
+}
+
+/// A sidecar that cannot be reached again ends the asking, and says so.
+#[test]
+fn an_export_is_not_asked_again_when_the_sidecar_is_gone() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, _imported, _target) = target(TargetWorld::default());
+    let mut source = FakeControl::new("source", &log).losing_exports(1);
+    source.cannot_reopen = true;
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut source,
+        &mut FakeControl::new("target", &log),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+    assert!(
+        failure.reason.contains("cannot reach the sidecar again"),
+        "{failure}"
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true (lost)",
+            "source reopen",
+            "target drop",
+        ]
+    );
+    still_on_source(&mut bench);
+}
+
+/// A refusal is an answer: the export is not asked again.
+#[test]
+fn a_refused_export_is_not_asked_again() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, _imported, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).refusing("export", "the player is asleep"),
+        &mut FakeControl::new("target", &log),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+    assert!(!failure.reason.contains("asked"), "{failure}");
+    assert_eq!(log.lines().len(), 3, "{:?}", log.lines());
+    still_on_source(&mut bench);
+}
+
+/// The source says its freeze ends before the rest of the transfer could be done:
+/// the switch gives up at once, while it can still let the source go on. The
+/// freeze limit being above what the server allows is told.
+#[test]
+fn a_freeze_that_ends_too_soon_is_given_up_before_the_import() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let steps = Log::default();
+    let traced = steps.clone();
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        // One second of freeze left, and two seconds of margin kept.
+        &mut FakeControl::new("source", &log).with_ticks_left(Some(20)),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            trace: Some(Arc::new(move |what: &str, _| traced.push(what.to_owned()))),
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+    assert!(
+        failure.reason.contains("left on the old server"),
+        "{failure}"
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+            "target drop",
+        ]
+    );
+    let told = steps.lines();
+    assert!(
+        told.iter().any(|line| line.contains("max_freeze_seconds")),
+        "{told:?}"
+    );
+    still_on_source(&mut bench);
+}
+
+/// The margin is the one asked for: with a small one, the same freeze is enough.
+#[test]
+fn the_margin_kept_against_the_freeze_is_the_one_asked_for() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    let done = switch(
+        &handle,
+        target_backend(&address, &options()),
+        // Three seconds of freeze left; the margin keeps one.
+        &mut FakeControl::new("source", &log).with_ticks_left(Some(60)),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            commit_margin: Duration::from_secs(1),
+            ..settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(done.source_kept, None);
+    finish(player, target_thread, run);
+}
+
+/// The client has the target's world, but the delta took so long that the freeze left
+/// no longer outlasts the confirm and the release: the arrival is dropped and the
+/// source goes on, rather than placing a player whose release would be refused.
+#[test]
+fn a_freeze_that_runs_short_before_the_confirm_drops_the_arrival() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        // Four seconds of freeze, a margin of one and a half: the confirm may start
+        // until about two and a half seconds after the export.
+        &mut FakeControl::new("source", &log).with_ticks_left(Some(80)),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            commit_margin: Duration::from_millis(1500),
+            // Slow once the client holds the target's world, as a client that reads
+            // the delta slowly would be.
+            trace: Some(Arc::new(|what: &str, _| {
+                if what.starts_with("hand over: the client has the target's world") {
+                    std::thread::sleep(Duration::from_millis(2800));
+                }
+            })),
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Disconnected)
+    );
+    assert!(failure.reason.contains("was dropped"), "{failure}");
+    assert!(
+        failure.reason.contains("left on the old server"),
+        "{failure}"
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=all-but-position announce=Some(true) place=false",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
             "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
         ]
     );
-    // The client is told, then its connection ends; the target's side closes too.
     let mut last = 0;
     while let Ok((id, _)) = player.recv() {
         last = id;
     }
     assert_eq!(last, pc::DISCONNECT);
     run.join().unwrap().unwrap();
-    drop(target_thread);
 }
 
 /// A server that freezes the player and gives no hand-over id cannot be asked to let

@@ -387,6 +387,8 @@ fn move_players(proxy: &Proxy, who: &str, server: &str) -> Reply {
                 info!("{line}");
                 handle.tell(&format!("You are now on {}.", moved.to));
                 lines.push(line);
+                // Already in the log; the console says it too.
+                lines.extend(moved.alert);
             }
             Err(why) => {
                 warning!("{why}");

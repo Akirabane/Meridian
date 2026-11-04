@@ -2,7 +2,7 @@
 //! `switch` (and `send`), and `/server` and `/hub` in game. The switch itself is
 //! `meridian-handoff`'s; this module finds the sidecars of the two backends in the
 //! configuration, reaches them, and says how it went, step by step, in the log.
-use crate::log::{info, warning};
+use crate::log::{error, info, warning};
 use meridian_config::{Config, Sidecar};
 use meridian_handoff::{Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend};
 use meridian_net::backend::BackendOptions;
@@ -40,6 +40,29 @@ fn sidecar_control(sidecar: &Sidecar, timeout: Duration) -> Result<Box<dyn Playe
     Ok(Box::new(client))
 }
 
+/// How long Horizon lets a player stay frozen by default (`max_freeze_seconds` of a
+/// server's `[transfer]`). The proxy cannot read a server's setting, so this is what
+/// it warns about.
+const HORIZON_FREEZE_MS: u64 = 30_000;
+
+/// What the operator should know about the configuration before any switch, one
+/// line each: the freeze limit must stay below what the servers allow.
+pub fn startup_warnings(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !config.sidecars.is_empty() && config.switch_freeze_limit_ms >= HORIZON_FREEZE_MS {
+        warnings.push(format!(
+            "switch-freeze-limit-ms is {} ms, but a Horizon server lets a frozen player go by \
+             itself after its max_freeze_seconds ({} s by default): a switch gives up at the \
+             limit only if the server's is longer. Lower the limit, or raise max_freeze_seconds \
+             in [transfer] on every server that has a sidecar. Each switch also reads the \
+             freeze its server says is left, and gives up before it ends",
+            config.switch_freeze_limit_ms,
+            HORIZON_FREEZE_MS / 1_000,
+        ));
+    }
+    warnings
+}
+
 /// A switch that happened.
 #[derive(Debug)]
 pub struct Moved {
@@ -47,6 +70,9 @@ pub struct Moved {
     pub to: String,
     pub done: Done,
     pub took: Duration,
+    /// What the operator must know, when the old server would not let the player go
+    /// after the new one placed them.
+    pub alert: Option<String>,
 }
 
 impl Moved {
@@ -124,6 +150,8 @@ pub fn switch(
             info!("{who}: switch to {to}: {step} (+{} ms)", at.as_millis());
         })),
         carry_position: config.switch_carry_position,
+        freeze_limit: Duration::from_millis(config.switch_freeze_limit_ms),
+        commit_margin: Duration::from_millis(config.switch_commit_margin_ms),
         ..Settings::default()
     };
     info!("{name}: switch from {from} to {}: starting", backend.name);
@@ -141,11 +169,29 @@ pub fn switch(
         &settings,
     )
     .map_err(|failure| failed(failure.to_string()))?;
+    // The new server has the player placed; the old one would not let them go, so it
+    // saves its own copy when the proxy closes its connection, and the two servers'
+    // files differ. Nothing undoes that: the operator is told, in the log and on the
+    // console, with the id both servers carry in their logs.
+    let alert = done.source_kept.as_ref().map(|why| {
+        let alert = format!(
+            "ALERT {name}: transfer {id} from {from} to {to}: {from} would not let the player \
+             go ({why}). {name} is on {to}, which placed them and saved their files; {from} \
+             keeps its own copy and saves it, so the two servers' files for {name} now differ: \
+             compare them and keep the one that is right. Both servers' logs name the transfer \
+             {id}",
+            id = done.handover,
+            to = backend.name,
+        );
+        error!("{alert}");
+        alert
+    });
     Ok(Moved {
         from,
         to: backend.name.clone(),
         done,
         took: started.elapsed(),
+        alert,
     })
 }
 

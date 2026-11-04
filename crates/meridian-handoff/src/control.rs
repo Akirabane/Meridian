@@ -25,8 +25,17 @@ pub trait PlayerControl {
 
     /// The player's record; with `freeze`, their own inputs stop being acted on
     /// until a release, and the record carries the `handover` id that the later
-    /// requests name. A freeze asked again gives the same record, the same id.
-    fn export(&mut self, uuid: &str, freeze: bool) -> Result<Record, String>;
+    /// requests name, with the ticks the freeze has left. A freeze asked again gives
+    /// the same record, the same id, and does not freeze again.
+    fn export(&mut self, uuid: &str, freeze: bool) -> Result<Exported, String>;
+
+    /// After a request that was lost on the way (no answer in time, a connection that
+    /// broke), makes the connection ready to ask the same thing again, and says
+    /// whether it is. `false` for a request the backend answered, even with a
+    /// refusal, and for a control that has nothing to reopen.
+    fn recover(&mut self) -> Result<bool, String> {
+        Ok(false)
+    }
 
     /// Puts `record` on the held player: every part of it, or only `parts`. With
     /// `place`, the player is placed in the world at once; without, they stay held
@@ -70,14 +79,23 @@ impl PlayerControl for SidecarClient {
             .map_err(|e| e.to_string())
     }
 
-    fn export(&mut self, uuid: &str, freeze: bool) -> Result<Record, String> {
+    fn export(&mut self, uuid: &str, freeze: bool) -> Result<Exported, String> {
         let answer = SidecarClient::export(self, uuid, freeze).map_err(|e| e.to_string())?;
-        // The endpoint answers {"ok": true, "record": {...}}.
-        answer
+        // The endpoint answers {"ok": true, "record": {...}}, and for a frozen player
+        // "freeze_ticks_left" beside the record.
+        let record = answer
             .get("record")
             .filter(|record| record.is_object())
             .cloned()
-            .ok_or_else(|| format!("the export answer has no record: {answer}"))
+            .ok_or_else(|| format!("the export answer has no record: {answer}"))?;
+        Ok(Exported {
+            record,
+            freeze_ticks_left: answer.get("freeze_ticks_left").and_then(Value::as_u64),
+        })
+    }
+
+    fn recover(&mut self) -> Result<bool, String> {
+        SidecarClient::recover(self).map_err(|e| format!("cannot reach the sidecar again: {e}"))
     }
 
     fn import(
@@ -120,6 +138,16 @@ impl PlayerControl for SidecarClient {
             .map(drop)
             .map_err(|e| e.to_string())
     }
+}
+
+/// What an export gives.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Exported {
+    pub record: Record,
+    /// The ticks (50 ms each) before the server lets the freeze go by itself, as
+    /// the server counted them when it answered; `None` for a player not frozen, and
+    /// for a server that does not say.
+    pub freeze_ticks_left: Option<u64>,
 }
 
 /// What a target says of an import.

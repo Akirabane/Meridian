@@ -61,6 +61,8 @@ pub enum ConfigError {
     },
     /// `sidecar-timeout-ms` is zero.
     ZeroSidecarTimeout,
+    /// `switch-freeze-limit-ms` is zero.
+    ZeroFreezeLimit,
     /// `status-sample` is above [`crate::MAX_STATUS_SAMPLE`].
     StatusSampleTooLarge(u32),
     /// `[commands] enabled` lists a command twice.
@@ -223,6 +225,9 @@ impl fmt::Display for ConfigError {
                  sidecar has a secret of its own",
                 path.display()
             ),
+            ConfigError::ZeroFreezeLimit => {
+                write!(f, "switch-freeze-limit-ms must be more than 0")
+            }
             ConfigError::ZeroSidecarTimeout => {
                 write!(f, "sidecar-timeout-ms must be more than 0")
             }

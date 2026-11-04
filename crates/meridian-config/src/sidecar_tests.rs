@@ -220,3 +220,23 @@ fn a_switch_carries_the_position_only_when_asked() {
     let config = Config::from_toml_str(&text("switch-carry-position = true", "", "")).unwrap();
     assert!(config.switch_carry_position);
 }
+
+#[test]
+fn the_freeze_a_switch_may_use_has_a_limit_and_a_margin() {
+    let config = Config::from_toml_str(&text("", "", "")).unwrap();
+    assert_eq!(config.switch_freeze_limit_ms, 8_000);
+    assert_eq!(config.switch_commit_margin_ms, 2_000);
+    let config = Config::from_toml_str(&text(
+        "switch-freeze-limit-ms = 12000\nswitch-commit-margin-ms = 500",
+        "",
+        "",
+    ))
+    .unwrap();
+    assert_eq!(config.switch_freeze_limit_ms, 12_000);
+    assert_eq!(config.switch_commit_margin_ms, 500);
+    // No margin at all is allowed; no time to freeze is not.
+    let config = Config::from_toml_str(&text("switch-commit-margin-ms = 0", "", "")).unwrap();
+    assert_eq!(config.switch_commit_margin_ms, 0);
+    let e = Config::from_toml_str(&text("switch-freeze-limit-ms = 0", "", "")).unwrap_err();
+    assert!(matches!(e, ConfigError::ZeroFreezeLimit), "{e}");
+}

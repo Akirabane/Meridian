@@ -10,7 +10,7 @@ use horizon_protocol::{
     packets::play::Clientbound as C, text,
 };
 use meridian_config::{AuthMode, Backend};
-use meridian_handoff::{Imported, Outcome, Record, Session};
+use meridian_handoff::{Exported, Imported, Outcome, Record, Session};
 use meridian_net::{
     Profile,
     backend::BackendLink,
@@ -65,16 +65,19 @@ impl PlayerControl for FakeSidecar {
         self.answer("expect", "expect".into())
     }
 
-    fn export(&mut self, _: &str, _: bool) -> Result<Record, String> {
+    fn export(&mut self, _: &str, _: bool) -> Result<Exported, String> {
         if let Some(hook) = &mut self.on_export {
             hook();
         }
         self.answer("export", "export".into())?;
-        Ok(serde_json::json!({
-            "version": 1,
-            "handover": "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
-            "dimension": OVERWORLD
-        }))
+        Ok(Exported {
+            record: serde_json::json!({
+                "version": 1,
+                "handover": "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+                "dimension": OVERWORLD
+            }),
+            freeze_ticks_left: Some(600),
+        })
     }
 
     fn import(
@@ -108,6 +111,8 @@ impl PlayerControl for FakeSidecar {
 struct Sidecars {
     /// A request the target's sidecar refuses, with the reason.
     target_refuses: Option<(&'static str, String)>,
+    /// A request the source's sidecar refuses, with the reason.
+    source_refuses: Option<(&'static str, String)>,
     /// Run when the source exports the player, in the middle of the switch.
     during_export: Option<Box<dyn Fn() + Send + Sync>>,
 }
@@ -160,6 +165,7 @@ fn world(sidecars: Sidecars) -> World {
     let signal = Mutex::new(signal);
     let Sidecars {
         target_refuses,
+        source_refuses,
         during_export,
     } = sidecars;
     let during_export = during_export.map(Arc::new);
@@ -175,7 +181,11 @@ fn world(sidecars: Sidecars) -> World {
                 backend: sidecar.backend.clone(),
                 log: log.clone(),
                 signal: east.then(|| signal.lock().unwrap().clone()),
-                refuse: target_refuses.clone().filter(|_| east),
+                refuse: if east {
+                    target_refuses.clone()
+                } else {
+                    source_refuses.clone()
+                },
                 on_export,
             }))
         }
@@ -546,4 +556,76 @@ fn the_place_reserved_for_a_switch_that_fails_is_given_back() {
     }
     assert_eq!(proxy.sessions.balancer.reserved("nowhere"), 0);
     let _ = &mut player;
+}
+
+/// The new server placed the player, but the old one would not let them go: nothing
+/// undoes the placing, so the player stays on the new server and the operator is told,
+/// in the console's lines and in the log, with the id of the transfer.
+#[test]
+fn a_source_that_keeps_the_player_is_an_alert_not_a_failure() {
+    let World {
+        proxy,
+        log,
+        mut player,
+        _source,
+        relay,
+        target,
+    } = world(Sidecars {
+        source_refuses: Some(("release", "that hand-over is over".to_owned())),
+        ..Sidecars::default()
+    });
+    let lines = Commands::builtin().execute(&proxy, "switch alex east");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].starts_with("Alex moved from lobby to east in "),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].starts_with(
+            "ALERT Alex: transfer 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 from lobby to east: lobby \
+             would not let the player go (that hand-over is over)"
+        ),
+        "{}",
+        lines[1]
+    );
+    // No drop and no abort: the target has the player placed.
+    assert_eq!(
+        log.lines(),
+        [
+            "east expect",
+            "lobby export",
+            "east import place=false",
+            "east confirm",
+            "lobby release Moved",
+        ]
+    );
+    let list = Commands::builtin().execute(&proxy, "list");
+    assert!(list[1].contains(" on east for "), "{list:?}");
+    // The player is told they are on east, and plays on there.
+    let (chat, live) = client_after_switch(&mut player);
+    assert_eq!(chat, ["You are now on east."]);
+    assert_eq!(live, effect(CLIENT_ID));
+    attack(&mut player, TARGET_ID);
+    assert_eq!(target.join().unwrap().unwrap().attacked, CLIENT_ID);
+    relay.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_freeze_limit_a_server_would_not_allow_is_warned_about_at_start() {
+    let with = |limit: u64, sidecars: Vec<Sidecar>| Config {
+        sidecars,
+        switch_freeze_limit_ms: limit,
+        ..Config::default()
+    };
+    let one = || vec![sidecar("lobby", 25580)];
+    // The default is well below Horizon's 30 seconds.
+    assert!(startup_warnings(&with(8_000, one())).is_empty());
+    assert!(startup_warnings(&with(29_999, one())).is_empty());
+    let warnings = startup_warnings(&with(30_000, one()));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("max_freeze_seconds"), "{warnings:?}");
+    assert!(warnings[0].contains("30000 ms"), "{warnings:?}");
+    // Without a sidecar no switch happens, so there is nothing to warn of.
+    assert!(startup_warnings(&with(60_000, Vec::new())).is_empty());
 }

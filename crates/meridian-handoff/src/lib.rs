@@ -42,19 +42,23 @@
 //!    player's file is on its disk.
 //! 4. **Commit.** The source lets the player go (`player-release moved`) and its
 //!    connection closes. Its last packets, the disconnect among them, never reach
-//!    the client. A source that refuses (the freeze ran out, so the player played on
-//!    there and the target's record is older) fails the switch: the client is
-//!    disconnected with a message, the source keeps the player, and the target
-//!    closes the copy it placed ([`After::Disconnected`]).
+//!    the client. A source that refuses (the freeze ran out, or a command killed
+//!    the frozen player) cannot be obeyed by undoing anything: the target has the
+//!    player placed, and `player-drop` takes only a held player. The player stays on
+//!    the target, the source's connection closes all the same, and the switch ends
+//!    with [`Done::source_kept`] set to the source's reason, for the caller to tell
+//!    the operator: the two servers' files for the player differ from then on, and
+//!    [`Done::handover`] is the id both servers' logs carry.
 //!
 //! Before the first packet of the delta, any failure leaves the player where they
 //! were: the target forgets them (`player-drop`, which also cancels an import not
 //! yet confirmed, with nothing saved or said), the source lets them go on
 //! (`player-release abort`) if it froze them, and the client saw nothing. If the
-//! target will not place the player after the delta, the client already holds the
-//! target's world: the player is disconnected with a message, and the source keeps
-//! them. A player who leaves once their record is out of the source has it saved
-//! on the target as a normal save (decision 10).
+//! target will not place the player after the delta, or the freeze left is too
+//! short to place them (see Timing), the client already holds the target's world:
+//! the player is disconnected with a message, and the source keeps them. A player
+//! who leaves once their record is out of the source has it saved on the target as a
+//! normal save (decision 10).
 //!
 //! # The digest is checked on the prepare connection itself
 //!
@@ -91,6 +95,21 @@
 //! left is three requests and the delta. [`Settings::freeze_limit`] gives up before,
 //! and must stay below the server's `max_freeze_seconds`.
 //!
+//! An export with freeze says how many ticks of freeze are left
+//! (`freeze_ticks_left`, [`Exported`]). The hand-over goes no further than the moment
+//! when that leaves less than [`Settings::commit_margin`] plus twice the slowest
+//! request so far (the confirm and the release take about as long): it is checked
+//! before the import, before the delta, and before the confirm, and a switch that is
+//! too late is undone as any other failure. The ticks are counted from the moment the
+//! export was sent, so the proxy never believes in more time than there is.
+//!
+//! The answer to the export may be lost (no answer in time, a connection that
+//! broke): it is asked again up to [`Settings::export_attempts`] times in all, on a
+//! connection reopened by [`PlayerControl::recover`], while the freeze limit allows.
+//! The source answers a repeated export of a frozen player with the same record, and
+//! does not freeze again, so this is safe whether or not the first request arrived.
+//! A refusal is an answer and is not asked again.
+//!
 //! # Known limits
 //!
 //! - **A player who leaves after the import** is placed on the target
@@ -116,7 +135,8 @@ mod switch;
 
 pub use configure::{ClientConfiguration, Digest, DigestBuilder, configure};
 pub use control::{
-    Arrival, Imported, Outcome, PlayerControl, Record, record_dimension, record_handover, uuid_text,
+    Arrival, Exported, Imported, Outcome, PlayerControl, Record, record_dimension, record_handover,
+    uuid_text,
 };
 pub use session::{Session, SessionHandle};
 pub use switch::{
