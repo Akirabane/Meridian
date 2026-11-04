@@ -3,6 +3,7 @@ mod args;
 mod balance;
 mod commands;
 mod console;
+mod evacuate;
 mod health;
 mod log;
 mod placing;

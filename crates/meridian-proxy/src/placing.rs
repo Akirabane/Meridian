@@ -196,12 +196,52 @@ pub fn hub(
     open_to: impl Fn(&str) -> bool,
     current: &str,
 ) -> Result<(String, Reservation), String> {
+    in_roles(
+        config,
+        shared,
+        &[Role::Lobby, Role::Sublobby],
+        open_to,
+        current,
+        "No lobby has room right now.",
+    )
+}
+
+/// Where `/play` leads for a player on `current`: the best open server of role `game`
+/// by the rule of the login (fill one up to its soft cap, then open the next, overflow
+/// up to the hard cap). A place is reserved. `Err` is the line the player is told.
+pub fn game(
+    config: &Config,
+    shared: &Shared,
+    open_to: impl Fn(&str) -> bool,
+    current: &str,
+) -> Result<(String, Reservation), String> {
+    in_roles(
+        config,
+        shared,
+        &[Role::Game],
+        open_to,
+        current,
+        "No game server has room right now.",
+    )
+}
+
+/// The best server of the first of `roles` that can take the player, as the login
+/// would choose among them, with a place reserved on it; `none` is what the player is
+/// told when no role can.
+fn in_roles(
+    config: &Config,
+    shared: &Shared,
+    roles: &[Role],
+    open_to: impl Fn(&str) -> bool,
+    current: &str,
+    none: &str,
+) -> Result<(String, Reservation), String> {
     let retry = Duration::from_secs(config.backend_retry_seconds);
     let now = Instant::now();
     shared
         .balancer
         .retain(|name| config.balanced(name).is_some());
-    for role in [Role::Lobby, Role::Sublobby] {
+    for &role in roles {
         let servers: Vec<Server<'_>> = config
             .servers_with_role(role)
             .filter(|s| open_to(&s.backend))
@@ -221,7 +261,49 @@ pub fn hub(
             return Ok((target, reservation));
         }
     }
-    Err("No lobby has room right now.".to_owned())
+    Err(none.to_owned())
+}
+
+/// Where a player on the drained `from` can go: the best server of the same role by the
+/// rule of the login, never `from`, and never one that serves the other kind of player
+/// than `from` does (DESIGN.md section 15.3). A place is reserved on it. `Err` is why
+/// the player has nowhere to go.
+pub fn elsewhere(config: &Config, shared: &Shared, from: &str) -> Result<Reservation, String> {
+    let Some(limits) = config.balanced(from) else {
+        return Err(format!("{from} has no role"));
+    };
+    let role = limits.role;
+    // Without routes, groups choose nothing. With them, the players of `from` are of the
+    // kind its group is for.
+    let kind = (!config.routes.is_empty())
+        .then(|| {
+            config
+                .groups
+                .iter()
+                .find(|g| g.backends.iter().any(|b| b == from))
+        })
+        .flatten()
+        .map(|g| g.auth);
+    let retry = Duration::from_secs(config.backend_retry_seconds);
+    let now = Instant::now();
+    shared
+        .balancer
+        .retain(|name| config.balanced(name).is_some());
+    let servers: Vec<Server<'_>> = config
+        .servers_with_role(role)
+        .filter(|s| s.backend != from)
+        .filter(|s| kind.is_none_or(|k| !crate::route::serves_other_kind(config, &s.backend, k)))
+        .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
+        .collect();
+    shared
+        .balancer
+        .reserve(
+            &servers,
+            || shared.counts(),
+            config.balancing.margin,
+            config.balancing.tie_break,
+        )
+        .map_err(|NoRoom| format!("no other server of role {} has room", role.name()))
 }
 
 /// Connects to `name` with the place already reserved. Whatever happens, `name` is

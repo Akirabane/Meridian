@@ -331,6 +331,69 @@ fn errors_read_well() {
     );
 }
 
+/// A configuration whose lobbies are `east` and `west`, and whose default backend is
+/// `lobby`, a backend with no role; `balancing` is the value of `enabled`.
+fn with_roles(balancing: bool) -> Config {
+    Config::from_toml_str(&format!(
+        r#"
+forwarding-secret = "test-secret"
+default-backend = "lobby"
+try = ["open"]
+[[backends]]
+name = "lobby"
+address = "127.0.0.1:25566"
+[[backends]]
+name = "east"
+address = "127.0.0.1:25567"
+role = "lobby"
+soft-cap = 10
+[[backends]]
+name = "west"
+address = "127.0.0.1:25568"
+role = "lobby"
+soft-cap = 10
+[[backends]]
+name = "open"
+address = "127.0.0.1:25569"
+role = "game"
+soft-cap = 10
+[balancing]
+enabled = {balancing}
+"#
+    ))
+    .unwrap()
+}
+
+#[test]
+fn with_balancing_on_the_entry_follows_the_roles() {
+    // The lobbies come first, then the default backend and `try` as the last resort.
+    assert_eq!(
+        names(candidates(&with_roles(true), None, VERIFIED)),
+        ["east", "west", "lobby", "open"]
+    );
+}
+
+#[test]
+fn with_balancing_off_the_entry_is_the_default_backend_then_try() {
+    assert_eq!(
+        names(candidates(&with_roles(false), None, VERIFIED)),
+        ["lobby", "open"]
+    );
+}
+
+#[test]
+fn a_forced_host_still_comes_first_with_balancing_on() {
+    let mut config = with_roles(true);
+    config.forced_hosts = vec![meridian_config::ForcedHost {
+        host: "play.example.com".into(),
+        backend: "west".into(),
+    }];
+    assert_eq!(
+        names(candidates(&config, Some("play.example.com"), VERIFIED)),
+        ["west", "open"]
+    );
+}
+
 // The player limit.
 
 #[test]

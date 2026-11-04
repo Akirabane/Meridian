@@ -11,6 +11,8 @@ pub enum ProxyCommand {
     Server,
     /// `/hub` and `/lobby` ask to move to the hub backend.
     Hub,
+    /// `/play` asks to move to a server of role `game` that the balancer finds.
+    Play,
 }
 
 impl ProxyCommand {
@@ -19,6 +21,7 @@ impl ProxyCommand {
         match self {
             ProxyCommand::Server => "server",
             ProxyCommand::Hub => "hub",
+            ProxyCommand::Play => "play",
         }
     }
 
@@ -27,6 +30,7 @@ impl ProxyCommand {
         match self {
             ProxyCommand::Server => &["server"],
             ProxyCommand::Hub => &["hub", "lobby"],
+            ProxyCommand::Play => &["play"],
         }
     }
 }

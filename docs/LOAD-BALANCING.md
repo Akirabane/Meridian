@@ -27,15 +27,15 @@ with whom, are not part of it.
 
 | Need | Today | Missing |
 | --- | --- | --- |
-| Roles | `role`, `soft-cap` and `hard-cap` are read and checked. At login, role `lobby` is used | The use of `sublobby` and `game`: moving players between roles |
-| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each. With balancing on, a login is placed among the lobbies its route allows, and `/hub` takes a lobby, then a sublobby | `default-backend` does not follow the roles |
+| Roles | `role`, `soft-cap` and `hard-cap` are read and checked. At login, role `lobby` is used; `/play` places a player on a server of role `game` by the same rule | Moving a group from a sublobby to a game, and who decides |
+| Entry point | `default-backend`, `try`, and `hub-backend` for `/hub`: one server each. With balancing on, a login is placed among the lobbies its route allows, and `/hub` takes a lobby, then a sublobby | Nothing: with balancing on and no routes, a login tries the servers of role `lobby` before the default backend, which stays the last resort |
 | Order of candidates | `route::candidates` gives the servers of the player's group in the listed order, and a login goes to the first that answers. Filling a server first is therefore what happens already, with no limit at all | A limit: the first server takes every player until it fails |
 | Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` gives the count. A place is reserved with the count, under one lock, from the choice of a server until the session is open, so logins at the same time do not pass a cap. Players who joined a server some other way are not seen |
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
 | Does a server accept transfers | The proxy reads `accepts_transfers`, `players` and `capacity` through the sidecar (section 3). A failed login also marks a server "passed over" for `backend-retry-seconds` (`health.rs`) | The answer on the Horizon side: its command and its names are not fixed |
 | Premium or offline | Done. Players are verified or unverified, decided at login (DESIGN.md section 15), and groups and routes keep the two kinds apart | Nothing for placement: it chooses among the servers the route already allows |
 | Ping | The proxy measures the TCP connection time to each server with a role and keeps it (section 5). Nothing measures a player. The relay passes keep-alives through as they are (`relay.rs`) | Player to proxy, not asked for |
-| Drain | A server that reports it does not accept transfers, or that the operator drains with the console's `drain`, is not offered to new players, not even to a named choice; its players stay | Nothing moves the players off it. A removed server still keeps its players until they leave |
+| Drain | A server that reports it does not accept transfers, or that the operator drains with the console's `drain`, is not offered to new players, not even to a named choice; its players stay | `drain <server> --move` sends the players off it, one at a time, to other servers of the same role (section 4); a player with nowhere to go stays. A removed server still keeps its players until they leave |
 | Moving players between roles | `/server` and `/hub` switch a player through the sidecars (DESIGN.md section 5) | Moving a group from a sublobby to a game, and who decides |
 
 ## 3. Reading the state of a server
@@ -199,11 +199,16 @@ kind of player already (section 4).
    does not answer is left for the next, and a forced host may pass the soft cap but
    not the hard cap. Done. `/hub` takes a lobby then a sublobby, and `/server <name>`
    respects the hard cap and the drain, with a place reserved until the switch ends.
-   Done. Not done: placing players on the game role, and the console's `switch` and
-   `send`, which ignore the caps.
+   Done. `/play` (listed in `[commands] enabled`) places a player on a server of role
+   `game` by the same rule. Done. Not done: the console's `switch` and `send`, which ignore
+   the caps.
 4. The probe of section 5, kept by the proxy; the console's `servers` command showing
    the role, the count against the caps, open, closed or draining, and the ping; and
-   `drain` and `undrain`. Done.
+   `drain` and `undrain`. Done. `drain <server> --move` also sends the players of the
+   server, one at a time with a pause of half a second between two moves, to other
+   servers of the same role that the same rule picks (never one for the other kind of
+   player); it answers with a line for each move and a summary, and a player with no
+   eligible target stays and is named. The console waits for the last move.
 5. The report of section 3: the sidecar request and the proxy's reading of it are done.
    What is missing is the Horizon server's own command, and the drain it allows once
    a server can say it no longer accepts transfers.
@@ -218,15 +223,16 @@ Decided:
 - The server's state reaches the proxy through the sidecar (section 3).
 - Explicit choices (forced host, `/server <name>`) may pass the soft cap, never the
   hard cap (section 4).
-- `/hub` looks for a lobby first, then a sublobby (section 4).
+- `/hub` looks for a lobby first, then a sublobby (section 4); `/play` looks for a server
+  of role `game`.
+- With balancing on and no routes, the servers of role `lobby` are tried before the
+  default backend (`route::candidates`).
 
 Open:
 
 - The command and the field names of the Horizon server's report, until it defines
   them (section 3). The proxy side reads `players`, `capacity` and
   `accepts_transfers`.
-- Whether `default-backend` should follow the roles too, so a new login lands on the
-  lobby with room. The rule of section 4 allows it; it is not decided.
 - What a player sees when every server of a role is at its hard cap. Today it is "The
   server is full".
 - A reload changes the caps for the logins after it, as for every other setting. The

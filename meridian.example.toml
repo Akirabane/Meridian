@@ -187,6 +187,8 @@ probe-interval-seconds = 10
 [commands]
 # "server": /server lists the servers and /server <name> asks to move to one.
 # "hub": /hub and /lobby ask to move to the hub backend.
+# "play": /play asks to move to the game server the balancer finds (role "game",
+# [balancing] enabled). Off unless listed here, so a backend's own /play keeps working.
 enabled = ["server", "hub"]
 # The backend /hub and /lobby lead to. When it is left out, the default backend, or,
 # with [balancing] enabled and a backend of role "lobby", the lobby the balancer finds.

@@ -603,13 +603,20 @@ fn commands_hook(
             format!("Moving you to {target}...")
         }
     };
-    // `/hub` with balancing on: the lobby the balancer finds for the player.
-    let hubber = {
+    // `/hub` and `/play` with balancing on: the lobby or game server the balancer finds
+    // for the player.
+    let placer = {
         let (config, switcher) = (Arc::clone(&config), Arc::clone(&sessions.switcher));
         let (handle, name) = (handle.clone(), name.to_owned());
-        move |typist: &commands::Typist| {
+        move |role: meridian_config::Role, typist: &commands::Typist| {
             let open_to = |backend: &str| commands::open_to(&config, backend, typist);
-            match crate::placing::hub(&config, &shared, open_to, &typist.backend) {
+            let found = match role {
+                meridian_config::Role::Game => {
+                    crate::placing::game(&config, &shared, open_to, &typist.backend)
+                }
+                _ => crate::placing::hub(&config, &shared, open_to, &typist.backend),
+            };
+            match found {
                 Ok((target, place)) => {
                     switching::in_game(
                         Arc::clone(&config),
@@ -626,7 +633,7 @@ fn commands_hook(
             }
         }
     };
-    commands::hook(config, typist, mover, hubber)
+    commands::hook(config, typist, mover, placer)
 }
 
 /// What a player is told when none of the backends tried answers.

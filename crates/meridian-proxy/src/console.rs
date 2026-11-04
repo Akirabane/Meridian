@@ -61,8 +61,8 @@ impl Commands {
             ),
             command(
                 "drain",
-                "drain <server>",
-                "stops offering a server with a role to new players; its players stay",
+                "drain <server> [--move]",
+                "stops offering a server with a role to new players; its players stay, or with --move are sent one at a time to other servers of the same role",
                 drain,
             ),
             command(
@@ -283,8 +283,10 @@ fn servers(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
 }
 
 fn drain(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
-    let [server] = args else {
-        return Err(usage("drain", commands));
+    let (server, moving) = match args {
+        [server] => (server, false),
+        [server, flag] if flag.eq_ignore_ascii_case("--move") => (server, true),
+        _ => return Err(usage("drain", commands)),
     };
     let config = proxy.config();
     if config.balanced(server).is_none() {
@@ -292,13 +294,80 @@ fn drain(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
             "{server} has no role, so there is nothing to drain; it takes players only where              a route, a forced host or a command sends them"
         ));
     }
-    if !proxy.sessions.balancer.drain(server) {
-        return Ok(vec![format!("{server} is already drained")]);
+    let newly = proxy.sessions.balancer.drain(server);
+    if newly {
+        info!("backend \"{server}\" is drained from the console");
     }
-    info!("backend \"{server}\" is drained from the console");
-    Ok(vec![format!(
-        "{server} takes no new player; its players stay. undrain {server} offers it again"
-    )])
+    let mut lines = vec![match (newly, moving) {
+        (true, false) => format!(
+            "{server} takes no new player; its players stay. undrain {server} offers it again"
+        ),
+        (true, true) => format!(
+            "{server} takes no new player; its players are being sent to other servers of its role"
+        ),
+        (false, _) => format!("{server} is already drained"),
+    }];
+    if moving {
+        lines.extend(evacuate(proxy, &config, server));
+    }
+    Ok(lines)
+}
+
+/// Sends the players of the drained `server` to other servers of its role, one at a
+/// time (see `evacuate`). The console waits for the last move, and the log has each.
+fn evacuate(proxy: &Proxy, config: &Config, server: &str) -> Vec<String> {
+    let players: Vec<Player> = proxy
+        .sessions
+        .players()
+        .into_iter()
+        .filter(|p| p.backend == server)
+        .collect();
+    if players.is_empty() {
+        return vec![format!("no player is on {server}")];
+    }
+    let outcome = crate::evacuate::run(
+        config,
+        &proxy.sessions.shared(),
+        server,
+        &players,
+        &mut |player, target| move_one(proxy, config, player, target),
+        crate::evacuate::PAUSE,
+        &mut std::thread::sleep,
+    );
+    outcome.report(server)
+}
+
+/// Moves one player to `target` and tells them how it went: the console's line, or why it
+/// failed.
+fn move_one(
+    proxy: &Proxy,
+    config: &Config,
+    player: &Player,
+    target: &str,
+) -> Result<String, String> {
+    let Some((player, handle)) = proxy.sessions.session(&player.name) else {
+        return Err(format!("{} left before the switch", player.name));
+    };
+    match switching::switch(
+        config,
+        &proxy.sessions.switcher,
+        &handle,
+        &player.name,
+        player.address.ip(),
+        target,
+    ) {
+        Ok(moved) => {
+            let line = moved.describe(&player.name);
+            info!("{line}");
+            handle.tell(&format!("You are now on {}.", moved.to));
+            Ok(line)
+        }
+        Err(why) => {
+            warning!("{why}");
+            handle.tell(&format!("Could not move you to {target}. {why}"));
+            Err(why)
+        }
+    }
 }
 
 fn undrain(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
@@ -1004,7 +1073,12 @@ mod tests {
     #[test]
     fn drain_checks_its_arguments() {
         let proxy = balanced_proxy();
-        assert_eq!(run(&proxy, "drain"), ["usage: drain <server>"]);
+        assert_eq!(run(&proxy, "drain"), ["usage: drain <server> [--move]"]);
+        assert_eq!(
+            run(&proxy, "drain lobby now"),
+            ["usage: drain <server> [--move]"]
+        );
+        assert!(!proxy.sessions.balancer.is_drained("lobby"));
         assert_eq!(run(&proxy, "undrain a b"), ["usage: undrain <server>"]);
         // East has no role: there is nothing to drain, and nothing is changed.
         let said = run(&proxy, "drain east");
@@ -1012,5 +1086,82 @@ mod tests {
         assert!(!proxy.sessions.balancer.is_drained("east"));
         let said = run(&proxy, "drain nowhere");
         assert!(said[0].starts_with("nowhere has no role"), "{said:?}");
+    }
+
+    /// Two lobbies, `lobby` and `east`, with room for two players each.
+    fn two_lobbies() -> Proxy {
+        let proxy = proxy();
+        proxy.set_config(Config {
+            balanced: ["lobby", "east"]
+                .iter()
+                .map(|b| BalancedServer {
+                    backend: (*b).into(),
+                    role: Role::Lobby,
+                    soft_cap: 2,
+                    hard_cap: 2,
+                })
+                .collect(),
+            ..config()
+        });
+        proxy
+    }
+
+    #[test]
+    fn drain_move_with_nobody_on_the_server_only_drains_it() {
+        let proxy = two_lobbies();
+        let said = run(&proxy, "drain lobby --move");
+        assert!(said[0].starts_with("lobby takes no new player"), "{said:?}");
+        assert_eq!(said[1], "no player is on lobby");
+        assert!(proxy.sessions.balancer.is_drained("lobby"));
+    }
+
+    /// With no other server of its role, a player stays and is listed.
+    #[test]
+    fn drain_move_lists_the_players_with_nowhere_to_go() {
+        let proxy = balanced_proxy();
+        let _alex = join(&proxy, "Alex", "lobby");
+        let said = run(&proxy, "drain lobby --move");
+        assert_eq!(
+            said[1..],
+            [
+                "lobby: 0 moved, 1 stayed",
+                "  Alex stays on lobby: no other server of role lobby has room",
+            ]
+        );
+        assert_eq!(proxy.sessions.counts().get("lobby"), Some(&1));
+    }
+
+    /// The target is chosen and the move is tried through the switch; with no sidecar in
+    /// this configuration it fails, says why, and the player stays where they are.
+    #[test]
+    fn drain_move_tries_a_switch_to_the_other_lobby_and_says_when_it_fails() {
+        let proxy = two_lobbies();
+        let _alex = join(&proxy, "Alex", "lobby");
+        let said = run(&proxy, "drain lobby --move");
+        assert!(
+            said[1]
+                .starts_with("Alex could not move from lobby to east: check: lobby has no sidecar"),
+            "{said:?}"
+        );
+        assert_eq!(
+            said[2..],
+            [
+                "lobby: 0 moved, 1 stayed",
+                "  Alex stays on lobby: the move failed"
+            ]
+        );
+        assert_eq!(proxy.sessions.counts().get("lobby"), Some(&1));
+        assert_eq!(proxy.sessions.balancer.reserved("east"), 0);
+    }
+
+    /// `--move` on a server that is drained already still moves its players.
+    #[test]
+    fn drain_move_works_on_a_server_drained_before() {
+        let proxy = two_lobbies();
+        let _alex = join(&proxy, "Alex", "lobby");
+        assert!(run(&proxy, "drain lobby")[0].starts_with("lobby takes no new player"));
+        let said = run(&proxy, "drain lobby --move");
+        assert_eq!(said[0], "lobby is already drained");
+        assert!(said[1].starts_with("Alex could not move"), "{said:?}");
     }
 }
