@@ -2,7 +2,7 @@
 //! and whether there is room for them. Both are pure functions of the
 //! configuration and what the login told the proxy, so they are tested here
 //! without any connection.
-use meridian_config::{AuthKind, Config};
+use meridian_config::{AuthKind, Config, Role};
 use std::fmt;
 
 /// Why no backend can be chosen. The configuration is checked when it is loaded,
@@ -78,6 +78,17 @@ pub fn candidates(
             })?;
         first.extend(group.backends.iter().map(String::as_str));
     } else {
+        // With balancing on and no routes, the entry follows the roles: the servers
+        // of role `lobby` come before the default backend, which stays the last
+        // resort, so a login lands on the lobby with room even when the default
+        // backend is full or has no role.
+        if config.balancing.enabled {
+            first.extend(
+                config
+                    .servers_with_role(Role::Lobby)
+                    .map(|s| s.backend.as_str()),
+            );
+        }
         first.push(&config.default_backend);
     }
 
