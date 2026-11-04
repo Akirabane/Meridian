@@ -154,7 +154,7 @@ impl fmt::Display for Target {
     }
 }
 
-fn check_name(name: &str) -> Result<(), String> {
+pub(crate) fn check_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > MAX_NAME {
         return Err(format!(
             "\"{name}\" is not a player name (1 to {MAX_NAME} characters)"
@@ -170,7 +170,7 @@ fn check_name(name: &str) -> Result<(), String> {
 }
 
 /// 32 hexadecimal digits, or 8-4-4-4-12 with hyphens.
-fn parse_uuid(text: &str) -> Option<[u8; 16]> {
+pub(crate) fn parse_uuid(text: &str) -> Option<[u8; 16]> {
     let digits: String = if text.len() == 36 {
         let groups: Vec<&str> = text.split('-').collect();
         if groups.iter().map(|g| g.len()).collect::<Vec<_>>() != [8, 4, 4, 4, 12] {
@@ -395,27 +395,31 @@ impl Access {
     /// Writes the lists to `path`: the whole file goes to a temporary file beside it,
     /// which then replaces it, so a failure leaves the old file.
     pub fn save(&self, path: &Path) -> Result<(), AccessError> {
-        let write = |source| AccessError::Write {
+        write_whole(path, &self.to_toml())
+    }
+}
+
+/// Writes `text` to a temporary file beside `path`, which then replaces it.
+pub(crate) fn write_whole(path: &Path, text: &str) -> Result<(), AccessError> {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    let done = (|| {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if let Err(source) = done {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(AccessError::Write {
             path: path.to_owned(),
             source,
-        };
-        let mut temporary = path.as_os_str().to_owned();
-        temporary.push(".tmp");
-        let temporary = PathBuf::from(temporary);
-        let done = (|| {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(self.to_toml().as_bytes())?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&temporary, path)
-        })();
-        if let Err(source) = done {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(write(source));
-        }
-        Ok(())
+        });
     }
+    Ok(())
 }
 
 fn entry_line(target: &Target) -> String {
@@ -423,7 +427,7 @@ fn entry_line(target: &Target) -> String {
 }
 
 /// `text` as a TOML basic string.
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for c in text.chars() {
@@ -507,7 +511,7 @@ pub enum AccessError {
 }
 
 impl AccessError {
-    fn entry(what: &str, why: String) -> Self {
+    pub(crate) fn entry(what: &str, why: String) -> Self {
         AccessError::Entry {
             what: what.to_owned(),
             why,
@@ -515,7 +519,7 @@ impl AccessError {
     }
 
     /// The same, with the file named in the message.
-    fn in_file(self, path: &Path) -> Self {
+    pub(crate) fn in_file(self, path: &Path) -> Self {
         let named = |text: String| format!("{}: {text}", path.display());
         match self {
             AccessError::Parse(text) => AccessError::Parse(named(text)),

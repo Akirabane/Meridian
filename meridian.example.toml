@@ -248,6 +248,14 @@ bind = "127.0.0.1:9100"
 [access]
 # file = "access.toml"
 
+# The groups of permissions and the players in them have a file of their own too, which
+# the console changes (perm) and which is read at the start, at `reload` and on SIGHUP.
+# Without it /server, /hub, /lobby and /play are open to everyone, as before, and the
+# staff commands need a permission nobody has. A relative path is taken from this file's
+# folder.
+[permissions]
+# file = "permissions.toml"
+
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.
 [commands]
@@ -255,6 +263,9 @@ bind = "127.0.0.1:9100"
 # "hub": /hub and /lobby ask to move to the hub backend.
 # "play": /play asks to move to the game server the balancer finds (role "game",
 # [balancing] enabled). Off unless listed here, so a backend's own /play keeps working.
+# "send", "glist", "alert": the staff commands /send <player|all|server:name> <server>,
+# /glist [server] and /alert [server:name] <message>. Off unless listed here, and a player
+# may use one only with the permission of the same name (see [permissions]).
 enabled = ["server", "hub"]
 # The backend /hub and /lobby lead to. When it is left out, the default backend, or,
 # with [balancing] enabled and a backend of role "lobby", the lobby the balancer finds.

@@ -229,13 +229,70 @@ is written with hyphens or without. An entry with none or more than one of `name
 and `ip`, a name or an address that is not one, an entry twice, or a key that is not listed,
 is an error that names the entry.
 
+## `[permissions]`
+
+Where the groups of permissions and the players in them are kept ([OPERATING.md](OPERATING.md),
+section 5.9). Like the bans, they are not in this file: the console changes them while the proxy
+runs.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `file` | `"permissions.toml"` | The file of the groups and the players. A relative path is taken from the folder of this file. A file that is not there means no groups and no players; the console creates it at the first change | A path; the file, if it is there, must be valid (the proxy does not start with one that is not) |
+
+Without the file nothing changes for the players: `/server`, `/hub`, `/lobby` and `/play` stay
+open to everyone, and `/send`, `/glist` and `/alert` (which are off unless listed in
+`[commands] enabled`) need a permission nobody has. The file is read when the proxy starts, at
+`reload` and on SIGHUP:
+
+```toml
+[group.default]                  # everyone is in it; it need not be written
+deny = ["meridian.play"]
+
+[group.moderator]
+inherits = ["default"]           # the nodes of other groups, when this one says nothing
+allow = ["meridian.glist", "meridian.alert"]
+
+[group.admin]
+inherits = ["moderator"]
+allow = ["meridian.send", "meridian.server.*"]
+deny = ["meridian.server.secret"]
+
+[[player]]                       # one of name, uuid
+name = "Alex"
+groups = ["admin"]
+```
+
+A node is lower-case words joined by dots, `*` (every node) or words ending in `.*` (every
+node below them, not the words themselves). The nodes the proxy checks:
+
+| Node | What it lets a player do | Without any rule |
+| --- | --- | --- |
+| `meridian.server` | `/server`: list the servers and move | allowed |
+| `meridian.server.<name>` | Be listed, and go to the server `<name>` (in lower case) with `/server <name>` | allowed |
+| `meridian.hub` | `/hub` and `/lobby` | allowed |
+| `meridian.play` | `/play` | allowed |
+| `meridian.send` | `/send` | refused |
+| `meridian.glist` | `/glist` | refused |
+| `meridian.alert` | `/alert` | refused |
+
+How a node is decided: the groups nearest to the player first (the groups they are in, then
+those these inherit, level by level, then `default`). The first level that has a rule matching
+the node decides. Among the matches of one level the most specific wins (a node over a
+pattern, a longer pattern over a shorter, `*` last), and a deny wins a tie. A node no group
+says anything of is refused, except the four that were open before there were permissions.
+Group names are letters, digits, underscores and hyphens; a group may not inherit itself
+through others; a player in no group has `default` alone. An entry with none or more than one
+of `name` and `uuid`, a group that is not written (`default` excepted), a node that is not one,
+a node both allowed and denied in one group, or a key that is not listed, is an error that
+names it.
+
 ## `[commands]`
 
 The commands players type in game that the proxy answers itself.
 
 | Key | Default | What it does | Checks |
 | --- | --- | --- | --- |
-| `enabled` | `["server", "hub"]` | The commands the proxy answers. `"server"` is `/server`; `"hub"` is `/hub` and `/lobby`; `"play"` is `/play`, which takes the player to the server of role `game` the balancer finds (it needs `[balancing] enabled` and a server with that role, and is off unless listed). Any other command goes to the server | `"server"`, `"hub"` or `"play"`, each once; may be empty |
+| `enabled` | `["server", "hub"]` | The commands the proxy answers. `"server"` is `/server`; `"hub"` is `/hub` and `/lobby`; `"play"` is `/play`, which takes the player to the server of role `game` the balancer finds (it needs `[balancing] enabled` and a server with that role, and is off unless listed). `"send"`, `"glist"` and `"alert"` are the staff commands (`/send <player\|all\|server:name> <server>`, `/glist [server]`, `/alert [server:name] <message>`); they are off unless listed, and a player may use them only with the permission of the same name (`[permissions]`). Any other command goes to the server | `"server"`, `"hub"`, `"play"`, `"send"`, `"glist"` or `"alert"`, each once; may be empty |
 | `hub-backend` | the default server | The server `/hub` and `/lobby` lead to. With `[balancing] enabled` and a server of role `"lobby"`, leaving it out lets the balancer choose the lobby; writing it keeps that server | A configured server |
 | `server-list` | `true` | Whether `/server` may list the servers | None |
 
@@ -246,7 +303,9 @@ logins that start after it: players already connected keep their server and thei
 session. A server removed from the file keeps its players until they leave. `listen`
 is the exception: the proxy keeps listening where it started until a restart.
 
-The bans and the whitelist (the file of `[access]`) are read again at the same time. If that
-file cannot be read, nothing is reloaded, the configuration included. A player who is banned by
+The bans and the whitelist (the file of `[access]`) and the permissions (the file of
+`[permissions]`) are read again at the same time. If either file cannot be read, nothing is
+reloaded, the configuration included. A permission changed applies to the next command a player
+types. A player who is banned by
 what the file now says is disconnected, with the reason; a player who is not on a whitelist
 that is now on stays.

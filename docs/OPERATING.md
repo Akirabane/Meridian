@@ -267,6 +267,8 @@ or `debug`. There is no log file or rotation: let the service manager or a redir
 | `switch <player> <server>` | Moves a player while they stay connected |
 | `send <player\|all> <server>` | The same, for one player or each player in turn |
 | `kick <player> [reason]` | Disconnects a player |
+| `alert [server:<name>] <message>` | Shows a message in the chat of the players online, or of those on one server |
+| `perm ...` | Manages the permission groups and the players in them (section 5.9) |
 | `ban <name\|uuid\|ip> [reason]` | Bans a player name, an account, an address or a range (`203.0.113.0/24`), and disconnects the players it holds (section 5.8) |
 | `pardon <name\|uuid\|ip>` | Lifts a ban |
 | `banlist` | Lists the bans |
@@ -463,6 +465,75 @@ the servers keep their own lists, which the proxy does not read or change. Refus
 as `meridian_login_failures_total{reason="banned"}` and `{reason="not_whitelisted"}` (section
 8.1).
 
+### 5.9 Permissions and the commands in game
+
+The console is the operator's and needs no permission. What is checked is what a **player** types
+in chat. Each command has a node; a player has it, or not, through the groups they are in. What a
+group is and how a node is decided is in [CONFIG.md](CONFIG.md) (`[permissions]`).
+
+| Command in game | Node | Open to everyone before there is a rule |
+| --- | --- | --- |
+| `/server`, `/server <name>` | `meridian.server`, and `meridian.server.<name>` to be listed and to go to `<name>` | yes |
+| `/hub`, `/lobby` | `meridian.hub` | yes |
+| `/play` | `meridian.play` | yes |
+| `/send <player\|all\|server:name> <server>` | `meridian.send` | no |
+| `/glist [server]` | `meridian.glist` | no |
+| `/alert [server:name] <message>` | `meridian.alert` | no |
+
+So a proxy that has no `permissions.toml` behaves as before: the first four are for everyone. To
+close one, deny its node in `default` (`deny = ["meridian.play"]`), and give it back to a rank by
+allowing it in that group: the group the player is in is nearer than `default`, so it wins. A
+server can be hidden from `/server` and refused to the players without its node
+(`deny = ["meridian.server.staff"]`); `/hub` and `/play` place a player by their own rules and
+do not look at `meridian.server.<name>`.
+
+The staff commands are off until they are listed in `[commands] enabled` (a backend may have a
+command of the same name). With one on, a player without the node is told `You do not have
+permission to use /send.`, and the command is not passed to the server. With it:
+
+- `/send <player|all|server:name> <server>` moves one player, every player, or those on a server,
+  as the console's `send` does (the same code, and the same transfer: it needs a sidecar next to
+  each server). The command answers at once, `Sending 2 players to east...`; the moves go on in the
+  background, each player is told how theirs ended, and the sender is told at the end how many
+  failed. The log has each move.
+- `/glist [server]` lists the players online, one line for each server that has some, or the
+  players of one server.
+- `/alert [server:name] <message>` shows `[Alert] <message>` in the chat of every player online, or
+  of those on one server (`server:east` first or last in the line). The sender is told how many
+  were reached. A player who is in the loading screen or in the configuration phase of the game
+  is counted but does not see it.
+
+Each use of `/send` and `/alert` is in the log with the name of the player who typed it.
+
+The console manages the permissions; every change is written to the file at once (the whole file
+beside it, then renamed), and the file is read at the start, at `reload` and on SIGHUP, with the
+same rules as the bans (section 5.8): a file that cannot be read stops the start and changes
+nothing at a reload, and a change that cannot be written holds in memory and says so.
+
+| Command | Effect |
+| --- | --- |
+| `perm list` | The groups, with their nodes and what they inherit, and the players in them |
+| `perm list <player>` | The groups a player is in |
+| `perm check <player> <node>` | Whether the player has the node. By name only unless the player is online or an id is given: a rank given to an id is not seen from a name |
+| `perm grant <player\|uuid> <group>`, `perm revoke <player\|uuid> <group>` | Puts a player in a group, or takes them out |
+| `perm group <group> create`, `perm group <group> delete` | Makes a group, or deletes it (it leaves the groups that inherit it and the players in it) |
+| `perm group <group> allow <node>`, `deny <node>`, `unset <node>` | What the group says of a node or a pattern (`meridian.server.*`); `unset` makes it say nothing |
+| `perm group <group> inherit <group>`, `uninherit <group>` | Makes the group take the nodes of another when it says nothing of its own. A loop is refused |
+
+What a name proves:
+
+- With `auth-mode = "online"` a name and an id are those of the account, checked. Rank by unique
+  id: a name changes hands, and a rank given to a name goes to whoever holds it when they join.
+- In offline mode, and for the unverified players of the hybrid mode, **the name is whatever the
+  client says it is**: anyone who types the name of a player with a rank has it. **In offline mode
+  do not give `meridian.send` or `meridian.alert` to a name**; the permissions are no barrier
+  there, only a convenience on a network where every player is trusted. The same limit as the
+  whitelist (section 5.8).
+
+Not done: in-game commands to manage the groups, a permission for the backends' own commands (the
+proxy decides only what it answers), a group for a kind of login (verified or not), a rank that
+expires, and a link with the servers' own operator levels.
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it
@@ -529,6 +600,9 @@ Before the first player:
       same role.
 - [ ] Someone can type commands on the proxy's console when it is needed (section 5.4), and
       the log is kept somewhere.
+- [ ] If you give players ranks: `permissions.toml` is in a folder the proxy can write and is kept
+      with the configuration, `perm check` says what you mean for a player of each rank, and in
+      offline mode nothing sensitive is given to a name (section 5.9).
 - [ ] If you use the bans or the whitelist: `access.toml` is in a folder the proxy can write, is
       kept with the configuration, and a test ban and `pardon` of a test name work (section 5.8).
 - [ ] The proxy's service is restarted by something when it dies. It does not restart itself,
@@ -680,7 +754,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Several proxies, or a proxy that restarts without dropping players | Nothing | A second proxy for the same servers: the counts and the caps are per proxy, and players on a proxy that dies are dropped |
 | Placing players | Caps, a drain, balancing among lobbies and `/play` for games, evacuation of a restarting server | Moving a group from a lobby to a game, matchmaking, a decision on who starts a move |
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
-| Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for them, an expiry on a ban, a sync with the servers' lists, permissions or a player database in the proxy (permissions are planned) |
+| Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), groups of permissions with `perm`, `/send`, `/glist` and `/alert` in game (section 5.9), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for the bans and the groups, an expiry on a ban or a rank, a sync with the servers' lists, a player database in the proxy |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
 | Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence | A recorded run of Horizon's `server/stopping` notice, which the sidecar now hears and the proxy feeds to the detector (opt in: `--management-properties`, `sidecar-notices`) |
 | Report of a server's state | The sidecar's `status` request and the proxy's reading of `players`, `capacity`, `accepts_transfers` | A Horizon command that answers it. Today balancing counts the proxy's own sessions |
@@ -712,6 +786,10 @@ switch, and keep the proxy's log and both servers' logs.
   Tab.
 - SIGTERM and SIGHUP are handled on Unix only (section 5.3); on Windows only Ctrl+C stops the
   proxy. The console is standard input (section 5.4).
+- The permissions by name are as strong as the login, like the whitelist: in offline mode a name
+  is not proof of who is playing, and a rank given to a name goes to whoever types it (section
+  5.9). The proxy decides only the commands it answers itself; what a server's own commands allow
+  is the server's.
 - The bans and the whitelist by name are as strong as the login: in offline mode, and for the
   unverified players of the hybrid mode, a name is not proof of who is playing (section 5.8). A
   ban by address is closed without a reason.

@@ -9,6 +9,7 @@ mod health;
 mod log;
 mod metrics;
 mod notices;
+mod permissions;
 mod placing;
 mod restart;
 // Used by the session once routing is wired in; until then only its tests call it.
@@ -18,6 +19,7 @@ mod serve;
 mod session;
 #[cfg(unix)]
 mod signals;
+mod staff;
 mod state;
 mod status;
 mod switching;
@@ -104,6 +106,15 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
         }
     };
     let access_file = config.access.file.clone();
+    // The permissions, the same way: a file that cannot be read stops the start.
+    let permissions = match permissions::read(config.permissions.file.as_deref()) {
+        Ok(permissions) => permissions,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let permissions_file = config.permissions.file.clone();
     let listener = match serve::listen(config.listen) {
         Ok(listener) => listener,
         Err(e) => {
@@ -125,6 +136,13 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
     if let Some(access) = access {
         info!("bans and whitelist: {}", access::summary(&access));
         proxy.sessions.access.install(access, access_file);
+    }
+    if let Some(permissions) = permissions {
+        info!("permissions: {}", permissions::summary(&permissions));
+        proxy
+            .sessions
+            .permissions
+            .install(permissions, permissions_file);
     }
     // SIGTERM stops the proxy and SIGHUP reloads it, where the system has them. Set before
     // the line below, which says the proxy is up, so that a signal sent once it is read
