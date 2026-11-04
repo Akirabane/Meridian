@@ -488,7 +488,7 @@ fn begin_moving(shared: &Arc<Shared>, replacement: Replacement) -> std::result::
     let (reader, writer) = link.connection.split();
     let closer = reader
         .closer()
-        .map_err(|e| End::Broken(horizon_protocol::Error::new(&e.to_string())))?;
+        .map_err(|e| End::Broken(horizon_protocol::Error::new(e.to_string())))?;
     let lane = Arc::new(Lane {
         id: shared.lane_id(),
         writer: Mutex::new(writer),

@@ -219,6 +219,18 @@ silent-rounds = 3
 # Seconds a backend that was told to stop may go on answering before it counts as back.
 grace-seconds = 60
 
+# What the proxy does with a player whose server is lost while they are in the game: the
+# connection closes or breaks, or the server disconnects them. They are moved to another
+# server, with a loading screen, instead of being disconnected. See docs/OPERATING.md.
+[fallback]
+# Move a player whom their server disconnects, and show them the reason in the chat.
+on-kick = true
+# Move a player whose server's connection closes or breaks.
+on-crash = true
+# The most servers tried for a player in a row, until one keeps them for a minute. Past it
+# the player is disconnected with a message.
+max-attempts = 3
+
 # The PROXY protocol, version 1 or 2: the header a layer 4 load balancer (HAProxy, nginx
 # stream, a host's balancer) in front of the proxy writes to say who the player is. Off by
 # default. Anyone who may send the header can claim any address, so it is read only from

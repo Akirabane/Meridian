@@ -204,4 +204,29 @@ fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, S
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    /// A run of losses ends when a server kept the player a minute, and not before.
+    #[test]
+    fn a_run_ends_when_a_server_keeps_the_player() {
+        let start = Instant::now();
+        let mut run = Run {
+            lost: vec!["lobby".into()],
+            tried: 2,
+            since: Some(start),
+        };
+        run.settle(start + SETTLED - Duration::from_secs(1));
+        assert_eq!((run.lost.len(), run.tried), (1, 2));
+        run.settle(start + SETTLED);
+        assert_eq!((run.lost.len(), run.tried), (0, 0));
+        assert!(run.since.is_none());
+        // No server has taken the player yet: nothing to settle.
+        let mut run = Run {
+            tried: 1,
+            ..Run::default()
+        };
+        run.settle(start + SETTLED * 10);
+        assert_eq!(run.tried, 1);
+    }
+}

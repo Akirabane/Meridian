@@ -907,6 +907,7 @@ pub(crate) mod tests {
 
     mod access;
     mod balancing;
+    mod fallback;
     mod staff;
 
     const SECRET: &str = "a shared secret";

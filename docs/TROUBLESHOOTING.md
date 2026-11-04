@@ -46,6 +46,17 @@ What the player sees, then what the log says.
 | The connection closes right after the server list | `WARN <peer>: <error>; closing the connection` | The client sent something the proxy does not accept | Read `<error>`; with `MERIDIAN_LOG=debug`, look at the lines before it |
 | Nothing: the connection is closed without a message | `DEBUG <peer>: over <n> connections this minute; closed` | `connections-per-minute` (20 by default) reached for that address. Server list pings count | Raise the limit, or `0` for none. Many players behind one NAT address can reach it |
 
+A server lost while a player is in the game (`[fallback]`, [OPERATING.md](OPERATING.md) section 5.11):
+
+| The log says | Cause | Action |
+| --- | --- | --- |
+| `INFO <peer>: <player>: lost backend "<a>" (the connection was lost: ...); moved to "<b>"` | The server crashed or the connection broke, and the player was moved | Find why `<a>` went away |
+| `INFO <peer>: <player>: lost backend "<a>" (it disconnected them: <reason>); moved to "<b>"` | The server disconnected the player (a kick, its own shutdown) | Read `<reason>`; it is also in the player's chat |
+| `WARN <peer>: <player>: lost backend "<a>" (...); no other server took them` | Every other server refused or did not answer; the player was disconnected with a message | Read the `cannot join backend` lines just before, and see the next table |
+| `WARN <peer>: <player>: lost backend "<a>" (...); <n> servers were tried for them already, so they are disconnected` | `max-attempts` was reached: servers lost the player one after the other | Look at why they keep failing; raise `max-attempts` only if there are more servers to try |
+| `WARN <peer>: <player>: lost backend "<a>" (...); no other server to send them to` | The player's route has no other server | Add servers to the group or to `try` |
+| Players are disconnected when a server stops, as before | `[fallback]` has `on-crash = false` or `on-kick = false`, or they were still logging in | Check `[fallback]` |
+
 Behind a load balancer (`[proxy-protocol]`, [OPERATING.md](OPERATING.md) section 5.6):
 
 | The log says | Cause | Action |
