@@ -6,9 +6,9 @@
 //! and on Windows through the job object that holds it and what it started (see
 //! the `tree` module), never by a process id, so a process that later got the
 //! same id is never touched.
-use crate::bench::{Bench, Kind, ProcessSpec, eula_accepted};
+use crate::bench::{Bench, Kind, Notice, ProcessSpec, eula_accepted};
 use crate::tree::Tree;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod notice;
 
 /// Lines of output kept per process.
 pub const LOG_LINES: usize = 2000;
@@ -44,6 +46,9 @@ pub enum State {
     Starting,
     /// Its port answers.
     Online,
+    /// Still running, but the proxy was told it is about to be stopped; the panel
+    /// waits a moment before it stops it (see `Notice`).
+    Draining,
     /// Asked to stop.
     Stopping,
     /// It ended by itself; its exit code when there is one.
@@ -56,13 +61,17 @@ impl State {
             State::Stopped => "stopped",
             State::Starting => "starting",
             State::Online => "online",
+            State::Draining => "draining",
             State::Stopping => "stopping",
             State::Exited(_) => "exited",
         }
     }
 
     fn running(self) -> bool {
-        matches!(self, State::Starting | State::Online | State::Stopping)
+        matches!(
+            self,
+            State::Starting | State::Online | State::Draining | State::Stopping
+        )
     }
 }
 
@@ -144,6 +153,16 @@ pub struct Supervisor {
     processes: Vec<Arc<Process>>,
     born: Instant,
     closing: AtomicBool,
+    /// What the panel tells the proxy before it stops a server.
+    notice: Notice,
+    /// The proxy it tells, when there is one to tell.
+    proxy: Option<String>,
+    /// The servers (by the proxy's name) whose drain is the panel's: it lifts those
+    /// when the server is back, and no other.
+    drained: Mutex<HashSet<String>>,
+    /// One conversation with the proxy at a time, so that the answers of two
+    /// servers stopped together are not mixed.
+    talking: Mutex<()>,
 }
 
 impl Supervisor {
@@ -168,6 +187,10 @@ impl Supervisor {
                 .collect(),
             born: Instant::now(),
             closing: AtomicBool::new(false),
+            notice: bench.notice.clone(),
+            proxy: bench.proxy_of_notice().map(|p| p.name.clone()),
+            drained: Mutex::new(HashSet::new()),
+            talking: Mutex::new(()),
         });
         let watched = Arc::downgrade(&supervisor);
         let _ = thread::Builder::new()
@@ -205,6 +228,10 @@ impl Supervisor {
         let mut inner = process.lock();
         if inner.state.running() {
             return Err(format!("{name} is already {}", inner.state.name()));
+        }
+        if spec.kind == Kind::Proxy {
+            // A proxy that starts again forgets its drains: none of them is the panel's.
+            self.panel_drains().clear();
         }
         if spec.kind == Kind::Server {
             let engines = engines_of(&spec.dir);
@@ -323,11 +350,12 @@ impl Supervisor {
     }
 
     /// Stops the process `name`, waits for it to end, and starts it again. Runs in
-    /// the background; returns at once.
+    /// the background; returns at once. A server the proxy is to be told about (see
+    /// [`Notice`]) is announced first.
     pub fn restart(self: &Arc<Self>, name: &str) -> Result<(), String> {
         let process = Arc::clone(self.process(name)?);
-        let running = process.lock().state.running();
-        if running {
+        let announced = self.needs_notice(&process);
+        if !announced && process.lock().state.running() {
             self.stop(name)?;
         }
         let supervisor = Arc::clone(self);
@@ -335,12 +363,44 @@ impl Supervisor {
         let _ = thread::Builder::new()
             .name(format!("panel-restart-{name}"))
             .spawn(move || {
+                if announced {
+                    if !supervisor.give_notice(&process) {
+                        return;
+                    }
+                    if process.lock().state.running() {
+                        if let Err(e) = supervisor.stop(&name) {
+                            process.log().push(format!("[panel] {e}"));
+                        }
+                    }
+                }
                 let until = Instant::now() + process.spec.stop_timeout + Duration::from_secs(5);
                 while process.lock().state.running() && Instant::now() < until {
                     thread::sleep(TICK);
                 }
                 if let Err(e) = supervisor.start(&name) {
                     process.log().push(format!("[panel] {e}"));
+                }
+            });
+        Ok(())
+    }
+
+    /// [`Supervisor::stop`] for an operator's request: a server the proxy is to be
+    /// told about (see [`Notice`]) is announced first, and stopped after the grace.
+    /// Returns at once.
+    pub fn stop_noticed(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        let process = Arc::clone(self.process(name)?);
+        if !self.needs_notice(&process) {
+            return self.stop(name);
+        }
+        let supervisor = Arc::clone(self);
+        let name = name.to_owned();
+        let _ = thread::Builder::new()
+            .name(format!("panel-notice-{name}"))
+            .spawn(move || {
+                if supervisor.give_notice(&process) {
+                    if let Err(e) = supervisor.stop(&name) {
+                        process.log().push(format!("[panel] {e}"));
+                    }
                 }
             });
         Ok(())
@@ -654,7 +714,7 @@ fn watch(supervisor: std::sync::Weak<Supervisor>) {
             return;
         }
         for p in &supervisor.processes {
-            check(p);
+            check(&supervisor, p);
         }
         tick = tick.wrapping_add(1);
         if tick % SAMPLE_EVERY == 0 {
@@ -664,7 +724,7 @@ fn watch(supervisor: std::sync::Weak<Supervisor>) {
 }
 
 /// Notes whether `process` ended, and whether its port answers.
-fn check(process: &Process) {
+fn check(supervisor: &Arc<Supervisor>, process: &Arc<Process>) {
     let mut inner = process.lock();
     let Some(running) = inner.running.as_mut() else {
         return;
@@ -692,6 +752,9 @@ fn check(process: &Process) {
                 Some(code) => format!("[panel] ended with code {code}"),
                 None => "[panel] ended".to_owned(),
             });
+            if !asked {
+                supervisor.after_crash(process);
+            }
             if left > 0 {
                 process.log().push(format!(
                     "[panel] {left} process{} it had started still ran: ended",
@@ -710,6 +773,7 @@ fn check(process: &Process) {
                         "[panel] online: port {} answers",
                         process.spec.port
                     ));
+                    supervisor.welcome_back(process);
                 }
             }
         }

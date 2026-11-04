@@ -84,6 +84,34 @@ for the proxy, `stop` for a server) and killed if it has not ended after
 `stop-timeout-seconds` (30 by default). A sidecar has no console: stopping it ends
 it at once.
 
+### Telling the proxy before a server stops
+
+A server that stops takes its players with it, and the proxy goes on offering it to new
+ones until it notices. With `[drain-before-stop]` in `bench.toml`, the panel tells the
+proxy first. It is off unless the file turns it on:
+
+```toml
+[drain-before-stop]
+enabled = true
+grace-seconds = 5      # how long the panel waits after telling the proxy (5 by default)
+move-players = false   # true: also send the players elsewhere (`drain <server> --move`)
+proxy = "proxy"        # the proxy to tell; not needed when the bench has only one
+```
+
+When you stop or restart a server from the page (or the API), and the proxy is running,
+the panel types `drain <server>` (or `drain <server> --move`) on the proxy's console,
+shows the server as `draining`, waits the grace, and then stops it as usual. A second
+stop during the grace stops it at once. When the server answers again, the panel types
+`undrain <server>`, but only if the drain was its own: a server the operator had drained
+stays drained. A server that dies by itself cannot be announced, but it is drained at
+once so that no new player is sent to it, and offered again when it is back. "Stop all"
+does not announce anything, since the proxy stops with the rest; a proxy that is not
+running is not waited for.
+
+The proxy knows a server by the name in its own configuration. When that is not the
+process's name in `bench.toml`, say so with `backend = "name"` on the server's
+`[[process]]`.
+
 The console shows the last 2,000 lines of the process's output and sends a line to
 its input: for the proxy `list`, `servers`, `send`, `kick`, `reload`, `end`; for a
 server `stop` or any of its commands.
