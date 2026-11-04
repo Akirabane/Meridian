@@ -78,6 +78,13 @@ repository's release workflow from the tagged commit:
 gh attestation verify <archive> -R Akirabane/Meridian
 ```
 
+### As a service or a container
+
+[deploy/meridian.service](deploy/meridian.service) is a systemd unit (a dedicated user, a restart
+after a crash, `systemctl reload` for SIGHUP), and the [Dockerfile](Dockerfile) builds a small image
+that runs as a non-root user and reads its configuration from a volume. The steps are in
+[docs/OPERATING.md](docs/OPERATING.md), section 5.7. Neither has been run on a real host yet.
+
 ### From the sources
 
 Meridian needs Rust 1.85 or later and nothing else. The Minecraft protocol comes from
