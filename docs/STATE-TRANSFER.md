@@ -303,17 +303,34 @@ Each is one line; each answer is one JSON line, `{"ok": true, ...}` or
 
 | Request | On | Does |
 | --- | --- | --- |
-| `player-expect <uuid>` | target | The next login of `<uuid>` joins as a held player. The expectation lapses after a few seconds. No ticket is needed: only the proxy can log a player in, through forwarding (section 6.4) |
-| `player-export <uuid>` | source | Closes the player's menu as vanilla does (cursor stack and crafting grid back into the inventory), stops simulating them, and answers with the record (6.3). The player stays connected and frozen |
-| `player-import <uuid> <record>` | target | Checks the record's version and data version, applies it to the held player (body included), sends that player the resulting changes, then unholds them: simulated, shown, announced |
-| `player-release <uuid> moved` | source | Removes the frozen player without saving their file and, by default, without a "left the game" message. The proxy closes that backend connection |
-| `player-release <uuid> abort` | source | Unfreezes the player; nothing happened |
-| `player-drop <uuid>` | target | Removes a held player whose switch was abandoned, without saving anything |
+| `player-expect <uuid> [seconds]` | target | The next login of `<uuid>` joins as a held player. The expectation lapses after `seconds` (the server's default, 10, when left out; 60 at most). It names no hand-over: there is none yet, since it is sent before the export. No ticket is needed: only the proxy can log a player in, through forwarding (section 6.4) |
+| `player-export <uuid> freeze` | source | Closes the player's menu as vanilla does (cursor stack and crafting grid back into the inventory), stops acting on the player's own inputs, and answers with the record (6.3), which carries a `handover` id. The player stays connected and frozen. Asked again, it gives the same record, byte for byte, and does not restart the freeze |
+| `player-export <uuid>` | source | The same read without a freeze: `handover` is null and the player goes on. The proxy does not use it for a switch |
+| `player-import <uuid> <json>` | target | The JSON is `{"record": ..., "parts": [...], "announce": bool, "place": bool}`. Checks the record's version, data version and `handover` id (a record without one, or another player's, is refused), applies it to the held player (body included) and sends that player the resulting changes. With `"place": false` the player stays held; otherwise it is placed at once. The reply comes only once the player's file is on the target's disk |
+| `player-confirm <uuid> <handover>` | target | Places a player imported with `place` false: files written first, then simulated, shown, announced |
+| `player-release <uuid> <handover> moved [announce]` | source | Removes the frozen player without saving their file and, by default, without a "left the game" message. Refused when the hand-over is over (the freeze ran out, the player died, or it is another hand-over's id): the player has played on there since the export, and the record the target has is older, so the proxy fails the switch |
+| `player-release <uuid> <handover> abort` | source | Unfreezes the player; nothing happened |
+| `player-drop <uuid> [handover]` | target | Removes a held player whose switch was abandoned, without saving anything. After an import it names that record's `handover`, so a late drop leaves a newer arrival alone; before any import there is no id to name |
+
+The requests are one built-in module of the server, off by default: with
+`[transfer] enabled = false` every `player-*` request is answered
+`{"error": "transfers are off on this server"}`. Turning it on makes the server
+refuse to start without Velocity forwarding, which is what makes the proxy the
+only way in. A request line is 16 MiB at most, line break included; the proxy
+does not send a longer one.
 
 This follows the phases of DESIGN.md section 5: *prepare* is `player-expect`
-and the held login, *freeze* and *hand over* are `player-export` then
-`player-import`, *commit* is `player-release moved`, and a failure is
-`player-release abort` with `player-drop`.
+and the held login, *freeze* and *hand over* are `player-export freeze` then
+`player-import` (and `player-confirm`), *commit* is `player-release moved`,
+and a failure is `player-release abort` with `player-drop`. The hand-over id
+from the export goes in every request after it: in the record the import
+carries, then in the confirm, the release and the drop that follows an import.
+
+The commit comes after the reply of the import or the confirm, so the
+target's file is on disk before the source lets the player go. If the source
+refuses `moved`, the switch fails: the client is disconnected, the source keeps
+the player, and the copy the target placed stays in the target's player file
+(older than the source's).
 
 ### 6.3 The record
 
@@ -323,6 +340,7 @@ A JSON object:
 {
   "version": 1,
   "data_version": 0,
+  "handover": "<32 hexadecimal digits>",
   "uuid": "...",
   "name": "...",
   "dimension": "minecraft:overworld",
@@ -345,17 +363,22 @@ A JSON object:
 - `player` is what `player_tag` builds (section 2.1). Both backends run the same
   Horizon version, so the compound is the most complete form there is, and the
   code to write and read it exists and is tested. The proxy never decodes it.
-- The fields above it are the ones the proxy reads for itself: it checks the
-  dimension and the position against the target before it imports, and logs
-  them. The target reads only the `player` compound: changing these fields
-  changes nothing there.
+- `handover` is the id of the hand-over that an export with `freeze` starts
+  (`null` for one without). The proxy reads it and sends it back in the requests
+  that end the hand-over; the target refuses a record without it, and a second
+  import of the same record is taken as a retry. The proxy never changes it.
+- The other fields above `player` are the ones the proxy reads for itself: it
+  checks the dimension and the position against the target before it imports,
+  and logs them. The target reads only the `player` compound and the
+  `handover` id: changing these fields changes nothing there.
 - Where the player arrives is given in the import request itself, not in the
   record. With `switch-carry-position = true` the proxy sends `position`,
-  `rotation`, `velocity` and `on_ground` beside the record (Horizon's
-  `docs/server.md`, "Where the player arrives", from fork commit 46bfe5de0),
-  with the `position` part; they take the place of the compound's. They are
-  where the player's client last said it stands and how it looks (its moves, and
-  its answers to teleports), standing still. The client keeps moving while the
+  `rotation` and `on_ground` beside the record (Horizon's `docs/server.md`,
+  "Where the player arrives", from fork commit 46bfe5de0), with the `position`
+  part; they take the place of the compound's. A server without that change,
+  which is separate from the one that takes the import, ignores them and puts the
+  player at the compound's place. They are where the player's client last said
+  it stands and how it looks (its moves, and its answers to teleports). The client keeps moving while the
   source holds the player frozen; the export's place would pull the player back
   by what they did meanwhile. Only the import of a carried position can move the
   player on the target, so only then does the hand-over wait for the chunks

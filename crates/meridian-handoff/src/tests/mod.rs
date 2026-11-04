@@ -46,9 +46,12 @@ fn decode(id: i32, payload: &[u8]) -> C {
     C::decode(id, payload).unwrap()
 }
 
-/// A record as `player-export` gives it, as far as the proxy reads it.
+/// The hand-over id of the fake exports.
+const HANDOVER: &str = "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69";
+
+/// A record as `player-export` with freeze gives it, as far as the proxy reads it.
 fn record(dimension: &str) -> Record {
-    json!({ "version": 1, "dimension": dimension, "player": "AAAA" })
+    json!({ "version": 1, "handover": HANDOVER, "dimension": dimension, "player": "AAAA" })
 }
 
 /// What the fake controls were asked, in order, by both sides.
@@ -134,6 +137,8 @@ impl PlayerControl for FakeControl {
         arrival: Option<Arrival>,
     ) -> Result<Imported, String> {
         assert_eq!(record_dimension(&record), Some(OVERWORLD));
+        // The record goes to the target as the source gave it, with its hand-over id.
+        assert_eq!(record_handover(&record).as_deref(), Some(HANDOVER));
         let parts = match parts {
             None => "all".to_owned(),
             Some(parts)
@@ -159,19 +164,28 @@ impl PlayerControl for FakeControl {
         })
     }
 
-    fn confirm(&mut self, _: &str) -> Result<(), String> {
-        self.answer("confirm", "confirm".into())
+    fn confirm(&mut self, _: &str, handover: &str) -> Result<(), String> {
+        self.answer("confirm", format!("confirm {handover}"))
     }
 
-    fn release(&mut self, _: &str, outcome: Outcome, announce: bool) -> Result<(), String> {
+    fn release(
+        &mut self,
+        _: &str,
+        handover: &str,
+        outcome: Outcome,
+        announce: bool,
+    ) -> Result<(), String> {
         self.answer(
             "release",
-            format!("release {outcome:?} announce={announce}"),
+            format!("release {handover} {outcome:?} announce={announce}"),
         )
     }
 
-    fn drop_player(&mut self, _: &str) -> Result<(), String> {
-        self.answer("drop", "drop".into())
+    fn drop_player(&mut self, _: &str, handover: Option<&str>) -> Result<(), String> {
+        self.answer(
+            "drop",
+            handover.map_or("drop".to_owned(), |id| format!("drop {id}")),
+        )
     }
 }
 

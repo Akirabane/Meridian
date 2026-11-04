@@ -63,8 +63,9 @@ It writes, in `banc`:
   account is checked, which suits a bench on one machine), with the three servers
   and the address of each one's sidecar (ports 25580, 25581, 25582);
 - `lobby\`, `game1\`, `game2\`: each a `server.toml` (ports 25601, 25602, 25603, on
-  `127.0.0.1` only, online mode off) and a `forwarding.secret` holding the proxy's
-  secret;
+  `127.0.0.1` only, online mode off, and the transfer module on: `[transfer]
+  enabled = true`, which a server that moves players needs and which is off by
+  default) and a `forwarding.secret` holding the proxy's secret;
 - `secrets\`: `lobby.key`, `game1.key`, `game2.key`, a secret of its own for each
   sidecar, which the proxy reads from the same file. Neither the panel nor `init`
   ever shows them.

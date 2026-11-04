@@ -7,12 +7,13 @@
 use meridian_sidecar::client::SidecarClient;
 use serde_json::Value;
 
-pub use meridian_sidecar::request::{Arrival, Outcome};
+pub use meridian_sidecar::request::{Arrival, Outcome, record_handover};
 
 /// A player record as `player-export` gives it. The proxy carries it from one
-/// backend to the other without reading it, except for its dimension. The
-/// target reads only its player compound: the fields above it are for the
-/// proxy's checks and logs, and changing them changes nothing.
+/// backend to the other without reading it, except for its dimension and its
+/// `handover` id. The target reads only its player compound and that id: the other
+/// fields above it are for the proxy's checks and logs, and changing them changes
+/// nothing.
 pub type Record = Value;
 
 /// The player requests of a switch. Each error is the reason the backend or its
@@ -23,7 +24,8 @@ pub trait PlayerControl {
     fn expect(&mut self, uuid: &str, seconds: Option<u64>) -> Result<(), String>;
 
     /// The player's record; with `freeze`, their own inputs stop being acted on
-    /// until a release.
+    /// until a release, and the record carries the `handover` id that the later
+    /// requests name. A freeze asked again gives the same record, the same id.
     fn export(&mut self, uuid: &str, freeze: bool) -> Result<Record, String>;
 
     /// Puts `record` on the held player: every part of it, or only `parts`. With
@@ -42,14 +44,23 @@ pub trait PlayerControl {
     ) -> Result<Imported, String>;
 
     /// Places a player imported without being placed, and announces them if the
-    /// import said so.
-    fn confirm(&mut self, uuid: &str) -> Result<(), String>;
+    /// import said so. `handover` is the id of the record that was imported.
+    fn confirm(&mut self, uuid: &str, handover: &str) -> Result<(), String>;
 
-    /// Ends the hand-over of a frozen player: they have moved away, or they stay.
-    fn release(&mut self, uuid: &str, outcome: Outcome, announce: bool) -> Result<(), String>;
+    /// Ends the hand-over `handover` of a frozen player: they have moved away, or
+    /// they stay. The source refuses `Moved` once the freeze has run out.
+    fn release(
+        &mut self,
+        uuid: &str,
+        handover: &str,
+        outcome: Outcome,
+        announce: bool,
+    ) -> Result<(), String>;
 
-    /// Forgets an expected or held player.
-    fn drop_player(&mut self, uuid: &str) -> Result<(), String>;
+    /// Forgets an expected or held player. With a `handover`, only the arrival of
+    /// that record, which must be the imported one; before any import there is no
+    /// id to name.
+    fn drop_player(&mut self, uuid: &str, handover: Option<&str>) -> Result<(), String>;
 }
 
 impl PlayerControl for SidecarClient {
@@ -86,20 +97,26 @@ impl PlayerControl for SidecarClient {
         })
     }
 
-    fn confirm(&mut self, uuid: &str) -> Result<(), String> {
-        SidecarClient::confirm(self, uuid)
+    fn confirm(&mut self, uuid: &str, handover: &str) -> Result<(), String> {
+        SidecarClient::confirm(self, uuid, handover)
             .map(drop)
             .map_err(|e| e.to_string())
     }
 
-    fn release(&mut self, uuid: &str, outcome: Outcome, announce: bool) -> Result<(), String> {
-        SidecarClient::release(self, uuid, outcome, announce)
+    fn release(
+        &mut self,
+        uuid: &str,
+        handover: &str,
+        outcome: Outcome,
+        announce: bool,
+    ) -> Result<(), String> {
+        SidecarClient::release(self, uuid, handover, outcome, announce)
             .map(drop)
             .map_err(|e| e.to_string())
     }
 
-    fn drop_player(&mut self, uuid: &str) -> Result<(), String> {
-        SidecarClient::drop_player(self, uuid)
+    fn drop_player(&mut self, uuid: &str, handover: Option<&str>) -> Result<(), String> {
+        SidecarClient::drop_player(self, uuid, handover)
             .map(drop)
             .map_err(|e| e.to_string())
     }

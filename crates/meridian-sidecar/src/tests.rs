@@ -19,6 +19,8 @@ const TOKEN: &str = "the backend's own token";
 const UUID: &str = "0123456789abcdef0123456789abcdef";
 /// [`UUID`] as Horizon writes it.
 const DASHED: &str = "01234567-89ab-cdef-0123-456789abcdef";
+/// A hand-over id, as an export with freeze gives it.
+const HANDOVER: &str = "9f2c4be0a1d34e6b8c0f1e2d3c4b5a69";
 const WAIT: Duration = Duration::from_secs(3);
 
 /// A sidecar on 127.0.0.1 in front of a fake endpoint that answers with `answer`.
@@ -92,10 +94,19 @@ fn every_request_reaches_the_backend_and_its_answer_comes_back() {
         json!({ "echo": format!("player-export {DASHED}") })
     );
     client
-        .import(UUID, json!({ "version": 1 }), None, None, None, None)
+        .import(
+            UUID,
+            json!({ "version": 1, "handover": HANDOVER }),
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
-    client.release(UUID, Outcome::Moved, false).unwrap();
-    client.drop_player(UUID).unwrap();
+    client
+        .release(UUID, HANDOVER, Outcome::Moved, false)
+        .unwrap();
+    client.drop_player(UUID, None).unwrap();
     let commands: Vec<String> = running
         .seen
         .lock()
@@ -244,7 +255,7 @@ fn a_backend_error_is_passed_on() {
         "{error}"
     );
     // A refusal from the backend leaves the connection usable.
-    assert!(client.drop_player(UUID).is_err());
+    assert!(client.drop_player(UUID, None).is_err());
     assert_eq!(running.seen.lock().unwrap().len(), 2);
 }
 
@@ -305,14 +316,16 @@ fn a_request_that_is_not_a_player_request_is_refused_by_the_sidecar() {
     assert!(running.seen.lock().unwrap().is_empty());
 }
 
-// The contract of Horizon's held-player work (docs/server.md, "Players arriving
-// from another server"), with a fake endpoint that answers as it documents.
+// The contract of Horizon's player transfers (docs/server.md, "A proxy moving a
+// player between two servers"), with a fake endpoint that answers as it documents.
 
-/// The record of the contract's `player-export` example, for [`DASHED`].
-fn record() -> Value {
+/// The record of the contract's `player-export` example, for [`DASHED`], with the
+/// hand-over id of an export with freeze (`None` for one without: `null`).
+fn record(handover: Option<&str>) -> Value {
     json!({
         "version": 1,
         "data_version": 5023,
+        "handover": handover,
         "uuid": DASHED,
         "name": "Alex",
         "dimension": "minecraft:overworld",
@@ -339,20 +352,22 @@ const ALL_PARTS: [&str; 10] = [
     "advancements",
 ];
 
-/// The held player of the fake backend: whether there is one, and whether its
-/// record was imported without placing it, with the announce asked then.
-#[derive(Clone, Copy)]
-enum Held {
-    Waiting,
-    Imported { announce: bool },
-    Gone,
+/// What the fake backend holds of the player: on the source, a hand-over under way;
+/// on the target, an arrival whose record was imported without placing it, with the
+/// announce asked then.
+#[derive(Default)]
+struct Transfer {
+    frozen: Option<String>,
+    imported: Option<(String, bool)>,
+    /// A player who was placed, or dropped: there is no arrival any more.
+    arrived: bool,
 }
 
 /// A backend that answers each command as the contract says, from what the line
-/// holds and from the held player's state, and refuses the lines the contract
-/// refuses.
+/// holds and from the state of the transfer, and refuses the lines the contract
+/// refuses. It plays the source and the target both, for one player.
 fn contract() -> fake::Answer {
-    let held = Arc::new(Mutex::new(Held::Waiting));
+    let transfer = Arc::new(Mutex::new(Transfer::default()));
     Arc::new(move |line: &str| {
         let refuse = |why: &str| Some(json!({ "error": why }).to_string());
         let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -360,6 +375,7 @@ fn contract() -> fake::Answer {
         if args.next() != Some(DASHED) {
             return refuse("the sidecar sent a unique id Horizon would not write");
         }
+        let mut state = transfer.lock().unwrap();
         let reply = match command {
             "player-expect" => match args.next() {
                 None => json!({ "ok": true, "renewed": false, "ttl_seconds": 10 }),
@@ -367,7 +383,12 @@ fn contract() -> fake::Answer {
                 Some(_) => return refuse("the time must be a number of seconds above zero"),
             },
             "player-export" => match (args.next(), args.next()) {
-                (None | Some("freeze"), None) => json!({ "ok": true, "record": record() }),
+                (None, None) => json!({ "ok": true, "record": record(None) }),
+                // A repeated export is the same record, the same id.
+                (Some("freeze"), None) => {
+                    let id = state.frozen.get_or_insert_with(|| HANDOVER.to_owned());
+                    json!({ "ok": true, "record": record(Some(id)) })
+                }
                 _ => return refuse("player-export takes a unique id and at most freeze"),
             },
             "player-import" => {
@@ -377,6 +398,12 @@ fn contract() -> fake::Answer {
                 };
                 if request["record"]["data_version"] != json!(5023) {
                     return refuse("the record was made by another version of the game");
+                }
+                let Some(id) = request["record"]["handover"].as_str() else {
+                    return refuse("the record has no hand-over id: export it with freeze");
+                };
+                if state.imported.as_ref().is_some_and(|(have, _)| have != id) {
+                    return refuse("another hand-over is under way for that player");
                 }
                 let parts = request
                     .get("parts")
@@ -390,44 +417,70 @@ fn contract() -> fake::Answer {
                     .get("place")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                *held.lock().unwrap() = if placed {
-                    Held::Gone
+                if placed {
+                    state.imported = None;
+                    state.arrived = true;
                 } else {
-                    Held::Imported {
-                        announce: announced,
-                    }
-                };
-                json!({ "ok": true, "parts": parts, "placed": placed, "announced": announced })
+                    state.imported = Some((id.to_owned(), announced));
+                }
+                json!({ "ok": true, "handover": id, "parts": parts, "placed": placed, "announced": announced })
             }
             "player-confirm" => {
-                let mut state = held.lock().unwrap();
-                match *state {
-                    Held::Imported { announce } => {
-                        *state = Held::Gone;
+                let Some(id) = args.next() else {
+                    return refuse("player-confirm takes a unique id and a hand-over");
+                };
+                match state.imported.clone() {
+                    Some((have, announce)) if have == id => {
+                        state.imported = None;
+                        state.arrived = true;
                         json!({ "ok": true, "placed": true, "announced": announce })
                     }
-                    Held::Waiting => {
+                    Some(_) => return refuse("that record is of another hand-over"),
+                    None if state.arrived => {
+                        return refuse("no player with that unique id is held");
+                    }
+                    None => {
                         return refuse("that player is held but its record has not been imported");
                     }
-                    Held::Gone => return refuse("no player with that unique id is held"),
                 }
             }
-            "player-release" => match (args.next(), args.next()) {
-                (Some("moved"), None) => {
-                    json!({ "ok": true, "released": "moved", "announced": false })
+            "player-release" => {
+                let Some(id) = args.next() else {
+                    return refuse("player-release takes a unique id and a hand-over");
+                };
+                if state.frozen.as_deref() != Some(id) {
+                    return refuse("that player is not in that hand-over");
                 }
-                (Some("moved"), Some("announce")) => {
-                    json!({ "ok": true, "released": "moved", "announced": true })
+                match (args.next(), args.next()) {
+                    (Some("moved"), None) => {
+                        state.frozen = None;
+                        json!({ "ok": true, "released": "moved", "announced": false })
+                    }
+                    (Some("moved"), Some("announce")) => {
+                        state.frozen = None;
+                        json!({ "ok": true, "released": "moved", "announced": true })
+                    }
+                    (Some("abort"), None) => {
+                        state.frozen = None;
+                        json!({ "ok": true, "released": "abort" })
+                    }
+                    _ => {
+                        return refuse(
+                            "player-release <uuid> <hand-over> is followed by moved [announce] \
+                             or abort",
+                        );
+                    }
                 }
-                (Some("abort"), None) => json!({ "ok": true, "released": "abort" }),
-                _ => {
-                    return refuse(
-                        "player-release <uuid> is followed by moved [announce] or abort",
-                    );
-                }
-            },
+            }
             "player-drop" => {
-                *held.lock().unwrap() = Held::Gone;
+                // With an id, it must be the imported record's.
+                if let Some(id) = args.next()
+                    && state.imported.as_ref().map(|(have, _)| have.as_str()) != Some(id)
+                {
+                    return refuse("that is not the imported record's hand-over");
+                }
+                state.imported = None;
+                state.arrived = true;
                 json!({ "ok": true, "held": true, "expected": false })
             }
             _ => return refuse("unknown command"),
@@ -452,9 +505,17 @@ fn a_switch_goes_through_the_contract_line_by_line() {
     );
 
     // On the backend the player leaves: exported with a freeze. The record comes
-    // back exactly as the backend wrote it.
+    // back exactly as the backend wrote it, with the hand-over id; asked again, it
+    // is the same.
     let exported = client.export(UUID, true).unwrap();
-    assert_eq!(exported, json!({ "ok": true, "record": record() }));
+    assert_eq!(
+        exported,
+        json!({ "ok": true, "record": record(Some(HANDOVER)) })
+    );
+    assert_eq!(client.export(UUID, true).unwrap(), exported);
+    // Without a freeze it is a read: no id.
+    let read = client.export(UUID, false).unwrap();
+    assert_eq!(read["record"]["handover"], json!(null));
 
     // The record goes to the held player as it is: some parts, quietly...
     let imported = client
@@ -469,42 +530,76 @@ fn a_switch_goes_through_the_contract_line_by_line() {
         .unwrap();
     assert_eq!(
         imported,
-        json!({ "ok": true, "parts": ["inventory", "experience"], "placed": true, "announced": false })
+        json!({ "ok": true, "handover": HANDOVER, "parts": ["inventory", "experience"], "placed": true, "announced": false })
     );
     // ...or whole, with the default announce.
     let whole = client
-        .import(UUID, record(), None, None, None, None)
+        .import(UUID, record(Some(HANDOVER)), None, None, None, None)
         .unwrap();
     assert_eq!(whole["announced"], json!(true));
     assert_eq!(whole["parts"], json!(ALL_PARTS));
 
     // The old backend lets the player go, or keeps them.
     assert_eq!(
-        client.release(UUID, Outcome::Moved, true).unwrap(),
+        client
+            .release(UUID, HANDOVER, Outcome::Moved, true)
+            .unwrap(),
         json!({ "ok": true, "released": "moved", "announced": true })
     );
-    assert_eq!(
-        client.release(UUID, Outcome::Abort, false).unwrap(),
-        json!({ "ok": true, "released": "abort" })
+    // The hand-over is over: a second release has nothing to end.
+    assert!(
+        client
+            .release(UUID, HANDOVER, Outcome::Abort, false)
+            .is_err()
     );
-    assert_eq!(client.drop_player(UUID).unwrap()["ok"], json!(true));
+    assert_eq!(client.drop_player(UUID, None).unwrap()["ok"], json!(true));
 
     // The lines are the contract's, word for word.
     let seen = running.seen.lock().unwrap().clone();
     assert_eq!(seen[0], format!("player-expect {DASHED}"));
     assert_eq!(seen[1], format!("player-expect {DASHED} 30"));
     assert_eq!(seen[2], format!("player-export {DASHED} freeze"));
-    assert!(seen[3].starts_with(&format!("player-import {DASHED} {{")));
-    assert_eq!(seen[5], format!("player-release {DASHED} moved announce"));
-    assert_eq!(seen[6], format!("player-release {DASHED} abort"));
-    assert_eq!(seen[7], format!("player-drop {DASHED}"));
+    assert_eq!(seen[3], format!("player-export {DASHED} freeze"));
+    assert_eq!(seen[4], format!("player-export {DASHED}"));
+    assert!(seen[5].starts_with(&format!("player-import {DASHED} {{")));
+    assert!(seen[6].starts_with(&format!("player-import {DASHED} {{")));
+    assert_eq!(
+        seen[7],
+        format!("player-release {DASHED} {HANDOVER} moved announce")
+    );
+    assert_eq!(seen[8], format!("player-release {DASHED} {HANDOVER} abort"));
+    assert_eq!(seen[9], format!("player-drop {DASHED}"));
+}
+
+#[test]
+fn a_release_names_the_hand_over_of_the_export() {
+    let running = Running::start(contract(), WAIT);
+    let mut client = running.client(SECRET);
+    // Nothing was exported with a freeze, so there is no hand-over to end.
+    let error = client
+        .release(UUID, HANDOVER, Outcome::Abort, false)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Refused(why) if why.contains("not in that hand-over")),
+        "{error}"
+    );
+    client.export(UUID, true).unwrap();
+    // Another id than the export's is refused, and leaves the freeze as it was.
+    let other = "00000000000000000000000000000001";
+    assert!(client.release(UUID, other, Outcome::Moved, false).is_err());
+    assert_eq!(
+        client
+            .release(UUID, HANDOVER, Outcome::Abort, false)
+            .unwrap(),
+        json!({ "ok": true, "released": "abort" })
+    );
 }
 
 #[test]
 fn the_backends_refusals_come_back_as_refusals() {
     let running = Running::start(contract(), WAIT);
     let mut client = running.client(SECRET);
-    let mut old = record();
+    let mut old = record(Some(HANDOVER));
     old["data_version"] = json!(4000);
     let error = client
         .import(UUID, old, None, None, None, None)
@@ -514,7 +609,32 @@ fn the_backends_refusals_come_back_as_refusals() {
         "{error}"
     );
     // The connection still serves the next request.
-    assert_eq!(client.drop_player(UUID).unwrap()["ok"], json!(true));
+    assert_eq!(client.drop_player(UUID, None).unwrap()["ok"], json!(true));
+}
+
+/// A server that has transfers off answers every player request with an error, and
+/// the reason comes back as it is.
+#[test]
+fn a_server_with_transfers_off_refuses_every_request_and_says_so() {
+    let running = Running::start(
+        Arc::new(|_| Some(r#"{"error":"transfers are off on this server"}"#.to_owned())),
+        WAIT,
+    );
+    let mut client = running.client(SECRET);
+    let off =
+        |e: Error| matches!(&e, Error::Refused(why) if why == "transfers are off on this server");
+    assert!(off(client.expect(UUID, None).unwrap_err()));
+    assert!(off(client.export(UUID, true).unwrap_err()));
+    assert!(off(client
+        .import(UUID, record(Some(HANDOVER)), None, None, Some(false), None)
+        .unwrap_err()));
+    assert!(off(client.confirm(UUID, HANDOVER).unwrap_err()));
+    assert!(off(client
+        .release(UUID, HANDOVER, Outcome::Abort, false)
+        .unwrap_err()));
+    assert!(off(client.drop_player(UUID, None).unwrap_err()));
+    // A refusal from the backend leaves the connection usable.
+    assert_eq!(running.seen.lock().unwrap().len(), 6);
 }
 
 #[test]
@@ -528,8 +648,20 @@ fn a_request_that_cannot_be_a_line_never_reaches_the_backend() {
         ),
         (client.expect(UUID, Some(61)).unwrap_err(), "from 1 to 60"),
         (
-            client.release(UUID, Outcome::Abort, true).unwrap_err(),
+            client
+                .release(UUID, HANDOVER, Outcome::Abort, true)
+                .unwrap_err(),
             "announce goes with moved",
+        ),
+        (
+            client
+                .release(UUID, "moved", Outcome::Abort, false)
+                .unwrap_err(),
+            "is not a hand-over id",
+        ),
+        (
+            client.confirm(UUID, "").unwrap_err(),
+            "is not a hand-over id",
         ),
         (
             client
@@ -538,8 +670,20 @@ fn a_request_that_cannot_be_a_line_never_reaches_the_backend() {
             "JSON object",
         ),
         (
-            client.drop_player("x player-drop").unwrap_err(),
+            client
+                .import(UUID, record(None), None, None, None, None)
+                .unwrap_err(),
+            "export it with freeze",
+        ),
+        (
+            client.drop_player("x player-drop", None).unwrap_err(),
             "is not a unique id",
+        ),
+        (
+            client
+                .drop_player(UUID, Some(&format!("{HANDOVER} moved")))
+                .unwrap_err(),
+            "is not a hand-over id",
         ),
     ];
     for (error, says) in cases {
@@ -556,25 +700,40 @@ fn an_import_without_placing_is_confirmed_later() {
     let running = Running::start(contract(), WAIT);
     let mut client = running.client(SECRET);
     // Before any import, there is nothing to confirm.
-    let error = client.confirm(UUID).unwrap_err();
+    let error = client.confirm(UUID, HANDOVER).unwrap_err();
     assert!(
         matches!(&error, Error::Refused(why) if why.contains("has not been imported")),
         "{error}"
     );
     let imported = client
-        .import(UUID, record(), None, Some(true), Some(false), None)
+        .import(
+            UUID,
+            record(Some(HANDOVER)),
+            None,
+            Some(true),
+            Some(false),
+            None,
+        )
         .unwrap();
     assert_eq!(imported["placed"], json!(false));
     assert_eq!(imported["announced"], json!(true));
+    // The confirm names the record that was imported, and no other.
+    let other = "00000000000000000000000000000001";
+    let error = client.confirm(UUID, other).unwrap_err();
+    assert!(
+        matches!(&error, Error::Refused(why) if why.contains("another hand-over")),
+        "{error}"
+    );
     assert_eq!(
-        client.confirm(UUID).unwrap(),
+        client.confirm(UUID, HANDOVER).unwrap(),
         json!({ "ok": true, "placed": true, "announced": true })
     );
     // The lines are the contract's.
     let seen = running.seen.lock().unwrap().clone();
     let body: Value = serde_json::from_str(seen[1].splitn(3, ' ').nth(2).unwrap()).unwrap();
     assert_eq!(body["place"], json!(false));
-    assert_eq!(seen[2], format!("player-confirm {DASHED}"));
+    assert_eq!(body["record"]["handover"], json!(HANDOVER));
+    assert_eq!(seen[3], format!("player-confirm {DASHED} {HANDOVER}"));
 }
 
 #[test]
@@ -582,17 +741,22 @@ fn a_dropped_arrival_cannot_be_confirmed() {
     let running = Running::start(contract(), WAIT);
     let mut client = running.client(SECRET);
     client
-        .import(UUID, record(), None, None, Some(false), None)
+        .import(UUID, record(Some(HANDOVER)), None, None, Some(false), None)
         .unwrap();
+    // With an id, only the imported record's arrival is dropped.
+    let other = "00000000000000000000000000000001";
+    assert!(client.drop_player(UUID, Some(other)).is_err());
     assert_eq!(
-        client.drop_player(UUID).unwrap(),
+        client.drop_player(UUID, Some(HANDOVER)).unwrap(),
         json!({ "ok": true, "held": true, "expected": false })
     );
-    let error = client.confirm(UUID).unwrap_err();
+    let error = client.confirm(UUID, HANDOVER).unwrap_err();
     assert!(
         matches!(&error, Error::Refused(why) if why.contains("no player with that unique id is held")),
         "{error}"
     );
+    let seen = running.seen.lock().unwrap().clone();
+    assert_eq!(seen[2], format!("player-drop {DASHED} {HANDOVER}"));
 }
 
 /// The state of the backend goes through the sidecar and the signed exchange: one

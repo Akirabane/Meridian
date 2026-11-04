@@ -53,7 +53,7 @@ impl Moved {
     /// One line for the console and the log, with the bytes and times.
     pub fn describe(&self, name: &str) -> String {
         let [prepare, freeze, hand_over, commit] = self.done.times.map(|t| t.as_millis());
-        let mut line = format!(
+        format!(
             "{name} moved from {} to {} in {} ms (prepare {prepare} ms, freeze {freeze} ms, \
              hand over {hand_over} ms, commit {commit} ms): {} packets, {} bytes \
              ({} chunks, {} entities)",
@@ -64,12 +64,7 @@ impl Moved {
             self.done.delta_bytes,
             self.done.chunks,
             self.done.entities,
-        );
-        if let Some(warning) = &self.done.warning {
-            line.push_str("; ");
-            line.push_str(warning);
-        }
-        line
+        )
     }
 }
 

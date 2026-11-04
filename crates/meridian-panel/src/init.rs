@@ -248,6 +248,9 @@ name = "world"
 [engine]
 resources = "{resources}"
 
+[transfer]
+enabled = true               # takes the proxy's player-* requests; needs forwarding.secret
+
 [backups]
 every = "0"
 
