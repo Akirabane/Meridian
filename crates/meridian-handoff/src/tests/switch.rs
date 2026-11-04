@@ -1153,3 +1153,277 @@ fn the_permission_level_of_the_target_reaches_the_client() {
         run.join().unwrap().unwrap();
     }
 }
+
+/// The answer to the confirm is lost after the target placed the player: the confirm
+/// is asked again on a reopened connection, the target answers it as it answered the
+/// first, and the switch ends as a success. Without the retry, the proxy would take
+/// the placing for a failure, release the source with `abort`, and the player would
+/// be on both servers.
+#[test]
+fn a_lost_confirm_is_asked_again_and_the_switch_succeeds() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    let steps = Log::default();
+    let traced = steps.clone();
+    let done = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal).losing("confirm", 1),
+        &Digests::default(),
+        &Settings {
+            trace: Some(Arc::new(move |what: &str, _| traced.push(what.to_owned()))),
+            ..settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(done.source_kept, None);
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=all-but-position announce=Some(true) place=false",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 (answer lost)",
+            "target reopen",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved announce=true",
+        ]
+    );
+    let told = steps.lines();
+    assert!(
+        told.iter()
+            .any(|line| line.contains("the placing: no answer") && line.contains("(2 of 3)")),
+        "{told:?}"
+    );
+    finish(player, target_thread, run);
+}
+
+/// The same for the import: the target holds the record already, and answers the
+/// repeat with `ok`.
+#[test]
+fn a_lost_import_is_asked_again_and_the_switch_succeeds() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal).losing("import", 2),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap();
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=all-but-position announce=Some(true) place=false (answer lost)",
+            "target reopen",
+            "target import parts=all-but-position announce=Some(true) place=false (answer lost)",
+            "target reopen",
+            "target import parts=all-but-position announce=Some(true) place=false",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved announce=true",
+        ]
+    );
+    finish(player, target_thread, run);
+}
+
+/// A repeat that the target refuses is a refusal, like any other: the switch ends,
+/// and the refusal is not asked again.
+#[test]
+fn a_confirm_refused_when_asked_again_ends_the_switch() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal)
+            .losing("confirm", 1)
+            .refusing("confirm", "the player is not held"),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Disconnected)
+    );
+    assert!(failure.reason.contains("not held"), "{failure}");
+    assert!(!failure.reason.contains("asked"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=all-but-position announce=Some(true) place=false",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 (answer lost)",
+            "target reopen",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+            "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+        ]
+    );
+    let mut last = 0;
+    while let Ok((id, _)) = player.recv() {
+        last = id;
+    }
+    assert_eq!(last, pc::DISCONNECT);
+    run.join().unwrap().unwrap();
+}
+
+/// An import refused when asked again leaves the player on the source.
+#[test]
+fn an_import_refused_when_asked_again_lets_the_source_go_on() {
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, _imported, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut FakeControl::new("target", &log)
+            .losing("import", 1)
+            .refusing("import", "data_version 5022"),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Stayed)
+    );
+    assert!(failure.reason.contains("data_version"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=all-but-position announce=Some(true) place=false (answer lost)",
+            "target reopen",
+            "target import parts=all-but-position announce=Some(true) place=false",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+            "target drop",
+        ]
+    );
+    still_on_source(&mut bench);
+}
+
+/// A confirm whose answer is always lost is asked a few times, no more. Then nothing
+/// is known of what the target did, and the failure says so: the player may be placed
+/// there.
+#[test]
+fn a_confirm_that_is_always_lost_is_given_up_and_says_what_is_not_known() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal).losing("confirm", 10),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Disconnected)
+    );
+    assert!(failure.reason.contains("asked 3 times"), "{failure}");
+    assert!(
+        failure.reason.contains("may have placed the player"),
+        "{failure}"
+    );
+    let confirms = log
+        .lines()
+        .iter()
+        .filter(|line| line.starts_with("target confirm"))
+        .count();
+    assert_eq!(confirms, 3, "{:?}", log.lines());
+    let mut last = 0;
+    while let Ok((id, _)) = player.recv() {
+        last = id;
+    }
+    assert_eq!(last, pc::DISCONNECT);
+    run.join().unwrap().unwrap();
+}
+
+/// The asking again stops at the freeze limit: past it the player is let go on the
+/// source, not kept frozen for one more try.
+#[test]
+fn a_lost_confirm_is_not_asked_again_past_the_freeze_limit() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        // The confirm takes longer than the freeze limit allows, and its answer is lost.
+        &mut target_control(&log, signal)
+            .losing("confirm", 1)
+            .on("confirm", || {
+                std::thread::sleep(Duration::from_millis(1700))
+            }),
+        &Digests::default(),
+        &Settings {
+            freeze_limit: Duration::from_millis(1500),
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Disconnected)
+    );
+    assert!(failure.reason.contains("may have placed"), "{failure}");
+    assert!(
+        !log.lines().iter().any(|l| l == "target reopen"),
+        "{:?}",
+        log.lines()
+    );
+    let confirms = log
+        .lines()
+        .iter()
+        .filter(|line| line.starts_with("target confirm"))
+        .count();
+    assert_eq!(confirms, 1, "{:?}", log.lines());
+    let mut last = 0;
+    while let Ok((id, _)) = player.recv() {
+        last = id;
+    }
+    assert_eq!(last, pc::DISCONNECT);
+    run.join().unwrap().unwrap();
+}

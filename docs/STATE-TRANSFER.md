@@ -379,7 +379,31 @@ the two apart: when it cannot get the backend's answer, its reply says
 `"unreached": true`. If the export is lost every time, the switch is given up and the
 target forgets the player; the source, which may have frozen them, lets the freeze
 go by itself after its `max_freeze_seconds`, and the player cannot move until then.
-Nothing else is asked again: an import and a confirm are not repeated.
+
+**A lost answer to the import or the confirm.** The two requests that end on the target
+can lose their answer too, and the confirm matters most: the target may have placed
+the player and written their files, and the proxy has heard nothing. Taking that for
+a failure would release the source with `abort` and leave the player on both servers.
+Horizon answers a `player-import` or `player-confirm` that names the hand-over of a
+player it already placed from that record with `{"ok": true, "placed": true, ...,
+"retried": true}`, doing nothing again, so the proxy asks again, as for the export:
+on a new connection to the sidecar, when the request was *lost* (no answer in time, a
+connection that broke, a sidecar that could not reach the backend: `"unreached": true`),
+three times in all (`Settings::commit_attempts`), and never once the freeze left or the
+freeze limit has gone (the same moment that stops the hand-over from going on). The
+answer of a repeat is the answer: `ok`, with `retried` or not, counts as a success, and
+the switch goes on to the release.
+
+A *refusal* is an answer and is never asked again, a repeat's refusal included: the
+player is not held, the record is another hand-over's, a file could not be written (the
+target keeps the player held and imported). The sidecar tells the two apart, and so
+does the proxy: `unreached` is a request whose fate is unknown, a refusal is a `no`.
+When the answer stays lost (every attempt, or the time ran out), the switch fails as a
+refused one does (the arrival is dropped, the source is released with `abort`, the
+client disconnected if it already had the target's world), but its reason says what is
+not known: `(asked 3 times; the target may have placed the player)`. In that case
+compare the player's files on the two servers (see the release that is refused, below);
+the target's is the right one if it placed the player.
 
 **A release refused after the placing.** The target then has the player placed and
 its files written, and nothing undoes that: `player-drop` takes only a held player.

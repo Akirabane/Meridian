@@ -156,6 +156,13 @@ pub struct Settings {
     /// in time, a connection that broke). The source answers a repeated export of a
     /// frozen player with the same record, and does not freeze again.
     pub export_attempts: u32,
+    /// How many times the import and the confirm are asked in all when the answer is
+    /// lost (no answer in time, a connection that broke, a sidecar that could not
+    /// reach the backend), while the freeze left allows. The target answers a repeated
+    /// import or confirm of the same hand-over for a player this transfer placed with
+    /// `ok` and `placed: true`, and does not place them twice; a refusal is an answer
+    /// and is never asked again.
+    pub commit_attempts: u32,
     /// Whether the player keeps the position of their record. Without it they
     /// arrive where the target puts them, in chunks the target already sent;
     /// with it, the target must first send the chunks around the new place.
@@ -178,6 +185,7 @@ impl Default for Settings {
             freeze_limit: Duration::from_secs(8),
             commit_margin: Duration::from_secs(2),
             export_attempts: 3,
+            commit_attempts: 3,
             carry_position: false,
             announce_arrival: true,
             announce_departure: true,
@@ -326,11 +334,74 @@ impl Run<'_> {
         self.target.drop_player(&self.uuid, handover.as_deref())
     }
 
-    /// The target places the player whose record it holds.
-    fn confirm_target(&mut self) -> Result<(), String> {
-        match self.handover.clone() {
-            Some(handover) => self.target.confirm(&self.uuid, &handover),
-            None => Err("the export gave no hand-over id".into()),
+    /// The target places the player whose record it holds. An answer lost on the way
+    /// is asked for again (see [`Run::ask_target`]): the player may be placed
+    /// already, and then the target says so.
+    fn confirm_target(&mut self, retry: Retry<'_>) -> Result<(), String> {
+        let Some(handover) = self.handover.clone() else {
+            return Err("the export gave no hand-over id".into());
+        };
+        let uuid = self.uuid.clone();
+        self.ask_target(
+            "the placing",
+            "the target may have placed the player",
+            retry,
+            |target| target.confirm(&uuid, &handover),
+        )
+    }
+
+    /// Asks the target something that can safely be asked twice, and asks again when
+    /// the answer was lost: no answer in time, a connection that broke, a sidecar that
+    /// could not reach the backend (`PlayerControl::lost`). The backend may have acted
+    /// on the request before the answer was lost, so the connection is reopened and the
+    /// same request goes again, up to `retry.attempts` times in all and never once
+    /// `retry.deadline` has come. A request is only repeated this way if the target
+    /// answers the repeat with the answer of the first: an import or confirm of the same
+    /// hand-over for a player this transfer placed is `ok` (`placed: true`, `retried`),
+    /// not a second placing. A refusal is an answer: it ends the asking, and is returned
+    /// as it came.
+    ///
+    /// When the answer stays lost, the error says so: nothing is known of what the
+    /// target did, and `unsure` says what it may have done.
+    fn ask_target<T>(
+        &mut self,
+        what: &str,
+        unsure: &str,
+        retry: Retry<'_>,
+        mut ask: impl FnMut(&mut dyn PlayerControl) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let e = match ask(&mut *self.target) {
+                Ok(answer) => {
+                    if attempt > 1 {
+                        (retry.note)(&format!("{what}: answered on attempt {attempt}"));
+                    }
+                    return Ok(answer);
+                }
+                Err(e) => e,
+            };
+            if !self.target.lost() {
+                return Err(e);
+            }
+            if attempt >= retry.attempts || Instant::now() >= retry.deadline {
+                let tried = if attempt > 1 {
+                    format!("asked {attempt} times; ")
+                } else {
+                    String::new()
+                };
+                return Err(format!("{e} ({tried}{unsure})"));
+            }
+            match self.target.recover() {
+                Ok(true) => (retry.note)(&format!(
+                    "{what}: no answer ({e}); asking again ({} of {})",
+                    attempt + 1,
+                    retry.attempts
+                )),
+                Ok(false) => return Err(format!("{e} ({unsure})")),
+                Err(why) => return Err(format!("{e}; {why} ({unsure})")),
+            }
         }
     }
 
@@ -384,21 +455,36 @@ impl Run<'_> {
     /// record goes into the target as a normal save, and the source lets them go.
     /// `record` is the record still to import; `None` when it was imported already,
     /// without placing the player.
-    fn left(&mut self, step: Step, record: Option<Record>, announce: bool) -> Failure {
+    fn left(
+        &mut self,
+        step: Step,
+        record: Option<Record>,
+        announce: bool,
+        retry: Retry<'_>,
+    ) -> Failure {
         // A placed player is saved by the target when its connection closes.
         let placed = match record {
-            Some(record) => self
-                .target
-                .import(
-                    &self.uuid,
-                    record,
-                    self.parts.clone(),
-                    Some(false),
-                    true,
-                    self.arrival(),
+            Some(record) => {
+                let (uuid, parts, arrival) =
+                    (self.uuid.clone(), self.parts.clone(), self.arrival());
+                self.ask_target(
+                    "the import",
+                    "the target may have placed the player",
+                    retry,
+                    |target| {
+                        target.import(
+                            &uuid,
+                            record.clone(),
+                            parts.clone(),
+                            Some(false),
+                            true,
+                            arrival,
+                        )
+                    },
                 )
-                .is_ok(),
-            None => self.confirm_target().is_ok(),
+                .is_ok()
+            }
+            None => self.confirm_target(retry).is_ok(),
         };
         if !placed {
             let _ = self.drop_target();
@@ -423,6 +509,15 @@ impl Run<'_> {
             after: After::Left,
         }
     }
+}
+
+/// How a request to the target is repeated when its answer is lost: how many times in
+/// all, until when, and where it is told.
+#[derive(Clone, Copy)]
+struct Retry<'a> {
+    attempts: u32,
+    deadline: Instant,
+    note: &'a dyn Fn(&str),
 }
 
 /// Switches the player of `session` to `target`. `source` is the control of the
@@ -694,7 +789,16 @@ pub fn switch(
         ));
     }
     if run.client_gone() {
-        return Err(run.left(Step::Freeze, Some(record), settings.announce_departure));
+        return Err(run.left(
+            Step::Freeze,
+            Some(record),
+            settings.announce_departure,
+            Retry {
+                attempts: settings.commit_attempts,
+                deadline: freeze.deadline(),
+                note: &note,
+            },
+        ));
     }
     note("freeze: the source froze the player and gave their record");
     let frozen = Instant::now();
@@ -718,13 +822,25 @@ pub fn switch(
     // Taken before the request: the target can send the new view's centre and
     // chunks before its answer reaches us, and they count as after the import.
     let import_sent = Instant::now();
-    let imported = match run.target.import(
-        &run.uuid,
-        record,
-        run.parts.clone(),
-        Some(settings.announce_arrival),
-        false,
-        arrival,
+    let (uuid, parts) = (run.uuid.clone(), run.parts.clone());
+    let imported = match run.ask_target(
+        "hand over: the import",
+        "the target may hold the player's record",
+        Retry {
+            attempts: settings.commit_attempts,
+            deadline: freeze.deadline(),
+            note: &note,
+        },
+        |target| {
+            target.import(
+                &uuid,
+                record.clone(),
+                parts.clone(),
+                Some(settings.announce_arrival),
+                false,
+                arrival,
+            )
+        },
     ) {
         Ok(imported) => imported,
         Err(e) => {
@@ -813,7 +929,16 @@ pub fn switch(
         if run.client_gone() {
             drop(down);
             drop(s);
-            return Err(run.left(Step::HandOver, None, settings.announce_departure));
+            return Err(run.left(
+                Step::HandOver,
+                None,
+                settings.announce_departure,
+                Retry {
+                    attempts: settings.commit_attempts,
+                    deadline: freeze.deadline(),
+                    note: &note,
+                },
+            ));
         }
         if Instant::now() >= freeze.deadline() {
             drop(down);
@@ -879,7 +1004,16 @@ pub fn switch(
         if !sent {
             drop(down);
             drop(s);
-            return Err(run.left(Step::HandOver, None, settings.announce_departure));
+            return Err(run.left(
+                Step::HandOver,
+                None,
+                settings.announce_departure,
+                Retry {
+                    attempts: settings.commit_attempts,
+                    deadline: freeze.deadline(),
+                    note: &note,
+                },
+            ));
         }
         (packets.len(), bytes, extras.len(), chunks, entities)
     };
@@ -907,8 +1041,12 @@ pub fn switch(
             target.name
         ))
     } else {
-        run.confirm_target()
-            .map_err(|e| format!("{} would not place the player: {e}", target.name))
+        run.confirm_target(Retry {
+            attempts: settings.commit_attempts,
+            deadline: freeze.deadline(),
+            note: &note,
+        })
+        .map_err(|e| format!("{} would not place the player: {e}", target.name))
     };
     if let Err(reason) = placed {
         disconnect();

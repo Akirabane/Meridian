@@ -74,6 +74,12 @@ impl SidecarClient {
         result
     }
 
+    /// Whether the last request was lost on the way ([`Error::is_lost`]): the backend
+    /// may have acted on it. `false` after an answer, a refusal included.
+    pub fn was_lost(&self) -> bool {
+        self.lost
+    }
+
     /// After a request that was lost on the way ([`Error::is_lost`]), makes the
     /// connection ready for the same request again: a new one, with a new challenge,
     /// when the old one broke. `Ok(false)` when the last request was not lost (it
