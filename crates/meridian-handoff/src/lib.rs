@@ -111,6 +111,14 @@
 //! does not freeze again, so this is safe whether or not the first request arrived.
 //! A refusal is an answer and is not asked again.
 //!
+//! The answer to the import and to the confirm may be lost as well, after the target
+//! acted: they are asked again, up to [`Settings::commit_attempts`] times in all, on a
+//! reopened connection, while the freeze left allows. The target answers a repeat of
+//! the same hand-over with `ok` (`placed: true`, `retried`) and does nothing twice, so
+//! a lost answer to the confirm no longer ends with the player on both servers. A
+//! refusal is never asked again; an answer that stays lost fails the switch with a
+//! reason that says the target may have placed the player.
+//!
 //! # Known limits
 //!
 //! - **A player who leaves after the import** is placed on the target

@@ -234,7 +234,9 @@ fn a_request_the_backend_never_answered_can_be_asked_again_on_the_same_connectio
     let mut client = running.client(SECRET);
     // Nothing was lost yet.
     assert!(!client.recover().unwrap());
+    assert!(!client.was_lost());
     assert!(client.export(UUID, true).unwrap_err().is_lost());
+    assert!(client.was_lost());
     assert!(client.recover().unwrap());
     let again = client.export(UUID, true).unwrap();
     assert_eq!(
@@ -242,6 +244,7 @@ fn a_request_the_backend_never_answered_can_be_asked_again_on_the_same_connectio
         json!({ "echo": format!("player-export {DASHED} freeze") })
     );
     // An answer needs no second try.
+    assert!(!client.was_lost());
     assert!(!client.recover().unwrap());
 }
 
@@ -280,6 +283,7 @@ fn a_refusal_is_an_answer_and_is_not_asked_again() {
     let mut client = running.client(SECRET);
     let error = client.export(UUID, true).unwrap_err();
     assert!(!error.is_lost(), "{error}");
+    assert!(!client.was_lost());
     assert!(!client.recover().unwrap());
 }
 

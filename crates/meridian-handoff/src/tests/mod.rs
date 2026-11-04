@@ -19,7 +19,7 @@ use meridian_net::{
 use meridian_testkit::{held::*, pipe};
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -83,10 +83,15 @@ struct FakeControl {
     recentered: Option<bool>,
     /// The ticks the export says the freeze has left.
     ticks_left: Option<u64>,
-    /// How many exports are lost on the way before one is answered.
-    lose_exports: u32,
-    /// Whether the last export was lost, so that the connection can be reopened.
+    /// How many answers of each request are lost on the way before one comes. An
+    /// export is lost before it gets there; any other request is acted on, and its
+    /// answer is what is lost.
+    losing: HashMap<&'static str, u32>,
+    /// Whether the last request was lost, so that the connection can be reopened.
     lost: bool,
+    /// The requests acted on once already: a repeat is answered, as Horizon answers a
+    /// repeated import or confirm of the same hand-over, without acting again.
+    acted: HashSet<&'static str>,
     /// Whether the connection cannot be reopened.
     cannot_reopen: bool,
 }
@@ -102,8 +107,9 @@ impl FakeControl {
             recentered: None,
             // Horizon's default: 30 s of freeze.
             ticks_left: Some(600),
-            lose_exports: 0,
+            losing: HashMap::new(),
             lost: false,
+            acted: HashSet::new(),
             cannot_reopen: false,
         }
     }
@@ -113,9 +119,43 @@ impl FakeControl {
         self
     }
 
-    fn losing_exports(mut self, count: u32) -> Self {
-        self.lose_exports = count;
+    fn losing_exports(self, count: u32) -> Self {
+        self.losing("export", count)
+    }
+
+    /// The answers to the first `count` `request`s are lost.
+    fn losing(mut self, request: &'static str, count: u32) -> Self {
+        self.losing.insert(request, count);
         self
+    }
+
+    /// Whether the answer to this `request` is lost; counts it.
+    fn loses(&mut self, request: &'static str) -> bool {
+        match self.losing.get_mut(request) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The answer of a request the backend acted on: lost if it is to be, and then
+    /// the line of the log says so.
+    fn answer_or_lose(&mut self, request: &'static str, line: String) -> Result<(), String> {
+        let lost = self.loses(request);
+        let line = if lost {
+            format!("{line} (answer lost)")
+        } else {
+            line
+        };
+        let repeat = !self.acted.insert(request);
+        let answered = self.answer_with(request, line, !repeat);
+        self.lost = lost;
+        if lost {
+            return Err("no answer in time".to_owned());
+        }
+        answered
     }
 
     fn refusing(mut self, request: &'static str, why: &str) -> Self {
@@ -129,8 +169,17 @@ impl FakeControl {
     }
 
     fn answer(&mut self, request: &'static str, line: String) -> Result<(), String> {
+        self.answer_with(request, line, true)
+    }
+
+    fn answer_with(
+        &mut self,
+        request: &'static str,
+        line: String,
+        run_hook: bool,
+    ) -> Result<(), String> {
         self.log.push(format!("{} {line}", self.side));
-        if let Some(hook) = self.hooks.get_mut(request) {
+        if run_hook && let Some(hook) = self.hooks.get_mut(request) {
             hook();
         }
         match self.refuse.get(request) {
@@ -146,8 +195,7 @@ impl PlayerControl for FakeControl {
     }
 
     fn export(&mut self, _: &str, freeze: bool) -> Result<Exported, String> {
-        if self.lose_exports > 0 {
-            self.lose_exports -= 1;
+        if self.loses("export") {
             self.lost = true;
             self.log
                 .push(format!("{} export freeze={freeze} (lost)", self.side));
@@ -159,6 +207,10 @@ impl PlayerControl for FakeControl {
                 record: self.record.clone(),
                 freeze_ticks_left: self.ticks_left,
             })
+    }
+
+    fn lost(&self) -> bool {
+        self.lost
     }
 
     fn recover(&mut self) -> Result<bool, String> {
@@ -200,7 +252,7 @@ impl PlayerControl for FakeControl {
                 a.position, a.rotation, a.velocity, a.on_ground
             )
         });
-        self.answer(
+        self.answer_or_lose(
             "import",
             format!("import parts={parts} announce={announce:?} place={place}{pose}"),
         )
@@ -210,7 +262,7 @@ impl PlayerControl for FakeControl {
     }
 
     fn confirm(&mut self, _: &str, handover: &str) -> Result<(), String> {
-        self.answer("confirm", format!("confirm {handover}"))
+        self.answer_or_lose("confirm", format!("confirm {handover}"))
     }
 
     fn release(

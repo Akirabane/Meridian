@@ -37,6 +37,14 @@ pub trait PlayerControl {
         Ok(false)
     }
 
+    /// Whether the last request was lost on the way (no answer in time, a connection
+    /// that broke, a backend the sidecar could not reach) rather than answered: the
+    /// backend may have acted on it. A refusal is an answer, and is not lost. Does not
+    /// reopen anything; [`PlayerControl::recover`] does.
+    fn lost(&self) -> bool {
+        false
+    }
+
     /// Puts `record` on the held player: every part of it, or only `parts`. With
     /// `place`, the player is placed in the world at once; without, they stay held
     /// until [`PlayerControl::confirm`], and a [`PlayerControl::drop_player`] still
@@ -96,6 +104,10 @@ impl PlayerControl for SidecarClient {
 
     fn recover(&mut self) -> Result<bool, String> {
         SidecarClient::recover(self).map_err(|e| format!("cannot reach the sidecar again: {e}"))
+    }
+
+    fn lost(&self) -> bool {
+        SidecarClient::was_lost(self)
     }
 
     fn import(
