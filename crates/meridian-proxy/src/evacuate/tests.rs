@@ -263,3 +263,11 @@ group = "accounts"
     assert!(done.moves.is_empty());
     assert_eq!(done.outcome.stayed.len(), 1);
 }
+
+/// Nobody on the backend: there is nothing to send, and the console says so.
+#[test]
+fn send_away_with_nobody_on_the_server_is_nothing() {
+    let config = config("");
+    let sessions = Sessions::default();
+    assert!(send_away(&sessions, &config, "a").is_none());
+}

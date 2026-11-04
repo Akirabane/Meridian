@@ -151,6 +151,17 @@ impl Drop for Admission<'_> {
     }
 }
 
+#[cfg(test)]
+impl Sessions {
+    /// Sessions whose switches go through `switcher`, for tests with fake sidecars.
+    pub fn with_switcher(switcher: Arc<Switcher>) -> Self {
+        Self {
+            switcher,
+            ..Self::default()
+        }
+    }
+}
+
 impl Sessions {
     /// Takes a place for one more player under `max_players` (0: no limit). The
     /// check and the count are one step, so two players logging in at once cannot

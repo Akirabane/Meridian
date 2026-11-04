@@ -1,7 +1,7 @@
 //! What the accept loop, the players' threads and the console share: the
 //! configuration, which the console can reload, the sessions being relayed, the
 //! stop flag, and how backends are reached.
-use crate::restart::{Detector, LogOnly, Settings};
+use crate::restart::{Detector, Evacuator, Settings};
 use crate::session::{Connect, Sessions};
 use crate::throttle::Throttle;
 use meridian_config::Config;
@@ -18,10 +18,12 @@ pub type Probe = dyn Fn(&str, Duration) -> Result<Duration, String> + Send + Syn
 
 /// The proxy's shared state.
 pub struct Proxy {
-    config: RwLock<Arc<Config>>,
+    /// Shared with the evacuation of a backend that is going down, which runs on a
+    /// thread of its own and reads the configuration in force when it starts.
+    config: Arc<RwLock<Arc<Config>>>,
     /// The file the configuration was read from, for `reload`.
     pub config_path: PathBuf,
-    pub sessions: Sessions,
+    pub sessions: Arc<Sessions>,
     stop: Arc<AtomicBool>,
     pub connect: Arc<Connect>,
     pub probe: Arc<Probe>,
@@ -35,14 +37,16 @@ impl Proxy {
     /// The state of a running proxy: backends are reached over TCP, and `stop`
     /// is the flag Ctrl+C sets.
     pub fn new(config: Config, config_path: PathBuf, stop: Arc<AtomicBool>) -> Self {
-        let sessions = Sessions::default();
+        let sessions = Arc::new(Sessions::default());
+        let settings = Settings::from(&config.restart);
+        let config = Arc::new(RwLock::new(Arc::new(config)));
         let restarts = Detector::new(
             Arc::clone(&sessions.balancer),
-            Arc::new(LogOnly),
-            Settings::default(),
+            Arc::new(Evacuator::new(Arc::clone(&sessions), Arc::clone(&config))),
+            settings,
         );
         Self {
-            config: RwLock::new(Arc::new(config)),
+            config,
             config_path,
             sessions,
             stop,

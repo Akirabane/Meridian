@@ -274,9 +274,14 @@ fn servers(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
                 count(on, "player", "players")
             );
             // A backend with a role has a second line: what the balancer makes of it.
-            let balancing =
-                crate::placing::describe(&config, &proxy.sessions.shared(), &b.name, on)
-                    .map(|l| format!("    {l}"));
+            let balancing = crate::placing::describe(
+                &config,
+                &proxy.sessions.shared(),
+                &b.name,
+                on,
+                proxy.restarts.describe(&b.name).as_deref(),
+            )
+            .map(|l| format!("    {l}"));
             std::iter::once(line).chain(balancing)
         })
         .collect())
@@ -295,6 +300,8 @@ fn drain(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
         ));
     }
     let newly = proxy.sessions.balancer.drain(server);
+    // A backend the detector drained stays drained when it is back: the operator drained it too.
+    proxy.restarts.keep_drained(server);
     if newly {
         info!("backend \"{server}\" is drained from the console");
     }
@@ -316,57 +323,9 @@ fn drain(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
 /// Sends the players of the drained `server` to other servers of its role, one at a
 /// time (see `evacuate`). The console waits for the last move, and the log has each.
 fn evacuate(proxy: &Proxy, config: &Config, server: &str) -> Vec<String> {
-    let players: Vec<Player> = proxy
-        .sessions
-        .players()
-        .into_iter()
-        .filter(|p| p.backend == server)
-        .collect();
-    if players.is_empty() {
-        return vec![format!("no player is on {server}")];
-    }
-    let outcome = crate::evacuate::run(
-        config,
-        &proxy.sessions.shared(),
-        server,
-        &players,
-        &mut |player, target| move_one(proxy, config, player, target),
-        crate::evacuate::PAUSE,
-        &mut std::thread::sleep,
-    );
-    outcome.report(server)
-}
-
-/// Moves one player to `target` and tells them how it went: the console's line, or why it
-/// failed.
-fn move_one(
-    proxy: &Proxy,
-    config: &Config,
-    player: &Player,
-    target: &str,
-) -> Result<String, String> {
-    let Some((player, handle)) = proxy.sessions.session(&player.name) else {
-        return Err(format!("{} left before the switch", player.name));
-    };
-    match switching::switch(
-        config,
-        &proxy.sessions.switcher,
-        &handle,
-        &player.name,
-        player.address.ip(),
-        target,
-    ) {
-        Ok(moved) => {
-            let line = moved.describe(&player.name);
-            info!("{line}");
-            handle.tell(&format!("You are now on {}.", moved.to));
-            Ok(line)
-        }
-        Err(why) => {
-            warning!("{why}");
-            handle.tell(&format!("Could not move you to {target}. {why}"));
-            Err(why)
-        }
+    match crate::evacuate::send_away(&proxy.sessions, config, server) {
+        Some(outcome) => outcome.report(server),
+        None => vec![format!("no player is on {server}")],
     }
 }
 
@@ -1070,6 +1029,48 @@ mod tests {
         assert!(!proxy.sessions.balancer.is_drained("lobby"));
         assert_eq!(run(&proxy, "undrain lobby"), ["lobby is not drained"]);
         assert_eq!(lobby_lines(&proxy)[1], "    role lobby, 1/3 (hard 4): open");
+    }
+
+    #[test]
+    fn servers_says_why_a_backend_is_restarting_and_offers_it_when_it_is_back() {
+        use crate::restart::Cause;
+        let proxy = balanced_proxy();
+        proxy
+            .restarts
+            .announce("lobby", Cause::Announced, Instant::now());
+        assert!(proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(
+            lobby_lines(&proxy)[1],
+            "    role lobby, 0/3 (hard 4): draining (restarting: it announced its stop)"
+        );
+        proxy.restarts.back("lobby");
+        assert!(!proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(lobby_lines(&proxy)[1], "    role lobby, 0/3 (hard 4): open");
+    }
+
+    /// The operator's `drain` and `undrain` win over the detector's marking.
+    #[test]
+    fn the_operators_drain_outlasts_a_restart_and_their_undrain_is_believed() {
+        use crate::restart::Cause;
+        let proxy = balanced_proxy();
+        proxy
+            .restarts
+            .announce("lobby", Cause::Panel, Instant::now());
+        assert_eq!(run(&proxy, "drain lobby"), ["lobby is already drained"]);
+        proxy.restarts.back("lobby");
+        assert!(proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(
+            lobby_lines(&proxy)[1],
+            "    role lobby, 0/3 (hard 4): draining (drained from the console)"
+        );
+        // An undrain while the backend is restarting offers it again: the line is not
+        // "restarting" for a server the balancer offers.
+        run(&proxy, "undrain lobby");
+        proxy
+            .restarts
+            .announce("lobby", Cause::Panel, Instant::now());
+        run(&proxy, "undrain lobby");
+        assert_eq!(lobby_lines(&proxy)[1], "    role lobby, 0/3 (hard 4): open");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! `meridian_testkit::held` as "east", and fake sidecars that answer from memory.
 use super::*;
 use crate::console::Commands;
-use crate::session::Player;
+use crate::session::{Player, Sessions};
 use crate::state::Proxy;
 use horizon_protocol::{
     connection::Connection, crypto::offline_uuid, ids::play::clientbound as pc,
@@ -190,10 +190,10 @@ fn world(sidecars: Sidecars) -> World {
             }))
         }
     };
-    proxy.sessions.switcher = Arc::new(Switcher {
+    proxy.sessions = Arc::new(Sessions::with_switcher(Arc::new(Switcher {
         controls: Arc::new(controls),
         digests: Digests::default(),
-    });
+    })));
     // Alex, relayed between the test's two pipes, joins lobby's world.
     let (proxy_client, mut player) = pipe();
     let (proxy_backend, mut source) = pipe();
