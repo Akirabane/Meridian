@@ -2,6 +2,7 @@
 //! the limits it applies. [`Config::load`] reads it from a TOML file, fills in the
 //! defaults and checks it; `meridian.example.toml` at the root of the repository
 //! shows every setting.
+mod access;
 mod auth;
 mod balancing;
 mod commands;
@@ -12,6 +13,7 @@ mod proxy_protocol;
 mod restart;
 mod sidecar;
 
+pub use access::{Access, AccessError, AccessSettings, Ban, Net, Refusal, Target};
 pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
@@ -22,6 +24,7 @@ pub use proxy_protocol::{ProxyProtocol, ProxyProtocolMode, TrustedNet};
 pub use restart::Restart;
 pub use sidecar::{MIN_SIDECAR_SECRET, Sidecar, read_secret};
 
+use access::FileAccess;
 use auth::FileAuth;
 use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
@@ -204,6 +207,8 @@ pub struct Config {
     pub proxy_protocol: ProxyProtocol,
     /// The `[metrics]` table.
     pub metrics: Metrics,
+    /// The `[access]` table.
+    pub access: AccessSettings,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -256,6 +261,7 @@ impl Default for Config {
             restart: Restart::default(),
             proxy_protocol: ProxyProtocol::default(),
             metrics: Metrics::default(),
+            access: AccessSettings::default(),
         }
     }
 }
@@ -296,6 +302,7 @@ impl std::fmt::Debug for Config {
             restart,
             proxy_protocol,
             metrics,
+            access,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -335,6 +342,7 @@ impl std::fmt::Debug for Config {
             .field("restart", restart)
             .field("proxy_protocol", proxy_protocol)
             .field("metrics", metrics)
+            .field("access", access)
             .finish()
     }
 }
@@ -383,6 +391,8 @@ struct File {
     proxy_protocol: FileProxyProtocol,
     #[serde(default)]
     metrics: FileMetrics,
+    #[serde(default)]
+    access: FileAccess,
 }
 
 #[derive(Deserialize)]
@@ -573,6 +583,7 @@ impl Config {
             restart: file.restart.into_settings(),
             proxy_protocol: file.proxy_protocol.into_settings()?,
             metrics: file.metrics.into_settings()?,
+            access: file.access.into_settings(folder),
         };
         config.validate()?;
         Ok(config)
@@ -907,5 +918,7 @@ mod restart_tests;
 #[cfg(test)]
 mod proxy_protocol_tests;
 
+#[cfg(test)]
+mod access_tests;
 #[cfg(test)]
 mod sidecar_tests;
