@@ -1,11 +1,12 @@
 //! The panel with stand-in processes: the panel's own binary run as
 //! `__fake-process`, which prints, answers its console and opens a port. No real
 //! server is started, and nothing leaves the test's own folders.
-use meridian_panel::bench::Bench;
+use meridian_panel::bench::{Bench, Notice};
 use meridian_panel::http::{self, Panel, Request};
 use meridian_panel::supervisor::{State, Supervisor};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_meridian-panel");
@@ -726,4 +727,282 @@ fn when_the_panel_dies_what_it_started_ends_too() {
     panel.wait().unwrap();
     wait_for("the server to end", || !alive(server));
     wait_for("its child to end", || !alive(child));
+}
+
+// Telling the proxy before a server is stopped (`[drain-before-stop]`).
+
+/// A bench of stand-ins with `servers` and a proxy, the notice turned on, the
+/// proxy and the servers online. The folders are the test's own.
+fn noticed(
+    name: &str,
+    servers: &[&str],
+    grace: u64,
+    move_players: bool,
+) -> (PathBuf, Arc<Supervisor>) {
+    let dir = scratch(name);
+    let (mut bench, _) = bench(&dir, servers, &[]);
+    bench.notice = Notice {
+        enabled: true,
+        grace: Duration::from_secs(grace),
+        move_players,
+        proxy: None,
+    };
+    let supervisor = Supervisor::new(&bench);
+    for server in servers {
+        accept_in(&dir.join(server));
+    }
+    supervisor.start("proxy").unwrap();
+    ready(&supervisor, "proxy");
+    for server in servers {
+        supervisor.start(server).unwrap();
+        ready(&supervisor, server);
+    }
+    (dir, supervisor)
+}
+
+/// Stops what is left of the bench, and removes the test's folder.
+fn finish(supervisor: &Arc<Supervisor>, dir: &Path) {
+    supervisor.stop_all();
+    wait_for("the bench to stop", || supervisor.running() == 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Where `needle` first appears in the log of `name`.
+fn position(supervisor: &Supervisor, name: &str, needle: &str) -> Option<usize> {
+    log_text(supervisor, name).find(needle)
+}
+
+fn pid_of(supervisor: &Supervisor, name: &str) -> Option<u32> {
+    supervisor
+        .snapshots()
+        .into_iter()
+        .find(|s| s.name == name)
+        .unwrap()
+        .pid
+}
+
+/// Waits until `name` is online in a run other than the one of `first`.
+fn wait_for_new_run(supervisor: &Supervisor, name: &str, first: u32) {
+    wait_for("a new run", || {
+        state_of(supervisor, name) == State::Online
+            && pid_of(supervisor, name).is_some_and(|pid| pid != first)
+    });
+}
+
+#[test]
+fn the_proxy_is_told_before_a_server_is_stopped_and_the_stop_waits_the_grace() {
+    let (dir, supervisor) = noticed("notice-stop", &["lobby"], 2, false);
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the drain", || {
+        position(&supervisor, "proxy", "> drain lobby").is_some()
+    });
+    let told = Instant::now();
+    // The server is still up, and says it is about to stop.
+    assert_eq!(state_of(&supervisor, "lobby"), State::Draining);
+    assert!(!log_text(&supervisor, "lobby").contains("stopping with"));
+    wait_for("the stop", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    assert!(
+        told.elapsed() >= Duration::from_millis(1000),
+        "stopped {:?} after the proxy was told, the grace is 2 s",
+        told.elapsed()
+    );
+    let log = log_text(&supervisor, "lobby");
+    assert!(
+        log.contains("[panel] told the proxy \"drain lobby\""),
+        "{log}"
+    );
+    assert!(
+        log.contains("[panel] proxy: lobby takes no new player"),
+        "{log}"
+    );
+    assert!(
+        !log_text(&supervisor, "proxy").contains("--move"),
+        "the players are not moved unless asked"
+    );
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn with_move_players_the_drain_asks_the_proxy_to_move_them() {
+    let (dir, supervisor) = noticed("notice-move", &["lobby"], 0, true);
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the stop", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    assert!(position(&supervisor, "proxy", "> drain lobby --move").is_some());
+    assert!(log_text(&supervisor, "lobby").contains("proxy: lobby: 0 moved, 0 stayed"));
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn a_restart_drains_first_and_lifts_the_drain_when_the_server_is_back() {
+    let (dir, supervisor) = noticed("notice-restart", &["lobby"], 1, false);
+    let first = pid_of(&supervisor, "lobby").unwrap();
+    supervisor.restart("lobby").unwrap();
+    wait_for_new_run(&supervisor, "lobby", first);
+    wait_for("the undrain", || {
+        position(&supervisor, "proxy", "> undrain lobby").is_some()
+    });
+    let drain = position(&supervisor, "proxy", "> drain lobby").expect("drained first");
+    let undrain = position(&supervisor, "proxy", "> undrain lobby").unwrap();
+    assert!(drain < undrain);
+    // The server is not drained at the proxy any more: a second undrain says so.
+    let again = supervisor
+        .ask("proxy", "undrain lobby", Duration::from_secs(8))
+        .unwrap();
+    assert_eq!(again, ["lobby is not drained"]);
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn a_drain_of_the_operator_is_not_lifted_by_the_panel() {
+    let (dir, supervisor) = noticed("notice-operator", &["lobby"], 0, false);
+    let said = supervisor
+        .ask("proxy", "drain lobby", Duration::from_secs(8))
+        .unwrap();
+    assert!(said[0].starts_with("lobby takes no new player"), "{said:?}");
+    let first = pid_of(&supervisor, "lobby").unwrap();
+    supervisor.restart("lobby").unwrap();
+    wait_for_new_run(&supervisor, "lobby", first);
+    // Time for an undrain to be typed if there were going to be one.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(log_text(&supervisor, "lobby").contains("proxy: lobby is already drained"));
+    assert!(position(&supervisor, "proxy", "> undrain").is_none());
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn the_proxy_is_told_nothing_unless_the_setting_is_on() {
+    let dir = scratch("notice-off");
+    let (bench, _) = bench(&dir, &["lobby"], &[]);
+    assert!(!bench.notice.enabled, "off by default");
+    let supervisor = Supervisor::new(&bench);
+    accept_in(&dir.join("lobby"));
+    supervisor.start("proxy").unwrap();
+    ready(&supervisor, "proxy");
+    supervisor.start("lobby").unwrap();
+    ready(&supervisor, "lobby");
+    let first = pid_of(&supervisor, "lobby").unwrap();
+    supervisor.restart("lobby").unwrap();
+    wait_for_new_run(&supervisor, "lobby", first);
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the stop", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    assert!(!log_text(&supervisor, "proxy").contains("drain"));
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn without_a_proxy_running_the_server_is_stopped_at_once() {
+    let dir = scratch("notice-no-proxy");
+    let (mut bench, _) = bench(&dir, &["lobby"], &[]);
+    bench.notice = Notice {
+        enabled: true,
+        grace: Duration::from_secs(30),
+        ..Notice::default()
+    };
+    let supervisor = Supervisor::new(&bench);
+    accept_in(&dir.join("lobby"));
+    supervisor.start("lobby").unwrap();
+    ready(&supervisor, "lobby");
+    let asked = Instant::now();
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the stop", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    assert!(asked.elapsed() < Duration::from_secs(10), "no 30 s grace");
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn a_second_stop_during_the_grace_stops_the_server_at_once() {
+    let (dir, supervisor) = noticed("notice-twice", &["lobby"], 30, false);
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the drain", || {
+        state_of(&supervisor, "lobby") == State::Draining
+    });
+    let asked = Instant::now();
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the stop", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    assert!(asked.elapsed() < Duration::from_secs(10));
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn a_server_that_dies_is_drained_and_offered_again_when_it_is_back() {
+    // Even with move-players: nobody is left on a dead server to be moved.
+    let (dir, supervisor) = noticed("notice-crash", &["lobby"], 0, true);
+    supervisor.send("lobby", "crash").unwrap();
+    wait_for("the drain", || {
+        position(&supervisor, "proxy", "> drain lobby").is_some()
+    });
+    wait_for("the drain to be noted", || {
+        log_text(&supervisor, "lobby").contains("proxy: lobby takes no new player")
+    });
+    assert!(matches!(
+        state_of(&supervisor, "lobby"),
+        State::Exited(Some(3))
+    ));
+    assert!(!log_text(&supervisor, "proxy").contains("--move"));
+    assert!(position(&supervisor, "proxy", "> undrain").is_none());
+    supervisor.start("lobby").unwrap();
+    wait_for("the undrain", || {
+        position(&supervisor, "proxy", "> undrain lobby").is_some()
+    });
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn a_server_is_known_to_the_proxy_by_its_backend_name() {
+    let dir = scratch("notice-backend");
+    let (mut bench, _) = bench(&dir, &["lobby"], &[]);
+    bench.processes[0].backend = Some("west".to_owned());
+    bench.notice = Notice {
+        enabled: true,
+        grace: Duration::ZERO,
+        ..Notice::default()
+    };
+    let supervisor = Supervisor::new(&bench);
+    accept_in(&dir.join("lobby"));
+    supervisor.start("proxy").unwrap();
+    ready(&supervisor, "proxy");
+    supervisor.start("lobby").unwrap();
+    ready(&supervisor, "lobby");
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the stop", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    assert!(position(&supervisor, "proxy", "> drain west").is_some());
+    assert!(position(&supervisor, "proxy", "> drain lobby").is_none());
+    finish(&supervisor, &dir);
+}
+
+#[test]
+fn a_proxy_that_starts_again_forgets_the_drains_of_the_panel() {
+    let (dir, supervisor) = noticed("notice-proxy-restart", &["lobby"], 0, false);
+    supervisor.stop_noticed("lobby").unwrap();
+    wait_for("the stop", || {
+        state_of(&supervisor, "lobby") == State::Stopped
+    });
+    // The proxy ends and starts again: its drains are gone, so the one the panel made
+    // is no longer a drain to lift, and an operator's new one must be left alone.
+    supervisor.stop("proxy").unwrap();
+    wait_for("the proxy stopped", || {
+        state_of(&supervisor, "proxy") == State::Stopped
+    });
+    supervisor.start("proxy").unwrap();
+    ready(&supervisor, "proxy");
+    supervisor
+        .ask("proxy", "drain lobby", Duration::from_secs(8))
+        .unwrap();
+    supervisor.start("lobby").unwrap();
+    ready(&supervisor, "lobby");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(position(&supervisor, "proxy", "> undrain").is_none());
+    finish(&supervisor, &dir);
 }

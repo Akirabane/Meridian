@@ -56,6 +56,44 @@ pub struct ProcessSpec {
     pub stop_command: Option<String>,
     /// How long a stop waits before the process is killed.
     pub stop_timeout: Duration,
+    /// The name the proxy knows a server by, when it is not the process's own name.
+    /// Only for servers.
+    pub backend: Option<String>,
+}
+
+impl ProcessSpec {
+    /// The name of this server in the proxy's configuration.
+    pub fn backend_name(&self) -> &str {
+        self.backend.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// What the panel tells the proxy before it stops or restarts a server, so that no
+/// new player is sent to it and, if asked, the players on it are moved away first.
+/// Off unless the bench file turns it on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub enabled: bool,
+    /// How long the panel waits after telling the proxy, before it stops the server.
+    pub grace: Duration,
+    /// Also send the players of the server elsewhere (`drain <server> --move`).
+    pub move_players: bool,
+    /// The proxy to tell; the bench's only proxy when not named.
+    pub proxy: Option<String>,
+}
+
+/// The grace the panel waits when the file does not say.
+pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);
+
+impl Default for Notice {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            grace: DEFAULT_GRACE,
+            move_players: false,
+            proxy: None,
+        }
+    }
 }
 
 /// The bench file, read and checked.
@@ -64,6 +102,7 @@ pub struct Bench {
     /// The port of the panel's page, on 127.0.0.1.
     pub panel_port: u16,
     pub processes: Vec<ProcessSpec>,
+    pub notice: Notice,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +111,18 @@ struct File {
     panel_port: Option<u16>,
     #[serde(default, rename = "process")]
     processes: Vec<FileProcess>,
+    drain_before_stop: Option<FileNotice>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct FileNotice {
+    #[serde(default)]
+    enabled: bool,
+    grace_seconds: Option<u64>,
+    #[serde(default)]
+    move_players: bool,
+    proxy: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +137,7 @@ struct FileProcess {
     port: u16,
     stop_command: Option<String>,
     stop_timeout_seconds: Option<u64>,
+    backend: Option<String>,
 }
 
 /// The panel's port when the file does not say.
@@ -139,11 +191,21 @@ impl Bench {
                 args: p.args,
                 dir: resolve(root, &p.dir),
                 port: p.port,
+                backend: p.backend,
             })
             .collect();
+        let notice = file
+            .drain_before_stop
+            .map_or_else(Notice::default, |n| Notice {
+                enabled: n.enabled,
+                grace: n.grace_seconds.map_or(DEFAULT_GRACE, Duration::from_secs),
+                move_players: n.move_players,
+                proxy: n.proxy,
+            });
         let bench = Bench {
             panel_port: file.panel_port.unwrap_or(DEFAULT_PANEL_PORT),
             processes,
+            notice,
         };
         bench.validate()?;
         Ok(bench)
@@ -157,12 +219,7 @@ impl Bench {
             return Err(error("panel-port must be from 1 to 65535"));
         }
         for (i, p) in self.processes.iter().enumerate() {
-            if p.name.is_empty()
-                || !p
-                    .name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            {
+            if !valid_name(&p.name) {
                 return Err(error(format!(
                     "process name \"{}\" must be letters, digits, dashes or underscores",
                     p.name
@@ -199,14 +256,77 @@ impl Bench {
                     p.name
                 )));
             }
+            if let Some(backend) = &p.backend {
+                if p.kind != Kind::Server {
+                    return Err(error(format!(
+                        "process \"{}\": backend is for a server, which the proxy knows by a name",
+                        p.name
+                    )));
+                }
+                if !valid_name(backend) {
+                    return Err(error(format!(
+                        "process \"{}\": backend \"{backend}\" must be letters, digits, dashes or                          underscores",
+                        p.name
+                    )));
+                }
+            }
+        }
+        self.validate_notice()
+    }
+
+    fn validate_notice(&self) -> Result<(), BenchError> {
+        let notice = &self.notice;
+        if let Some(name) = &notice.proxy {
+            match self.process(name) {
+                Some(p) if p.kind == Kind::Proxy => {}
+                Some(_) => {
+                    return Err(error(format!(
+                        "[drain-before-stop]: \"{name}\" is not a proxy"
+                    )));
+                }
+                None => {
+                    return Err(error(format!(
+                        "[drain-before-stop]: no process called \"{name}\" in the bench"
+                    )));
+                }
+            }
+        }
+        if notice.enabled && self.proxy_of_notice().is_none() {
+            return Err(error(
+                "[drain-before-stop] is enabled: name the proxy to tell with proxy = \"...\",                  the bench has not exactly one proxy",
+            ));
         }
         Ok(())
+    }
+
+    /// The proxy the panel tells before it stops a server: the one the file names,
+    /// or the bench's only proxy.
+    pub fn proxy_of_notice(&self) -> Option<&ProcessSpec> {
+        match &self.notice.proxy {
+            Some(name) => self.process(name),
+            None => {
+                let mut proxies = self.processes.iter().filter(|p| p.kind == Kind::Proxy);
+                let first = proxies.next();
+                if proxies.next().is_some() {
+                    None
+                } else {
+                    first
+                }
+            }
+        }
     }
 
     /// The process called `name`.
     pub fn process(&self, name: &str) -> Option<&ProcessSpec> {
         self.processes.iter().find(|p| p.name == name)
     }
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn resolve(root: &Path, path: &Path) -> PathBuf {
@@ -292,6 +412,121 @@ port = 25565
             (&format!("{ONE}shell = \"rm\"") as &str, "unknown field"),
         ] {
             let e = Bench::from_toml_str(text, root()).unwrap_err();
+            assert!(e.to_string().contains(says), "{says}: {e}");
+        }
+    }
+
+    #[test]
+    fn telling_the_proxy_is_off_unless_the_file_turns_it_on() {
+        let bench = Bench::from_toml_str(ONE, root()).unwrap();
+        assert!(!bench.notice.enabled);
+        assert_eq!(bench.notice, Notice::default());
+        assert_eq!(bench.notice.grace, DEFAULT_GRACE);
+    }
+
+    #[test]
+    fn the_notice_is_read_with_the_only_proxy_by_default() {
+        let text = format!(
+            "{ONE}
+[drain-before-stop]
+enabled = true
+grace-seconds = 2
+move-players = true
+"
+        );
+        let bench = Bench::from_toml_str(&text, root()).unwrap();
+        assert!(bench.notice.enabled && bench.notice.move_players);
+        assert_eq!(bench.notice.grace, Duration::from_secs(2));
+        assert_eq!(bench.proxy_of_notice().unwrap().name, "proxy");
+    }
+
+    #[test]
+    fn a_server_has_a_backend_name_that_defaults_to_its_own() {
+        let server = ONE
+            .replace("kind = \"proxy\"", "kind = \"server\"")
+            .replace(
+                "\"proxy\"
+kind",
+                "\"lobby-card\"
+kind",
+            );
+        let bench = Bench::from_toml_str(&server, root()).unwrap();
+        assert_eq!(bench.processes[0].backend_name(), "lobby-card");
+        let named = format!(
+            "{server}backend = \"lobby\"
+"
+        );
+        let bench = Bench::from_toml_str(&named, root()).unwrap();
+        assert_eq!(bench.processes[0].backend_name(), "lobby");
+    }
+
+    #[test]
+    fn a_bad_notice_is_refused() {
+        let two = format!(
+            "{ONE}{}",
+            ONE.replace(
+                "\"proxy\"
+kind",
+                "\"proxy2\"
+kind"
+            )
+            .replace("25565", "25566")
+        );
+        let server = ONE.replace("kind = \"proxy\"", "kind = \"server\"");
+        for (text, says) in [
+            (
+                // Two proxies: which one to tell?
+                format!(
+                    "{two}
+[drain-before-stop]
+enabled = true
+"
+                ),
+                "not exactly one proxy",
+            ),
+            (
+                format!(
+                    "{ONE}
+[drain-before-stop]
+proxy = \"nowhere\"
+"
+                ),
+                "no process called",
+            ),
+            (
+                format!(
+                    "{server}
+[drain-before-stop]
+proxy = \"proxy\"
+"
+                ),
+                "is not a proxy",
+            ),
+            (
+                format!(
+                    "{ONE}backend = \"lobby\"
+"
+                ),
+                "backend is for a server",
+            ),
+            (
+                format!(
+                    "{server}backend = \"lo by\"
+"
+                ),
+                "must be letters, digits",
+            ),
+            (
+                format!(
+                    "{ONE}
+[drain-before-stop]
+speed = 3
+"
+                ),
+                "unknown field",
+            ),
+        ] {
+            let e = Bench::from_toml_str(&text, root()).unwrap_err();
             assert!(e.to_string().contains(says), "{says}: {e}");
         }
     }

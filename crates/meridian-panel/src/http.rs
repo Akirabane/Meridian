@@ -286,7 +286,7 @@ fn action_on(supervisor: &Arc<Supervisor>, name: &str, action: &str) -> Result<(
         }
         ("all", _) => Err("the whole bench can be started or stopped".to_owned()),
         (name, "start") => supervisor.start(name),
-        (name, "stop") => supervisor.stop(name),
+        (name, "stop") => supervisor.stop_noticed(name),
         (name, "restart") => supervisor.restart(name),
         (_, other) => Err(format!("unknown action \"{other}\"")),
     }

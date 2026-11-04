@@ -5,7 +5,8 @@
 //! `--child` it first starts a child of its own, as a server starts its engine,
 //! and writes its id and the child's to `fake.pid` and `child.pid` in its
 //! folder. With `--hold` it only waits, a minute at most, as an engine would,
-//! whatever its other arguments (such as `--control-socket PATH`).
+//! whatever its other arguments (such as `--control-socket PATH`). Its console also
+//! answers `drain SERVER [--move]` and `undrain SERVER` in the words of the proxy's.
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
 
@@ -58,6 +59,7 @@ pub fn run(args: &[String]) -> i32 {
         });
         listener
     });
+    let mut drained: Vec<String> = Vec::new();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -69,6 +71,35 @@ pub fn run(args: &[String]) -> i32 {
                 return 0;
             }
             ["crash"] => return 3,
+            // As the proxy's console answers them (crates/meridian-proxy/src/console.rs).
+            ["drain", server] | ["drain", server, "--move"] => {
+                let moving = words.len() == 3;
+                let newly = !drained.iter().any(|d| d == server);
+                if newly {
+                    drained.push((*server).to_owned());
+                }
+                let first = match (newly, moving) {
+                    (true, false) => format!(
+                        "{server} takes no new player; its players stay. undrain {server} offers it again"
+                    ),
+                    (true, true) => format!(
+                        "{server} takes no new player; its players are being sent to other servers of its role"
+                    ),
+                    (false, _) => format!("{server} is already drained"),
+                };
+                let _ = writeln!(out, "{first}");
+                if moving {
+                    let _ = writeln!(out, "{server}: 0 moved, 0 stayed");
+                }
+            }
+            ["undrain", server] => {
+                if let Some(at) = drained.iter().position(|d| d == server) {
+                    drained.remove(at);
+                    let _ = writeln!(out, "{server} is offered to new players again");
+                } else {
+                    let _ = writeln!(out, "{server} is not drained");
+                }
+            }
             ["slow"] => {
                 // An answer that comes late, like the proxy's servers, which waits
                 // for every server before it prints, then prints it at once.
