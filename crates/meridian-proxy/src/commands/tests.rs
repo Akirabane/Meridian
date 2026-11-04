@@ -19,9 +19,17 @@ fn config(extra: &str) -> Config {
 }
 
 fn alex_on(backend: &str) -> Typist {
+    typist(AuthKind::Verified, backend, "")
+}
+
+/// Alex, on `backend`, with the permissions written in `file` (`permissions.toml`).
+fn typist(auth: AuthKind, backend: &str, file: &str) -> Typist {
     Typist {
-        auth: AuthKind::Verified,
+        auth,
         backend: backend.into(),
+        name: "Alex".into(),
+        uuid: [1; 16],
+        permissions: Arc::new(Permissions::parse(file).unwrap()),
     }
 }
 
@@ -32,6 +40,9 @@ fn said(answer: Option<Answer>) -> Option<String> {
         Answer::Move(target) => format!("move to {target}"),
         Answer::Hub => "move to the balancer's lobby".to_owned(),
         Answer::Play => "move to the balancer's game server".to_owned(),
+        Answer::Send { who, server } => format!("send {who:?} to {server}"),
+        Answer::Glist(server) => format!("glist {server:?}"),
+        Answer::Alert { server, message } => format!("alert {server:?}: {message}"),
     })
 }
 
@@ -156,10 +167,7 @@ fn backends_of_the_other_kind_are_neither_listed_nor_offered() {
         ask(&config, "server guests").as_deref(),
         Some("There is no server called guests.")
     );
-    let guest = Typist {
-        auth: AuthKind::Unverified,
-        backend: "guests".into(),
-    };
+    let guest = typist(AuthKind::Unverified, "guests", "");
     assert_eq!(
         said(answer(&config, &guest, "server")).as_deref(),
         Some("Servers: guests. You are on guests.")
@@ -182,6 +190,7 @@ fn the_hook_answers_and_moves() {
         move || alex_on(&where_now.lock().unwrap()),
         |target: &str| format!("Moving you to {target}..."),
         |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
+        |_: &Typist, _: Answer| unreachable!("no staff command is typed"),
     );
     assert_eq!(
         hook("server east").as_deref(),
@@ -330,4 +339,217 @@ fn play_goes_to_the_backend_unless_it_is_enabled() {
     config.commands.enabled = vec![ProxyCommand::Server, ProxyCommand::Hub];
     assert_eq!(ask_on(&config, "lobby", "play"), None);
     assert_eq!(ask_on(&balanced(true, ""), "lobby", "play"), None);
+}
+
+// ---- permissions and the staff commands ----
+
+const STAFF_ON: &str =
+    "[commands]\nenabled = [\"server\", \"hub\", \"play\", \"send\", \"glist\", \"alert\"]";
+
+const STAFF: &str = r#"
+[group.staff]
+allow = ["meridian.send", "meridian.glist", "meridian.alert"]
+[[player]]
+name = "Alex"
+groups = ["staff"]
+"#;
+
+fn ask_as(file: &str, command: &str) -> Option<String> {
+    said(answer(
+        &config(STAFF_ON),
+        &typist(AuthKind::Verified, "lobby", file),
+        command,
+    ))
+}
+
+#[test]
+fn the_staff_commands_belong_to_the_backend_unless_they_are_turned_on() {
+    for command in ["send all east", "glist", "alert hello"] {
+        assert_eq!(said(answer(&config(""), &alex_on("lobby"), command)), None);
+        // Whatever the player's permissions.
+        let staff = typist(AuthKind::Verified, "lobby", STAFF);
+        assert_eq!(
+            said(answer(&config(""), &staff, command)),
+            None,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn a_player_without_the_node_is_told_so_and_nothing_starts() {
+    for (command, word) in [
+        ("send all east", "send"),
+        ("glist", "glist"),
+        ("glist east", "glist"),
+        ("alert hello", "alert"),
+    ] {
+        assert_eq!(
+            ask_as("", command).as_deref(),
+            Some(format!("You do not have permission to use /{word}.").as_str()),
+            "{command}"
+        );
+    }
+    // A group that has some of the nodes does not have the others.
+    let only_glist =
+        "[group.g]\nallow = [\"meridian.glist\"]\n[[player]]\nname = \"Alex\"\ngroups = [\"g\"]\n";
+    assert_eq!(ask_as(only_glist, "glist").as_deref(), Some("glist None"));
+    assert_eq!(
+        ask_as(only_glist, "send all east").as_deref(),
+        Some("You do not have permission to use /send.")
+    );
+}
+
+#[test]
+fn send_names_who_and_where() {
+    assert_eq!(
+        ask_as(STAFF, "send Steve east").as_deref(),
+        Some("send Player(\"Steve\") to east")
+    );
+    assert_eq!(
+        ask_as(STAFF, "send ALL east").as_deref(),
+        Some("send All to east")
+    );
+    assert_eq!(
+        ask_as(STAFF, "send server:lobby east").as_deref(),
+        Some("send Server(\"lobby\") to east")
+    );
+    for bad in ["send", "send Steve", "send Steve east now"] {
+        assert_eq!(
+            ask_as(STAFF, bad).as_deref(),
+            Some("Usage: /send <player|all|server:name> <server>"),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn glist_takes_a_server_or_none() {
+    assert_eq!(ask_as(STAFF, "glist").as_deref(), Some("glist None"));
+    assert_eq!(
+        ask_as(STAFF, "glist east").as_deref(),
+        Some("glist Some(\"east\")")
+    );
+    assert_eq!(
+        ask_as(STAFF, "glist east west").as_deref(),
+        Some("Usage: /glist [server]")
+    );
+}
+
+#[test]
+fn alert_takes_a_message_and_a_server_first_or_last() {
+    assert_eq!(
+        ask_as(STAFF, "alert restart in  five minutes").as_deref(),
+        Some("alert None: restart in five minutes")
+    );
+    assert_eq!(
+        ask_as(STAFF, "alert server:east restart soon").as_deref(),
+        Some("alert Some(\"east\"): restart soon")
+    );
+    assert_eq!(
+        ask_as(STAFF, "alert restart soon server:east").as_deref(),
+        Some("alert Some(\"east\"): restart soon")
+    );
+    // A server alone is not a message.
+    for bad in ["alert", "alert server:east", "alert server:"] {
+        assert_eq!(
+            ask_as(STAFF, bad).as_deref(),
+            Some("Usage: /alert [server:name] <message>"),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn the_old_commands_stay_open_until_a_group_denies_them() {
+    for command in ["server", "server east", "hub", "play"] {
+        let line = ask_as("", command).unwrap();
+        assert!(!line.contains("permission"), "{command}: {line}");
+    }
+    let closed =
+        "[group.default]\ndeny = [\"meridian.server\", \"meridian.hub\", \"meridian.play\"]\n";
+    for (command, word) in [
+        ("server", "server"),
+        ("hub", "hub"),
+        ("lobby", "lobby"),
+        ("play", "play"),
+    ] {
+        assert_eq!(
+            ask_as(closed, command).as_deref(),
+            Some(format!("You do not have permission to use /{word}.").as_str()),
+            "{command}"
+        );
+    }
+    // A rank that allows them again, for those in it.
+    let staff_only = "[group.default]\ndeny = [\"meridian.hub\"]\n\
+                      [group.staff]\nallow = [\"meridian.hub\"]\n\
+                      [[player]]\nname = \"Alex\"\ngroups = [\"staff\"]\n";
+    // Allowed: Alex is on the lobby already, which is the answer of an allowed /hub.
+    assert_eq!(
+        ask_as(staff_only, "hub").as_deref(),
+        Some("You are already on lobby.")
+    );
+}
+
+#[test]
+fn a_server_can_be_closed_to_a_player_by_its_node() {
+    let file = "[group.default]\ndeny = [\"meridian.server.east\"]\n";
+    assert_eq!(
+        ask_as(file, "server").as_deref(),
+        Some("Servers: lobby (default), guests. You are on lobby."),
+        "not listed"
+    );
+    assert_eq!(
+        ask_as(file, "server east").as_deref(),
+        Some("You do not have permission to go to east.")
+    );
+    assert_eq!(
+        ask_as(file, "server guests").as_deref(),
+        Some("move to guests")
+    );
+    // A server that does not exist is still said not to.
+    assert_eq!(
+        ask_as(file, "server nowhere").as_deref(),
+        Some("There is no server called nowhere.")
+    );
+    // Allowed again by a rank, with a pattern.
+    let ranked = "[group.default]\ndeny = [\"meridian.server.*\"]\n\
+                  [group.vip]\nallow = [\"meridian.server.east\"]\n\
+                  [[player]]\nname = \"Alex\"\ngroups = [\"vip\"]\n";
+    assert_eq!(
+        ask_as(ranked, "server").as_deref(),
+        Some("Servers: east. You are on lobby.")
+    );
+}
+
+#[test]
+fn what_the_hook_cannot_decide_goes_to_the_staff_closure() {
+    let config = Arc::new(config(STAFF_ON));
+    let staff = Arc::new(Permissions::parse(STAFF).unwrap());
+    let hook = hook(
+        Arc::clone(&config),
+        {
+            let staff = Arc::clone(&staff);
+            move || Typist {
+                permissions: Arc::clone(&staff),
+                ..alex_on("lobby")
+            }
+        },
+        |target: &str| format!("Moving you to {target}..."),
+        |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
+        |typist: &Typist, answer: Answer| format!("{} did {answer:?}", typist.name),
+    );
+    assert_eq!(hook("glist").as_deref(), Some("Alex did Glist(None)"));
+    // Without the node the staff closure is never reached.
+    let hook_no = super::hook(
+        config,
+        || alex_on("lobby"),
+        |_: &str| String::new(),
+        |_: Role, _: &Typist| String::new(),
+        |_: &Typist, _: Answer| unreachable!("not allowed"),
+    );
+    assert_eq!(
+        hook_no("glist").as_deref(),
+        Some("You do not have permission to use /glist.")
+    );
 }

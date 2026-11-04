@@ -66,6 +66,8 @@ pub struct Sessions {
     pub statuses: Arc<Statuses>,
     /// The bans and the whitelist.
     pub access: crate::access::Lists,
+    /// The groups of permissions and the players in them.
+    pub permissions: Arc<crate::permissions::Lists>,
 }
 
 /// What placement reads, held apart from [`Sessions`] so that a command typed in
@@ -79,9 +81,47 @@ pub struct Shared {
     pub balancer: Arc<Balancer>,
     pub statuses: Arc<Statuses>,
     pub metrics: Arc<Metrics>,
+    /// What a player is allowed to type in game.
+    pub permissions: Arc<crate::permissions::Lists>,
 }
 
 impl Shared {
+    /// The players being relayed, in the order they joined.
+    pub fn players(&self) -> Vec<Player> {
+        let mut players: Vec<Player> = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(Entry::player)
+            .collect();
+        players.sort_by_key(|p| p.joined);
+        players
+    }
+
+    /// The sessions being relayed, with the players, in the order they joined.
+    pub fn sessions(&self) -> Vec<(Player, Handle)> {
+        let mut sessions: Vec<(Player, Handle)> = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|e| (e.player(), e.handle.clone()))
+            .collect();
+        sessions.sort_by_key(|(p, _)| p.joined);
+        sessions
+    }
+
+    /// The player called `name`, whatever its case, and the handle of their session.
+    pub fn session(&self, name: &str) -> Option<(Player, Handle)> {
+        self.open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|e| e.player.name.eq_ignore_ascii_case(name))
+            .map(|e| (e.player(), e.handle.clone()))
+    }
+
     /// How many players are on each backend now; see [`Sessions::counts`].
     pub fn counts(&self) -> HashMap<String, usize> {
         let backends: Vec<String> = self
@@ -295,6 +335,7 @@ impl Sessions {
             balancer: Arc::clone(&self.balancer),
             statuses: Arc::clone(&self.statuses),
             metrics: Arc::clone(self.metrics()),
+            permissions: Arc::clone(&self.permissions),
         }
     }
 
@@ -616,14 +657,17 @@ fn commands_hook(
     peer: SocketAddr,
 ) -> Arc<meridian_net::relay::CommandHook> {
     let config = Arc::new(config.clone());
+    let shared = sessions.shared();
     let typist = {
-        let handle = handle.clone();
+        let (handle, permissions) = (handle.clone(), Arc::clone(&shared.permissions));
         move || commands::Typist {
             auth,
             backend: handle.backend(),
+            name: handle.profile().name.clone(),
+            uuid: handle.profile().uuid,
+            permissions: Arc::new(permissions.snapshot()),
         }
     };
-    let shared = sessions.shared();
     // A move to a backend the player named: with balancing on, it may pass the soft
     // cap, never the hard cap, and a place is kept on it until the switch ends.
     let mover = {
@@ -645,6 +689,16 @@ fn commands_hook(
             );
             format!("Moving you to {target}...")
         }
+    };
+    // `/send`, `/glist` and `/alert`, for the players who have the permission.
+    let staff = {
+        let context = crate::staff::Context {
+            config: Arc::clone(&config),
+            shared: shared.clone(),
+            switcher: Arc::clone(&sessions.switcher),
+            handle: handle.clone(),
+        };
+        move |typist: &commands::Typist, answer| crate::staff::run(&context, typist, answer)
     };
     // `/hub` and `/play` with balancing on: the lobby or game server the balancer finds
     // for the player.
@@ -676,7 +730,7 @@ fn commands_hook(
             }
         }
     };
-    commands::hook(config, typist, mover, placer)
+    commands::hook(config, typist, mover, placer, staff)
 }
 
 /// What a player is told when none of the backends tried answers.
@@ -744,6 +798,7 @@ pub(crate) mod tests {
 
     mod access;
     mod balancing;
+    mod staff;
 
     const SECRET: &str = "a shared secret";
 

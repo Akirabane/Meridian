@@ -7,9 +7,10 @@
 //! proxy's own extensions can add theirs later.
 use crate::access;
 use crate::log::{debug, info, warning};
+use crate::permissions;
 use crate::session::{Player, hyphenated};
+use crate::staff;
 use crate::state::Proxy;
-use crate::switching;
 use meridian_config::Config;
 use std::io::BufRead;
 use std::sync::Arc;
@@ -113,6 +114,18 @@ impl Commands {
                 "whitelist <add|remove> <name|uuid> | list | on | off",
                 "lets in only the players of the whitelist while it is on",
                 access::commands::whitelist,
+            ),
+            command(
+                "alert",
+                "alert [server:<name>] <message>",
+                "shows a message in the chat of the players online, or of those on one server",
+                alert,
+            ),
+            command(
+                "perm",
+                "perm list [player] | check <player> <node> | grant|revoke <player> <group> | group <group> create|delete|allow <node>|deny <node>|unset <node>|inherit <group>|uninherit <group>",
+                "manages the permission groups and the players in them (docs/OPERATING.md, section 5.9)",
+                permissions::commands::perm,
             ),
             command(
                 "reload",
@@ -420,41 +433,36 @@ fn move_players(proxy: &Proxy, who: &str, server: &str) -> Reply {
             format!("already on {}", backend.name)
         });
     }
-    let mut lines = Vec::new();
-    let mut failed = 0;
-    for player in &moving {
-        let Some((player, handle)) = proxy.sessions.session(&player.name) else {
-            lines.push(format!("{} left before the switch", player.name));
-            continue;
-        };
-        match switching::switch(
-            &config,
-            &proxy.sessions.switcher,
-            &handle,
-            &player.name,
-            player.address.ip(),
-            &backend.name,
-        ) {
-            Ok(moved) => {
-                let line = moved.describe(&player.name);
-                info!("{line}");
-                handle.tell(&format!("You are now on {}.", moved.to));
-                lines.push(line);
-                // Already in the log; the console says it too.
-                lines.extend(moved.alert);
-            }
-            Err(why) => {
-                warning!("{why}");
-                handle.tell(&format!("Could not move you to {}. {why}", backend.name));
-                lines.push(why);
-                failed += 1;
-            }
-        }
-    }
+    let moving: Vec<Player> = moving.into_iter().cloned().collect();
+    let (mut lines, failed) = staff::move_all(
+        &config,
+        &proxy.sessions.shared(),
+        &proxy.sessions.switcher,
+        &moving,
+        &backend.name,
+    );
     match (moving.len(), failed) {
         (1, 1) => Err(lines.remove(0)),
         _ => Ok(lines),
     }
+}
+
+fn alert(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
+    let (server, message) = match args {
+        [first, message @ ..] if first.starts_with("server:") => (Some(&first[7..]), message),
+        message => (None, message),
+    };
+    if message.is_empty() || server.is_some_and(str::is_empty) {
+        return Err(usage("alert", commands));
+    }
+    let message = message.join(" ");
+    let told = staff::alert(&proxy.sessions.shared(), &proxy.config(), server, &message)?;
+    let line = match told {
+        1 => "alert shown to 1 player".to_owned(),
+        n => format!("alert shown to {n} players"),
+    };
+    info!("{line}: {message}");
+    Ok(vec![line])
 }
 
 fn kick(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
@@ -506,7 +514,20 @@ pub fn reload_file(proxy: &Proxy) -> Reply {
     let lists = access::read(file.as_deref()).map_err(|e| {
         format!("not reloaded, the bans and the whitelist are unchanged in use: {e}")
     })?;
+    let perm_file = new.permissions.file.clone();
+    let perms = permissions::read(perm_file.as_deref())
+        .map_err(|e| format!("not reloaded, the permissions are unchanged in use: {e}"))?;
     let mut lines = apply(proxy, new);
+    let mut more = Vec::new();
+    if let Some(perms) = perms {
+        more.extend(permissions::commands::reloaded(proxy, perms, perm_file));
+    }
+    if !more.is_empty() {
+        if lines.len() == 1 {
+            lines = vec!["reloaded:".to_owned()];
+        }
+        lines.extend(more);
+    }
     if let Some(lists) = lists {
         let more = access::commands::reloaded(proxy, lists, file);
         if !more.is_empty() {
