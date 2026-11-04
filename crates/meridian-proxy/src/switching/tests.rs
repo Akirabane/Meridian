@@ -133,6 +133,7 @@ fn sidecar(backend: &str, port: u16) -> Sidecar {
         backend: backend.into(),
         address: format!("127.0.0.1:{port}"),
         secret_file: format!("{backend}.key").into(),
+        notices: false,
     }
 }
 

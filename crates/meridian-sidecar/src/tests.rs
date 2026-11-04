@@ -3,6 +3,7 @@
 use crate::Error;
 use crate::client::SidecarClient;
 use crate::endpoint::{Endpoint, fake};
+use crate::management::Notices;
 use crate::request::Outcome;
 use crate::server::{Settings, serve};
 use crate::wire::{self, Direction};
@@ -35,6 +36,14 @@ struct Running {
 
 impl Running {
     fn start(answer: fake::Answer, endpoint_timeout: Duration) -> Self {
+        Self::start_with(answer, endpoint_timeout, None)
+    }
+
+    fn start_with(
+        answer: fake::Answer,
+        endpoint_timeout: Duration,
+        notices: Option<Arc<Notices>>,
+    ) -> Self {
         let (endpoint, seen, endpoint_thread) = fake::start(TOKEN, answer);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -45,6 +54,7 @@ impl Running {
             endpoint_timeout,
             idle_timeout: WAIT,
             insecure_remote: false,
+            notices,
         });
         let stop = Arc::new(AtomicBool::new(false));
         let sidecar = {
@@ -889,4 +899,78 @@ fn a_status_needs_the_secret_like_every_request() {
     let mut client = running.client(b"another secret that is long enough");
     assert!(client.status().is_err());
     assert!(running.seen.lock().unwrap().is_empty());
+}
+
+const STOPPING: &str = r#"{"jsonrpc":"2.0","method":"minecraft:notification/server/stopping"}"#;
+
+/// A sidecar that does not listen to the management protocol says so, and never asks the
+/// backend: the proxy can tell a sidecar with no notices from one that heard none.
+#[test]
+fn a_sidecar_that_does_not_listen_says_so_and_asks_the_backend_nothing() {
+    let running = Running::start(echo(), WAIT);
+    let mut client = running.client(SECRET);
+    let report = client.notices(None, Duration::from_millis(50)).unwrap();
+    assert!(!report.enabled && !report.watching);
+    assert_eq!((report.last, report.notices.len()), (0, 0));
+    assert!(running.seen.lock().unwrap().is_empty());
+}
+
+/// A client asks where the count stands, then for what comes after: the notice that the
+/// sidecar hears while the request waits is in its answer, on the signed wire.
+#[test]
+fn the_notices_the_sidecar_hears_reach_the_proxy_after_the_number_it_has() {
+    let notices = Arc::new(Notices::default());
+    notices.set_watching(true);
+    let running = Running::start_with(echo(), WAIT, Some(Arc::clone(&notices)));
+    let mut client = running.client(SECRET);
+    let start = client.notices(None, Duration::ZERO).unwrap();
+    assert!(start.enabled && start.watching);
+    assert_eq!((start.last, start.notices.len()), (0, 0));
+    // Nothing yet: the answer comes after the wait, empty.
+    let begun = std::time::Instant::now();
+    let none = client.notices(Some(0), Duration::from_millis(200)).unwrap();
+    assert!(begun.elapsed() >= Duration::from_millis(190));
+    assert!(none.notices.is_empty());
+    // One that comes during the wait ends it.
+    let hearing = {
+        let notices = Arc::clone(&notices);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            notices.offer(STOPPING);
+        })
+    };
+    let heard = client.notices(Some(0), Duration::from_secs(5)).unwrap();
+    hearing.join().unwrap();
+    assert_eq!(heard.notices.len(), 1);
+    assert_eq!(
+        (heard.notices[0].seq, heard.notices[0].line.as_str()),
+        (1, STOPPING)
+    );
+    // Asked again with the number it has, it hears nothing more.
+    let again = client.notices(Some(1), Duration::ZERO).unwrap();
+    assert_eq!((again.last, again.notices.len()), (1, 0));
+    // It never reached the backend.
+    assert!(running.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_notices_request_takes_no_other_field() {
+    use crate::request::Request;
+    let ok: Request = serde_json::from_str(r#"{"op":"notices","after":3,"wait_ms":500}"#).unwrap();
+    assert_eq!(
+        ok,
+        Request::Notices {
+            after: Some(3),
+            wait_ms: Some(500)
+        }
+    );
+    assert!(serde_json::from_str::<Request>(r#"{"op":"notices","uuid":"x"}"#).is_err());
+    assert_eq!(
+        serde_json::to_string(&Request::Notices {
+            after: None,
+            wait_ms: None
+        })
+        .unwrap(),
+        r#"{"op":"notices"}"#
+    );
 }

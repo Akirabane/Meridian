@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 /// How the proxy came to know that a backend is going down.
-// Nothing sends this yet: the sidecar or the panel will (docs/RESTART.md).
+// `Panel` is not sent by anything yet (docs/RESTART.md).
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cause {
@@ -157,7 +157,6 @@ impl Detector {
     /// A message of the backend's management protocol, one JSON-RPC line. `server/stopping` is
     /// [`Detector::announce`]; `server/started` ends the restart. Anything else is not
     /// for the detector, and `false`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn handle_notification(&self, backend: &str, line: &str, now: Instant) -> bool {
         match notice(line) {
             Some(Notice::Stopping) => {
@@ -251,8 +250,6 @@ impl Detector {
 }
 
 /// What a notification of the management protocol says of the server's life.
-// Nothing sends this yet: the sidecar or the panel will (docs/RESTART.md).
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notice {
     /// `server/stopping`: the shutdown began.
@@ -263,7 +260,6 @@ pub enum Notice {
 
 /// The notice in one JSON-RPC message of the management protocol, if it is one. The
 /// method is `minecraft:notification/server/stopping` there; the prefix is optional here.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn notice(line: &str) -> Option<Notice> {
     let message: serde_json::Value = serde_json::from_str(line).ok()?;
     let method = message.get("method")?.as_str()?;

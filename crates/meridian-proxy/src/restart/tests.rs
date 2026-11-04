@@ -209,6 +209,7 @@ fn config() -> Config {
         backend: backend.into(),
         address: format!("127.0.0.1:{port}"),
         secret_file: PathBuf::from("unused"),
+        notices: false,
     };
     let server = |backend: &str| BalancedServer {
         backend: backend.into(),

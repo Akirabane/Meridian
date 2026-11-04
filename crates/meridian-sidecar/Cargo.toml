@@ -12,6 +12,9 @@ name = "meridian-sidecar"
 path = "src/main.rs"
 
 [dependencies]
+# The management protocol is served over TLS by default (rustls and ring are in the
+# workspace already, through meridian-net).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # The challenge each connection starts with.
 getrandom = "0.3"
 serde = { version = "1.0.200", features = ["derive"] }

@@ -17,6 +17,10 @@ Options:
   --listen ADDR          where the proxy connects (default 127.0.0.1:25580)
   --secret-file PATH     the secret shared with the proxy (or MERIDIAN_SIDECAR_SECRET)
   --endpoint-timeout-ms N  how long the server has to answer (default 5000)
+  --management-properties PATH
+                         the backend's server.properties: the sidecar then listens to
+                         the management protocol it sets up (on this machine only) and
+                         tells the proxy when the server announces its stop
   --allow-remote         listen on an address other machines can reach
   --insecure-remote      with --allow-remote, accept it without TLS: player
                          records then cross the network in clear
@@ -39,6 +43,7 @@ pub struct Options {
     pub listen: SocketAddr,
     pub endpoint_file: PathBuf,
     pub secret_file: Option<PathBuf>,
+    pub management_properties: Option<PathBuf>,
     pub endpoint_timeout: Duration,
     pub allow_remote: bool,
     pub insecure_remote: bool,
@@ -49,6 +54,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     let mut listen: SocketAddr = "127.0.0.1:25580".parse().expect("a valid default");
     let mut endpoint_file = None;
     let mut secret_file = None;
+    let mut management_properties = None;
     let mut endpoint_timeout = Duration::from_millis(5_000);
     let (mut allow_remote, mut insecure_remote) = (false, false);
     let mut args = args.into_iter();
@@ -72,6 +78,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             }
             "--endpoint-file" => endpoint_file = Some(PathBuf::from(value("--endpoint-file")?)),
             "--secret-file" => secret_file = Some(PathBuf::from(value("--secret-file")?)),
+            "--management-properties" => {
+                management_properties = Some(PathBuf::from(value("--management-properties")?));
+            }
             "--endpoint-timeout-ms" => {
                 let text = value("--endpoint-timeout-ms")?;
                 let ms: u64 =
@@ -90,6 +99,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         listen,
         endpoint_file,
         secret_file,
+        management_properties,
         endpoint_timeout,
         allow_remote,
         insecure_remote,
@@ -169,6 +179,32 @@ mod tests {
         );
         assert!(run(&["--endpoint-file", "e", "--port", "1"]).is_err());
         assert_eq!(parse([OsString::from("--help")]), Ok(Command::Help));
+    }
+
+    #[test]
+    fn the_management_properties_are_off_unless_given() {
+        assert_eq!(
+            run(&["--endpoint-file", "e"])
+                .unwrap()
+                .management_properties,
+            None
+        );
+        let options = run(&[
+            "--endpoint-file",
+            "e",
+            "--management-properties",
+            "srv/server.properties",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.management_properties,
+            Some(PathBuf::from("srv/server.properties"))
+        );
+        assert!(
+            run(&["--endpoint-file", "e", "--management-properties"])
+                .unwrap_err()
+                .contains("needs a value")
+        );
     }
 
     #[test]

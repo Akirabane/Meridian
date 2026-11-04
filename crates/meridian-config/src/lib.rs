@@ -403,6 +403,8 @@ struct FileBackend {
     address: String,
     sidecar: Option<String>,
     sidecar_secret_file: Option<PathBuf>,
+    #[serde(default)]
+    sidecar_notices: bool,
     role: Option<Role>,
     soft_cap: Option<u32>,
     hard_cap: Option<u32>,
@@ -440,12 +442,16 @@ impl Config {
         };
         let mut sidecars = Vec::new();
         for b in &file.backends {
+            if b.sidecar_notices && b.sidecar.is_none() {
+                return Err(ConfigError::NoticesWithoutSidecar(b.name.clone()));
+            }
             match (&b.sidecar, &b.sidecar_secret_file) {
                 (None, None) => {}
                 (Some(address), Some(secret_file)) => sidecars.push(Sidecar {
                     backend: b.name.clone(),
                     address: address.clone(),
                     secret_file: sidecar::resolve(folder, secret_file),
+                    notices: b.sidecar_notices,
                 }),
                 (Some(_), None) => {
                     return Err(ConfigError::SidecarWithoutSecret(b.name.clone()));

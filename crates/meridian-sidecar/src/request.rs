@@ -13,6 +13,7 @@
 //! | release | `player-release <uuid> <handover> moved [announce]` or `player-release <uuid> <handover> abort` |
 //! | drop | `player-drop <uuid> [handover]` |
 //! | status | `status` (a placeholder: see [`STATUS_LINE`]) |
+//! | notices | none: the sidecar answers it from the notices of the backend's management protocol it heard |
 //!
 //! `<handover>` is the id that a `player-export` with `freeze` puts in its record
 //! (32 hexadecimal digits). The import names it through the record it carries; the
@@ -94,6 +95,17 @@ pub enum Request {
     /// and whether it accepts transfers. Read only, and it names no player.
     // A struct variant, so that a field it does not have is refused like for the others.
     Status {},
+    /// The notices of the backend's management protocol (`server/stopping`,
+    /// `server/started`), which the sidecar hears itself: the request never reaches the
+    /// backend's control endpoint. Without `after` the answer holds none and only says
+    /// where the count stands; with it, the notices numbered above it, after waiting up
+    /// to `wait_ms` for one if there are none.
+    Notices {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u64>,
+    },
 }
 
 /// The line a [`Request::Status`] becomes on the backend's control endpoint. It is a
@@ -270,7 +282,7 @@ impl Request {
             | Request::Release { uuid, .. }
             | Request::Confirm { uuid, .. }
             | Request::Drop { uuid, .. } => Some(uuid),
-            Request::Status {} => None,
+            Request::Status {} | Request::Notices { .. } => None,
         }
     }
 
@@ -394,6 +406,92 @@ impl Request {
             Request::Drop { handover: None, .. } => format!("player-drop {uuid}"),
             Request::Drop { .. } => format!("player-drop {uuid} {handover}"),
             Request::Status {} => STATUS_LINE.to_owned(),
+            Request::Notices { .. } => {
+                return Err(
+                    "notices are heard by the sidecar and never sent to the backend".into(),
+                );
+            }
+        })
+    }
+}
+
+/// One notice of the backend's management protocol, as the sidecar passes it on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoticeHeard {
+    /// Its number, from 1 up, in the order the sidecar heard them.
+    pub seq: u64,
+    /// The JSON-RPC message, as the backend sent it.
+    pub line: String,
+    /// How long ago the sidecar heard it.
+    pub age: std::time::Duration,
+}
+
+/// What the sidecar answers to [`Request::Notices`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NoticeReport {
+    /// Whether the sidecar listens to the management protocol at all: it does not
+    /// unless it was given the backend's `server.properties`.
+    pub enabled: bool,
+    /// Whether the connection to the backend's management protocol is up now.
+    pub watching: bool,
+    /// The number of the last notice there has been, 0 if none. It starts again from 0
+    /// when the sidecar does.
+    pub last: u64,
+    pub notices: Vec<NoticeHeard>,
+}
+
+impl NoticeReport {
+    /// The answer as the sidecar writes it.
+    pub fn to_value(&self) -> Value {
+        serde_json::json!({
+            "enabled": self.enabled,
+            "watching": self.watching,
+            "last": self.last,
+            "notices": self.notices.iter().map(|n| serde_json::json!({
+                "seq": n.seq,
+                "line": n.line,
+                "age_ms": u64::try_from(n.age.as_millis()).unwrap_or(u64::MAX),
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Reads the answer.
+    pub fn from_value(answer: &Value) -> Result<NoticeReport, String> {
+        let Value::Object(map) = answer else {
+            return Err(format!("the notices are not a JSON object: {answer}"));
+        };
+        let flag = |key: &str| {
+            map.get(key)
+                .and_then(Value::as_bool)
+                .ok_or_else(|| format!("{key} is not true or false"))
+        };
+        let last = map
+            .get("last")
+            .and_then(Value::as_u64)
+            .ok_or("last is not a whole number")?;
+        let mut notices = Vec::new();
+        for item in map
+            .get("notices")
+            .and_then(Value::as_array)
+            .ok_or("notices is not a list")?
+        {
+            let seq = item.get("seq").and_then(Value::as_u64);
+            let line = item.get("line").and_then(Value::as_str);
+            let age = item.get("age_ms").and_then(Value::as_u64);
+            let (Some(seq), Some(line), Some(age)) = (seq, line, age) else {
+                return Err(format!("a notice is not usable: {item}"));
+            };
+            notices.push(NoticeHeard {
+                seq,
+                line: line.to_owned(),
+                age: std::time::Duration::from_millis(age),
+            });
+        }
+        Ok(NoticeReport {
+            enabled: flag("enabled")?,
+            watching: flag("watching")?,
+            last,
+            notices,
         })
     }
 }

@@ -64,6 +64,7 @@ fn config() -> Config {
         backend: backend.into(),
         address: format!("127.0.0.1:{port}"),
         secret_file: PathBuf::from("unused"),
+        notices: false,
     };
     let server = |backend: &str| BalancedServer {
         backend: backend.into(),
@@ -244,6 +245,7 @@ impl Running {
             endpoint_timeout: Duration::from_secs(3),
             idle_timeout: Duration::from_secs(3),
             insecure_remote: false,
+            notices: None,
         });
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
@@ -263,6 +265,7 @@ impl Running {
                 backend: "lobby".into(),
                 address,
                 secret_file,
+                notices: false,
             },
             folder,
             stop,
@@ -296,6 +299,7 @@ fn a_sidecar_that_cannot_be_reached_or_read_is_an_error() {
     let running = Running::start("{}");
     let wrong_file = Sidecar {
         secret_file: running.folder.join("missing.key"),
+        notices: false,
         ..running.sidecar.clone()
     };
     assert!(ask_sidecar(&wrong_file, Duration::from_secs(1)).is_err());
@@ -306,6 +310,7 @@ fn a_sidecar_that_cannot_be_reached_or_read_is_an_error() {
     .unwrap();
     let other = Sidecar {
         secret_file: running.folder.join("other.key"),
+        notices: false,
         ..running.sidecar.clone()
     };
     assert!(ask_sidecar(&other, Duration::from_secs(1)).is_err());

@@ -33,9 +33,11 @@ Read this before you plan a deployment.
   it names. Check Horizon's releases before relying on it. Without
   those servers the proxy still relays players; a switch answers which step failed and the
   player stays where they are.
-- **A planned restart needs the panel, or an operator typing `drain`.** The proxy notices an
-  unplanned stop by the silence of the server's sidecar, which is after the server has gone.
-  Horizon's own `server/stopping` notice is parsed but nothing feeds it yet (section 6).
+- **A planned restart needs the panel, an operator typing `drain`, or the server's own announcement.**
+  Without them the proxy notices an unplanned stop by the silence of the server's sidecar, which is
+  after the server has gone. Horizon's own `server/stopping` notice is fed to the proxy when the
+  sidecar is started with `--management-properties` and the backend has `sidecar-notices = true`
+  (off by default; section 6).
 
 ## 1. What you run
 
@@ -126,7 +128,9 @@ meridian-sidecar --endpoint-file <server folder>/.horizon/engine.json \
 
 The options are `--endpoint-file` (required), `--listen` (default `127.0.0.1:25580`),
 `--secret-file` (or the `MERIDIAN_SIDECAR_SECRET` environment variable), and
-`--endpoint-timeout-ms` (default 5000). The secret is never an argument, because other users
+`--endpoint-timeout-ms` (default 5000). With `--management-properties <server folder>/server.properties` the sidecar also listens to
+the server's management protocol and tells the proxy when the server announces its stop (section 6;
+it is off without the option). The secret is never an argument, because other users
 of the machine can read a process's arguments.
 
 The secret is a file of at least 16 bytes, **one per sidecar** (the proxy refuses two sidecars
@@ -300,16 +304,17 @@ machine that is not trusted and check, with `required`, that the connection is c
 
 ## 6. Restarting a server without losing its players
 
-A server that stops takes its players with it. There are three ways the proxy learns of it
+A server that stops takes its players with it. There are four ways the proxy learns of it
 ([RESTART.md](RESTART.md) has the design):
 
 | How | When | Needs |
 | --- | --- | --- |
 | The operator types `drain <server> --move`, wait, then stops the server | Before the stop. Planned | A console, servers that take transfers |
 | The panel does it: `[drain-before-stop]` in the bench file, with `move-players = true` | Before the stop. Planned | The panel starts and stops the server |
+| The server announces its own stop (`server/stopping` of its management protocol), heard by its sidecar | Before the stop. Planned or not, as long as the server says it | `--management-properties` on the sidecar, `management-server-enabled=true` on the server, `sidecar-notices = true` on the backend, a role and `[balancing] enabled` |
 | The sidecar of the server does not answer for `silent-rounds` readings in a row | After the server is down | `[balancing] enabled` and a sidecar |
 
-In all three cases the server is marked draining at once, so no new player is sent to it, and
+In all four cases the server is marked draining at once, so no new player is sent to it, and
 it is offered again when it is back. The silence detection only drains: it does not move
 anybody unless the evacuation is on.
 
@@ -512,7 +517,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
 | Player management | `kick`, `max-players`, `on-duplicate`, the server's own whitelist and bans on each server | A ban list, permissions or a player database in the proxy (permissions are planned) |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
-| Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence | Horizon's `server/stopping` notice fed to the detector (needs the sidecar to follow the management protocol) |
+| Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence | A recorded run of Horizon's `server/stopping` notice, which the sidecar now hears and the proxy feeds to the detector (opt in: `--management-properties`, `sidecar-notices`) |
 | Report of a server's state | The sidecar's `status` request and the proxy's reading of `players`, `capacity`, `accepts_transfers` | A Horizon command that answers it. Today balancing counts the proxy's own sessions |
 
 ## 12. Known limits
@@ -527,8 +532,11 @@ switch, and keep the proxy's log and both servers' logs.
 - A server that stops without warning disconnects its players. They are not sent to the
   fallback list, which applies at login only. Only a planned restart moves them.
 - Horizon's `server/stopping` notice and the panel's announcement are the signals for an early
-  warning; the first is not fed (it needs the sidecar to listen to the management protocol),
-  and the second needs the panel to supervise the server.
+  warning. The first is fed only when the sidecar is given `--management-properties` and the backend
+  has `sidecar-notices = true`; the sidecar reads the management protocol on its own machine and
+  does not verify the self-signed certificate Horizon makes ([RESTART.md](RESTART.md), "How the
+  announcement reaches the proxy"). It has not been tried against a real Horizon in a recorded run.
+  The second needs the panel to supervise the server.
 - The server's own report of its state (`accepts_transfers`, `players`, `capacity`) is not
   defined by Horizon yet; balancing counts the proxy's own sessions.
 - The sidecar has no TLS, no encryption, and the proxy has no way to check one other than a
