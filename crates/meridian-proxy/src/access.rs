@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 pub mod commands;
+pub mod sync;
 
 /// The lists in force and the file they are written to.
 #[derive(Default)]

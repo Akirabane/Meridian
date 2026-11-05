@@ -31,6 +31,8 @@ pub struct Proxy {
     pub throttle: Throttle,
     /// Which backends are going down (docs/RESTART.md).
     pub restarts: Detector,
+    /// The bans and whitelist changes still to be told to the servers (`[access.sync]`).
+    pub access_sync: Arc<crate::access::sync::Outbox>,
 }
 
 impl Proxy {
@@ -58,6 +60,7 @@ impl Proxy {
             probe: Arc::new(tcp_probe),
             throttle: Throttle::default(),
             restarts,
+            access_sync: Arc::default(),
         }
     }
 
