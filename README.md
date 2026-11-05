@@ -309,6 +309,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   measurements and their limits (see Measures).
 - [docs/TESTING-FORK.md](docs/TESTING-FORK.md): the procedure for trying the seamless switch
   on real servers with the Horizon fork.
+- [docs/VALIDATION.md](docs/VALIDATION.md): running the ban sync, the evacuation and the stop
+  announcement against real Horizon servers, step by step, and what to expect.
 - [docs/PARITY.md](docs/PARITY.md): what Velocity and BungeeCord do, function by function, where
   Meridian stands, and what to build next.
 - [docs/BUILD.md](docs/BUILD.md): building and testing.
