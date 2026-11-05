@@ -209,4 +209,59 @@ impl Config {
         }
         Ok(())
     }
+
+    /// What the operator should know of the balancing settings, one line each. The file is
+    /// used all the same: nothing here is wrong in itself.
+    ///
+    /// A report is believed for `state-max-age-seconds`. A round of readings starts every
+    /// `probe-interval-seconds`, or at once after a round that lasted longer, and a server that
+    /// does not answer holds the round for `sidecar-timeout-ms`, then, with `tie-break =
+    /// "ping"`, for `connect-timeout-ms`. A server that answers is read at the start of one
+    /// round and as late as `sidecar-timeout-ms` into the next. When that gap is longer than
+    /// the age a report is believed for, one silent server makes the reports of all the others
+    /// too old in turn, and they are not offered to new players.
+    pub fn balancing_warnings(&self) -> Vec<String> {
+        let read = self
+            .sidecars
+            .iter()
+            .any(|s| self.balanced(&s.backend).is_some());
+        if !self.balancing.enabled || !read {
+            return Vec::new();
+        }
+        let ping = self.balancing.tie_break == TieBreak::Ping;
+        let held =
+            self.sidecar_timeout_ms
+                .saturating_add(if ping { self.connect_timeout_ms } else { 0 });
+        let interval = self.balancing.probe_interval_seconds.saturating_mul(1_000);
+        let gap = interval.max(held).saturating_add(self.sidecar_timeout_ms);
+        let age = self.balancing.state_max_age_seconds.saturating_mul(1_000);
+        if age >= gap {
+            return Vec::new();
+        }
+        let lower = if ping {
+            "sidecar-timeout-ms or connect-timeout-ms"
+        } else {
+            "sidecar-timeout-ms"
+        };
+        vec![format!(
+            "state-max-age-seconds is {} s, but up to {} ms can pass between two readings of a \
+             server that answers, while another does not (probe-interval-seconds {} s, \
+             sidecar-timeout-ms {} ms{}): the reports of the servers that answer would then be \
+             too old in turn, and they would not be offered to new players. Raise \
+             state-max-age-seconds to {} or more, or lower {lower}",
+            self.balancing.state_max_age_seconds,
+            gap,
+            self.balancing.probe_interval_seconds,
+            self.sidecar_timeout_ms,
+            if ping {
+                format!(
+                    ", connect-timeout-ms {} ms for tie-break = \"ping\"",
+                    self.connect_timeout_ms
+                )
+            } else {
+                String::new()
+            },
+            gap.div_ceil(1_000),
+        )]
+    }
 }

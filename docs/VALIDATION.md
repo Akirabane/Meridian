@@ -180,7 +180,7 @@ happens with nowhere to go (B2). `[restart] evacuate = true` for B1 to B3.
 | --- | --- | --- | --- | --- |
 | B1 | Clean stop, player moved first | Log `vt_b1` in with `--seconds 60` (it lands on `lobby` or `game1`); note the time; in the panel, stop that server (the panel types `stop` at its console) | The proxy logs `backend "<x>" is going down: 1 moved, 0 stayed` and `vt_b1 moved from <x> to <y> in N ms`, with no `lost backend` line. The client ends `RESULT clean` with `moves=1`. Note: stop typed to the announcement, the move (N), and whether the move finished before the server's card went down (it should) | **Not as expected: the move lost the race; the fallback took the player.** Stop typed at 19:35:13.700; `server/stopping` heard and the proxy logged `going down (it announced its stop)` at 13.762 (74 ms after the stop); the server disconnected the player (`multiplayer.disconnect.server_shutdown`) at 13.840, 78 ms after the announcement; the proxy started its move at 13.841 and it failed (`check: the player is already on lobby`): `0 moved, 1 stayed`. The fallback (#84) had already moved the player to lobby. The client ended `RESULT clean` with `moves=1` (no visible cut). See section 6, item 7. |
 | B2 | Nowhere to go | Log `vt_b2` in; `proxy: switch vt_b2 game2`; stop `game2` | `vt_b2 stays on game2: no other server of role game has room`; when the server drops them the fallback (#84) moves them to a lobby | As expected: `vt_b2 stays on game2: no other server of role game has room`; the server dropped them 92 ms after the announcement and the fallback put them on lobby; client `RESULT clean`, `moves=1`. |
-| B3 | Kill, no announcement (control) | `proxy: switch vt_b3 game2`; end game2's supervisor process in the task manager | The fallback moves the player; the detector finds the silence after `silent-rounds` (3) rounds of 3 s; nothing is announced | Fallback as expected: 490 ms after the kill, `vt_b3` was on game1 (`lost backend "game2" (the connection was lost ...)`). Nothing was announced. The detector decided 18.7 s after the kill (`it stopped answering`), later than the 9 s that 3 rounds of 3 s suggest. |
+| B3 | Kill, no announcement (control) | `proxy: switch vt_b3 game2`; end game2's supervisor process in the task manager | The fallback moves the player; the detector finds the silence after `silent-rounds` (3) rounds of 3 s; nothing is announced | Fallback as expected: 490 ms after the kill, `vt_b3` was on game1 (`lost backend "game2" (the connection was lost ...)`). Nothing was announced. The detector decided 18.7 s after the kill (`it stopped answering`), later than the 9 s that 3 rounds of 3 s suggest: the 3 s were counted from the end of each round, and with game2 dead each round lasted about 4.1 s (item 7 below). |
 | B4 | `evacuate = false` | `evacuate = false`, `reload`; log a player in; stop their server | `going down (it announced its stop): its players stay on it`; the fallback moves the player | Not run with a player. C2 and C3 ran with `evacuate = false` and no player: `going down (it announced its stop): its players stay on it ([restart] evacuate is off)`. |
 | after each | The server returns | Start it in the panel | Card online, the proxy logs `backend "<x>" is back`, `proxy: servers` no longer says draining | As expected: card online again after 2.3 to 4.0 s, `backend "<x>" is back` after 2.7 to 4.6 s, `servers` offers it again, not draining. |
 
@@ -280,7 +280,7 @@ open question of #86 is answered: a real Horizon takes `bans/add` with a name al
 run, from the retry schedule), and neither the console nor a login waits. What a server holds
 while the proxy was away is read at the next connection and merged, and nothing local is removed.
 `server/stopping` and `server/started` reach the proxy through the sidecar. A kill is caught by
-the fallback in 490 ms and by the detector's silence in 18.7 s.
+the fallback in 490 ms and by the detector's silence in 18.7 s (about 12.7 s with the fix of item 7).
 
 **What does not work, or not as written.**
 
@@ -318,7 +318,24 @@ the fallback in 490 ms and by the detector's silence in 18.7 s.
    lower-case name).
 6. **The CLI.** `horizon-server ban ... --dir` needs a running server (3.4).
 7. **The detector's silence** took 18.7 s from the kill to its decision (B3), not the 9 s that
-   3 rounds of 3 s suggest. Not investigated.
+   3 rounds of 3 s suggest. Proxy defect, fixed on `fix/probe-period`. The poller waited the
+   interval after each round had ended, not from its start, so each period was the interval plus
+   the round. With game2 dead, a round lasted about 4.1 s on Windows, where a connection to a
+   port nobody listens on is refused only after about 2 s (2065 ms measured): about 2.07 s for
+   the reading (the sidecar still found the endpoint file of the killed server and was refused
+   on its port), then about 2.07 s for the connection measure of `tie-break = "ping"` to
+   127.0.0.1:25603. From the kill: 2.38 s to the start of the first silent round, 2.07 s for its
+   reading, then 2 × (2.07 + 2.07 + 3) s to the end of the third reading, 18.7 s in all. The
+   proxy's log agrees: the kill at 19:38:07.509 (490 ms before the fallback's line),
+   the first `cannot read the state of backend "game2"` at 11.955, the decision at 26.217, which
+   is 14.26 s or two periods of 7.13 s later. Rounds now start every interval from the start of
+   the last one, or at once when a round lasted longer: on this bench a round with game2 dead
+   (4.14 s) outlasts the 3 s, so the rounds would have followed each other and decided in about
+   2.38 + 2.07 + 2 × 4.14 = 12.7 s. The same cause
+   made a round held by a server that does not answer at all (5 s for its reading and 5 s for its
+   measure by default) put 20 s between two readings of every other server, more than the 15 s a
+   report is believed: the configuration check now warns when `state-max-age-seconds` is shorter
+   than the longest gap the settings allow.
 
 **Not run.** B4 with a player on the server (`evacuate = false` was only seen with nobody on it, in
 C); a ban of a name Horizon cannot resolve (2.5: the proxy refuses a name over 16 characters before

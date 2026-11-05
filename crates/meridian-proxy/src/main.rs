@@ -73,10 +73,16 @@ fn main() -> ExitCode {
     }
 }
 
-/// Loads the configuration, or logs why it cannot be used.
+/// Loads the configuration, or logs why it cannot be used. What is worth knowing of a
+/// configuration that can be used is logged as a warning, for `--check` as for a start.
 fn load(path: &Path) -> Option<Config> {
     match Config::load(path) {
-        Ok(config) => Some(config),
+        Ok(config) => {
+            for warning in config.balancing_warnings() {
+                warning!("{}: {warning}", path.display());
+            }
+            Some(config)
+        }
         // A read error already names the file.
         Err(e @ ConfigError::Read { .. }) => {
             error!("{e}");
