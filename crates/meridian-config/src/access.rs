@@ -66,6 +66,12 @@ impl Net {
         })
     }
 
+    /// The address, when the entry is one address and not a range of them.
+    pub fn address(&self) -> Option<IpAddr> {
+        let longest = if self.network.is_ipv4() { 32 } else { 128 };
+        (self.prefix == longest).then_some(self.network)
+    }
+
     /// Whether `address` is in the range. An IPv4 address written as IPv6
     /// (`::ffff:203.0.113.9`) is the IPv4 one.
     pub fn contains(&self, address: IpAddr) -> bool {

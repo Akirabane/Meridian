@@ -390,3 +390,23 @@ fn the_sync_with_the_servers_is_off_unless_the_table_turns_it_on() {
     .to_string();
     assert!(error.contains("from-server"), "{error}");
 }
+
+#[test]
+fn a_net_says_whether_it_is_one_address() {
+    let Target::Net(one) = target("203.0.113.9") else {
+        panic!("an address is a net")
+    };
+    assert_eq!(one.address(), Some(ip("203.0.113.9")));
+    let Target::Net(range) = target("203.0.113.0/24") else {
+        panic!("a range is a net")
+    };
+    assert_eq!(range.address(), None);
+    let Target::Net(six) = target("2001:db8::1") else {
+        panic!("an address is a net")
+    };
+    assert_eq!(six.address(), Some(ip("2001:db8::1")));
+    let Target::Net(whole) = target("::/0") else {
+        panic!("a range is a net")
+    };
+    assert_eq!(whole.address(), None);
+}
