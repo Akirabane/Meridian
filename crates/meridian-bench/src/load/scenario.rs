@@ -123,6 +123,8 @@ fn configuration(
         "listen = \"{listen}\"\n\
          max-players = 0\n\
          connections-per-minute = 0\n\
+         max-pending-logins = 0\n\
+         max-pending-logins-per-address = 0\n\
          auth-mode = \"offline\"\n\
          compression-threshold = {threshold}\n\
          connect-timeout-ms = 5000\n\

@@ -12,6 +12,8 @@ listen = "127.0.0.1:<spectator-port, 25565 unless --spectator-port>"
 max-players = 0
 # Every bot comes from 127.0.0.1: the limit on connections from one address is off.
 connections-per-minute = 0
+max-pending-logins = 0
+max-pending-logins-per-address = 0
 auth-mode = "offline"
 compression-threshold = 256
 connect-timeout-ms = 5000
