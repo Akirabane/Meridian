@@ -25,6 +25,10 @@ pub enum Step {
     Close,
     /// Receive nothing more: the other side closes the connection.
     ExpectClose,
+    /// From here on, wait this long for each packet, instead of [`WAIT`]. For a peer whose
+    /// other side stays silent until the test is done with it, which on a slow machine can
+    /// take longer than [`WAIT`].
+    Patience(Duration),
 }
 
 impl Step {
@@ -79,6 +83,10 @@ pub fn run(
                 connection.writer.shutdown();
                 return Ok(());
             }
+            Step::Patience(wait) => connection
+                .reader
+                .set_read_timeout(Some(*wait))
+                .map_err(|e| fail(e.to_string()))?,
             Step::ExpectClose => match connection.recv() {
                 Ok((got, payload)) => {
                     recorder.record(incoming, got, &payload);
@@ -109,6 +117,26 @@ pub fn spawn(
 mod tests {
     use super::*;
     use crate::pipe;
+
+    /// `Patience` sets how long the next steps wait: here far less than [`WAIT`], so the step
+    /// that expects the close gives up at once while the other side stays silent.
+    #[test]
+    fn patience_sets_how_long_the_next_steps_wait() {
+        let (mut a, _silent) = pipe();
+        let began = std::time::Instant::now();
+        let outcome = run(
+            &mut a,
+            &[
+                Step::Patience(Duration::from_millis(100)),
+                Step::ExpectClose,
+            ],
+            Dir::ToClient,
+            &Recorder::new(),
+        );
+        let error = outcome.unwrap_err();
+        assert!(error.starts_with("step 1"), "{error}");
+        assert!(began.elapsed() < WAIT, "{:?}", began.elapsed());
+    }
 
     #[test]
     fn two_peers_follow_their_scripts() {

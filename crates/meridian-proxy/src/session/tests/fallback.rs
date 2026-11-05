@@ -472,6 +472,9 @@ fn followed_over_tcp(kick: bool) {
         id: cfg::serverbound::CLIENT_INFORMATION,
     }];
     east.extend(joins(7, SECOND));
+    // The player says nothing more until the test is done with it, which on a slow machine
+    // can take longer than a peer's usual wait: east must not close first.
+    east.push(Step::Patience(Duration::from_secs(60)));
     east.push(Step::ExpectClose);
     let (connect, tried, threads) = scripted(vec![(LOBBY, vec![lobby]), (EAST, vec![east])]);
     let mut proxy = Proxy::new(
