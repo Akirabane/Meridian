@@ -450,7 +450,7 @@ commands in its `hello`:
   once: a hook result that means "taken, the answer comes later". The timeout is 2000 ms. After
   it, the player reads `That command did not answer.`.
 - The commands are offered to the client's completion only if the proxy changes the command tree
-  the server sends. It does not today (`README.md:232`: `/server` is not offered by Tab
+  the server sends. It does not today (`README.md:284`: `/server` is not offered by Tab
   completion). Version 1 does not add it.
 
 ### 4.4 The choice of server
