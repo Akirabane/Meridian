@@ -8,8 +8,9 @@
 use crate::login_policy::{LoginPolicy, NameLookup, ProfileLookup, Refusal};
 use crate::{Error, Profile, Result};
 use horizon_protocol::{
+    buf::Reader,
     connection::Connection,
-    crypto,
+    crypto, frame,
     packets::{handshake, login, status},
     rsa::RsaPrivateKey,
 };
@@ -21,7 +22,7 @@ use std::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// How long the handshake, a status request and the login may wait for the
@@ -210,8 +211,10 @@ fn accept_bounded(
     checks: &Checks<'_>,
     bounds: &Bounds,
 ) -> Result<Option<ClientSession>> {
-    connection.reader.set_read_timeout(Some(bounds.silence))?;
-    let (id, payload) = connection.recv()?;
+    let start = Instant::now();
+    // The handshake comes first and at once: it has the status's time, the shorter.
+    let mut early = Early::new(bounds, start + bounds.status);
+    let (id, payload) = early.recv(&mut connection)?.ok_or_else(ended)?;
     let intention = match handshake::Serverbound::decode(id, &payload)? {
         handshake::Serverbound::Intention(intention) => intention,
         handshake::Serverbound::Unknown(id, _) => {
@@ -224,18 +227,24 @@ fn accept_bounded(
         handshake::STATUS => {
             serve_status(
                 &mut connection,
+                &mut early,
                 config,
                 virtual_host(&intention.host).as_deref(),
             )?;
             Ok(None)
         }
-        handshake::LOGIN => log_in(
-            connection,
-            config,
-            checks,
-            intention.protocol,
-            virtual_host(&intention.host),
-        ),
+        handshake::LOGIN => {
+            early.until = start + bounds.login;
+            early.login = true;
+            log_in(
+                connection,
+                &mut early,
+                config,
+                checks,
+                intention.protocol,
+                virtual_host(&intention.host),
+            )
+        }
         // The proxy is where players arrive; it takes no transfers from other
         // servers, as a vanilla server does by default (`accepts-transfers`).
         handshake::TRANSFER => {
@@ -261,6 +270,7 @@ struct Joined {
 /// then [`finish`].
 fn log_in(
     mut connection: Connection,
+    early: &mut Early,
     config: &Config,
     checks: &Checks<'_>,
     protocol: i32,
@@ -278,7 +288,7 @@ fn log_in(
         );
         return Ok(None);
     }
-    let (id, payload) = connection.recv()?;
+    let (id, payload) = early.recv(&mut connection)?.ok_or_else(ended)?;
     let hello = match login::Serverbound::decode(id, &payload)? {
         login::Serverbound::Hello(hello) => hello,
         other => {
@@ -310,10 +320,12 @@ fn log_in(
         }
     };
     let joined = match auth {
-        AuthKind::Premium => match authenticate(&mut connection, &hello.name, checks.sessions)? {
-            Some(joined) => joined,
-            None => return Ok(None),
-        },
+        AuthKind::Premium => {
+            match authenticate(&mut connection, early, &hello.name, checks.sessions)? {
+                Some(joined) => joined,
+                None => return Ok(None),
+            }
+        }
         // UUIDUtil.createOfflineProfile: the UUID is derived from the name, and
         // the UUID the client sent is ignored.
         AuthKind::Offline => Joined {
@@ -322,7 +334,7 @@ fn log_in(
             properties: Vec::new(),
         },
     };
-    finish(connection, config, joined, auth, virtual_host).map(Some)
+    finish(connection, early, config, joined, auth, virtual_host)
 }
 
 /// The proxy's key pair (`MinecraftServer.initializeKeyPair`), made at the first
@@ -350,6 +362,7 @@ fn proxy_key() -> Result<&'static ProxyKey> {
 /// they were told why.
 fn authenticate(
     connection: &mut Connection,
+    early: &mut Early,
     name: &str,
     sessions: &dyn session::Sessions,
 ) -> Result<Option<Joined>> {
@@ -363,7 +376,7 @@ fn authenticate(
         should_authenticate: true,
     });
     connection.send(&request.encode())?;
-    let (id, payload) = connection.recv()?;
+    let (id, payload) = early.recv(connection)?.ok_or_else(ended)?;
     let answer = match login::Serverbound::decode(id, &payload)? {
         login::Serverbound::Key(answer) => answer,
         other => {
@@ -387,6 +400,7 @@ fn authenticate(
         .ok_or_else(|| protocol_error("the shared secret is not 16 bytes".into()))?;
     let server_hash = crypto::server_hash("", &secret, &key.public_der);
     connection.enable_encryption(&secret);
+    early.encrypted = true;
     let refusal = match sessions.has_joined(name, &server_hash) {
         Ok(Some(joined)) => return Ok(Some(joined)),
         Ok(None) => "multiplayer.disconnect.unverified_username",
@@ -536,11 +550,12 @@ mod session {
 /// Compression, the finished login, and the client's acknowledgement.
 fn finish(
     mut connection: Connection,
+    early: &mut Early,
     config: &Config,
     joined: Joined,
     auth: AuthKind,
     virtual_host: Option<String>,
-) -> Result<ClientSession> {
+) -> Result<Option<ClientSession>> {
     // Unlike vanilla, a connection over memory is compressed too: the proxy only
     // has those in tests, which should go through what players get.
     let threshold = config.compression_threshold;
@@ -548,6 +563,7 @@ fn finish(
         let compression = login::Clientbound::Compression(login::Compression { threshold });
         connection.send(&compression.encode())?;
         connection.set_compression(threshold);
+        early.threshold = usize::try_from(threshold).ok();
     }
     let finished = login::Clientbound::LoginFinished(login::LoginFinished {
         profile: login::GameProfile {
@@ -558,18 +574,24 @@ fn finish(
         session: session_id()?,
     });
     connection.send(&finished.encode())?;
-    // The client may answer a query or a cookie request before it acknowledges.
-    loop {
-        let (id, payload) = connection.recv()?;
-        match login::Serverbound::decode(id, &payload)? {
-            login::Serverbound::LoginAcknowledged(_) => break,
-            login::Serverbound::CustomQueryAnswer(_) | login::Serverbound::CookieResponse(_) => {}
-            other => {
-                return Err(protocol_error(format!(
-                    "unexpected packet {} before the login was acknowledged",
-                    other.id()
-                )));
-            }
+    // The proxy sends no query and no cookie request, so an answer to one is
+    // refused, as vanilla's handleCustomQueryPacket and handleCookieResponse do: a
+    // client cannot keep the login open with packets that lead nowhere.
+    let (id, payload) = early.recv(&mut connection)?.ok_or_else(ended)?;
+    match login::Serverbound::decode(id, &payload)? {
+        login::Serverbound::LoginAcknowledged(_) => {}
+        login::Serverbound::CustomQueryAnswer(_) | login::Serverbound::CookieResponse(_) => {
+            disconnect(
+                &mut connection,
+                &translatable("multiplayer.disconnect.unexpected_query_response", &[]),
+            );
+            return Ok(None);
+        }
+        other => {
+            return Err(protocol_error(format!(
+                "unexpected packet {} before the login was acknowledged",
+                other.id()
+            )));
         }
     }
     connection.reader.set_read_timeout(Some(READ_TIMEOUT))?;
@@ -578,7 +600,7 @@ fn finish(
         .into_iter()
         .map(|p| (p.name, p.value, p.signature.unwrap_or_default()))
         .collect();
-    Ok(ClientSession {
+    Ok(Some(ClientSession {
         profile: Profile {
             name: joined.name,
             uuid: joined.uuid.to_be_bytes(),
@@ -587,7 +609,7 @@ fn finish(
         auth,
         virtual_host,
         connection,
-    })
+    }))
 }
 
 /// `ServerConnectionListener.getSessionId`: one random id for the life of the
@@ -629,13 +651,17 @@ fn disconnect(connection: &mut Connection, reason_json: &str) {
 /// `ServerStatusPacketListenerImpl`: one status answer, then the pong, and the
 /// connection ends. A second status request ends it too, and so does a client
 /// that closes without pinging.
-fn serve_status(connection: &mut Connection, config: &Config, host: Option<&str>) -> Result<()> {
+fn serve_status(
+    connection: &mut Connection,
+    early: &mut Early,
+    config: &Config,
+    host: Option<&str>,
+) -> Result<()> {
     let mut answered = false;
     loop {
-        let (id, payload) = match connection.recv() {
-            Ok(packet) => packet,
-            Err(e) if e.is_end_of_stream() => return Ok(()),
-            Err(e) => return Err(e.into()),
+        // A client that closes, or says nothing more, is done.
+        let Some((id, payload)) = early.recv(connection)? else {
+            return Ok(());
         };
         match status::Serverbound::decode(id, &payload)? {
             status::Serverbound::StatusRequest(_) if answered => return Ok(()),
@@ -712,6 +738,147 @@ fn hyphenated(uuid: [u8; 16]) -> String {
 
 fn protocol_error(message: String) -> Error {
     Error::Protocol(horizon_protocol::Error::new(message))
+}
+
+/// What a login or a status request that took too long is told, as vanilla's
+/// `ServerLoginPacketListenerImpl.tick` says it after 600 ticks.
+const TOO_SLOW: &str = "the client took too long to log in";
+
+/// A connection that ended, or went silent, before a packet began.
+fn ended() -> Error {
+    protocol_error("the client closed the connection or stopped answering".into())
+}
+
+/// Reads the client's packets before its session, within [`Bounds`].
+///
+/// Before encryption the frames are read here a byte at a time, so that each read
+/// waits at most until the deadline, whatever pace the bytes come at, and a frame
+/// longer than [`Bounds::max_frame`] is refused from its length, before any of it is
+/// kept. Once the login turned encryption on, the connection reads; the deadline is
+/// still checked before each packet, and the player has been checked by the session
+/// service by then.
+struct Early {
+    until: Instant,
+    silence: Duration,
+    max_frame: usize,
+    /// The compression the login set up: the frames then start with a data length.
+    threshold: Option<usize>,
+    /// Encryption is on: the connection reads from then on.
+    encrypted: bool,
+    /// The connection is logging in, and is told when it takes too long.
+    login: bool,
+}
+
+impl Early {
+    fn new(bounds: &Bounds, until: Instant) -> Self {
+        Early {
+            until,
+            silence: bounds.silence,
+            max_frame: bounds.max_frame,
+            threshold: None,
+            encrypted: false,
+            login: false,
+        }
+    }
+
+    /// The deadline has passed: a login is told so, and the connection ends.
+    fn too_slow(&self, connection: &mut Connection) -> Error {
+        if self.login {
+            disconnect(
+                connection,
+                &translatable("multiplayer.disconnect.slow_login", &[]),
+            );
+        }
+        protocol_error(TOO_SLOW.into())
+    }
+
+    /// Sets the read timeout to what is left before the deadline, at most the
+    /// silence; an error once nothing is left.
+    fn arm(&self, connection: &mut Connection) -> Result<()> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(self.too_slow(connection));
+        }
+        connection
+            .reader
+            .set_read_timeout(Some(left.min(self.silence)))?;
+        Ok(())
+    }
+
+    /// One byte; `None` when none came, because the client closed or said nothing.
+    fn byte(&self, connection: &mut Connection) -> Result<Option<u8>> {
+        self.arm(connection)?;
+        match connection.reader.read_raw(1) {
+            Ok(byte) => Ok(byte.first().copied()),
+            Err(_) if Instant::now() >= self.until => Err(self.too_slow(connection)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// The next packet, as its id and payload; `None` when the connection ended or
+    /// went silent before a frame began.
+    fn recv(&mut self, connection: &mut Connection) -> Result<Option<(i32, Vec<u8>)>> {
+        if self.encrypted {
+            self.arm(connection)?;
+            return match connection.recv() {
+                Ok(packet) => Ok(Some(packet)),
+                Err(_) if Instant::now() >= self.until => Err(self.too_slow(connection)),
+                Err(e) if e.is_end_of_stream() || e.is_timed_out() => Ok(None),
+                Err(e) => Err(e.into()),
+            };
+        }
+        // Varint21FrameDecoder: a length of at most three bytes, never zero.
+        let mut length = 0usize;
+        let mut complete = false;
+        for i in 0..3 {
+            let Some(b) = self.byte(connection)? else {
+                return if i == 0 { Ok(None) } else { Err(ended()) };
+            };
+            length |= usize::from(b & 0x7f) << (7 * i);
+            if b & 0x80 == 0 {
+                complete = true;
+                break;
+            }
+        }
+        if !complete {
+            return Err(protocol_error("length wider than 21 bits".into()));
+        }
+        if length == 0 {
+            return Err(protocol_error("Frame length cannot be zero".into()));
+        }
+        if length > self.max_frame {
+            return Err(protocol_error(format!(
+                "a frame of {length} bytes before the login is done; at most {} are read",
+                self.max_frame
+            )));
+        }
+        let mut frame = Vec::with_capacity(length);
+        while frame.len() < length {
+            frame.push(self.byte(connection)?.ok_or_else(ended)?);
+        }
+        let body = match self.threshold {
+            None => frame,
+            Some(threshold) => {
+                // A data length larger than the frames read here is refused before
+                // anything is inflated.
+                let mut r = Reader::new(&frame);
+                let size = r.varint()?;
+                if usize::try_from(size).is_ok_and(|size| size > self.max_frame) {
+                    return Err(protocol_error(format!(
+                        "a packet of {size} bytes before the login is done; at most {} are read",
+                        self.max_frame
+                    )));
+                }
+                match frame::body(&frame, Some(threshold), &mut frame::Inflater::default())? {
+                    frame::Body::Plain(at) => frame[at..].to_vec(),
+                    frame::Body::Inflated(body) => body,
+                }
+            }
+        };
+        let mut r = Reader::new(&body);
+        let id = r.varint()?;
+        Ok(Some((id, body[r.position()..].to_vec())))
+    }
 }
 
 #[cfg(test)]
@@ -1102,17 +1269,29 @@ mod tests {
     }
 
     #[test]
-    fn the_login_waits_for_the_acknowledgement_past_a_query_answer() {
-        let (mut client, accepted) = proxy(offline(-1));
-        start_login(&mut client, "Alex");
-        login_reply(&mut client);
-        let answer = login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
-            transaction: 1,
-            payload: None,
-        });
-        client.send(&answer.encode()).unwrap();
-        acknowledge(&mut client);
-        assert!(accepted.join().unwrap().unwrap().is_some());
+    fn an_answer_to_a_query_never_sent_ends_the_login() {
+        let unasked = [
+            login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
+                transaction: 1,
+                payload: None,
+            }),
+            login::Serverbound::CookieResponse(login::CookieResponse {
+                key: "minecraft:a".into(),
+                payload: Some(vec![1, 2, 3]),
+            }),
+        ];
+        for packet in unasked {
+            let (mut client, accepted) = proxy(offline(-1));
+            start_login(&mut client, "Alex");
+            login_reply(&mut client);
+            client.send(&packet.encode()).unwrap();
+            // Vanilla's handleCustomQueryPacket and handleCookieResponse.
+            assert_eq!(
+                reason(login_reply(&mut client))["translate"],
+                "multiplayer.disconnect.unexpected_query_response"
+            );
+            assert!(accepted.join().unwrap().unwrap().is_none());
+        }
     }
 
     #[test]
@@ -1563,5 +1742,193 @@ mod tests {
             Some("https://s/hasJoined")
         );
         assert_eq!(session::verify_endpoint(&serde_json::json!({})), None);
+    }
+
+    /// Short bounds, so that the tests of the deadlines take a moment.
+    const SHORT: Bounds = Bounds {
+        silence: Duration::from_millis(400),
+        login: Duration::from_millis(800),
+        status: Duration::from_millis(800),
+        max_frame: 2048,
+    };
+
+    /// A proxy that runs `accept` within `bounds`; the client's two halves.
+    fn bounded_proxy(
+        config: Config,
+        bounds: Bounds,
+    ) -> (
+        horizon_protocol::connection::ConnReader,
+        horizon_protocol::connection::ConnWriter,
+        JoinHandle<Result<Option<ClientSession>>>,
+    ) {
+        let (client, server) = Pipe::pair();
+        let accepted = std::thread::spawn(move || {
+            accept_bounded(
+                Connection::local(server),
+                &config,
+                &Checks::real(None),
+                &bounds,
+            )
+        });
+        let (reader, writer) = Connection::local(client).split();
+        (reader, writer, accepted)
+    }
+
+    /// Whether `accepted` has ended within `limit`.
+    fn ends_within<T>(accepted: &JoinHandle<T>, limit: Duration) -> bool {
+        let until = Instant::now() + limit;
+        while Instant::now() < until {
+            if accepted.is_finished() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        accepted.is_finished()
+    }
+
+    /// Writes `bytes` one at a time, `every` apart, until `stop` is set.
+    fn trickle(
+        mut writer: horizon_protocol::connection::ConnWriter,
+        bytes: Vec<u8>,
+        every: Duration,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            for b in bytes {
+                if stop.load(std::sync::atomic::Ordering::Relaxed)
+                    || writer.write_raw(&[b]).is_err()
+                {
+                    return;
+                }
+                std::thread::sleep(every);
+            }
+        })
+    }
+
+    fn intention(intent: i32) -> Vec<u8> {
+        handshake::Serverbound::Intention(handshake::Intention {
+            protocol: horizon_protocol::PROTOCOL_VERSION,
+            host: "localhost".into(),
+            port: 25565,
+            intent,
+        })
+        .encode()
+    }
+
+    /// A frame of `length` bytes, of which only the length means anything: what a
+    /// client that sends a byte at a time, never quite silent, starts with.
+    fn announced(length: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        horizon_protocol::buf::write_varint(&mut bytes, length as i32);
+        bytes.extend(std::iter::repeat_n(0u8, length));
+        bytes
+    }
+
+    #[test]
+    fn a_login_that_comes_a_byte_at_a_time_ends_at_its_deadline() {
+        let (mut reader, mut writer, accepted) = bounded_proxy(offline(-1), SHORT);
+        writer.send(&intention(handshake::LOGIN)).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // A byte every 100 ms: never silent for the 400 ms of `silence`.
+        let sender = trickle(
+            writer,
+            announced(1000),
+            Duration::from_millis(100),
+            stop.clone(),
+        );
+        let ended = ends_within(&accepted, Duration::from_secs(3));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(ended, "the login is still open past its deadline");
+        let (id, payload) = reader.recv().unwrap();
+        let login::Clientbound::Disconnect(disconnect) =
+            login::Clientbound::decode(id, &payload).unwrap()
+        else {
+            panic!("expected a disconnect");
+        };
+        assert!(
+            disconnect
+                .reason_json
+                .contains("multiplayer.disconnect.slow_login")
+        );
+        assert!(accepted.join().unwrap().is_err());
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn a_status_request_that_comes_a_byte_at_a_time_ends_at_its_deadline() {
+        let (_reader, mut writer, accepted) = bounded_proxy(Config::default(), SHORT);
+        writer.send(&intention(handshake::STATUS)).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sender = trickle(
+            writer,
+            announced(1000),
+            Duration::from_millis(100),
+            stop.clone(),
+        );
+        let ended = ends_within(&accepted, Duration::from_secs(3));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(ended, "the status is still open past its deadline");
+        assert!(accepted.join().unwrap().is_err());
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn a_frame_too_long_for_a_login_is_refused_from_its_length() {
+        let bounds = Bounds {
+            silence: Duration::from_secs(5),
+            login: Duration::from_secs(10),
+            status: Duration::from_secs(10),
+            max_frame: 2048,
+        };
+        // As the first frame, and after the handshake: a length of 2 MiB and nothing
+        // after it. The refusal comes from the length, without waiting for the bytes.
+        for handshake_first in [false, true] {
+            let (_reader, mut writer, accepted) = bounded_proxy(offline(-1), bounds);
+            if handshake_first {
+                writer.send(&intention(handshake::LOGIN)).unwrap();
+            }
+            writer.write_raw(&[0xff, 0xff, 0x7f]).unwrap();
+            assert!(
+                ends_within(&accepted, Duration::from_secs(2)),
+                "the proxy waits for a frame it should refuse"
+            );
+            let Err(error) = accepted.join().unwrap() else {
+                panic!("expected a refusal");
+            };
+            let error = error.to_string();
+            assert!(error.contains("before the login is done"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_compressed_acknowledgement_is_read_and_a_huge_one_refused() {
+        // A threshold of 0: the client compresses every packet, the acknowledgement too.
+        let (mut client, accepted) = proxy(offline(0));
+        start_login(&mut client, "Alex");
+        login_reply(&mut client);
+        client.set_compression(0);
+        login_reply(&mut client);
+        acknowledge(&mut client);
+        assert!(accepted.join().unwrap().unwrap().is_some());
+
+        // A data length of 8 MiB in a frame of a few bytes is refused before it is
+        // inflated.
+        let (mut client, accepted) = proxy(offline(0));
+        start_login(&mut client, "Alex");
+        login_reply(&mut client);
+        client.set_compression(0);
+        login_reply(&mut client);
+        let mut frame = Vec::new();
+        horizon_protocol::buf::write_varint(&mut frame, 8 << 20);
+        frame.extend([0x78, 0x9c, 0x03, 0x00]);
+        let mut bytes = Vec::new();
+        horizon_protocol::buf::write_varint(&mut bytes, frame.len() as i32);
+        bytes.extend(frame);
+        client.writer.write_raw(&bytes).unwrap();
+        let Err(error) = accepted.join().unwrap() else {
+            panic!("expected a refusal");
+        };
+        let error = error.to_string();
+        assert!(error.contains("before the login is done"), "{error}");
     }
 }
