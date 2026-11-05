@@ -123,6 +123,12 @@ pub(crate) struct Shared {
     /// player is (the proxy's counts, its metrics page, a login placing another player)
     /// must not wait for that. Changed only with `down` held, after `down.backend`.
     backend: Mutex<String>,
+    /// For tests: when set, a move off a lost backend waits on the receiver once the client
+    /// has been told to go back to the configuration phase, before it closes the lost
+    /// connection, and says on the sender when it has closed it, so that a test can let the
+    /// client acknowledge in between.
+    #[cfg(test)]
+    pub(crate) moving_gate: Mutex<Option<(mpsc::Receiver<()>, mpsc::Sender<()>)>>,
     up: Mutex<Up>,
     client_closer: Closer,
     commands: Mutex<Option<Arc<CommandHook>>>,
@@ -281,6 +287,8 @@ impl Session {
             pending: Mutex::new(None),
             disconnected: AtomicBool::new(false),
             backend: Mutex::new(String::new()),
+            #[cfg(test)]
+            moving_gate: Mutex::new(None),
         });
         let handle = SessionHandle(Arc::clone(&shared));
         *lock(&shared.backend) = name.to_owned();
@@ -510,6 +518,10 @@ fn begin_moving(shared: &Arc<Shared>, replacement: Replacement) -> std::result::
         closer,
         target: None,
     });
+    // The lost backend's lane, taken while it is still the active one: once the client is
+    // told to go back to the configuration phase, it may acknowledge, and the replacement
+    // become the active lane, before this thread closes the lost one.
+    let lost = Arc::clone(&shared.up().lane);
     *lock(&shared.pending) = Some(Pending {
         lane,
         reader,
@@ -532,8 +544,19 @@ fn begin_moving(shared: &Arc<Shared>, replacement: Replacement) -> std::result::
         }
         down.phase = Phase::Configuration;
     }
-    // The lost backend's connection is of no use any more.
-    shared.up().lane.closer.close();
+    #[cfg(test)]
+    let gate = lock(&shared.moving_gate).take();
+    #[cfg(test)]
+    if let Some((open, _)) = &gate {
+        let _ = open.recv_timeout(Duration::from_secs(5));
+    }
+    // The lost backend's connection is of no use any more. Not `shared.up().lane`: that may
+    // be the replacement by now.
+    lost.closer.close();
+    #[cfg(test)]
+    if let Some((_, closed)) = gate {
+        let _ = closed.send(());
+    }
     Ok(())
 }
 
