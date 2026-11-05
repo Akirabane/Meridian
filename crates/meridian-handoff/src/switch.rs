@@ -1038,6 +1038,7 @@ pub fn switch(
         down.active = lane.id;
         down.swap = swap;
         down.backend = target.name.to_owned();
+        shared.set_backend(target.name);
         down.dimension = s.dimension.clone();
         {
             let mut up = shared.up();
