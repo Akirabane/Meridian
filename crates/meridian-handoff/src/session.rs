@@ -165,6 +165,9 @@ pub(crate) struct Down {
     /// Packets the ghost could not read, for the log of the next switch.
     pub unreadable: Vec<String>,
     pub flow: Flow,
+    /// While the reader thread answers a command the player typed: its id, and the messages other
+    /// threads told the player meanwhile, written after the answer (see [`Answering`]).
+    pub answering: Option<(std::thread::ThreadId, Vec<Vec<u8>>)>,
     /// Said in the chat once the next Login arrives: why the player was moved.
     notice: Option<String>,
 }
@@ -244,6 +247,7 @@ impl Session {
                 config_digest: None,
                 unreadable: Vec::new(),
                 flow: Flow::default(),
+                answering: None,
                 notice: None,
             }),
             up: Mutex::new(Up {
@@ -591,8 +595,17 @@ impl SessionHandle {
         let packet = play::Clientbound::SystemChat(play::SystemChat {
             content: text::literal(message),
             overlay: false,
-        });
-        let _ = down.writer.send(&packet.encode());
+        })
+        .encode();
+        // A command is being answered: what another thread says waits for the answer, so that
+        // "Sending..." is always read before "Sent." (the thread of a move can end first).
+        if let Some((reader, waiting)) = down.answering.as_mut()
+            && *reader != std::thread::current().id()
+        {
+            waiting.push(packet);
+            return;
+        }
+        let _ = down.writer.send(&packet);
     }
 
     /// Whether a switch of this player is under way.
@@ -874,6 +887,8 @@ fn answer_command(id: i32, payload: &[u8], shared: &Shared) -> bool {
         Ok(play::Serverbound::ChatCommandSigned(c)) => c.command,
         _ => return false,
     };
+    // From here until the answer is written, what other threads tell the player waits.
+    let _answering = Answering::begin(shared);
     let Some(reply) = hook(&command) else {
         return false;
     };
@@ -887,6 +902,35 @@ fn answer_command(id: i32, payload: &[u8], shared: &Shared) -> bool {
     });
     let _ = down.writer.send(&message.encode());
     true
+}
+
+/// The reader thread is answering a command. A command may start a thread that tells the player
+/// how it ended (`/send`, `/server`): if that thread is quicker than the reader, its message would
+/// come before the answer ("Could not move you" before "Moving you..."). So while this exists,
+/// what other threads tell the player is kept, and written, in order, when it is dropped: after
+/// the answer, which the reader writes before it returns. What the reader thread itself tells (an
+/// alert shown to the player who typed it) is written at once, before the answer, as ever.
+struct Answering<'a>(&'a Shared);
+
+impl<'a> Answering<'a> {
+    fn begin(shared: &'a Shared) -> Self {
+        shared.down().answering = Some((std::thread::current().id(), Vec::new()));
+        Self(shared)
+    }
+}
+
+impl Drop for Answering<'_> {
+    fn drop(&mut self) {
+        let mut down = self.0.down();
+        let Some((_, waiting)) = down.answering.take() else {
+            return;
+        };
+        if down.phase == Phase::Play {
+            for packet in waiting {
+                let _ = down.writer.send(&packet);
+            }
+        }
+    }
 }
 
 pub(crate) fn encode(body: &mut Vec<u8>, id: i32, payload: &[u8]) {
