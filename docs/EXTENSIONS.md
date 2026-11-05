@@ -182,7 +182,7 @@ version 1 (decision U3, section 10.3).
 ### 2.5 The WebSocket code
 
 The proxy's WebSocket code is the sidecar's, extended and moved into a crate that the proxy, the
-sidecar and the SDK use, with no new dependency (decision U6, section 10.3).
+sidecar and the SDK use, `meridian-websocket`, with no new dependency (decision U6, section 10.3).
 
 The sidecar's code is a client. It reads text messages, whole or in fragments, answers pings,
 and since the synchronisation of bans it also sends masked text frames
@@ -196,8 +196,9 @@ extension, so it uses that code nearly as it is. What the shared crate adds:
 - the check of `Sec-WebSocket-Accept` on the client side, now that a server of Meridian's own
   answers it.
 
-`Sec-WebSocket-Accept` is the base64 of a SHA-1. Both are already in the lock file (`sha1`
-through `horizon-protocol`, `base64` through `ureq`), so the shared crate adds no crate to it.
+`Sec-WebSocket-Accept` is the base64 of a SHA-1. `meridian-websocket` names `sha1` and `base64`
+as direct dependencies rather than writing them again by hand: both are already in the lock file
+(`sha1` through `horizon-protocol`, `base64` through `ureq`), so no crate is added to it.
 
 ## 3. Versions
 
@@ -742,11 +743,15 @@ Windows.
 2. **The configuration.** `[[extension]]` in `meridian-config`: the reading, the loopback check,
    the grants, one extension for each decision, the defaults, and the login time budget added to
    the queue's check. Nothing uses it. Proof: the configuration tests, and the existing tests
-   unchanged.
+   unchanged. CONFIG.md says what that budget means for the operator: the `timeout-ms` of
+   `decide-login` and `decide-server` count with `wait-seconds` and `connect-timeout-ms` against
+   the 27 s a login may stay silent, so with an extension on both points the queue's longest wait
+   is shorter than without.
 3. **The wire.** The types of protocol 0, the golden JSON, the proofs of the handshake (with the
    HMAC moved to where both sides reach it), and the WebSocket code both sides need: the
-   sidecar's, extended and shared (section 2.5, decision U6). Proof: the golden files, the test
-   vectors, and the sidecar's tests unchanged.
+   sidecar's, extended and shared as `meridian-websocket` (section 2.5, decision U6). It also
+   corrects the head comment of the sidecar's `websocket.rs`, which still calls it "a client which
+   only listens". Proof: the golden files, the test vectors, and the sidecar's tests unchanged.
 4. **The connection on the proxy.** Connect, hello, reconnect with the doubling wait,
    `max-in-flight`, the breaker, the metrics and the logs. No decision is wired yet. Proof: tests
    against a fake extension, including a wrong token on each side.
@@ -760,7 +765,9 @@ Windows.
 8. **The choice of server.** At login and in the fallback, with balancing on and off, and with
    the queue. Proof: the tests of `order`, `refuse` and an invalid name, and the hard cap held.
 9. **Orders.** The methods of section 5, their capabilities and the rate budget. Proof: one test
-   for each method against the code the console uses, and the refusals.
+   for each method against the code the console uses, and the refusals. This pull request settles
+   what happens when an answer would pass the limit of 256 KiB a message (section 2.1), which a
+   `players/list` of a large network reaches near 1,700 players: pages, or a higher limit.
 10. **The SDK and `allow-all`.** Proof: the SDK's tests, and the proxy's integration test with
     `allow-all` started as a process on both systems.
 11. **`file-permissions`.** Proof: its tests, and an integration test of a rank given by the file.
@@ -788,7 +795,7 @@ Windows.
   Windows). Mitigation: the configuration takes an address, the check of every resolved address
   is the sidecar's, and CI runs on both.
 
-### 10.3 Decisions of the operator (2026-11-05)
+### 10.3 Decisions of the operator (2026-11-05), with the reason this specification gives for each
 
 - **U1. The proxy connects to the extension, which listens on the loopback** (section 2.1). The
   proxy opens no new port, and no program becomes an extension unless the configuration names
@@ -804,9 +811,9 @@ Windows.
 - **U5. No priority place in the queue in version 1** (section 9). It can come later, as an
   optional field of the admission answer in a minor version, once the queue has a second level
   and an operator needs it; section 3's rule on added fields keeps that compatible.
-- **U6. The sidecar's WebSocket code is extended and shared, with no new dependency** (section
-  2.5). One implementation serves the sidecar, the proxy and the SDK, and is tested on both
-  systems.
+- **U6. The sidecar's WebSocket code is extended and shared as `meridian-websocket`, with no new
+  dependency** (section 2.5). One implementation serves the sidecar, the proxy and the SDK, and is
+  tested on both systems.
 - **U7. Players' addresses go only to extensions granted `addresses`** (section 7). An address
   is personal data that most extensions do not need.
 - **U8. The names stay:** the crate `meridian-extension`, the configuration `[[extension]]` and
