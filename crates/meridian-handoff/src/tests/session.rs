@@ -111,3 +111,78 @@ fn the_player_is_told_in_the_chat() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A command that starts a thread which tells the player how it ended (`/send`, `/server`): the
+/// thread can end before the reader has written the answer. Here it is made to, every time: the
+/// hook waits for the thread's message to be told before it returns its answer. The player must
+/// still read the answer first.
+#[test]
+fn what_a_thread_tells_while_a_command_is_answered_comes_after_the_answer() {
+    for round in 0..200 {
+        let (proxy_client, mut player) = pipe();
+        let (proxy_backend, mut source) = pipe();
+        player.reader.set_read_timeout(Some(WAIT)).unwrap();
+        source.reader.set_read_timeout(Some(WAIT)).unwrap();
+        let (session, handle) = Session::new(
+            ClientSession {
+                profile: profile(),
+                auth: AuthKind::Offline,
+                virtual_host: None,
+                connection: proxy_client,
+            },
+            BackendLink {
+                connection: proxy_backend,
+            },
+            "source",
+        )
+        .unwrap();
+        let hooked = handle.clone();
+        let session = session.with_commands(Arc::new(move |_: &str| {
+            let told = hooked.clone();
+            // The thread of a move, which has ended before the answer is returned.
+            std::thread::spawn(move || told.tell("Sent."))
+                .join()
+                .unwrap();
+            // The reader thread's own message is written at once, before the answer.
+            hooked.tell("Alert.");
+            Some("Sending...".to_owned())
+        }));
+        let run = std::thread::spawn(move || session.run());
+        send(&mut source, cfg::clientbound::FINISH_CONFIGURATION, &[]);
+        expect(&mut player, cfg::clientbound::FINISH_CONFIGURATION).unwrap();
+        send(&mut player, cfg::serverbound::FINISH_CONFIGURATION, &[]);
+        expect(&mut source, cfg::serverbound::FINISH_CONFIGURATION).unwrap();
+        player
+            .send(
+                &play::Serverbound::ChatCommand(play::ChatCommand {
+                    command: "send".into(),
+                })
+                .encode(),
+            )
+            .unwrap();
+        let mut said = Vec::new();
+        for _ in 0..3 {
+            let (id, payload) = player.recv().unwrap();
+            match decode(id, &payload) {
+                C::SystemChat(chat) => said.push(horizon_protocol::text::plain(
+                    &chat.content,
+                    &Default::default(),
+                )),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(said, ["Alert.", "Sending...", "Sent."], "round {round}");
+        // Told with no command under way, a message is written at once.
+        handle.tell("Later.");
+        let (id, payload) = player.recv().unwrap();
+        match decode(id, &payload) {
+            C::SystemChat(chat) => assert_eq!(
+                horizon_protocol::text::plain(&chat.content, &Default::default()),
+                "Later."
+            ),
+            other => panic!("{other:?}"),
+        }
+        drop(source);
+        run.join().unwrap().unwrap();
+    }
+}
