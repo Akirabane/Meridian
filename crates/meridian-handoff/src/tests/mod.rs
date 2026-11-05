@@ -297,6 +297,11 @@ struct Bench {
 }
 
 fn bench() -> Bench {
+    bench_as(&INFORMATION)
+}
+
+/// As [`bench`], for a client that sends `information` as its Client Information.
+fn bench_as(information: &[u8]) -> Bench {
     let (proxy_client, mut player) = pipe();
     let (proxy_backend, mut source) = pipe();
     let client = ClientSession {
@@ -310,7 +315,7 @@ fn bench() -> Bench {
     };
     let (session, handle) = Session::new(client, backend, "source").unwrap();
     let run = std::thread::spawn(move || session.run());
-    join_source(&mut player, &mut source);
+    join_source_as(&mut player, &mut source, information);
     Bench {
         handle,
         run,

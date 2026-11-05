@@ -1,6 +1,6 @@
 //! The switch itself: prepare, freeze, hand over, commit (DESIGN.md section 5).
 use crate::{
-    configure::{Digest, configure},
+    configure::{ClientConfiguration, Digest, Summary, configure, explain},
     control::{
         Arrival, Outcome, PlayerControl, Record, record_dimension, record_handover, uuid_text,
     },
@@ -214,18 +214,48 @@ pub struct TargetBackend<'a> {
     pub options: &'a BackendOptions,
 }
 
-/// The configuration digest last seen from each backend, so that a backend known
-/// to configure clients differently is refused before it is asked anything.
+/// The configuration digest last seen from each backend for each way a client
+/// configured itself, so that a backend known to configure such a client differently is
+/// refused before it is asked anything.
+///
+/// A server's configuration phase depends on what the client sent: a Horizon server
+/// sends the entries of a pack the client knows without their data. So what a backend
+/// gave one client says nothing of what it gives a client that sent something else, and
+/// the digest is kept under the client's [`ClientConfiguration::key`] as well as the
+/// backend's name.
 #[derive(Default)]
-pub struct Digests(Mutex<HashMap<String, Digest>>);
+pub struct Digests(Mutex<HashMap<(String, [u8; 32]), Seen>>);
+
+/// The most digests kept. Past it they are all forgotten: they only spare a prepare, and
+/// a forgotten one is learnt again by the next switch.
+const MOST_DIGESTS: usize = 1024;
+
+/// A backend's configuration as a switch saw it, and what the log of a refusal says of
+/// it.
+#[derive(Clone, Debug)]
+pub(crate) struct Seen {
+    pub digest: Digest,
+    pub summary: Summary,
+}
 
 impl Digests {
-    pub fn get(&self, backend: &str) -> Option<Digest> {
-        lock(&self.0).get(backend).copied()
+    /// The digest `backend` gave a client configured as `client`, if a switch saw one.
+    pub fn get(&self, backend: &str, client: &ClientConfiguration) -> Option<Digest> {
+        self.seen(backend, client).map(|seen| seen.digest)
     }
 
-    fn set(&self, backend: &str, digest: Digest) {
-        lock(&self.0).insert(backend.to_owned(), digest);
+    pub(crate) fn seen(&self, backend: &str, client: &ClientConfiguration) -> Option<Seen> {
+        lock(&self.0)
+            .get(&(backend.to_owned(), client.key()))
+            .cloned()
+    }
+
+    pub(crate) fn set(&self, backend: &str, client: &ClientConfiguration, seen: Seen) {
+        let mut digests = lock(&self.0);
+        if digests.len() >= MOST_DIGESTS {
+            digests.clear();
+        }
+        digests.insert((backend.to_owned(), client.key()), seen);
     }
 }
 
@@ -553,7 +583,7 @@ pub fn switch(
     let _switching = Switching(shared);
 
     // Check.
-    let (client_id, session_digest, dimension, secure_chat) = {
+    let (client_id, session_digest, session_summary, dimension, secure_chat) = {
         let down = shared.down();
         if down.backend == target.name {
             return Err(run.fail(
@@ -565,17 +595,36 @@ pub fn switch(
             return Err(run.fail(Step::Check, "the player is not in the play phase"));
         }
         match (down.ghost.player_id(), down.config_digest) {
-            (Some(id), Some(digest)) => (id, digest, down.dimension.clone(), down.secure_chat),
+            (Some(id), Some(digest)) => (
+                id,
+                digest,
+                down.config_summary.clone().unwrap_or_default(),
+                down.dimension.clone(),
+                down.secure_chat,
+            ),
             _ => return Err(run.fail(Step::Check, "the player has not joined yet")),
         }
     };
-    if let Some(kind) = digests
-        .get(target.name)
-        .and_then(|known| session_digest.differs(&known))
-    {
-        return Err(run.fail(Step::Check, differs(target.name, kind)));
-    }
     let client = shared.up().client.clone();
+    if let Some(seen) = digests.seen(target.name, &client)
+        && let Some(kind) = session_digest.differs(&seen.digest)
+    {
+        let detail = explain(
+            target.name,
+            (&session_digest, &session_summary),
+            (&seen.digest, &seen.summary),
+        );
+        let earlier = format!(
+            "{}'s was seen in an earlier switch of a client that sent what this player sent, \
+             which named {} known packs",
+            target.name,
+            client.known_pack_count()
+        );
+        return Err(run.fail(
+            Step::Check,
+            differs(target.name, kind, detail.into_iter().chain([earlier])),
+        ));
+    }
 
     // Prepare.
     let started = Instant::now();
@@ -617,17 +666,22 @@ pub fn switch(
                 .map(|()| digest)
                 .map_err(|e| e.to_string())
         });
-    let digest = match configured {
-        Ok(digest) => digest,
+    let (digest, summary) = match configured {
+        Ok(configured) => configured,
         Err(why) => {
             let _ = run.drop_target();
             return Err(run.fail(Step::Prepare, why));
         }
     };
-    digests.set(target.name, digest);
+    let detail = explain(
+        target.name,
+        (&session_digest, &session_summary),
+        (&digest, &summary),
+    );
+    digests.set(target.name, &client, Seen { digest, summary });
     if let Some(kind) = session_digest.differs(&digest) {
         let _ = run.drop_target();
-        return Err(run.fail(Step::Prepare, differs(target.name, kind)));
+        return Err(run.fail(Step::Prepare, differs(target.name, kind, detail)));
     }
     note("prepare: the target configures clients as the first server did (digest)");
     let (reader, writer) = link.connection.split();
@@ -1099,9 +1153,16 @@ pub fn switch(
     })
 }
 
-fn differs(backend: &str, kind: &str) -> String {
-    format!(
+/// The reason of a refusal on the digest, with what the log may say of the two
+/// configurations: sizes, short hashes and registry names, never their content.
+fn differs(backend: &str, kind: &str, detail: impl IntoIterator<Item = String>) -> String {
+    let detail: Vec<String> = detail.into_iter().collect();
+    let mut reason = format!(
         "{backend} configures clients differently ({kind}): the player would need a new \
          configuration phase"
-    )
+    );
+    if !detail.is_empty() {
+        reason.push_str(&format!(" ({})", detail.join("; ")));
+    }
+    reason
 }

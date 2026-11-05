@@ -142,7 +142,7 @@ mod prepare;
 mod session;
 mod switch;
 
-pub use configure::{ClientConfiguration, Digest, DigestBuilder, configure};
+pub use configure::{ClientConfiguration, Digest, DigestBuilder, Summary, configure};
 pub use control::{
     Arrival, Exported, Imported, Outcome, PlayerControl, Record, record_dimension, record_handover,
     uuid_text,

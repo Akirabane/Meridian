@@ -40,6 +40,41 @@ impl ClientConfiguration {
             _ => {}
         }
     }
+
+    /// How many packs the client named in its answer to Select Known Packs: none when it
+    /// sent no answer, or one that cannot be read. A server sends the entries of a pack the
+    /// client knows without their data, so this shapes the target's registry data.
+    pub fn known_pack_count(&self) -> usize {
+        self.known_packs
+            .as_deref()
+            .and_then(|answer| Reader::new(answer).varint().ok())
+            .map_or(0, |count| usize::try_from(count).unwrap_or(0))
+    }
+
+    /// A hash of everything the client sent, which is everything a server's configuration
+    /// phase can depend on: two clients with the same key are configured the same way by
+    /// the same server. A Horizon server, as vanilla's, sends the entries of a pack the
+    /// client knows without their data, so a client that knows the core pack and one that
+    /// knows none get different registry data from the same server.
+    pub fn key(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        let mut part = |bytes: Option<&[u8]>| match bytes {
+            Some(bytes) => {
+                hash.update([1]);
+                hash.update((bytes.len() as u64).to_be_bytes());
+                hash.update(bytes);
+            }
+            None => hash.update([0]),
+        };
+        part(self.information.as_deref());
+        part(self.known_packs.as_deref());
+        part(Some(&(self.custom.len() as u64).to_be_bytes()));
+        for custom in &self.custom {
+            part(Some(custom));
+        }
+        part(Some(&[u8::from(self.accepted_conduct)]));
+        hash.finalize().into()
+    }
 }
 
 /// What must match between two servers' configuration phases, kind by kind.
@@ -59,19 +94,174 @@ pub struct Digest([[u8; 32]; KINDS.len()]);
 impl Digest {
     /// The first kind of packet on which the two differ, or `None` when they match.
     pub fn differs(&self, other: &Digest) -> Option<&'static str> {
-        (0..KINDS.len())
-            .find(|&i| self.0[i] != other.0[i])
-            .map(|i| KINDS[i].1)
+        self.first_difference(other).map(|i| KINDS[i].1)
     }
+
+    fn first_difference(&self, other: &Digest) -> Option<usize> {
+        (0..KINDS.len()).find(|&i| self.0[i] != other.0[i])
+    }
+
+    /// The first 4 bytes of the hash of a kind, in hexadecimal.
+    fn short(&self, kind: usize) -> String {
+        hex(&self.0[kind][..4])
+    }
+}
+
+/// A configuration phase as far as the log of a refused switch says it: for each
+/// kind of [`KINDS`], its packets and bytes, and for the registry data, the registry
+/// each packet carries, with its entries, its bytes and a short hash. It holds no
+/// content: registry names are the game's, not a player's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    kinds: [Sizes; KINDS.len()],
+    registries: Vec<Registry>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Sizes {
+    packets: u32,
+    bytes: u64,
+}
+
+/// One Registry Data packet: the registry's name and its number of entries when they
+/// can be read, its size and the first bytes of its hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Registry {
+    name: Option<String>,
+    entries: Option<u32>,
+    bytes: usize,
+    hash: [u8; 4],
+}
+
+impl Registry {
+    fn of(payload: &[u8]) -> Registry {
+        let mut reader = Reader::new(payload);
+        // A registry's name is an identifier; anything else is not shown.
+        let name = reader.string(256).ok().filter(|name| {
+            !name.is_empty()
+                && name.bytes().all(
+                    |b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b':' | b'/'),
+                )
+        });
+        let entries = name
+            .as_ref()
+            .and_then(|_| reader.varint().ok())
+            .and_then(|count| u32::try_from(count).ok());
+        let mut hash = [0; 4];
+        hash.copy_from_slice(&Sha256::digest(payload)[..4]);
+        Registry {
+            name,
+            entries,
+            bytes: payload.len(),
+            hash,
+        }
+    }
+
+    /// The name a registry is known by: its own, or its place among the packets.
+    fn label(&self, index: usize) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("registry packet {} (unreadable name)", index + 1))
+    }
+
+    fn describe(&self) -> String {
+        match self.entries {
+            Some(entries) => format!("{entries} entries, {} bytes", self.bytes),
+            None => format!("{} bytes", self.bytes),
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Why two configurations differ, for the log: the kind, its packets, bytes and short
+/// hash on each side, and for the registry data, how many registries differ and the
+/// first of them. `ours` is the configuration the client holds, `theirs` the target's.
+pub fn explain(
+    target: &str,
+    ours: (&Digest, &Summary),
+    theirs: (&Digest, &Summary),
+) -> Option<String> {
+    let kind = ours.0.first_difference(theirs.0)?;
+    let side = |(digest, summary): (&Digest, &Summary)| {
+        let sizes = summary.kinds[kind];
+        format!(
+            "{} packets, {} bytes, hash {}",
+            sizes.packets,
+            sizes.bytes,
+            digest.short(kind)
+        )
+    };
+    let mut text = format!(
+        "{}: the client's {}, {target}'s {}",
+        KINDS[kind].1,
+        side(ours),
+        side(theirs)
+    );
+    if KINDS[kind].0 == c::REGISTRY_DATA {
+        text.push_str(&registries(
+            target,
+            &ours.1.registries,
+            &theirs.1.registries,
+        ));
+    }
+    Some(text)
+}
+
+/// How the registries of two configurations differ: by name where both can be read,
+/// by place otherwise.
+fn registries(target: &str, ours: &[Registry], theirs: &[Registry]) -> String {
+    let key = |r: &Registry, i: usize| r.name.clone().unwrap_or_else(|| format!("#{i}"));
+    let find = |list: &[Registry], wanted: &str| {
+        list.iter()
+            .enumerate()
+            .find(|&(i, r)| key(r, i) == wanted)
+            .map(|(_, r)| r.clone())
+    };
+    let mut differ = 0;
+    let mut first = None;
+    for (i, r) in ours.iter().enumerate() {
+        let other = find(theirs, &key(r, i));
+        if other
+            .as_ref()
+            .is_none_or(|o| o.hash != r.hash || o.bytes != r.bytes)
+        {
+            differ += 1;
+            first.get_or_insert((r.label(i), Some(r.describe()), other.map(|o| o.describe())));
+        }
+    }
+    for (i, r) in theirs.iter().enumerate() {
+        if find(ours, &key(r, i)).is_none() {
+            differ += 1;
+            first.get_or_insert((r.label(i), None, Some(r.describe())));
+        }
+    }
+    let Some((name, mine, other)) = first else {
+        return "; every registry is the same, so their order differs".to_owned();
+    };
+    let show = |side: Option<String>| side.unwrap_or_else(|| "absent".to_owned());
+    format!(
+        "; {differ} registries differ, the first {name} (the client's {}, {target}'s {})",
+        show(mine),
+        show(other)
+    )
 }
 
 /// Builds a [`Digest`] from the clientbound packets of a configuration phase.
 #[derive(Clone, Debug)]
-pub struct DigestBuilder([Sha256; KINDS.len()]);
+pub struct DigestBuilder {
+    hashes: [Sha256; KINDS.len()],
+    summary: Summary,
+}
 
 impl Default for DigestBuilder {
     fn default() -> Self {
-        DigestBuilder(std::array::from_fn(|_| Sha256::new()))
+        DigestBuilder {
+            hashes: std::array::from_fn(|_| Sha256::new()),
+            summary: Summary::default(),
+        }
     }
 }
 
@@ -81,13 +271,26 @@ impl DigestBuilder {
     pub fn add(&mut self, id: i32, payload: &[u8]) {
         if let Some(i) = KINDS.iter().position(|(kind, _)| *kind == id) {
             // The length first, so that two packets never hash as one.
-            self.0[i].update((payload.len() as u64).to_be_bytes());
-            self.0[i].update(payload);
+            self.hashes[i].update((payload.len() as u64).to_be_bytes());
+            self.hashes[i].update(payload);
+            let sizes = &mut self.summary.kinds[i];
+            sizes.packets = sizes.packets.saturating_add(1);
+            sizes.bytes = sizes.bytes.saturating_add(payload.len() as u64);
+            if id == c::REGISTRY_DATA {
+                self.summary.registries.push(Registry::of(payload));
+            }
         }
     }
 
     pub fn finish(&self) -> Digest {
-        Digest(std::array::from_fn(|i| self.0[i].clone().finalize().into()))
+        Digest(std::array::from_fn(|i| {
+            self.hashes[i].clone().finalize().into()
+        }))
+    }
+
+    /// What the log of a refused switch says of this configuration.
+    pub fn summary(&self) -> Summary {
+        self.summary.clone()
     }
 }
 
@@ -98,7 +301,7 @@ impl DigestBuilder {
 pub fn configure(
     connection: &mut Connection,
     client: &ClientConfiguration,
-) -> Result<Digest, String> {
+) -> Result<(Digest, Summary), String> {
     let send = |connection: &mut Connection, id: i32, payload: &[u8]| {
         let mut body = Vec::with_capacity(payload.len() + 1);
         write_varint(&mut body, id);
@@ -166,7 +369,7 @@ pub fn configure(
             }
             c::FINISH_CONFIGURATION => {
                 send(connection, s::FINISH_CONFIGURATION, &[])?;
-                return Ok(digest.finish());
+                return Ok((digest.finish(), digest.summary()));
             }
             _ => {}
         }
