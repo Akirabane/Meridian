@@ -54,7 +54,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Moving the player's state between servers | Built, waiting on Horizon | The proxy and the sidecar ask Horizon's `player-*` requests ([docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md)); Horizon's pull requests for them were open on 2026-11-04 |
 | The switch itself | Built, tested on fakes | `switch`, `send`, `/server`, `/hub`, `/lobby`. Not yet run on real servers |
 | Proof that there is no loading screen | Planned | Milestones J4 and J5 of the design: two real servers with different maps |
-| Extensions | Planned | |
+| Extensions | Specified, not built | A separate program the proxy asks at login, for a proxy command and for the choice of server, over a local socket; Rust SDK only ([docs/EXTENSIONS.md](docs/EXTENSIONS.md)) |
 
 ## Measures
 
