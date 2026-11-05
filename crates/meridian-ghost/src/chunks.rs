@@ -113,10 +113,13 @@ impl Chunks {
         let Some(radius) = self.radius else {
             return;
         };
-        let range = radius.max(2) + 3;
-        let (cx, cz) = self.center;
-        self.loaded
-            .retain(|&(x, z), _| (x - cx).abs() <= range && (z - cz).abs() <= range);
+        // In i64: the radius and the centre are what a packet says, anywhere an i32
+        // reaches.
+        let range = i64::from(radius.max(2)) + 3;
+        let (cx, cz) = (i64::from(self.center.0), i64::from(self.center.1));
+        self.loaded.retain(|&(x, z), _| {
+            (i64::from(x) - cx).abs() <= range && (i64::from(z) - cz).abs() <= range
+        });
     }
 
     /// The packets that bring the client from `self` to `to`, with the columns
@@ -145,14 +148,29 @@ impl Chunks {
                 play::SetChunkCacheCenter { x, z },
             )));
         }
+        // In i64: a column a packet names may be anywhere an i32 reaches, and so may the
+        // player, so the distance between them may not fit an i32.
+        let ring_of = |x: i32, z: i32| {
+            let (dx, dz) = (
+                i64::from(x) - i64::from(around.0),
+                i64::from(z) - i64::from(around.1),
+            );
+            (dx.abs().max(dz.abs()), dx, dz)
+        };
         let mut wanted: Vec<(&(i32, i32), &Chunk)> = to.loaded.iter().collect();
         wanted.sort_by_key(|&(&(x, z), _)| {
-            let (dx, dz) = (i64::from(x - around.0), i64::from(z - around.1));
-            (dx.abs().max(dz.abs()), dx * dx + dz * dz, x, z)
+            let (ring, dx, dz) = ring_of(x, z);
+            // Up to 2^32 apart on an axis: a square may not fit an i64 either.
+            (
+                ring,
+                dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)),
+                x,
+                z,
+            )
         });
         let mut placed = false;
         for (&(x, z), chunk) in wanted {
-            let ring = (x - around.0).abs().max((z - around.1).abs());
+            let (ring, _, _) = ring_of(x, z);
             if ring > 1 && !placed {
                 position(out);
                 placed = true;
