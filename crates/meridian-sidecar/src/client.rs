@@ -1,6 +1,7 @@
 //! The proxy's side of the signed exchange: one connection to one sidecar, and a
 //! function for each player request.
 use crate::Error;
+use crate::lists::AccessReport;
 use crate::request::{Arrival, NoticeReport, Outcome, Request, ServerStatus};
 use crate::wire::{self, Challenge, Direction, Expected};
 use serde_json::Value;
@@ -241,6 +242,32 @@ impl SidecarClient {
         })?;
         NoticeReport::from_value(&answer)
             .map_err(|why| Error::Endpoint(format!("the notices are not usable: {why}")))
+    }
+
+    /// The changes of the server's lists after number `after` (none without it: the answer
+    /// then only says where the count stands), waiting up to `wait` for one when there are
+    /// none. The connection's timeout must be longer than `wait`.
+    pub fn access_notices(
+        &mut self,
+        after: Option<u64>,
+        wait: Duration,
+    ) -> Result<AccessReport, Error> {
+        let answer = self.request(&Request::AccessNotices {
+            after,
+            wait_ms: Some(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+        })?;
+        AccessReport::from_value(&answer)
+            .map_err(|why| Error::Endpoint(format!("the report is not usable: {why}")))
+    }
+
+    /// Calls `method` of the server's management protocol on its lists (see
+    /// [`Request::Manage`]) and returns the result. The connection's timeout must be longer
+    /// than the sidecar's wait for the server, [`crate::lists::CALL_TIMEOUT`].
+    pub fn manage(&mut self, method: &str, params: Value) -> Result<Value, Error> {
+        self.request(&Request::Manage {
+            method: method.to_owned(),
+            params,
+        })
     }
 
     /// Forgets an expected or held player. With a `handover`, only the arrival of the

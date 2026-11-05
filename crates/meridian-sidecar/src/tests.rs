@@ -974,3 +974,136 @@ fn a_notices_request_takes_no_other_field() {
         r#"{"op":"notices"}"#
     );
 }
+
+const BANNED: &str = r#"{"jsonrpc":"2.0","method":"minecraft:notification/bans/added","params":[{"player":{"name":"Alex"}}]}"#;
+
+/// A sidecar that does not listen says so for the lists too, and refuses a call.
+#[test]
+fn a_sidecar_that_does_not_listen_has_no_list_notices_and_makes_no_call() {
+    let running = Running::start(echo(), WAIT);
+    let mut client = running.client(SECRET);
+    let report = client.access_notices(None, Duration::ZERO).unwrap();
+    assert!(!report.enabled && !report.watching);
+    let refused = client.manage("bans", Value::Null).unwrap_err();
+    assert!(
+        matches!(&refused, Error::Refused(why) if why.contains("--management-properties")),
+        "{refused}"
+    );
+    assert!(!refused.is_lost(), "it will not heal by asking again");
+    assert!(running.seen.lock().unwrap().is_empty());
+}
+
+/// The list notices and the calls on the signed wire, with a thread that plays the part of
+/// the listener on the server's management connection.
+#[test]
+fn the_list_notices_and_the_calls_cross_the_signed_wire() {
+    let notices = Arc::new(Notices::default());
+    notices.lists.begin_connection();
+    notices.set_watching(true);
+    let running = Running::start_with(echo(), WAIT, Some(Arc::clone(&notices)));
+    let mut client = running.client(SECRET);
+    let start = client.access_notices(None, Duration::ZERO).unwrap();
+    assert!(start.enabled && start.watching);
+    assert_eq!(
+        (start.connection, start.last, start.notices.len()),
+        (1, 0, 0)
+    );
+    // A notice of the lists is not one of the server's life.
+    assert!(notices.lists.offer(BANNED));
+    assert!(!notices.offer(BANNED));
+    let heard = client.access_notices(Some(0), Duration::ZERO).unwrap();
+    assert_eq!(heard.notices.len(), 1);
+    assert_eq!(heard.notices[0].line, BANNED);
+    assert!(!heard.missed);
+    assert_eq!(
+        client
+            .notices(Some(0), Duration::ZERO)
+            .unwrap()
+            .notices
+            .len(),
+        0
+    );
+
+    // The listener: takes what was asked and answers it.
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener = {
+        let (notices, stop) = (Arc::clone(&notices), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                for call in notices.lists.take_calls() {
+                    let text: Value = serde_json::from_str(call.text()).unwrap();
+                    asked.push(text["method"].as_str().unwrap().to_owned());
+                    let answer = if text["params"]["add"][0]["player"]["name"] == "nobody" {
+                        Err(crate::lists::CallError::Failed(
+                            "Invalid params: no one".into(),
+                        ))
+                    } else {
+                        Ok(json!([{ "asked": text["params"] }]))
+                    };
+                    let _ = call.into_reply().send(answer);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            asked
+        })
+    };
+    let params = json!({ "add": [{ "player": { "name": "Alex" } }] });
+    let result = client.manage("bans/add", params.clone()).unwrap();
+    assert_eq!(result, json!([{ "asked": params }]));
+    // The server's error is a refusal; a method outside the lists never leaves the sidecar.
+    let refused = client
+        .manage(
+            "bans/add",
+            json!({ "add": [{ "player": { "name": "nobody" } }] }),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&refused, Error::Refused(why) if why.contains("no one")),
+        "{refused}"
+    );
+    let outside = client.manage("server/stop", Value::Null).unwrap_err();
+    assert!(
+        matches!(&outside, Error::Refused(why) if why.contains("server/stop")),
+        "{outside}"
+    );
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(
+        listener.join().unwrap(),
+        ["minecraft:bans/add", "minecraft:bans/add"]
+    );
+
+    // The connection ends: a call is not reached, which the proxy may try again.
+    notices.lists.end_connection();
+    notices.set_watching(false);
+    let lost = client.manage("bans", Value::Null).unwrap_err();
+    assert!(
+        matches!(lost, Error::Unreached(_)) && lost.is_lost(),
+        "{lost}"
+    );
+}
+
+#[test]
+fn the_requests_on_the_lists_take_no_other_field() {
+    use crate::request::Request;
+    let ok: Request =
+        serde_json::from_str(r#"{"op":"access-notices","after":3,"wait_ms":500}"#).unwrap();
+    assert_eq!(
+        ok,
+        Request::AccessNotices {
+            after: Some(3),
+            wait_ms: Some(500)
+        }
+    );
+    assert!(serde_json::from_str::<Request>(r#"{"op":"access-notices","uuid":"x"}"#).is_err());
+    let call: Request =
+        serde_json::from_str(r#"{"op":"manage","method":"bans","params":null}"#).unwrap();
+    assert_eq!(
+        call,
+        Request::Manage {
+            method: "bans".into(),
+            params: Value::Null
+        }
+    );
+    assert!(serde_json::from_str::<Request>(r#"{"op":"manage","method":"bans","x":1}"#).is_err());
+}

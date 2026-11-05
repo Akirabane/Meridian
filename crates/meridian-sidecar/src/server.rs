@@ -2,6 +2,7 @@
 //! passes each one to the backend's control endpoint, and signs the answer.
 use crate::Error;
 use crate::endpoint::Endpoint;
+use crate::lists::{self, AccessReport};
 use crate::management::Notices;
 use crate::request::{NoticeHeard, NoticeReport, Request};
 use crate::wire::{self, Direction, Expected};
@@ -123,6 +124,12 @@ fn answer(body: &str, settings: &Settings) -> Value {
     if let Request::Notices { after, wait_ms } = &request {
         return notices_answer(settings, *after, *wait_ms);
     }
+    if let Request::AccessNotices { after, wait_ms } = &request {
+        return access_notices_answer(settings, *after, *wait_ms);
+    }
+    if let Request::Manage { method, params } = &request {
+        return manage_answer(settings, method, params);
+    }
     // A request that cannot be a well-formed line never reaches the backend.
     let line = match request.endpoint_line() {
         Ok(line) => line,
@@ -165,4 +172,54 @@ fn notices_answer(settings: &Settings, after: Option<u64>, wait_ms: Option<u64>)
         }
     };
     json!({ "ok": true, "result": report.to_value() })
+}
+
+/// The answer to an `access-notices` request: what the server announced of its lists, as
+/// [`notices_answer`] does for its life.
+fn access_notices_answer(settings: &Settings, after: Option<u64>, wait_ms: Option<u64>) -> Value {
+    let report = match &settings.notices {
+        None => AccessReport::default(),
+        Some(notices) => {
+            let heard = notices
+                .lists
+                .heard(after, Duration::from_millis(wait_ms.unwrap_or(0)));
+            AccessReport {
+                enabled: true,
+                // Asked after the wait, which may have been long enough for the
+                // connection to come or to go.
+                watching: notices.heard(None, Duration::ZERO).watching,
+                connection: heard.connection,
+                last: heard.last,
+                missed: heard.missed,
+                notices: heard
+                    .notices
+                    .into_iter()
+                    .map(|n| NoticeHeard {
+                        seq: n.seq,
+                        line: n.line,
+                        age: n.age,
+                    })
+                    .collect(),
+            }
+        }
+    };
+    json!({ "ok": true, "result": report.to_value() })
+}
+
+/// The answer to a `manage` request: the call is made on the connection the sidecar holds to
+/// the server's management protocol. A server that did not answer is `unreached`, like a
+/// backend's endpoint that did not; one that answered with an error is a refusal.
+fn manage_answer(settings: &Settings, method: &str, params: &Value) -> Value {
+    let Some(notices) = &settings.notices else {
+        return json!({
+            "ok": false,
+            "error": "the sidecar does not listen to the server's management protocol \
+                      (start it with --management-properties)",
+        });
+    };
+    match notices.lists.call(method, params, lists::CALL_TIMEOUT) {
+        Ok(result) => json!({ "ok": true, "result": result }),
+        Err(e) if e.is_lost() => json!({ "ok": false, "error": e.to_string(), "unreached": true }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
 }
