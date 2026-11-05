@@ -723,6 +723,11 @@ What is not synchronised:
   removed that way. In online and hybrid mode an account's id cannot
   be known from a name, so none is guessed: give the id that `banlist` shows (`pardon
   069a79f4-44e9-4726-a5be-fca90e38aaf5`). With the sync off, `pardon` is unchanged.
+- **A whitelist entry taken from a server's allowlist is filed by unique id** too, and carries no
+  mark. With the sync on and the proxy in offline mode, `whitelist remove <name>` removes the entry
+  under the id of that name (as typed, or in lower case) and sends the removal to the servers by
+  name; in online and hybrid mode give the id that `whitelist list` shows. An id is made from a
+  spelling, so the name must be spelled as the id was made.
 - **The allowlist switch.** Whether a server enforces its allowlist (`use_allowlist`) is not read
   or changed; only the entries are.
 - **Operators, kicks, the rest of the protocol.** Nothing else is read or sent.

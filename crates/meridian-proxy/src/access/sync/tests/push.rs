@@ -615,3 +615,70 @@ fn the_notice_of_a_server_about_that_pardon_changes_nothing_and_sends_nothing() 
     assert_eq!(proxy.access_sync.waiting("east"), 0);
     assert_eq!(proxy.access_sync.waiting("lobby"), 0);
 }
+
+/// An allowlist entry the proxy took from `server` for `name`: the id the server gave.
+fn allowed_from(proxy: &Proxy, server: &str, name: &str) {
+    use super::super::events::Event;
+    let id = Target::Uuid(horizon_protocol::crypto::offline_uuid(name).to_be_bytes());
+    let line = super::super::hear::apply(&proxy.sessions, server, Event::Allow { who: id });
+    assert!(line.is_some(), "the entry was taken");
+}
+
+#[test]
+fn a_removal_by_name_takes_off_an_entry_taken_from_a_server_and_is_sent_to_the_servers() {
+    // The allowlist of a server gives the unique id; `whitelist remove <name>` at the console.
+    let proxy = proxy(config(true, true, &["lobby", "east"]));
+    allowed_from(&proxy, "east", "vt_zeta");
+    assert_eq!(proxy.sessions.access.snapshot().allowed().len(), 1);
+    let lines = run(&proxy, "whitelist remove vt_zeta");
+    assert_eq!(lines[0], "vt_zeta removed from the whitelist");
+    assert!(proxy.sessions.access.snapshot().allowed().is_empty());
+    let servers = Arc::new(Servers::default());
+    pump(&proxy, &servers, Instant::now());
+    let call = (
+        "allowlist/remove".to_owned(),
+        json!({ "remove": [{ "name": "vt_zeta" }] }),
+    );
+    for backend in ["lobby", "east"] {
+        assert_eq!(
+            servers.calls_to(backend),
+            std::slice::from_ref(&call),
+            "{backend}"
+        );
+    }
+}
+
+#[test]
+fn a_removal_by_name_finds_a_capital_name_and_guesses_nothing_elsewhere() {
+    let proxy = proxy(config(true, true, &["east"]));
+    // The id of the name as typed, or of the lower-case name: the spelling of the removal must
+    // lead to it (an id is made from a spelling).
+    allowed_from(&proxy, "east", "vt_Zeta");
+    assert_eq!(
+        run(&proxy, "whitelist remove vt_Zeta")[0],
+        "vt_Zeta removed from the whitelist"
+    );
+    allowed_from(&proxy, "east", "vt_zeta");
+    assert_eq!(
+        run(&proxy, "whitelist remove VT_ZETA")[0],
+        "VT_ZETA removed from the whitelist"
+    );
+    assert_eq!(
+        run(&proxy, "whitelist remove Herobrine"),
+        ["Herobrine is not on the whitelist"]
+    );
+    // Online mode: no id is made from a name; the sync off: a removal is what it was.
+    let mut online = config(true, true, &["east"]);
+    online.online_mode = true;
+    online.auth_mode = meridian_config::AuthMode::Online;
+    for config in [online, config(false, false, &["east"])] {
+        let proxy = self::proxy(config);
+        allowed_from(&proxy, "east", "vt_zeta");
+        assert_eq!(
+            run(&proxy, "whitelist remove vt_zeta"),
+            ["vt_zeta is not on the whitelist"]
+        );
+        assert_eq!(proxy.sessions.access.snapshot().allowed().len(), 1);
+        assert_eq!(proxy.access_sync.waiting("east"), 0);
+    }
+}
