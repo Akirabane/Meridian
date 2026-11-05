@@ -62,6 +62,52 @@ folder. Cargo locks the folder while it builds, so builds queue instead of
 multiplying the work and the disk use. Prefer `cargo check` when a full build is
 not needed.
 
+## Linux binaries from CI
+
+To try Meridian on a Linux machine that has no compiler, the `Linux binaries` workflow
+builds the programs on request. It never runs by itself, and it makes no release, no
+tag and no image.
+
+```
+gh workflow run linux-binaries.yml            # on the default branch
+gh workflow run linux-binaries.yml --ref my-branch
+gh run list --workflow linux-binaries.yml     # find the run id
+gh run download <id>                          # saves the artifact in the current folder
+```
+
+The same can be done from the Actions tab (Linux binaries, Run workflow) and the page
+of the run. The artifact is private to the people who can read the repository and is
+kept for 14 days.
+
+It holds `meridian-linux-x86_64-<commit>.tar.gz` (the first 12 digits of the commit) and
+`meridian-linux-x86_64-<commit>.tar.gz.sha256`. Check the download, then unpack it:
+
+```
+sha256sum --check meridian-linux-x86_64-<commit>.tar.gz.sha256
+tar -xzf meridian-linux-x86_64-<commit>.tar.gz
+cd meridian-linux-x86_64-<commit>
+sha256sum --check SHA256SUMS
+```
+
+The folder in the archive has:
+
+| File | What it is |
+| --- | --- |
+| `meridian` | The proxy |
+| `meridian-sidecar` | The sidecar that runs next to each Horizon server |
+| `meridian-panel` | The panel that runs a test bench |
+| `meridian-bench` | The load measurement ([BENCH.md](BENCH.md)) |
+| `meridian.example.toml` | The example configuration |
+| `COMMIT.txt` | The full commit, the branch, the run, the version of `rustc`, the date, and the newest glibc the binaries need |
+| `SHA256SUMS` | The checksums of the files above |
+
+The binaries are built in release mode for `x86_64-unknown-linux-gnu` on Ubuntu
+22.04, whose glibc (2.35) is old enough for Debian 12 and 13 and Ubuntu 22.04 and
+later; the workflow fails if a binary asks for a glibc newer than Debian 12's 2.36.
+They are linked to the system's glibc, not statically and not to musl, so they do not
+run on Alpine. They need nothing else: no compiler, no Rust, no other library. The
+build uses `--locked`, so the dependencies are those of `Cargo.lock`.
+
 ## Releases
 
 A release is made by pushing a tag `vX.Y.Z` whose version is the workspace's

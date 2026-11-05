@@ -1,0 +1,96 @@
+name: Linux binaries
+
+# Builds the Linux binaries on request, to try Meridian on a machine that has no
+# compiler: Actions tab, "Linux binaries", "Run workflow" (or
+# `gh workflow run linux-binaries.yml`). Nothing is released, tagged or published: the
+# archive is an artifact of the run, private to people who can read the repository,
+# and kept for 14 days. docs/BUILD.md, "Linux binaries from CI".
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: x86_64-unknown-linux-gnu
+    # The oldest runner image still offered, so that the binaries ask for the oldest
+    # glibc (2.35) and run on Debian 12 and 13 and on Ubuntu 22.04 and later.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: >
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          -p meridian-proxy -p meridian-sidecar -p meridian-panel -p meridian-bench --bins
+      - name: Package
+        run: |
+          set -euo pipefail
+          sha12="${GITHUB_SHA:0:12}"
+          name="meridian-linux-x86_64-$sha12"
+          bin=target/x86_64-unknown-linux-gnu/release
+          mkdir -p "dist/$name"
+          for exe in meridian meridian-sidecar meridian-panel meridian-bench; do
+            install -m 755 "$bin/$exe" "dist/$name/$exe"
+          done
+          install -m 644 meridian.example.toml "dist/$name/meridian.example.toml"
+
+          # The newest glibc symbol any binary asks for. Debian 12 has glibc 2.36.
+          newest=$(for exe in meridian meridian-sidecar meridian-panel meridian-bench; do
+            objdump -T "dist/$name/$exe" | grep -o 'GLIBC_[0-9.]*' || true
+          done | sed 's/GLIBC_//' | sort -uV | tail -n 1)
+          echo "newest glibc symbol: $newest"
+          if [ "$(printf '%s\n' 2.36 "$newest" | sort -V | tail -n 1)" != 2.36 ]; then
+            echo "a binary needs glibc $newest, newer than Debian 12's 2.36" >&2
+            exit 1
+          fi
+
+          {
+            echo "commit:  $GITHUB_SHA"
+            echo "ref:     $GITHUB_REF_NAME"
+            echo "run:     $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "rustc:   $(rustc --version)"
+            echo "target:  x86_64-unknown-linux-gnu, release profile"
+            echo "built:   $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(. /etc/os-release && echo "$PRETTY_NAME"), $(ldd --version | head -n 1)"
+            echo "glibc:   the binaries need glibc $newest or later"
+          } > "dist/$name/COMMIT.txt"
+
+          (cd "dist/$name" && sha256sum meridian meridian-sidecar meridian-panel meridian-bench meridian.example.toml COMMIT.txt > SHA256SUMS)
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          rm -r "dist/$name"
+          echo "ARCHIVE=$name" >> "$GITHUB_ENV"
+          ls -l dist
+      - name: Check the archive as a download would be
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          tar -xzf "$GITHUB_WORKSPACE/dist/$ARCHIVE.tar.gz"
+          cd "$ARCHIVE"
+          sha256sum --check SHA256SUMS
+          ./meridian --version
+          ./meridian --check meridian.example.toml
+          ./meridian-sidecar --help > /dev/null
+          ./meridian-panel --help > /dev/null
+          ./meridian-bench --help > /dev/null
+          cat COMMIT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: |
+            dist/${{ env.ARCHIVE }}.tar.gz
+            dist/${{ env.ARCHIVE }}.tar.gz.sha256
+          retention-days: 14
+          if-no-files-found: error
