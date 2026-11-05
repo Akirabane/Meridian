@@ -77,9 +77,13 @@ fn server(backend: &str, bans: Value, allowlist: Value) -> Server {
             }
         })
     };
+    // One folder for each server of each test: tests run side by side in one process, and the
+    // one that ends removes only its own.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let folder = std::env::temp_dir().join(format!(
-        "meridian-access-sync-{}-{backend}",
-        std::process::id()
+        "meridian-access-sync-{}-{}-{backend}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&folder).unwrap();
     let secret_file = folder.join("sidecar.key");
