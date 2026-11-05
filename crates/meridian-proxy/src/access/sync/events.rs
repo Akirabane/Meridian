@@ -1,5 +1,5 @@
 //! What a server's management protocol says about its lists, as changes of the proxy's
-//! (docs/OPERATING.md, section 5.10). Nothing here touches the lists: a notification, or
+//! (docs/OPERATING.md, section 5.12). Nothing here touches the lists: a notification, or
 //! an entry of a list the server holds, becomes an [`Event`], and `hear.rs` applies it.
 //!
 //! The shapes are those of Horizon's management protocol, which follows vanilla's:

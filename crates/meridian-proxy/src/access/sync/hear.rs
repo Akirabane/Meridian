@@ -1,5 +1,5 @@
 //! `from-servers`: a ban, a pardon or a whitelist addition made on a server reaches the
-//! proxy's lists (docs/OPERATING.md, section 5.10).
+//! proxy's lists (docs/OPERATING.md, section 5.12).
 //!
 //! Each sidecar is asked, over a connection of its own kept between rounds, for what its
 //! server announced about its lists (`access-notices`), with a wait the sidecar holds the

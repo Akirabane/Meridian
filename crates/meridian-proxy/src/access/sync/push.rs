@@ -1,5 +1,5 @@
 //! `to-servers`: a ban, a pardon or a whitelist change made at the proxy's console is sent to
-//! the servers through their sidecars (docs/OPERATING.md, section 5.10).
+//! the servers through their sidecars (docs/OPERATING.md, section 5.12).
 //!
 //! The change is made on the proxy's lists first, and that is what refuses the player; sending
 //! it never holds the console or a login back. Each backend that has a sidecar has a lane of

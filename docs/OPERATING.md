@@ -130,7 +130,8 @@ The options are `--endpoint-file` (required), `--listen` (default `127.0.0.1:255
 `--secret-file` (or the `MERIDIAN_SIDECAR_SECRET` environment variable), and
 `--endpoint-timeout-ms` (default 5000). With `--management-properties <server folder>/server.properties` the sidecar also listens to
 the server's management protocol and tells the proxy when the server announces its stop (section 6;
-it is off without the option). The secret is never an argument, because other users
+it is off without the option; it also carries the servers' bans and whitelist for `[access.sync]`,
+section 5.12). The secret is never an argument, because other users
 of the machine can read a process's arguments.
 
 The secret is a file of at least 16 bytes, **one per sidecar** (the proxy refuses two sidecars
@@ -458,11 +459,9 @@ What they can and cannot tell about a player:
 - An address is the player's, or a shared one (a school, a mobile carrier, a VPN). A range
   that is wider than needed bans people who did nothing.
 
-Not done: the commands in game (they wait for the permissions), a duration or an expiry, a
-record of who banned and when, and the sync with the servers' own lists. Horizon's management
-protocol does serve its allowlist, bans and IP bans (`horizon-server/src/management.rs`,
-methods `allowlist/*`, `bans/*`, `ip_bans/*`), so a sync is possible later; none is made, and
-the servers keep their own lists, which the proxy does not read or change. Refusals are counted
+Not done: the commands in game (they wait for the permissions), a duration or an expiry, and a
+record of who banned and when. The servers keep their own lists; the proxy follows them and
+tells them its own only if you turn `[access.sync]` on (section 5.12). Refusals are counted
 as `meridian_login_failures_total{reason="banned"}` and `{reason="not_whitelisted"}` (section
 8.1).
 
@@ -642,6 +641,91 @@ use a stand-in client and servers. A player in the middle of a switch, or at log
 saved by it. Their inventory, position and the rest of what was unsaved on the lost server are
 whatever that server had last written.
 
+### 5.12 Keeping the bans and the whitelist in step with the servers
+
+The proxy's bans and whitelist (section 5.8) and each Horizon server's own are separate lists. A
+player banned on one server can still join another through the proxy, and a ban made at the
+proxy's console leaves the servers' lists as they were. `[access.sync]` joins them, in two
+directions that you turn on one by one. Both are off.
+
+```toml
+[access.sync]
+from-servers = true   # what is banned, pardoned or allowed on a server reaches the proxy
+to-servers = true     # what the console bans, pardons or whitelists is sent to the servers
+```
+
+Both go through the sidecars, which are already clients of the servers' management protocol
+(section 4). Each sidecar must be started with `--management-properties` and have a `[[sidecars]]`
+entry in the proxy's configuration; a backend without either is left out, and the proxy says so
+once in its log. Nothing else of the management protocol is used: the sidecar lets through only
+the three lists and, for each, a read and the addition or removal of one entry.
+
+**`from-servers`.** The proxy asks each sidecar for what its server announced about its lists,
+over the same signed exchange as the other requests.
+
+- A ban made on a server is a ban of the proxy, with the reason `banned on east` (or `banned on
+  east: <the server's reason>`), by unique id when the server gives one and by name otherwise. A
+  player who is connected to another server is disconnected with that reason, as for a ban at the
+  console. A ban of an address is a ban of that address.
+- A pardon on a server lifts the proxy's ban only if it is the one taken from that server (the
+  reason says so). A ban you made at the console, or one taken from another server, stays.
+- A player added to a server's allowlist is added to the proxy's whitelist. A player removed from
+  an allowlist is **not** removed from the whitelist: another server may still allow them.
+- When the proxy starts, and whenever a sidecar has connected to its server again (a restart of
+  the server), or has lost notices, or was restarted itself, the proxy reads the three lists the
+  server holds and takes what it does not have. That reading **never removes** an entry of the
+  proxy, whatever the server holds.
+- A ban that comes back with the source `Meridian` is the proxy's own (see "No loop" below) and
+  is not taken again.
+
+**`to-servers`.** `ban`, `pardon`, `whitelist add` and `whitelist remove` at the console are
+applied to the proxy's lists first, which is what refuses the player at once, then sent to every
+backend that has a sidecar: `ban <name>` becomes `bans/add` with the source `Meridian` and the
+reason, `ban <ip>` becomes `ip_bans/add`, `pardon` becomes `bans/remove` or `ip_bans/remove`, and
+the whitelist becomes `allowlist/add` or `allowlist/remove`. The command prints a line saying where
+it is being sent.
+
+- Each backend has a queue of its own, in the order the changes were made, so a ban and the
+  pardon after it cannot cross. A server that is slow holds up no other and never the console or
+  a login.
+- A server that cannot be reached (down, its sidecar down, its sidecar not connected to it) is
+  tried again after 2, 5, 15, 30, 60 and 120 seconds. After the sixth failure the change is given
+  up for that server, with a warning in the log; the proxy's lists keep it, so the player is
+  still refused at the proxy. A server that answers with an error (a name it cannot resolve) is
+  not tried again, and the log says what it answered.
+- A queue holds 256 changes; past that the oldest is dropped, with a warning.
+- Turning `to-servers` off at a reload drops what was still waiting. The queue is in memory:
+  a restart of the proxy forgets it.
+
+**No loop.** What the console decides is what is sent. A change that comes from a server is
+never sent on to the others (it is the proxy that refuses the player there, not the other
+servers' lists that change). The notice a server sends back for a change the proxy made carries
+the source `Meridian` and is ignored; a change already in the lists is no change.
+
+What is not synchronised:
+
+- **Ranges of addresses.** Horizon bans single addresses. A range banned at the proxy
+  (`203.0.113.0/24`) stays at the proxy; the console says it is not sent.
+- **Bans that end.** A ban on a server with an expiry is not copied, as the proxy's bans never
+  end; the log says so for each. A ban you want everywhere, make it at the console.
+- **Names and unique ids.** The two sides may name a player differently. A ban by name goes to a
+  server as a name, which it must resolve itself (its user cache, or the profile service, or the
+  offline player of an offline server); a name it cannot resolve is refused and logged. A ban by
+  unique id goes as an id. In offline mode, and for the unverified players of the hybrid mode, a
+  name is not proof of who is playing (section 5.8), and neither is an entry synchronised from a
+  name.
+- **The allowlist switch.** Whether a server enforces its allowlist (`use_allowlist`) is not read
+  or changed; only the entries are.
+- **Operators, kicks, the rest of the protocol.** Nothing else is read or sent.
+- **Who banned and when.** The reason is the only note kept; the proxy keeps no author.
+
+Not tried: this was tested against stand-ins for the sidecar's connection and for the server's
+management protocol, with the exact methods and shapes of Horizon's
+`horizon-server/src/management.rs` as read on its main branch; it has not run against a real
+Horizon server. Try it
+on one server first: ban a test name on the server, see `banned on <server>` in `banlist`, then ban
+another at the console and read `banlist` on the server.
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it
@@ -713,6 +797,9 @@ Before the first player:
       offline mode nothing sensitive is given to a name (section 5.9).
 - [ ] If you use the bans or the whitelist: `access.toml` is in a folder the proxy can write, is
       kept with the configuration, and a test ban and `pardon` of a test name work (section 5.8).
+- [ ] If you turn `[access.sync]` on: each sidecar has `--management-properties` and its log says
+      it is connected to the server's management protocol, a test ban on a server reaches
+      `banlist`, and a test ban at the console reaches the server's list (section 5.12).
 - [ ] The proxy's service is restarted by something when it dies. It does not restart itself,
       and players who were on it are disconnected.
 - [ ] You know how to roll back: the previous binary and the previous `meridian.toml`.
@@ -864,7 +951,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Placing players | Caps, a drain, balancing among lobbies and `/play` for games, evacuation of a restarting server | Moving a group from a lobby to a game, matchmaking, a decision on who starts a move |
 | Waiting when full | `[queue]`: a bounded line, first come first served, for a full proxy or lobbies at their hard cap (section 5.10) | A longer wait with a message of position, a line per group or role, priority |
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
-| Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), groups of permissions with `perm`, `/send`, `/glist` and `/alert` in game (section 5.9), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for the bans and the groups, an expiry on a ban or a rank, a sync with the servers' lists, a player database in the proxy |
+| Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), their sync with the servers' own lists (section 5.12, off by default), groups of permissions with `perm`, `/send`, `/glist` and `/alert` in game (section 5.9), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for the bans and the groups, an expiry on a ban or a rank, a player database in the proxy |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
 | Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence | A recorded run of Horizon's `server/stopping` notice, which the sidecar now hears and the proxy feeds to the detector (opt in: `--management-properties`, `sidecar-notices`) |
 | Report of a server's state | The sidecar's `status` request and the proxy's reading of `players`, `capacity`, `accepts_transfers` | A Horizon command that answers it. Today balancing counts the proxy's own sessions |
@@ -905,6 +992,10 @@ switch, and keep the proxy's log and both servers' logs.
 - The bans and the whitelist by name are as strong as the login: in offline mode, and for the
   unverified players of the hybrid mode, a name is not proof of who is playing (section 5.8). A
   ban by address is closed without a reason.
+- The sync of the bans and whitelist with the servers (section 5.12) has not run against a real
+  Horizon server: it was tested against stand-ins that use the methods and shapes of Horizon's
+  management protocol as written in its source. It does not carry ranges of addresses or bans
+  that end, and a change that could not be sent to a server in six tries is not sent again.
 - A proxy that dies drops its players, and nothing runs a second proxy for them.
 
 ## 13. How this page was checked

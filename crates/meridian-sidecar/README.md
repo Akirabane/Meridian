@@ -82,6 +82,25 @@ a `management-server-host` that is not a loopback address is refused, since a ce
 server made itself is not verified. The secret is in no log and no error. See
 [docs/RESTART.md](../../docs/RESTART.md), "How the announcement reaches the proxy".
 
+## Following and changing the server's bans and whitelist
+
+With the same option the sidecar can also carry the lists of the server's management protocol
+(`allowlist`, `bans`, `ip_bans`) for the proxy, when its `[access.sync]` is on. Two more
+requests:
+
+- `{"op": "access-notices", "after": N, "wait_ms": W}` answers the changes of the lists the
+  server announced (`notification/bans/added`, `.../removed`, `ip_bans`, `allowlist`), numbered
+  apart from the `notices` above, so that a run of bans never pushes a stop notice out of its
+  queue. The answer also says how many connections to the server there have been, and whether
+  notices were lost; the proxy reads the lists again when either moves.
+- `{"op": "manage", "method": "bans/add", "params": {...}}` makes that call on the connection
+  the sidecar already holds and answers its result. Only the three lists and, for each, a read
+  and the addition or removal of an entry go through (`allowlist`, `allowlist/add`,
+  `allowlist/remove`, `bans`, `bans/add`, `bans/remove`, `ip_bans`, `ip_bans/add`,
+  `ip_bans/remove`); nothing else of the protocol, and nothing that clears or sets a whole list.
+  A server that does not answer in 10 seconds, or a connection that is down, is `unreached`
+  (the proxy may ask again); a server that answers with an error is a refusal.
+
 ## What the connection protects, and what it does not
 
 Each connection starts with a random challenge from the sidecar. Every request

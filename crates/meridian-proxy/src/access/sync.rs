@@ -1,5 +1,5 @@
 //! The bans and the whitelist kept in step with the servers' own (docs/OPERATING.md,
-//! section 5.10), in two directions, both off (`[access.sync]`):
+//! section 5.12), in two directions, both off (`[access.sync]`):
 //!
 //! - `from-servers` ([`hear`]): what is banned, pardoned or allowed on a server reaches the
 //!   proxy's lists, so that a player banned on one server cannot join another through the

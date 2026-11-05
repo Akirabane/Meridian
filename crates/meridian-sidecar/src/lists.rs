@@ -1,6 +1,6 @@
 //! The lists of the backend's management protocol (the allowlist, the bans and the ip
 //! bans), through the connection that [`crate::management`] already holds
-//! (docs/OPERATING.md, section 5.10).
+//! (docs/OPERATING.md, section 5.12).
 //!
 //! - What the server announces about them (`notification/bans/added`, ...) is kept in a
 //!   queue of its own, apart from `server/stopping` and `server/started`: a long run of bans
