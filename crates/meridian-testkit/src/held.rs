@@ -186,6 +186,9 @@ pub fn join_source(player: &mut Connection, source: &mut Connection) {
 /// How the fake target differs from the source.
 #[derive(Clone)]
 pub struct TargetWorld {
+    /// The Client Information the target expects, as the proxy replays the client's. The
+    /// default is [`INFORMATION`], which the tests that play the client by hand send.
+    pub information: Vec<u8>,
     pub registry: Vec<u8>,
     pub dimension: &'static str,
     /// Whether the import sends the held player a position to confirm.
@@ -205,6 +208,7 @@ pub struct TargetWorld {
 impl Default for TargetWorld {
     fn default() -> Self {
         TargetWorld {
+            information: INFORMATION.to_vec(),
             registry: REGISTRY.to_vec(),
             dimension: OVERWORLD,
             import_sends_position: true,
@@ -249,7 +253,10 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
         let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
         let mut c = Connection::from_stream(stream).map_err(|e| e.to_string())?;
         let configuration = vec![
-            Step::expect_exactly(cfg::serverbound::CLIENT_INFORMATION, INFORMATION),
+            Step::expect_exactly(
+                cfg::serverbound::CLIENT_INFORMATION,
+                world.information.clone(),
+            ),
             Step::send(cfg::clientbound::REGISTRY_DATA, world.registry.clone()),
             Step::send(cfg::clientbound::SELECT_KNOWN_PACKS, PACKS),
             Step::expect_exactly(cfg::serverbound::SELECT_KNOWN_PACKS, PACKS_REPLY),

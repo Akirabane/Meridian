@@ -4,22 +4,40 @@
 //! it was sent to a file so that two runs can be compared.
 //!
 //! ```text
-//! real_run run [--host H] [--port P] [--name N] [--seconds S] [--out FILE]
+//! real_run run [--host H] [--port P] [--name N] [--seconds S] [--out FILE] [--script SCRIPT]
 //! real_run compare FILE_A FILE_B
 //! ```
+//!
+//! `--script "10:/server game1;190:/hub"` makes the player type, at each time in seconds since
+//! the connection, a command (the text starts with a slash) or a chat message (it does not).
+//! What is due while the server has the player in a configuration phase waits for the world.
+//! With a script, the player types nothing else, and `--seconds` defaults to ten seconds past
+//! the last time. When the session ends, `run` prints one line per thing typed (`SENT`) and
+//! per chat line the server sent (`CHAT`), with the time since the connection, in order; an
+//! action bar line is left out. The text of a command may not hold a semicolon.
 //!
 //! The last line printed by `run` starts with `RESULT` and says how the session
 //! ended: `clean` (the client left after its time), `disconnect` (the server sent a
 //! disconnect, whose text follows), `closed` (the connection was closed with no
 //! packet) or `error`. The exit status is 0 only for `clean`. `moves` counts the times the
 //! server took the player back to the configuration phase while they played, as a proxy does
-//! to move a player whose server was lost, and the player came out of it.
+//! to move a player whose server was lost, and the player came out of it. With a script,
+//! `said` counts the chat lines the server sent.
 use horizon_protocol::ids;
 use meridian_testkit::{
-    live::{End, Moves, Options, session_counting},
+    live::{
+        End, Entry, Moves, Options, link, parse_script, session_counting, session_linked,
+        start_script, transcript,
+    },
     trace::{Dir, Recorder},
 };
-use std::{fmt::Write as _, process::ExitCode, time::Instant};
+use std::{
+    fmt::Write as _,
+    process::ExitCode,
+    time::{Duration, Instant},
+};
+
+const USAGE: &str = "usage: real_run run [--host H] [--port P] [--name N] [--seconds S] [--out FILE] [--script \"10:/server game1;190:/hub\"]\n       real_run compare FILE_A FILE_B";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,15 +45,20 @@ fn main() -> ExitCode {
         Some("run") => run(&args[1..]),
         Some("compare") if args.len() == 3 => compare(&args[1], &args[2]),
         _ => {
-            eprintln!(
-                "usage: real_run run [--host H] [--port P] [--name N] [--seconds S] [--out FILE]\n       real_run compare FILE_A FILE_B"
-            );
+            eprintln!("{USAGE}");
             ExitCode::from(2)
         }
     }
 }
 
-fn options(args: &[String]) -> Result<(Options, Option<String>), String> {
+/// The settings of a run.
+struct Run {
+    options: Options,
+    out: Option<String>,
+    script: Option<Vec<Entry>>,
+}
+
+fn options(args: &[String]) -> Result<Run, String> {
     let mut o = Options {
         host: "127.0.0.1".into(),
         port: 25565,
@@ -43,6 +66,8 @@ fn options(args: &[String]) -> Result<(Options, Option<String>), String> {
         seconds: 20,
     };
     let mut out = None;
+    let mut typed = None;
+    let mut seconds_given = false;
     let mut it = args.iter();
     while let Some(key) = it.next() {
         let value = it.next().ok_or(format!("{key} needs a value"))?;
@@ -50,16 +75,40 @@ fn options(args: &[String]) -> Result<(Options, Option<String>), String> {
             "--host" => o.host = value.clone(),
             "--port" => o.port = value.parse().map_err(|_| "bad --port")?,
             "--name" => o.name = value.clone(),
-            "--seconds" => o.seconds = value.parse().map_err(|_| "bad --seconds")?,
+            "--seconds" => {
+                o.seconds = value.parse().map_err(|_| "bad --seconds")?;
+                seconds_given = true;
+            }
             "--out" => out = Some(value.clone()),
+            "--script" => typed = Some(parse_script(value).map_err(|e| format!("--script: {e}"))?),
             other => return Err(format!("unknown option {other}")),
         }
     }
-    Ok((o, out))
+    if let Some(entries) = &typed {
+        let last = entries.last().map_or(Duration::ZERO, |e| e.at);
+        if !seconds_given {
+            o.seconds = last.as_secs_f64().ceil() as u64 + 10;
+        } else if last >= Duration::from_secs(o.seconds) {
+            return Err(format!(
+                "--script has an entry at {:.1} seconds, not before the end of the session (--seconds {})",
+                last.as_secs_f64(),
+                o.seconds
+            ));
+        }
+    }
+    Ok(Run {
+        options: o,
+        out,
+        script: typed,
+    })
 }
 
 fn run(args: &[String]) -> ExitCode {
-    let (o, out) = match options(args) {
+    let Run {
+        options: o,
+        out,
+        script,
+    } = match options(args) {
         Ok(x) => x,
         Err(e) => {
             eprintln!("real_run: {e}");
@@ -68,8 +117,23 @@ fn run(args: &[String]) -> ExitCode {
     };
     let recorder = Recorder::new();
     let started = Instant::now();
-    let moves = Moves::default();
-    let end = session_counting(&o, &recorder, &moves);
+    let (end, moves, said) = match script {
+        None => {
+            let moves = Moves::default();
+            (session_counting(&o, &recorder, &moves), moves, None)
+        }
+        Some(entries) => {
+            let (handle, link) = link();
+            // The times run from the connection; the typist stops with the session.
+            let typist = start_script(handle.controller.clone(), entries, started);
+            let end = session_linked(&o, &recorder, &link);
+            let (lines, said) = transcript(&typist.finish(), &handle.journal);
+            for line in lines {
+                println!("{line}");
+            }
+            (end, handle.moves, Some(said))
+        }
+    };
     let trace = recorder.trace();
     if let Some(path) = &out {
         let mut text = String::new();
@@ -86,8 +150,9 @@ fn run(args: &[String]) -> ExitCode {
         End::Closed => ("closed", String::new(), 1),
         End::Error(e) => ("error", e.clone(), 1),
     };
+    let said = said.map_or(String::new(), |n| format!(" said={n}"));
     println!(
-        "RESULT {word} packets={} bytes={} seconds={:.1} moves={} {detail}",
+        "RESULT {word} packets={} bytes={} seconds={:.1} moves={}{said} {detail}",
         trace.count(Dir::ToClient),
         trace.bytes(Dir::ToClient),
         started.elapsed().as_secs_f32(),
