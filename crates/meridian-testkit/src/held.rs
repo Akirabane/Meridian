@@ -261,100 +261,115 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
         Err(_) => Err(format!("no {expected}")),
     };
     let thread = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
-        let mut c = Connection::from_stream(stream).map_err(|e| e.to_string())?;
-        let configuration = vec![
-            Step::expect_exactly(
-                cfg::serverbound::CLIENT_INFORMATION,
-                world.information.clone(),
-            ),
-            Step::send(cfg::clientbound::REGISTRY_DATA, world.registry.clone()),
-            Step::send(cfg::clientbound::SELECT_KNOWN_PACKS, PACKS),
-            Step::expect_exactly(cfg::serverbound::SELECT_KNOWN_PACKS, PACKS_REPLY),
-            Step::send(cfg::clientbound::KEEP_ALIVE, 11u64.to_be_bytes()),
-            Step::expect_exactly(cfg::serverbound::KEEP_ALIVE, 11u64.to_be_bytes()),
-            finish_configuration(),
-            Step::Expect {
-                id: cfg::serverbound::FINISH_CONFIGURATION,
-            },
-        ];
-        FakeBackend {
-            after_login: configuration,
-            ..FakeBackend::default()
-        }
-        .run(&mut c, &Recorder::new())?;
-        c.reader
-            .set_read_timeout(Some(world.idle))
-            .map_err(|e| e.to_string())?;
-        // The held player's join sequence and world.
-        send_typed(&mut c, &login(TARGET_ID, world.dimension));
-        for (id, payload) in columns(2) {
-            send(&mut c, id, &payload);
-        }
-        send_typed(&mut c, &position(1, 40.0));
-        // The target's own entity 5 is the client's player id.
-        send_typed(&mut c, &add_entity(CLIENT_ID, 500));
-        if let Some(level) = world.permission {
-            send_typed(
-                &mut c,
-                &C::EntityEvent(play::EntityEvent {
-                    id: TARGET_ID,
-                    event: 24 + level as i8,
-                }),
-            );
-        }
-        send(&mut c, pc::COMMANDS, &[0, 0]);
-        send(&mut c, pc::CHUNK_BATCH_FINISHED, &varint(9));
-        // A whole answer, with the place: a server cannot read one without it.
-        if accepted(&mut c)? != (1, [40.0, 70.0, 40.0]) {
-            return Err("the proxy confirmed another teleport".into());
-        }
-        expect(&mut c, ps::CHUNK_BATCH_RECEIVED)?;
-        expect(&mut c, ps::PLAYER_LOADED)?;
-        send(&mut c, pc::KEEP_ALIVE, &12u64.to_be_bytes());
-        if expect(&mut c, ps::KEEP_ALIVE)? != 12u64.to_be_bytes() {
-            return Err("the proxy answered the keep-alive wrongly".into());
-        }
-        next("import")?;
-        if !world.import_sends_position {
-            // Silent, with the connection open, until the control is dropped.
-            let _ = next("confirm");
-            return Err("told not to send the position".into());
-        }
-        // What the import changes, a position to confirm among it; the player
-        // stays held.
-        if world.recenter {
-            send_typed(
-                &mut c,
-                &C::SetChunkCacheCenter(play::SetChunkCacheCenter { x: 2, z: 2 }),
-            );
-        }
-        send_typed(&mut c, &position(2, 41.0));
-        if world.recenter {
-            // The chunks around the new place, on the next tick.
-            std::thread::sleep(Duration::from_millis(50));
-            send(&mut c, pc::CHUNK_BATCH_START, &[]);
-            for (id, payload) in [chunk(2, 2, 3), chunk(2, 3, 3)] {
+        // What the target is waiting for, so that an error says where it stopped.
+        let step = std::cell::Cell::new("the proxy's connection");
+        let result = (|| -> Result<TargetSaw, String> {
+            let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
+            let mut c = Connection::from_stream(stream).map_err(|e| e.to_string())?;
+            step.set("the login and the configuration phase");
+            let configuration = vec![
+                Step::expect_exactly(
+                    cfg::serverbound::CLIENT_INFORMATION,
+                    world.information.clone(),
+                ),
+                Step::send(cfg::clientbound::REGISTRY_DATA, world.registry.clone()),
+                Step::send(cfg::clientbound::SELECT_KNOWN_PACKS, PACKS),
+                Step::expect_exactly(cfg::serverbound::SELECT_KNOWN_PACKS, PACKS_REPLY),
+                Step::send(cfg::clientbound::KEEP_ALIVE, 11u64.to_be_bytes()),
+                Step::expect_exactly(cfg::serverbound::KEEP_ALIVE, 11u64.to_be_bytes()),
+                finish_configuration(),
+                Step::Expect {
+                    id: cfg::serverbound::FINISH_CONFIGURATION,
+                },
+            ];
+            FakeBackend {
+                after_login: configuration,
+                ..FakeBackend::default()
+            }
+            .run(&mut c, &Recorder::new())?;
+            c.reader
+                .set_read_timeout(Some(world.idle))
+                .map_err(|e| e.to_string())?;
+            // The held player's join sequence and world.
+            send_typed(&mut c, &login(TARGET_ID, world.dimension));
+            for (id, payload) in columns(2) {
                 send(&mut c, id, &payload);
             }
-            send(&mut c, pc::CHUNK_BATCH_FINISHED, &varint(2));
+            send_typed(&mut c, &position(1, 40.0));
+            // The target's own entity 5 is the client's player id.
+            send_typed(&mut c, &add_entity(CLIENT_ID, 500));
+            if let Some(level) = world.permission {
+                send_typed(
+                    &mut c,
+                    &C::EntityEvent(play::EntityEvent {
+                        id: TARGET_ID,
+                        event: 24 + level as i8,
+                    }),
+                );
+            }
+            send(&mut c, pc::COMMANDS, &[0, 0]);
+            send(&mut c, pc::CHUNK_BATCH_FINISHED, &varint(9));
+            // A whole answer, with the place: a server cannot read one without it.
+            step.set("the proxy's confirmation of the first teleport");
+            if accepted(&mut c)? != (1, [40.0, 70.0, 40.0]) {
+                return Err("the proxy confirmed another teleport".into());
+            }
+            step.set("the proxy's answer to the chunk batch");
             expect(&mut c, ps::CHUNK_BATCH_RECEIVED)?;
-        }
-        let chatter = std::time::Instant::now();
-        while chatter.elapsed() < world.chatter {
-            // An entity's swing: a packet the views do not keep.
-            send(&mut c, pc::ANIMATE, &[30, 0]);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // The client's confirmation, not the proxy's.
-        if accepted(&mut c)?.0 != 2 {
-            return Err("the client confirmed another teleport".into());
-        }
-        next("confirm")?;
-        send_typed(&mut c, &effect(TARGET_ID));
-        let attack = expect(&mut c, ps::ATTACK)?;
-        let attacked = Reader::new(&attack).varint().map_err(|e| e.to_string())?;
-        Ok(TargetSaw { attacked })
+            step.set("the proxy's \"player loaded\"");
+            expect(&mut c, ps::PLAYER_LOADED)?;
+            send(&mut c, pc::KEEP_ALIVE, &12u64.to_be_bytes());
+            step.set("the proxy's answer to the keep-alive");
+            if expect(&mut c, ps::KEEP_ALIVE)? != 12u64.to_be_bytes() {
+                return Err("the proxy answered the keep-alive wrongly".into());
+            }
+            step.set("the import (the control's signal)");
+            next("import")?;
+            if !world.import_sends_position {
+                // Silent, with the connection open, until the control is dropped.
+                let _ = next("confirm");
+                return Err("told not to send the position".into());
+            }
+            // What the import changes, a position to confirm among it; the player
+            // stays held.
+            if world.recenter {
+                send_typed(
+                    &mut c,
+                    &C::SetChunkCacheCenter(play::SetChunkCacheCenter { x: 2, z: 2 }),
+                );
+            }
+            send_typed(&mut c, &position(2, 41.0));
+            if world.recenter {
+                // The chunks around the new place, on the next tick.
+                std::thread::sleep(Duration::from_millis(50));
+                send(&mut c, pc::CHUNK_BATCH_START, &[]);
+                for (id, payload) in [chunk(2, 2, 3), chunk(2, 3, 3)] {
+                    send(&mut c, id, &payload);
+                }
+                send(&mut c, pc::CHUNK_BATCH_FINISHED, &varint(2));
+                step.set("the answer to the chunk batch after the import");
+                expect(&mut c, ps::CHUNK_BATCH_RECEIVED)?;
+            }
+            let chatter = std::time::Instant::now();
+            while chatter.elapsed() < world.chatter {
+                // An entity's swing: a packet the views do not keep.
+                send(&mut c, pc::ANIMATE, &[30, 0]);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The client's confirmation, not the proxy's.
+            step.set("the client's confirmation of the position sent after the import");
+            if accepted(&mut c)?.0 != 2 {
+                return Err("the client confirmed another teleport".into());
+            }
+            step.set("the confirm (the control's signal)");
+            next("confirm")?;
+            send_typed(&mut c, &effect(TARGET_ID));
+            step.set("the client's attack");
+            let attack = expect(&mut c, ps::ATTACK)?;
+            let attacked = Reader::new(&attack).varint().map_err(|e| e.to_string())?;
+            Ok(TargetSaw { attacked })
+        })();
+        result.map_err(|e| format!("{e}, while it waited for {}", step.get()))
     });
     (address, signal, thread)
 }
