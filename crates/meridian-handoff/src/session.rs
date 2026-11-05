@@ -49,7 +49,7 @@ use meridian_net::{
 };
 use meridian_rewrite::{Swap, Teleports};
 use std::sync::{
-    Arc, Mutex, MutexGuard,
+    Arc, Condvar, Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
@@ -129,6 +129,13 @@ pub(crate) struct Shared {
     /// client acknowledge in between.
     #[cfg(test)]
     pub(crate) moving_gate: Mutex<Option<(mpsc::Receiver<()>, mpsc::Sender<()>)>>,
+    /// For tests: when set, a switch tells the sender once it has written the target's world
+    /// to the client, and waits for the receiver before it changes the lane the client's
+    /// packets go to, so that a test can send a packet in between.
+    #[cfg(test)]
+    pub(crate) delta_gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// Where the client's packets go while a switch hands the client over.
+    pub(crate) routing: Routing,
     up: Mutex<Up>,
     client_closer: Closer,
     commands: Mutex<Option<Arc<CommandHook>>>,
@@ -289,6 +296,9 @@ impl Session {
             backend: Mutex::new(String::new()),
             #[cfg(test)]
             moving_gate: Mutex::new(None),
+            #[cfg(test)]
+            delta_gate: Mutex::new(None),
+            routing: Routing::default(),
         });
         let handle = SessionHandle(Arc::clone(&shared));
         *lock(&shared.backend) = name.to_owned();
@@ -678,6 +688,60 @@ impl SessionHandle {
     }
 }
 
+/// The longest a client's packet waits for a switch to change the lane. The window in which the
+/// routing is shut is the write of the delta to the client, which nothing but the client bounds
+/// (the freeze limit is checked before it, and a write has no timeout of its own): a client
+/// that does not read would hold its own packets for as long as it holds the write. This is
+/// the net that keeps those packets from waiting for good.
+const ROUTING_WAIT: Duration = Duration::from_secs(30);
+
+/// Whether the client's packets may be routed to the active lane. A switch shuts it from the
+/// moment it starts writing the target's world to the client until the lane is the target's.
+/// It has a lock of its own and is taken with no other held, so it can be in nobody's way.
+#[derive(Default)]
+pub(crate) struct Routing {
+    shut: Mutex<bool>,
+    opened: Condvar,
+}
+
+/// Opens the [`Routing`] again when it goes out of scope, however the switch ends.
+pub(crate) struct Shut<'a>(&'a Routing);
+
+impl Routing {
+    /// Shuts the routing until the returned guard is dropped.
+    pub(crate) fn shut(&self) -> Shut<'_> {
+        *lock(&self.shut) = true;
+        Shut(self)
+    }
+
+    /// Waits while the routing is shut, for at most [`ROUTING_WAIT`], or until `over`.
+    fn wait(&self, over: impl Fn() -> bool) {
+        let mut shut = lock(&self.shut);
+        if !*shut {
+            return;
+        }
+        let give_up = Instant::now() + ROUTING_WAIT;
+        while *shut && !over() {
+            let left = give_up.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            shut = self
+                .opened
+                .wait_timeout(shut, left.min(Duration::from_millis(100)))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+impl Drop for Shut<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0.shut) = false;
+        self.0.opened.notify_all();
+    }
+}
+
 impl Shared {
     pub fn down(&self) -> MutexGuard<'_, Down> {
         lock(&self.down)
@@ -863,6 +927,12 @@ fn copy_to_backend(mut from: ConnReader, shared: &Arc<Shared>) -> End {
         if sending == Phase::Play && answer_command(id, &payload, shared) {
             continue;
         }
+        // While a switch writes the target's world to the client and changes the lane, what the
+        // client says in answer to that world must wait for the lane, or it goes to the
+        // server the player has just left.
+        shared.routing.wait(|| {
+            shared.ended.load(Ordering::SeqCst) || shared.client_gone.load(Ordering::SeqCst)
+        });
         let mut up = shared.up();
         let payload = match sending {
             Phase::Play => {
