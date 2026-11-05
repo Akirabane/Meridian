@@ -4,6 +4,7 @@ use super::{enforce, not_saved, summary};
 use crate::console::{Commands, Reply, usage};
 use crate::log::info;
 use crate::state::Proxy;
+use horizon_protocol::crypto::offline_uuid;
 use meridian_config::Target;
 
 /// What a list entry is, then what it is about.
@@ -59,18 +60,68 @@ pub fn pardon(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
         return Err(usage("pardon", commands));
     };
     let target = Target::parse(who)?;
-    let (lifted, result) = proxy.sessions.access.change(|access| {
-        let lifted = access.pardon(&target);
-        (lifted, lifted)
+    let ids = offline_ids(proxy, &target);
+    let servers: Vec<String> = proxy
+        .config()
+        .backends
+        .iter()
+        .map(|b| b.name.clone())
+        .collect();
+    let ((by_name, from_servers), result) = proxy.sessions.access.change(|access| {
+        let by_name = access.pardon(&target);
+        let mut from_servers = Vec::new();
+        for id in ids {
+            let taken = access.bans().iter().any(|ban| {
+                ban.target.same(&id)
+                    && ban
+                        .reason
+                        .as_deref()
+                        .is_some_and(|r| servers.iter().any(|s| sync::events::is_marked(s, r)))
+            });
+            if taken && access.pardon(&id) {
+                from_servers.push(id);
+            }
+        }
+        let lifted = by_name || !from_servers.is_empty();
+        ((by_name, from_servers), lifted)
     });
-    if !lifted {
+    if !by_name && from_servers.is_empty() {
         return Err(format!("{target} is not banned"));
     }
     let line = format!("pardoned {target}");
     info!("{line}");
     let mut lines = vec![line];
+    for id in &from_servers {
+        lines.push(format!("also lifted {id}, the ban taken from a server"));
+    }
     lines.extend(sync::send(proxy, &Change::Pardon { who: target }));
     saved(lines, result)
+}
+
+/// The unique ids under which a ban or a whitelist entry of the player `target` may have been
+/// taken from a server (`[access.sync]`, `from-servers`), which files it by the id the server
+/// gives. Only where the id follows from the name: in offline mode the proxy itself gives a player
+/// the id of their name as typed, and a server may use that or the id of the lower-case name
+/// (Horizon `02f05c1` used the first; the code that makes the id is the server's), so both are
+/// tried. In online and hybrid
+/// mode the account's id cannot be known from a name, so none is guessed and the entry is
+/// pardoned by its id. Nothing while the sync is off, so that a pardon is then what it was.
+fn offline_ids(proxy: &Proxy, target: &Target) -> Vec<Target> {
+    let Target::Name(name) = target else {
+        return Vec::new();
+    };
+    let config = proxy.config();
+    let sync = config.access.sync;
+    if config.online_mode || !(sync.from_servers || sync.to_servers) {
+        return Vec::new();
+    }
+    let id = |name: &str| Target::Uuid(offline_uuid(name).to_be_bytes());
+    let mut ids = vec![id(name)];
+    let lower = name.to_ascii_lowercase();
+    if lower != *name {
+        ids.push(id(&lower));
+    }
+    ids
 }
 
 pub fn banlist(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
@@ -119,16 +170,28 @@ pub fn whitelist(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
         }
         ["remove", who] => {
             let target = Target::parse(who)?;
-            let (done, result) = proxy.sessions.access.change(|access| {
-                let done = access.disallow(&target);
-                (done, done)
+            let ids = offline_ids(proxy, &target);
+            let ((by_name, by_id), result) = proxy.sessions.access.change(|access| {
+                let by_name = access.disallow(&target);
+                // An entry a server's allowlist gave is by unique id.
+                let mut by_id = Vec::new();
+                for id in ids {
+                    if access.disallow(&id) {
+                        by_id.push(id);
+                    }
+                }
+                let done = by_name || !by_id.is_empty();
+                ((by_name, by_id), done)
             });
-            if !done {
+            if !by_name && by_id.is_empty() {
                 return Err(format!("{target} is not on the whitelist"));
             }
             let line = format!("{target} removed from the whitelist");
             info!("{line}");
             let mut lines = vec![line];
+            for id in &by_id {
+                lines.push(format!("also removed {id}, the entry taken from a server"));
+            }
             lines.extend(sync::send(proxy, &Change::Disallow { who: target }));
             saved(lines, result)
         }
