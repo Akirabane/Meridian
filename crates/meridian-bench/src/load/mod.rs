@@ -57,6 +57,7 @@ Options:
   --churn-hold-ms N     how long a connection of `churn` stays, on average (default 100)
   --max-bots N          the most bots a step may have (default 500)
   --max-seconds N       the longest window (default 60)
+  --max-total-seconds N the whole run: past it the run is stopped, and cut a minute later (default 1800)
   --min-free-gib N      stop when the machine has less memory free (default 16)
   --proxy PATH          the meridian program (default: next to this one)
   --out-dir DIR         write each scenario's rows as CSV there, and the report
@@ -82,6 +83,8 @@ struct Options {
     out_dir: Option<PathBuf>,
     append: bool,
     label: String,
+    /// The whole run may not last longer than this, whatever the steps do.
+    max_total: Duration,
     settings: Settings,
 }
 
@@ -101,6 +104,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
         out_dir: None,
         append: false,
         label: "no client".into(),
+        max_total: Duration::from_secs(1800),
         settings: Settings {
             proxy: PathBuf::new(),
             dir: PathBuf::new(),
@@ -126,6 +130,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
         },
     };
     let (mut max_bots, mut max_seconds) = (500usize, 60u64);
+    let mut max_total = 1800u64;
     let mut proxy = None;
     let (mut spectator, mut host, mut port) = (None, "localhost".to_owned(), 25565u16);
     let mut args = args.into_iter();
@@ -221,6 +226,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             }
             "--max-bots" => max_bots = number(&value("--max-bots")?, "--max-bots")? as usize,
             "--max-seconds" => max_seconds = number(&value("--max-seconds")?, "--max-seconds")?,
+            "--max-total-seconds" => {
+                max_total = number(&value("--max-total-seconds")?, "--max-total-seconds")?
+            }
             "--min-free-gib" => {
                 o.settings.min_free = (real(&value("--min-free-gib")?, "--min-free-gib")?
                     * (1u64 << 30) as f64) as u64
@@ -253,6 +261,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
              larger steps are planned with the person whose machine it is before they are run"
         ));
     }
+    o.max_total = Duration::from_secs(max_total);
     if o.settings.window > Duration::from_secs(max_seconds)
         || o.direct_window > Duration::from_secs(max_seconds)
     {
@@ -277,6 +286,23 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
     Ok(Some(o))
 }
 
+/// A run that is still going after `limit` is asked to stop; one that has not ended a minute later
+/// is cut: the proxies are killed and the program leaves. Nothing may run on for hours unseen.
+fn watchdog(stop: Arc<AtomicBool>, limit: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(limit);
+        eprintln!(
+            "meridian-bench load: still running after {} s; stopping it",
+            limit.as_secs()
+        );
+        stop.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(60));
+        eprintln!("meridian-bench load: did not stop; killing the proxy and leaving");
+        crate::proxy::kill_all();
+        std::process::exit(3);
+    });
+}
+
 pub fn main(args: Vec<OsString>) -> ExitCode {
     let mut options = match parse(args) {
         Ok(Some(options)) => options,
@@ -299,6 +325,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         return ExitCode::from(2);
     }
     let stop = Arc::clone(&options.settings.stop);
+    watchdog(Arc::clone(&stop), options.max_total);
     {
         let stop = Arc::clone(&stop);
         if let Err(e) = ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed)) {
@@ -501,9 +528,15 @@ fn columns(scenario: &str) -> &'static [&'static str] {
 fn write(table: &Table, path: &Path, append: bool) -> std::io::Result<()> {
     if append && let Ok(old) = std::fs::read_to_string(path) {
         let new = table.csv();
-        if let (Some(a), Some(b)) = (old.lines().next(), new.lines().next())
-            && a == b
-        {
+        if let (Some(a), Some(b)) = (old.lines().next(), new.lines().next()) {
+            if a != b {
+                // Never replace what is there: the figures of an earlier pass are not this
+                // run's to lose.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the columns of the file are not those of this run; not appended (use another --out-dir)",
+                ));
+            }
             let body: String = new.lines().skip(1).map(|l| format!("{l}\n")).collect();
             return std::fs::write(path, format!("{old}{body}"));
         }

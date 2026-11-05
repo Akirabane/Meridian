@@ -2,8 +2,9 @@
 //! threads, processor use, and how much memory the machine has left. The same reading is the
 //! live status line, one line a second on the standard error, so that the run can be watched.
 //!
-//! The memory guard is here too: when the memory the machine has free falls below the floor the
-//! run was given, the sampler stops the run.
+//! The guards are here too: the sampler stops the run when the memory the machine has free falls
+//! below the floor the run was given, when the proxy process is gone, when more than a tenth of the
+//! bots failed or were dropped, or when a reading of one second takes over four.
 use super::bot::Live;
 use crate::cpu;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +29,8 @@ pub struct Sample {
     pub cpu: f32,
     /// This program's, as the proxy's, so that the load's own cost is on the page.
     pub bench_cpu: f32,
+    /// This program's resident memory, in bytes: the swarm and the synthetic servers.
+    pub bench_rss: u64,
     /// Memory the machine has available, in bytes.
     pub free: u64,
 }
@@ -146,6 +149,14 @@ fn follow(
         let mut system = System::new();
         system.refresh_memory();
         let free = system.available_memory();
+        let bench_rss = me.map_or(0, |pid| {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing().with_memory(),
+            );
+            system.process(pid).map_or(0, |p| p.memory())
+        });
         let (rss, commit) = match watch.proxy {
             Some(pid) => {
                 system.refresh_processes_specifics(
@@ -166,6 +177,7 @@ fn follow(
             threads: watch.proxy.and_then(cpu::threads).unwrap_or(0),
             cpu: proxy_cpu.unwrap_or(0.0),
             bench_cpu: bench_cpu.unwrap_or(0.0),
+            bench_rss,
             free,
         };
         samples.lock().unwrap().push(sample);
@@ -197,12 +209,31 @@ fn follow(
             sample.free as f64 / GIB,
         );
         last = (0, logins, down);
-        if free < min_free {
-            eprintln!(
-                "meridian-bench: free memory is {:.1} GiB, under the floor of {:.1} GiB: stopping the run",
+        // The guards: each one that trips stops the run, and says why.
+        let lost = live.dropped.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed);
+        let reason = if free < min_free {
+            Some(format!(
+                "free memory is {:.1} GiB, under the floor of {:.1} GiB",
                 free as f64 / GIB,
                 min_free as f64 / GIB
-            );
+            ))
+        } else if watch.proxy.is_some() && rss == 0 {
+            Some("the proxy process is gone".to_owned())
+        } else if lost > (watch.players as u64 / 10).max(10) {
+            Some(format!(
+                "{lost} bots failed to log in or were dropped, over a tenth of the {}",
+                watch.players
+            ))
+        } else if second.elapsed() > Duration::from_secs(4) {
+            Some(format!(
+                "a reading that should take a second took {:.1} s: the machine or this program is starved",
+                second.elapsed().as_secs_f64()
+            ))
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            eprintln!("meridian-bench: {reason}: stopping the run");
             tripped.store(true, Ordering::Relaxed);
             run_stop.store(true, Ordering::Relaxed);
         }

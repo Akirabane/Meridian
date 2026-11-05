@@ -82,6 +82,8 @@ pub struct Live {
     pub moves_failed: AtomicU64,
     /// The first few reasons a bot failed.
     pub failures: Mutex<Vec<String>>,
+    /// Set once the run is ending the bots: connections that close then are not dropped ones.
+    ending: AtomicBool,
     /// A way to close each bot's connection from outside, so that the run can end them.
     closers: Mutex<Vec<horizon_protocol::connection::Closer>>,
 }
@@ -89,6 +91,7 @@ pub struct Live {
 impl Live {
     /// Closes every bot's connection: the bots' reads fail and they end.
     pub fn close_all(&self) {
+        self.ending.store(true, Ordering::Relaxed);
         for closer in self.closers.lock().unwrap().drain(..) {
             closer.close();
         }
@@ -187,7 +190,7 @@ pub fn run(plan: &Plan, live: &Arc<Live>, stop: &Arc<AtomicBool>) {
     let ended = listen(reader, &writer, live, stop, &state);
     state.over.store(true, Ordering::Relaxed);
     live.connected.fetch_sub(1, Ordering::Relaxed);
-    if !stop.load(Ordering::Relaxed) && ended.is_err() {
+    if !stop.load(Ordering::Relaxed) && !live.ending.load(Ordering::Relaxed) && ended.is_err() {
         live.dropped.fetch_add(1, Ordering::Relaxed);
     }
     if let Some(thread) = acting {

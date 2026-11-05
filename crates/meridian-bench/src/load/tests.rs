@@ -66,6 +66,12 @@ fn the_options_are_read_and_a_large_step_is_refused() {
     assert!(parse(args(&["--scenarios", "bogus"])).is_err());
     assert!(parse(args(&["--port", "1"])).is_err());
     assert!(parse(args(&["--help"])).unwrap().is_none());
+    let total = parse(args(&["--max-total-seconds", "90"]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(total.max_total, Duration::from_secs(90));
+    let default = parse(args(&[])).unwrap().unwrap();
+    assert_eq!(default.max_total, Duration::from_secs(1800));
 }
 
 /// Twenty bots straight to a synthetic server for five seconds: every bot logs in and joins,

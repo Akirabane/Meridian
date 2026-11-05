@@ -5,11 +5,27 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// How long the proxy has to start listening.
 const START: Duration = Duration::from_secs(15);
+
+/// The ids of the proxies that run, so that a watchdog can stop them if the run itself hangs.
+static RUNNING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Stops every proxy this program started and has not stopped yet.
+pub fn kill_all() {
+    let ids: Vec<u32> = RUNNING.lock().map(|g| g.clone()).unwrap_or_default();
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    for id in ids {
+        if let Some(process) = system.process(Pid::from_u32(id)) {
+            process.kill();
+        }
+    }
+}
 
 /// A running proxy.
 pub struct Proxy {
@@ -56,6 +72,9 @@ impl Proxy {
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", binary.display())))?;
         let pid = Pid::from_u32(child.id());
+        if let Ok(mut running) = RUNNING.lock() {
+            running.push(child.id());
+        }
         let mut proxy = Proxy {
             child,
             address,
@@ -119,6 +138,9 @@ impl Proxy {
             self.child.kill()?;
         }
         self.child.wait()?;
+        if let Ok(mut running) = RUNNING.lock() {
+            running.retain(|id| *id != self.child.id());
+        }
         Ok(())
     }
 }

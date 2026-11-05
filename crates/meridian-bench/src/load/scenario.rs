@@ -463,7 +463,7 @@ pub fn idle(s: &Settings, n: usize, bare: bool) -> Result<Row, String> {
         .with("dropped", dropped)
         .with("warnings", warnings)
         .with("proxy_alive", alive)
-        .with("memory_guard", tripped)
+        .with("guard_tripped", tripped)
         .with("first_failure", first_failure(&live)))
 }
 
@@ -650,6 +650,11 @@ pub fn active(
             mean(&proxied.samples, |x| f64::from(x.bench_cpu)),
             0,
         )
+        .num(
+            "bench_rss_peak_mib",
+            peak(&proxied.samples, |x| mib(x.bench_rss as f64)),
+            0,
+        )
         .num("rss_empty_mib", mib(rss0 as f64), 1)
         .num("rss_loaded_mib", mib(proxied.rss_after as f64), 1)
         .num(
@@ -685,7 +690,7 @@ pub fn active(
         .num("login_p99_ms", ms(proxied.logins.p99), 1)
         .with("warnings", warnings)
         .with("proxy_alive", alive)
-        .with("memory_guard", proxied.tripped || direct.tripped)
+        .with("guard_tripped", proxied.tripped || direct.tripped)
         .with("first_failure", proxied.first_failure))
 }
 
@@ -936,7 +941,7 @@ pub fn moves(s: &Settings, n: usize) -> Result<Row, String> {
         .with("sidecar_imports", asked.import.load(Ordering::Relaxed))
         .with("warnings", warnings)
         .with("proxy_alive", alive)
-        .with("memory_guard", tripped)
+        .with("guard_tripped", tripped)
         .with("first_failure", first))
 }
 
@@ -1109,7 +1114,7 @@ pub fn churn(s: &Settings, n: usize, cycles: u64) -> Result<Row, String> {
         )
         .with("warnings", warnings)
         .with("proxy_alive", alive)
-        .with("memory_guard", tripped)
+        .with("guard_tripped", tripped)
         .with("first_failure", first))
 }
 
