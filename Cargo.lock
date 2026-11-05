@@ -556,6 +556,7 @@ name = "meridian-rewrite"
 version = "0.1.0"
 dependencies = [
  "horizon-protocol",
+ "meridian-testkit",
 ]
 
 [[package]]
@@ -563,6 +564,7 @@ name = "meridian-sidecar"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "meridian-testkit",
  "rustls",
  "serde",
  "serde_json",

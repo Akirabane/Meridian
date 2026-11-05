@@ -5,6 +5,7 @@ use super::*;
 use horizon_protocol::packets::play::{self, Clientbound as C};
 
 mod entities;
+mod fuzz;
 mod lists;
 mod player;
 mod world;

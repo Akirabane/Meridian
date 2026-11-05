@@ -509,3 +509,61 @@ fn an_evacuation_counts_the_players_it_moved_and_the_ones_who_stayed() {
         "0"
     );
 }
+
+/// Clients that send their request a byte at a time, never quite silent, hold the
+/// page's places only until the request's deadline: then a monitor is served again.
+#[test]
+fn slow_requests_give_their_places_back_at_their_deadline() {
+    let proxy = proxy();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = serve_in_thread(listener, Arc::clone(&proxy)).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let slow: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed)
+                    && stream.write_all(b"G").is_ok()
+                {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            })
+        })
+        .collect();
+    std::thread::sleep(REQUEST_DEADLINE + Duration::from_millis(1500));
+    let health = request(address, "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health:?}");
+    for t in slow {
+        t.join().unwrap();
+    }
+    proxy.stop();
+    thread.join().unwrap();
+}
+
+/// A request line far longer than any monitor's is read up to the limit and answered
+/// from what was read, here a path the page does not serve: the rest is never read
+/// nor kept.
+#[test]
+fn a_giant_request_line_is_answered_from_its_first_bytes() {
+    let proxy = proxy();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = serve_in_thread(listener, Arc::clone(&proxy)).unwrap();
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // 64 KiB of a path and no end of line: the proxy answers after MAX_REQUEST.
+    let mut line = b"GET /".to_vec();
+    line.extend(std::iter::repeat_n(b'a', 64 << 10));
+    let _ = stream.write_all(&line);
+    let mut answer = Vec::new();
+    let _ = stream.read_to_end(&mut answer);
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(answer.starts_with("HTTP/1.1 404 "), "{answer}");
+    proxy.stop();
+    thread.join().unwrap();
+}

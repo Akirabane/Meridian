@@ -477,4 +477,35 @@ mod tests {
         let mut socket = socket(whole[..5].to_vec());
         assert_eq!(socket.read_message().unwrap(), Next::Closed);
     }
+
+    /// Frames changed at random, from a fixed seed: text, fragments, pings, a close,
+    /// and lengths of every size. The reader ends at the end of the bytes, without a
+    /// panic, and never gives a message longer than its limit.
+    #[test]
+    fn hostile_frames_are_read_or_refused_without_a_panic() {
+        use meridian_testkit::mutate::{Rng, mutate};
+        let mut valid = frame(true, 0x1, b"{\"method\":\"notification/server/stopping\"}");
+        valid.extend(frame(false, 0x1, b"in "));
+        valid.extend(frame(false, 0x0, b"three "));
+        valid.extend(frame(true, 0x0, b"pieces"));
+        valid.extend(frame(true, 0x9, b"ping"));
+        valid.extend(frame(true, 0x2, &[0, 1, 2]));
+        valid.extend(frame(true, 0x1, &[b'x'; 300]));
+        valid.extend(frame(true, 0x8, &[]));
+        let mut rng = Rng::new(0x7773);
+        for _ in 0..3000 {
+            let bytes = mutate(&mut rng, &valid);
+            let budget = bytes.len() + 2;
+            let mut socket = socket(bytes);
+            // Every message takes at least one byte of the input: the reader cannot
+            // go round more often than that without being stuck.
+            for _ in 0..budget {
+                match socket.read_message() {
+                    Ok(Next::Text(text)) => assert!(text.len() <= MAX_MESSAGE),
+                    Ok(Next::Idle) => {}
+                    Ok(Next::Closed) | Err(_) => break,
+                }
+            }
+        }
+    }
 }

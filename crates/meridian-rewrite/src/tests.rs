@@ -222,3 +222,43 @@ fn keep_alives_and_pings_are_answered_with_their_payload() {
     );
     assert_eq!(answer(false, ids_play::clientbound::SET_HEALTH, &[]), None);
 }
+
+/// Payloads of every packet id, valid ones changed at random and random ones, from a
+/// fixed seed: the swap answers each, without a panic, both ways.
+#[test]
+fn hostile_payloads_are_rewritten_or_refused_without_a_panic() {
+    use meridian_testkit::mutate::{Rng, mutate};
+    let valid = [
+        C::RemoveEntities(play::RemoveEntities { ids: vec![7, 3, 1] }),
+        C::SetPassengers(play::SetPassengers {
+            vehicle: 3,
+            passengers: vec![7, 1],
+        }),
+        C::TakeItemEntity(play::TakeItemEntity {
+            item: 3,
+            player: 7,
+            amount: 1,
+        }),
+        C::DamageEvent(play::DamageEvent {
+            id: 3,
+            source_type: 1,
+            cause: Some(7),
+            direct: Some(1),
+            position: None,
+        }),
+        C::SetEntityLink(play::SetEntityLink { source: 7, dest: 3 }),
+    ];
+    let valid: Vec<(i32, Vec<u8>)> = valid.iter().map(body).collect();
+    let mut rng = Rng::new(0x7377_6170);
+    for _ in 0..3000 {
+        let (id, payload) = if rng.below(2) == 0 {
+            let (id, payload) = &valid[rng.below(valid.len())];
+            (*id, mutate(&mut rng, payload))
+        } else {
+            let n = rng.below(48);
+            (rng.below(0x90) as i32, rng.bytes(n))
+        };
+        let _ = SWAP.clientbound(id, payload.clone());
+        let _ = SWAP.serverbound(id, payload);
+    }
+}

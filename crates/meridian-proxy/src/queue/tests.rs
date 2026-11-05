@@ -429,3 +429,25 @@ max-length = 4
             .starts_with("usage:")
     );
 }
+
+/// What a waiting player sends is kept, up to a number of packets and a number of
+/// bytes: one who sends large packets while they wait is not waiting quietly either,
+/// and leaves the line before the proxy keeps megabytes of them.
+#[test]
+fn a_waiting_player_who_sends_too_much_leaves_the_line() {
+    let (mut proxy, mut player) = connections();
+    let mut early = Vec::new();
+    // A client's settings and brand: kept.
+    player.send(&[0x00, 1, 2, 3]).unwrap();
+    player.send(&[0x02, 4, 5]).unwrap();
+    assert!(matches!(watch(&mut proxy, &mut early), Watch::Waiting));
+    assert_eq!(early.len(), 2);
+    // Three packets of 600 KiB each: past what a waiting player may send.
+    let large = vec![0x02; 600 << 10];
+    for _ in 0..3 {
+        player.send(&large).unwrap();
+    }
+    assert!(matches!(watch(&mut proxy, &mut early), Watch::Gone));
+    let kept: usize = early.iter().map(|(_, payload)| payload.len()).sum();
+    assert!(kept <= MAX_EARLY_BYTES, "{kept} bytes kept");
+}

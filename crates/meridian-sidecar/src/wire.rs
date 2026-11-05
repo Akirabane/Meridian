@@ -27,9 +27,33 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::io::{self, BufRead, Read};
 
 /// The length of a challenge, in bytes.
 pub const CHALLENGE_LEN: usize = 32;
+
+/// The longest signed line read, line break included: a body as long as the longest
+/// line Horizon's control endpoint takes ([`crate::request::MAX_LINE`]), written as a
+/// JSON string, where each quote and backslash of the body is doubled, and the fields
+/// around it.
+pub const MAX_SIGNED_LINE: usize = 2 * crate::request::MAX_LINE + 4096;
+
+/// The longest first line, the challenge's: its 64 hex digits and the JSON around them.
+pub const MAX_CHALLENGE_LINE: usize = 256;
+
+/// Reads one line into `line`, as `BufRead::read_line` does, but never more than `max`
+/// bytes: a peer that sends a longer one, or never ends it, gets an error as soon as it
+/// passes `max`, and nothing more of it is kept.
+pub fn read_line(reader: &mut impl BufRead, line: &mut String, max: usize) -> io::Result<usize> {
+    let read = reader.take(max as u64 + 1).read_line(line)?;
+    if read > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a line longer than {max} bytes"),
+        ));
+    }
+    Ok(read)
+}
 
 /// A challenge: what makes one connection's signatures useless on another.
 pub type Challenge = [u8; CHALLENGE_LEN];
@@ -373,5 +397,43 @@ mod tests {
         assert!(constant_time_eq(b"same", b"same"));
         assert!(!constant_time_eq(b"same", b"sane"));
         assert!(!constant_time_eq(b"same", b"same!"));
+    }
+
+    /// Signed lines changed at random, from a fixed seed: none is taken, and none
+    /// panics the reader.
+    #[test]
+    fn hostile_lines_are_refused_without_a_panic() {
+        use meridian_testkit::mutate::{Rng, mutate};
+        let secret = b"a shared secret of the right size";
+        let challenge = [7u8; CHALLENGE_LEN];
+        let line = seal(
+            secret,
+            &challenge,
+            Direction::Request,
+            3,
+            r#"{"request":"status"}"#,
+        );
+        let mut rng = Rng::new(0x7769_7265);
+        for _ in 0..3000 {
+            let changed = mutate(&mut rng, line.as_bytes());
+            let Ok(text) = String::from_utf8(changed) else {
+                continue;
+            };
+            if let Ok((seq, body)) = open(
+                secret,
+                &challenge,
+                Direction::Request,
+                &text,
+                Expected::After(2),
+            ) {
+                // Only a line that says the same thing is taken.
+                assert_eq!(
+                    (seq, body.as_str()),
+                    (3, r#"{"request":"status"}"#),
+                    "{text}"
+                );
+            }
+            let _ = read_challenge(&text);
+        }
     }
 }

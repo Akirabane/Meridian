@@ -31,6 +31,11 @@ const TICK: Duration = Duration::from_secs(1);
 /// sends more is not waiting quietly, and leaves the line.
 const MAX_EARLY_PACKETS: usize = 64;
 
+/// The most bytes of those packets kept. A client's settings, brand and known packs
+/// are a few hundred bytes; each packet may be 8 MiB once inflated, so the number of
+/// packets alone would let one waiting player hold half a gigabyte.
+const MAX_EARLY_BYTES: usize = 1 << 20;
+
 /// The most times one player is put back at the head of the line because every
 /// lobby was still at its hard cap when their turn came.
 const MAX_RETRIES: u32 = 100;
@@ -310,8 +315,14 @@ impl Who<'_> {
     }
 }
 
+/// The bytes of the packets kept.
+fn kept(early: &[(i32, Vec<u8>)]) -> usize {
+    early.iter().map(|(_, payload)| payload.len()).sum()
+}
+
 /// Reads the player's connection for a moment: whatever they sent is kept, and a
-/// connection that is closed or broken is a player who left.
+/// connection that is closed or broken is a player who left. One who sends more than
+/// [`MAX_EARLY_PACKETS`] packets or [`MAX_EARLY_BYTES`] bytes left too.
 pub fn watch(connection: &mut Connection, early: &mut Vec<(i32, Vec<u8>)>) -> Watch {
     if connection
         .reader
@@ -322,7 +333,12 @@ pub fn watch(connection: &mut Connection, early: &mut Vec<(i32, Vec<u8>)>) -> Wa
     }
     loop {
         match connection.recv() {
-            Ok(packet) if early.len() < MAX_EARLY_PACKETS => early.push(packet),
+            Ok(packet)
+                if early.len() < MAX_EARLY_PACKETS
+                    && kept(early) + packet.1.len() <= MAX_EARLY_BYTES =>
+            {
+                early.push(packet)
+            }
             Ok(_) => return Watch::Gone,
             Err(e) if e.is_timed_out() => return Watch::Waiting,
             Err(_) => return Watch::Gone,
