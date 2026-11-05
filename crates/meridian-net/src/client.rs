@@ -29,6 +29,29 @@ use std::{
 /// and a silent socket should not hold a thread for that long.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The bounds of what a connection may take before it is a session: whatever
+/// sends the bytes, the handshake, the status and the login end within them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    /// The longest wait for the client's next byte.
+    pub silence: Duration,
+    /// The longest a handshake and a login may take in all, as vanilla's
+    /// `ServerLoginPacketListenerImpl.tick` gives a login 600 ticks.
+    pub login: Duration,
+    /// The longest a handshake, a status request and its ping may take in all.
+    pub status: Duration,
+    /// The longest frame read before the login is done, in bytes.
+    pub max_frame: usize,
+}
+
+/// The bounds of every connection the proxy accepts.
+pub const BOUNDS: Bounds = Bounds {
+    silence: LOGIN_TIMEOUT,
+    login: Duration::from_secs(30),
+    status: Duration::from_secs(5),
+    max_frame: 2048,
+};
+
 /// The read timeout left on the connection for the rest of the session:
 /// vanilla's 30 s.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -173,11 +196,21 @@ pub fn accept_from(
 
 /// [`accept`], with `checks` to ask who a player is.
 fn accept_with(
-    mut connection: Connection,
+    connection: Connection,
     config: &Config,
     checks: &Checks<'_>,
 ) -> Result<Option<ClientSession>> {
-    connection.reader.set_read_timeout(Some(LOGIN_TIMEOUT))?;
+    accept_bounded(connection, config, checks, &BOUNDS)
+}
+
+/// [`accept_with`], within `bounds`.
+fn accept_bounded(
+    mut connection: Connection,
+    config: &Config,
+    checks: &Checks<'_>,
+    bounds: &Bounds,
+) -> Result<Option<ClientSession>> {
+    connection.reader.set_read_timeout(Some(bounds.silence))?;
     let (id, payload) = connection.recv()?;
     let intention = match handshake::Serverbound::decode(id, &payload)? {
         handshake::Serverbound::Intention(intention) => intention,
