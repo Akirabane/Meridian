@@ -1,0 +1,7 @@
+label,scenario,players,logged_in,failed,login_p50_ms,login_p95_ms,login_p99_ms,login_max_ms,logins_per_s,rss_empty_mib,rss_joined_mib,rss_end_mib,rss_per_player_kib,commit_empty_mib,commit_end_mib,threads_empty,threads_joined,cpu_idle_pct,cpu_idle_max_pct,keepalives_sent,keepalives_answered,dropped,warnings,proxy_alive,guard_tripped,first_failure
+no client,idle,100,100,0,61.5,254.9,300.2,314.7,307,10.1,72.6,72.6,640.0,2.1,78.5,11,312,0.29,0.43,200,200,0,0,true,false,
+no client,idle-bare,100,100,0,12.0,16.2,16.5,17.4,4417,10.1,45.5,45.5,363.0,2.1,49.3,11,312,0.30,0.40,200,200,0,0,true,false,
+no client,idle,250,250,0,618.8,1241.4,1390.5,1394.9,168,10.1,131.9,131.8,498.9,2.1,149.9,11,762,0.40,0.63,500,500,0,0,true,false,
+no client,idle-bare,250,250,0,25.4,34.2,36.9,39.7,3763,10.1,98.9,98.9,363.8,2.1,118.8,11,762,0.39,0.72,500,500,0,0,true,false,
+no client,idle,500,500,0,1432.0,1989.4,2182.7,2351.6,205,10.1,232.5,232.4,455.4,2.1,273.1,11,1512,0.58,0.90,1094,1094,0,0,true,false,
+no client,idle-bare,500,500,0,57.6,75.4,80.1,84.5,4418,10.1,186.0,185.9,360.2,2.1,232.9,11,1512,0.52,0.90,1000,1000,0,0,true,false,
