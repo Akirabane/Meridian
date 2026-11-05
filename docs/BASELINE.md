@@ -5,8 +5,9 @@ production, and they are not a promise.**
 # Load baseline
 
 This is the first measurement of how Meridian scales, made before any decision about its
-architecture: DESIGN.md section 17.4 says the proxy keeps a thread or two for each player and "holds a few
-thousand connections", and that the limit is "a figure of the baseline, not a guess". These are the
+architecture: DESIGN.md section 17.4 said the proxy keeps two threads for each player and "holds a few
+thousand connections", and that the limit is "a figure of the baseline, not a guess" (the section now
+gives the three threads this baseline found, and no longer says that thousands were held). These are the
 figures up to 500 connected players. Nothing in the proxy was changed to take them.
 
 The harness is `meridian-bench load`, in the `meridian-bench` crate next to the older latency
@@ -20,7 +21,7 @@ Up to 500 simultaneous players, one proxy, this machine:
 1. **Memory.** About 360 KiB of resident memory for each player who has only logged in, and 410 to 640 KiB
    (455 at 500 players) for a player who was sent a world of 169 columns and 30 entities (the proxy's own memory, in total 232 MiB for 500 players
    at rest, 237 MiB with 500 playing).
-2. **Threads.** Exactly three for each player, and twelve besides: 1512 at 500 players. DESIGN.md section 17.4 expected two.
+2. **Threads.** Exactly three for each player, and twelve besides: 1512 at 500 players. DESIGN.md section 17.4 expected two (corrected since).
 3. **Processor.** At rest, 0.58 % of one core for 500 players. Playing (20 small packets and 2 chunks a second
    down, 20 packets a second up), 0.27 % of a core for each player with compression as a
    server asks for it by default, 0.19 % with none: 1.33 cores for 500 players.
@@ -218,7 +219,8 @@ proxy uses (`horizon-protocol`'s connection). Chunk-like data compresses 3.2 to 
 
 Not corrected here, as the task said; for the decision about architecture.
 
-1. **Three threads for each player, not two** (DESIGN.md section 17.4): 1512 at 500 players, 12 + 3N at every step.
+1. **Three threads for each player, not two** (DESIGN.md section 17.4 said two and has been corrected): 1512 at 500 players, 12 + 3N at every step.
+   They are the supervisor (`player <address>`), the reader of the client (`session-to-backend`) and the reader of the backend (`session-lane-N`).
 2. **A packet is always decompressed and compressed again.** Two settings of compression that look alike cost the same, and the setting of "no compression either side" saves
    a quarter of the processor. A relay that passed a frame as it is when both sides compress at the same threshold would save the compression of the world on each join
    and of every chunk; this was not tried.

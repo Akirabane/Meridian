@@ -975,11 +975,37 @@ baseline says which are needed:
 
 ### 17.4 The thread model
 
-Version 1 uses threads: two for each player, one for each direction, because the
-protocol crate Meridian builds on reads and writes through blocking sockets. That is
-simple and fast to write, and it holds a few thousand connections. Past that, memory
-for stacks (which can be set small) and the work of the scheduler grow, and the limit
-is a figure of the baseline, not a guess made here.
+Version 1 uses threads, because the protocol crate Meridian builds on reads and writes
+through blocking sockets. A player in the game has **three**, not two (read in the code at
+commit `e2211c5`; the baseline counts 12 + 3 for each player, [BASELINE.md](BASELINE.md)):
+
+- **`player <address>`** (`meridian-proxy/src/serve.rs:195-197`). It does the handshake, the
+  login and the routing, then becomes the session's supervisor: `Session::run_with`
+  (`meridian-proxy/src/session.rs:741`, in `meridian-handoff/src/session.rs`) waits on a channel
+  of events (`ended.recv()`, line 348) and reads or writes no packet. It wakes for the end of
+  the session, for a backend that was lost (it asks the replacement of `[fallback]`), and for
+  the client's acknowledgement while a player is being moved.
+- **`session-to-backend`** (`meridian-handoff/src/session.rs:336`). It reads the client and writes
+  to the active backend (`copy_to_backend`).
+- **`session-lane-N`** (`meridian-handoff/src/session.rs:684-688`, started at line 342). It reads
+  the active backend and writes to the client (`copy_from_backend`), or to the switch's view of the
+  target while that is prepared.
+
+So there is a thread for each direction, as first designed, and a third that supervises. More
+threads exist only for a moment. A move asked in game runs on a `switch-<name>` thread
+(`meridian-proxy/src/switching.rs:237-247`), and `/send` on one of its own
+(`meridian-proxy/src/staff.rs:242`); the console's `switch` runs on the thread of the console. A
+switch adds a `session-lane-N` for the target (`meridian-handoff/src/switch.rs:703`), and the
+source's lane ends when the source lets the player go; a replacement after a lost server starts
+a lane too (`meridian-handoff/src/session.rs:576`). The `Relay` of `meridian-net`, with its two
+threads (`relay-to-client` and `relay-to-backend`, `meridian-net/src/relay.rs:141-150`), is not what the proxy
+runs any more: it remains in the tests of `meridian-net` and of `meridian-bench`.
+
+Threads are simple and fast to write. The baseline measured up to 500 players, 1,512 threads,
+and found no limit there ([BASELINE.md](BASELINE.md), "What limits first"); whether it holds a
+few thousand connections has not been measured. Past some count, memory for stacks (which can be
+set small) and the work of the scheduler grow, and the limit is a figure of the baseline, not a
+guess made here.
 
 Beyond that limit there are two ways. A pool of threads with non-blocking sockets
 and a state machine for each connection, or an asynchronous runtime. Both need the
