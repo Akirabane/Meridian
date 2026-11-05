@@ -673,7 +673,7 @@ over the same signed exchange as the other requests.
   an allowlist is **not** removed from the whitelist: another server may still allow them.
 - When the proxy starts, and whenever a sidecar has connected to its server again (a restart of
   the server), or has lost notices, or was restarted itself, the proxy reads the three lists the
-  server holds and takes what it does not have. That reading **never removes** an entry of the
+  server holds and takes what it does not have. A server that has just started refuses the first read (`Method cannot be dispatched pre server initialization: minecraft:bans`); the proxy logs a warning and tries again, and takes the lists a few seconds later (4.8 s in the run of [VALIDATION.md](VALIDATION.md)). That reading **never removes** an entry of the
   proxy, whatever the server holds.
 - A ban that comes back with the source `Meridian` is the proxy's own (see "No loop" below) and
   is not taken again.
@@ -719,10 +719,9 @@ What is not synchronised:
 - **Operators, kicks, the rest of the protocol.** Nothing else is read or sent.
 - **Who banned and when.** The reason is the only note kept; the proxy keeps no author.
 
-Not tried: this was tested against stand-ins for the sidecar's connection and for the server's
-management protocol, with the exact methods and shapes of Horizon's
-`horizon-server/src/management.rs` as read on its main branch; it has not run against a real
-Horizon server. Try it
+Tried against real servers on 2026-11-05 ([VALIDATION.md](VALIDATION.md)): three Horizon servers of
+the build `02f05c1` on one machine, with scripted players, in both directions. Not tried with a real
+client, over a network, with another Horizon build or with more than three servers. Try it
 on one server first: ban a test name on the server, see `banned on <server>` in `banlist`, then ban
 another at the console and read `banlist` on the server.
 
@@ -735,7 +734,7 @@ A server that stops takes its players with it. There are four ways the proxy lea
 | --- | --- | --- |
 | The operator types `drain <server> --move`, wait, then stops the server | Before the stop. Planned | A console, servers that take transfers |
 | The panel does it: `[drain-before-stop]` in the bench file, with `move-players = true` | Before the stop. Planned | The panel starts and stops the server |
-| The server announces its own stop (`server/stopping` of its management protocol), heard by its sidecar | Before the stop. Planned or not, as long as the server says it | `--management-properties` on the sidecar, `management-server-enabled=true` on the server, `sidecar-notices = true` on the backend, a role and `[balancing] enabled` |
+| The server announces its own stop (`server/stopping` of its management protocol), heard by its sidecar | At the start of the stop, about 78 ms before a Horizon server drops its players (measured): enough to drain it, not to move anyone. Planned or not, as long as the server says it | `--management-properties` on the sidecar, `management-server-enabled=true` on the server, `sidecar-notices = true` on the backend, a role and `[balancing] enabled` |
 | The sidecar of the server does not answer for `silent-rounds` readings in a row | After the server is down | `[balancing] enabled` and a sidecar |
 
 In all four cases the server is marked draining at once, so no new player is sent to it, and
@@ -749,7 +748,7 @@ silent-rounds = 3        # readings in a row without an answer before it counts 
 grace-seconds = 60       # a server told to stop may go on answering this long before it counts as back
 ```
 
-`evacuate` is off by default. When it is on, the players of the server go one at a time (half a
+`evacuate` is off by default, and it cannot move a player ahead of a plain Horizon `stop`: the announcement comes about 78 ms before the server drops its players (measured, [VALIDATION.md](VALIDATION.md), B1), too soon for a move, and the fallback of section 5.11 catches them instead. It helps when the server is announced early, as it is by the panel's `[drain-before-stop]`; to move players before a stop you type, send them first with `drain <server> --move`. When it is on, the players of the server go one at a time (half a
 second apart) to servers of the same role that the balancer picks, never to the server itself.
 A player with nowhere to go stays and is named in the log. After the silence of an unplanned
 stop it is too late to move anyone, since the server is already gone, so the evacuation is
@@ -953,7 +952,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
 | Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), their sync with the servers' own lists (section 5.12, off by default), groups of permissions with `perm`, `/send`, `/glist` and `/alert` in game (section 5.9), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for the bans and the groups, an expiry on a ban or a rank, a player database in the proxy |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
-| Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence | A recorded run of Horizon's `server/stopping` notice, which the sidecar now hears and the proxy feeds to the detector (opt in: `--management-properties`, `sidecar-notices`) |
+| Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence. Horizon's `server/stopping` notice reaches the proxy (run on real servers, [VALIDATION.md](VALIDATION.md)) but only about 78 ms before the players are dropped | An early warning from Horizon itself: a delay between its announcement and the disconnect of its players |
 | Report of a server's state | The sidecar's `status` request and the proxy's reading of `players`, `capacity`, `accepts_transfers` | A Horizon command that answers it. Today balancing counts the proxy's own sessions |
 
 ## 12. Known limits
@@ -973,7 +972,7 @@ switch, and keep the proxy's log and both servers' logs.
   warning. The first is fed only when the sidecar is given `--management-properties` and the backend
   has `sidecar-notices = true`; the sidecar reads the management protocol on its own machine and
   does not verify the self-signed certificate Horizon makes ([RESTART.md](RESTART.md), "How the
-  announcement reaches the proxy"). It has not been tried against a real Horizon in a recorded run.
+  announcement reaches the proxy"). It was run against real Horizon servers ([VALIDATION.md](VALIDATION.md)): the announcement reaches the proxy within a few milliseconds, but the server drops its players about 78 ms after it, so it is a signal to drain, not time to move.
   The second needs the panel to supervise the server.
 - The server's own report of its state (`accepts_transfers`, `players`, `capacity`) is not
   defined by Horizon yet; balancing counts the proxy's own sessions.
@@ -992,9 +991,10 @@ switch, and keep the proxy's log and both servers' logs.
 - The bans and the whitelist by name are as strong as the login: in offline mode, and for the
   unverified players of the hybrid mode, a name is not proof of who is playing (section 5.8). A
   ban by address is closed without a reason.
-- The sync of the bans and whitelist with the servers (section 5.12) has not run against a real
-  Horizon server: it was tested against stand-ins that use the methods and shapes of Horizon's
-  management protocol as written in its source. It does not carry ranges of addresses or bans
+- The sync of the bans and whitelist with the servers (section 5.12) ran against three real Horizon
+  servers on one machine with scripted players ([VALIDATION.md](VALIDATION.md)); it was written
+  and first tested against stand-ins that use the methods and shapes of Horizon's management
+  protocol as written in its source. It does not carry ranges of addresses or bans
   that end, and a change that could not be sent to a server in six tries is not sent again.
 - A proxy that dies drops its players, and nothing runs a second proxy for them.
 

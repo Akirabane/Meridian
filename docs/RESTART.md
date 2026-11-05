@@ -36,11 +36,11 @@ This note says what Meridian has for that, what it lacks, and what the detector 
 
 | Signal | When it comes | Cost | Status |
 |---|---|---|---|
-| `server/stopping` (the backend announces) | Before the game stops, with the players still on it | A WebSocket and TLS client, in the sidecar (it is on the backend's machine and can reach `127.0.0.1`) | Fed: the sidecar listens and the proxy asks it (`notices.rs`, "How the announcement reaches the proxy"); off unless set up on both sides |
+| `server/stopping` (the backend announces) | When the shutdown begins, with the players still on it; but a Horizon `stop` disconnects them about 78 ms later (measured, [VALIDATION.md](VALIDATION.md), B1), so in that time it drains the server and nothing more | A WebSocket and TLS client, in the sidecar (it is on the backend's machine and can reach `127.0.0.1`) | Fed: the sidecar listens and the proxy asks it (`notices.rs`, "How the announcement reaches the proxy"); off unless set up on both sides |
 | The panel restarts it | Before the stop | The panel tells the proxy | `Detector::announce(.., Cause::Panel, ..)`; not fed yet |
 | The sidecar does not answer for `silent-rounds` (3) rounds in a row | After the backend is already down | None: it reads what the poller already knows | Wired |
 
-The first is the one that gives time to move players, so it is the one to feed. The third
+The first was expected to give time to move players. It does not with a plain `stop` of the Horizon build `02f05c1`: the server announces and then drops its players within about 78 ms, and a move takes longer (it reaches the sidecars of both servers before it starts, then freezes and hands the player over). It is still worth feeding: the server is drained at once and no new player is sent to it. To move players ahead of a stop, start the move before the stop: `drain <server> --move`, or the panel's `[drain-before-stop]`. The third
 is the floor: it needs nothing from the backend, so it works with any server, and it still
 marks the backend draining and hands its players to the evacuation, which is late but not
 nothing (a player on a backend that hangs rather than stops is still on a live connection).
@@ -151,6 +151,6 @@ What is and is not checked:
 1. The panel: it tells the proxy before a restart, through the same channel, as
    `Cause::Panel`.
 
-The evacuation of a backend that was drained by the operator before the restart sends its
+With `evacuate = true` and a `stop` typed at the server (B1 of [VALIDATION.md](VALIDATION.md)) the evacuation starts when the announcement is heard, loses the race against the server's own disconnect, and logs `<player> could not move ... the player is already on <x>` and `0 moved, 1 stayed`; the player is then on another server through the fallback (#84), with no cut the client can see. The evacuation of a backend that was drained by the operator before the restart sends its
 players away as well, but only with `evacuate = true`; with it off nothing moves them, as
 before.
