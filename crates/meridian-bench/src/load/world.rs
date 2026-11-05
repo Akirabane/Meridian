@@ -117,12 +117,31 @@ pub fn loopback() -> SocketAddr {
 
 fn listen(bind: SocketAddr) -> io::Result<TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    socket
-        .bind(&bind.into())
-        .map_err(|e| io::Error::new(e.kind(), format!("cannot listen on {bind}: {e}")))?;
-    socket.listen(if cfg!(windows) { -BACKLOG } else { BACKLOG })?;
-    Ok(socket.into())
+    // A server of a fixed port is started again on it, one run after another: the connections of
+    // the one before may still be in TIME_WAIT, and a Unix system refuses the port for them unless
+    // told otherwise (Windows does not, and there the option would let another program take it),
+    // and the one before may not have let go of the port yet. So it is asked again for a moment.
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        #[cfg(unix)]
+        socket.set_reuse_address(true)?;
+        match socket.bind(&bind.into()) {
+            Ok(()) => {
+                socket.listen(if cfg!(windows) { -BACKLOG } else { BACKLOG })?;
+                return Ok(socket.into());
+            }
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse && std::time::Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("cannot listen on {bind}: {e}"),
+                ));
+            }
+        }
+    }
 }
 
 impl World {
