@@ -488,6 +488,9 @@ pub(super) struct Played {
     pub(super) threads_after: u32,
     pub(super) tripped: bool,
     pub(super) first_failure: String,
+    /// The last status line, for a test to say what the run was doing when it failed.
+    #[cfg(test)]
+    pub(super) status: String,
 }
 
 /// `n` active bots against `address` for the window. `proxy` is the process to read, if any.
@@ -561,6 +564,8 @@ pub(super) fn play(
         threads_after,
         tripped,
         first_failure: first_failure(&live),
+        #[cfg(test)]
+        status: live.status.lock().map(|s| s.clone()).unwrap_or_default(),
     };
     end(&live, handles);
     drop(sampler);

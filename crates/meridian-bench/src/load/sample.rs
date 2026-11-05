@@ -190,7 +190,7 @@ fn follow(
         let p99 = (!recent.is_empty()).then(|| {
             recent[((recent.len() as f64 * 0.99).ceil() as usize).clamp(1, recent.len()) - 1]
         });
-        eprintln!(
+        let line = format!(
             "[{} t={:>3.0}s] bots {}/{} joined {} logins/s {} | proxy rss {:.0} MiB cpu {:.0}% thr {} | rtt p99 {} | down {:.1} MB/s | free {:.1} GiB",
             watch.label,
             sample.at,
@@ -208,6 +208,10 @@ fn follow(
             down.saturating_sub(last.2) as f64 / 1e6,
             sample.free as f64 / GIB,
         );
+        eprintln!("{line}");
+        if let Ok(mut status) = live.status.lock() {
+            *status = line;
+        }
         last = (0, logins, down);
         // The guards: each one that trips stops the run, and says why.
         let lost = live.dropped.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed);

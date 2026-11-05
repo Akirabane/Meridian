@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 /// How long a connection or a login may take before the bot gives up.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// How long a bot's read waits before it looks at whether the run is ending.
+const TICK: Duration = Duration::from_secs(1);
+
 /// What a bot does once it is in the world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -64,6 +67,8 @@ pub struct Live {
     /// Bots whose connection ended while the run still wanted them.
     pub dropped: AtomicU64,
     pub login_times: Mutex<Vec<Duration>>,
+    /// The last status line the sampler wrote, for a failure to show what the run was doing.
+    pub status: Mutex<String>,
     /// Only while this is set are round trips kept.
     pub measuring: AtomicBool,
     /// Round trips in microseconds: all of the measured window, and those since the last
@@ -163,7 +168,10 @@ pub fn run(plan: &Plan, live: &Arc<Live>, stop: &Arc<AtomicBool>) {
     live.login_times.lock().unwrap().push(began.elapsed());
     live.logins.fetch_add(1, Ordering::Relaxed);
     live.connected.fetch_add(1, Ordering::Relaxed);
-    let _ = connection.reader.set_read_timeout(None);
+    // The read wakes once a second to see whether the run is ending: closing the connection from
+    // another thread does not always wake a read that waits on it (on Windows, now and then one
+    // stays blocked for good).
+    let _ = connection.reader.set_read_timeout(Some(TICK));
     let (reader, writer) = connection.split();
     if let Ok(closer) = reader.closer() {
         live.closers.lock().unwrap().push(closer);
@@ -353,13 +361,21 @@ fn listen(
             .send(&packet)
             .map_err(|e| e.to_string())
     };
-    // The read blocks for as long as the server is quiet; the run ends it by closing the
-    // connection ([`Live::close_all`]).
+    // The read blocks for as long as the server is quiet, a second at a time; the run ends it by
+    // closing the connection ([`Live::close_all`]), and if that does not wake the read, the
+    // next second's end of wait finds `ending`.
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.load(Ordering::Relaxed) || live.ending.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let (id, payload) = reader.recv().map_err(|e| e.to_string())?;
+        let waited = Instant::now();
+        let (id, payload) = match reader.recv() {
+            Ok(packet) => packet,
+            // A read that ran its whole second is the wait ending, not the connection: what has
+            // been read stays in the reader, and the next read goes on from there.
+            Err(_) if waited.elapsed() >= TICK - Duration::from_millis(100) => continue,
+            Err(e) => return Err(e.to_string()),
+        };
         live.down_packets.fetch_add(1, Ordering::Relaxed);
         live.down_bytes
             .fetch_add(payload.len() as u64 + 1, Ordering::Relaxed);
