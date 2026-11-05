@@ -1,0 +1,4 @@
+label,scenario,workers,cycles,logged_in,failed,out_of_ports,cycles_per_s,login_p50_ms,login_p95_ms,login_p99_ms,login_max_ms,proxy_cpu_mean_pct,proxy_cpu_peak_pct,rss_empty_mib,rss_peak_mib,rss_after_mib,threads_empty,threads_peak,threads_after,time_wait_before,time_wait_after,warnings,proxy_alive,guard_tripped,first_failure
+no client,churn,100,3099,3099,0,0,880,4.1,8.2,20.0,26.9,127.4,154.1,10.1,82.1,42.6,11,369,12,2785,9002,0,true,false,
+no client,churn,250,3249,3249,0,0,2062,8.0,27.4,44.2,59.2,264.0,264.0,10.1,136.3,47.8,11,859,12,252,6763,0,true,false,
+no client,churn,500,3499,3499,0,0,2632,58.3,131.6,148.7,173.6,397.8,397.8,10.1,218.5,56.5,11,1074,12,1420,7199,0,true,false,

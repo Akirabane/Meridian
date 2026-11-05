@@ -27,5 +27,9 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The load swarm's smoke test (twenty bots, five seconds) goes through the proxy
+      # program when it finds it built next to the tests.
+      - name: Proxy program
+        run: cargo build -p meridian-proxy
       - name: Tests
         run: cargo test --workspace

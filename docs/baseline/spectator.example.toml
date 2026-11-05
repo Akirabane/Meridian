@@ -1,0 +1,34 @@
+# The proxy configuration `meridian-bench load` writes for a run with a spectator, with the
+# values it fills in marked <like this>. It is here to be read, not to be started: the
+# synthetic servers listen on ports the run picks, and the forwarding secret is the real
+# server's (`--forwarding-secret-file`). See docs/BASELINE.md, "Watching a run".
+#
+# The bots connect to 127.0.0.1 and log in on the default server, a synthetic one. A real
+# client that types `localhost` in its server list sends that host name in its handshake, and
+# the forced host below leads it to the real server instead. Both go through this one proxy,
+# so the real client sees the proxy under load.
+
+listen = "127.0.0.1:<spectator-port, 25565 unless --spectator-port>"
+max-players = 0
+# Every bot comes from 127.0.0.1: the limit on connections from one address is off.
+connections-per-minute = 0
+max-pending-logins = 0
+max-pending-logins-per-address = 0
+auth-mode = "offline"
+compression-threshold = 256
+connect-timeout-ms = 5000
+# The real server's own forwarding.secret, read from the file given to the run.
+forwarding-secret = "<contents of the file>"
+default-backend = "lobby"
+
+[[forced-host]]
+host = "localhost"
+backend = "spectator"
+
+[[backends]]
+name = "lobby"
+address = "127.0.0.1:<port of the synthetic server>"
+
+[[backends]]
+name = "spectator"
+address = "<--spectator ADDR, the real server, such as 127.0.0.1:25601>"

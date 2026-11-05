@@ -17,6 +17,12 @@ use sysinfo::Pid;
 
 pub use imp::method;
 
+/// How many threads the process has now, or `None` when the system does not say. The load
+/// runs read it for the proxy, which runs threads for each player.
+pub fn threads(pid: Pid) -> Option<u32> {
+    imp::threads(pid)
+}
+
 /// Reads the processor use of some processes over a stretch of time.
 pub struct Meter {
     began: Instant,
@@ -46,7 +52,11 @@ mod imp {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
     use sysinfo::Pid;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
     use windows_sys::Win32::System::Threading::{
         GetCurrentThread, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -79,6 +89,32 @@ mod imp {
             // SAFETY: the handle came from OpenProcess and is closed here only, once.
             unsafe { CloseHandle(self.0) };
         }
+    }
+
+    /// The threads of a process: a snapshot of every thread of the machine, counted by owner.
+    pub fn threads(pid: Pid) -> Option<u32> {
+        // SAFETY: the call takes plain values and returns a new handle, or the invalid one.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        // SAFETY: THREADENTRY32 is plain data for which all zeros is a valid value.
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut count = 0;
+        // SAFETY: the snapshot is open until closed below, and `entry` is a THREADENTRY32
+        // whose size field is set, as the calls need.
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) };
+        while more != 0 {
+            if entry.th32OwnerProcessID == pid.as_u32() {
+                count += 1;
+            }
+            // SAFETY: as above.
+            more = unsafe { Thread32Next(snapshot, &mut entry) };
+        }
+        // SAFETY: the handle came from CreateToolhelp32Snapshot and is closed here only, once.
+        unsafe { CloseHandle(snapshot) };
+        Some(count)
     }
 
     /// The cycles the calling thread has run.
@@ -167,6 +203,15 @@ mod imp {
 mod imp {
     use std::time::Duration;
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    /// The threads of a process, from the line `Threads:` of its status on Linux.
+    pub fn threads(pid: Pid) -> Option<u32> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("Threads:"))
+            .and_then(|n| n.trim().parse().ok())
+    }
 
     /// How processor time is read, for the report.
     pub fn method() -> String {

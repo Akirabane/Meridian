@@ -16,7 +16,14 @@ path = "src/main.rs"
 # A run stops cleanly on Ctrl+C, and the proxy it started stops with it.
 ctrlc = "3.4"
 horizon-protocol.workspace = true
+# The load runs (`meridian-bench load`) serve the proxy's sidecar requests with the sidecar's own
+# server, in front of a stand-in for a game server's control endpoint, so that a switch is the
+# real one end to end. A path dependency of this workspace: no new code from outside.
+meridian-sidecar.workspace = true
 meridian-testkit.workspace = true
+# The stand-in control endpoint answers in JSON, as the sidecar's own tests do. Already in the
+# workspace's lock file, through the proxy and the sidecar.
+serde_json = "1"
 # The stand-in backend's queue of waiting connections, as long as the proxy's.
 socket2 = "0.6"
 # The proxy process's CPU and memory, and the machine named in the report.
@@ -26,11 +33,14 @@ sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
 ] }
 
 [dev-dependencies]
+# A test reads the configuration the load runs write with the proxy's own reader.
+meridian-config.workspace = true
 meridian-net.workspace = true
 
 # The workspace's lints, except that unsafe code is denied instead of forbidden:

@@ -5,11 +5,27 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// How long the proxy has to start listening.
 const START: Duration = Duration::from_secs(15);
+
+/// The ids of the proxies that run, so that a watchdog can stop them if the run itself hangs.
+static RUNNING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Stops every proxy this program started and has not stopped yet.
+pub fn kill_all() {
+    let ids: Vec<u32> = RUNNING.lock().map(|g| g.clone()).unwrap_or_default();
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    for id in ids {
+        if let Some(process) = system.process(Pid::from_u32(id)) {
+            process.kill();
+        }
+    }
+}
 
 /// A running proxy.
 pub struct Proxy {
@@ -28,13 +44,25 @@ impl Proxy {
         secret: &str,
         dir: &Path,
     ) -> io::Result<Proxy> {
+        Proxy::start_with(binary, dir, |address| {
+            configuration(address, backend, secret)
+        })
+    }
+
+    /// As [`Proxy::start`], with the configuration `write` makes for the address the proxy is
+    /// to listen on.
+    pub fn start_with(
+        binary: &Path,
+        dir: &Path,
+        write: impl FnOnce(SocketAddr) -> String,
+    ) -> io::Result<Proxy> {
         // A free port, taken and given back at once.
         let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
             .local_addr()?
             .port();
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let config = dir.join("meridian.toml");
-        std::fs::write(&config, configuration(address, backend, secret))?;
+        std::fs::write(&config, write(address))?;
         let log = dir.join("meridian.log");
         let child = Command::new(binary)
             .arg(&config)
@@ -44,6 +72,9 @@ impl Proxy {
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", binary.display())))?;
         let pid = Pid::from_u32(child.id());
+        if let Ok(mut running) = RUNNING.lock() {
+            running.push(child.id());
+        }
         let mut proxy = Proxy {
             child,
             address,
@@ -78,6 +109,16 @@ impl Proxy {
         lines[lines.len().saturating_sub(5)..].join(" | ")
     }
 
+    /// The proxy's whole log so far.
+    pub fn log_text(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Whether the proxy process is still there: it must be, all through a run.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     /// Lines of the proxy's log at warning level or worse.
     pub fn warnings(&self) -> usize {
         std::fs::read_to_string(&self.log)
@@ -97,6 +138,9 @@ impl Proxy {
             self.child.kill()?;
         }
         self.child.wait()?;
+        if let Ok(mut running) = RUNNING.lock() {
+            running.retain(|id| *id != self.child.id());
+        }
         Ok(())
     }
 }

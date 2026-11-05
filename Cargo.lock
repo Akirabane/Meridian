@@ -473,8 +473,11 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "horizon-protocol",
+ "meridian-config",
  "meridian-net",
+ "meridian-sidecar",
  "meridian-testkit",
+ "serde_json",
  "socket2",
  "sysinfo",
  "windows-sys 0.61.2",
