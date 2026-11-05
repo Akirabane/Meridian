@@ -33,6 +33,14 @@ on-duplicate = "refuse"
 # 0 means no limit.
 connections-per-minute = 20
 
+# Connections that may be logging in at once, from the moment they are accepted
+# to the end of their login (at most 30 s each). Further ones are closed at once,
+# before any of their packets are read. 0 means no limit.
+max-pending-logins = 2048
+# The same for one address. 0, the default, means no limit: many players may
+# share one address (a school, a LAN behind one router).
+max-pending-logins-per-address = 0
+
 # How players log in. Backends never check accounts themselves: they trust the
 # proxy.
 #   "online"   checks every player's account with the session service. A client

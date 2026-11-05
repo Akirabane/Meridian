@@ -182,6 +182,12 @@ pub struct Config {
     /// Connections one address may open in a minute, counted before the
     /// handshake; 0 means no limit.
     pub connections_per_minute: u32,
+    /// Connections that may be logging in at once, from their accept to the end of
+    /// their login; further ones are closed at once. 0 means no limit.
+    pub max_pending_logins: u32,
+    /// Connections one address may have logging in at once; 0 means no limit,
+    /// the default, since many players may share an address (a school, a LAN).
+    pub max_pending_logins_per_address: u32,
     /// Seconds a backend that failed to take a player is passed over, so the
     /// next players go straight to the next candidate; 0 never passes one over.
     pub backend_retry_seconds: u64,
@@ -266,6 +272,8 @@ impl Default for Config {
             auth: AuthSettings::default(),
             on_duplicate: OnDuplicate::Refuse,
             connections_per_minute: 20,
+            max_pending_logins: 2048,
+            max_pending_logins_per_address: 0,
             backend_retry_seconds: 10,
             status_sample: 12,
             commands: CommandSettings::default(),
@@ -310,6 +318,8 @@ impl std::fmt::Debug for Config {
             auth,
             on_duplicate,
             connections_per_minute,
+            max_pending_logins,
+            max_pending_logins_per_address,
             backend_retry_seconds,
             status_sample,
             commands,
@@ -352,6 +362,11 @@ impl std::fmt::Debug for Config {
             .field("auth", auth)
             .field("on_duplicate", on_duplicate)
             .field("connections_per_minute", connections_per_minute)
+            .field("max_pending_logins", max_pending_logins)
+            .field(
+                "max_pending_logins_per_address",
+                max_pending_logins_per_address,
+            )
             .field("backend_retry_seconds", backend_retry_seconds)
             .field("status_sample", status_sample)
             .field("commands", commands)
@@ -402,6 +417,8 @@ struct File {
     auth: FileAuth,
     on_duplicate: Option<OnDuplicate>,
     connections_per_minute: Option<u32>,
+    max_pending_logins: Option<u32>,
+    max_pending_logins_per_address: Option<u32>,
     backend_retry_seconds: Option<u64>,
     status_sample: Option<u32>,
     #[serde(default)]
@@ -593,6 +610,12 @@ impl Config {
             connections_per_minute: file
                 .connections_per_minute
                 .unwrap_or(defaults.connections_per_minute),
+            max_pending_logins: file
+                .max_pending_logins
+                .unwrap_or(defaults.max_pending_logins),
+            max_pending_logins_per_address: file
+                .max_pending_logins_per_address
+                .unwrap_or(defaults.max_pending_logins_per_address),
             backend_retry_seconds: file
                 .backend_retry_seconds
                 .unwrap_or(defaults.backend_retry_seconds),

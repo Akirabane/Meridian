@@ -132,6 +132,7 @@ are added one at a time:
 | To try it all on one machine | The panel's test bench, three servers and a proxy | [TESTING.md](docs/TESTING.md), [crates/meridian-panel](crates/meridian-panel/README.md) |
 | To put it on a real network | The checklist | [OPERATING.md](docs/OPERATING.md) section 7 |
 | To fix something | The log message, its cause and what to do | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
+| To know what the proxy guards against, or to report a vulnerability | The threat model, the limit of each input, and how to report privately | [SECURITY.md](docs/SECURITY.md) |
 
 `MERIDIAN_LOG` sets the log level (`error`, `warn`, `info`, `debug`). Ctrl+C, `end`
 in the console, or SIGTERM on Unix, stops the proxy: it stops accepting players, closes their sessions,

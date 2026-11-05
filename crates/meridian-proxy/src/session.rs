@@ -442,16 +442,20 @@ fn duplicate_login() -> configuration::Disconnect {
     }
 }
 
-/// One player's connection, from the handshake to the end of the relay.
+/// One player's connection, from the handshake to the end of the relay. `pending` is
+/// its place among the connections logging in, given back once the login is over.
 pub fn handle(
     connection: Connection,
     peer: SocketAddr,
     config: &Config,
     connect: &Connect,
     sessions: &Sessions,
+    pending: Option<crate::throttle::Pending>,
 ) {
     // The address lets the hybrid mode limit name lookups per address.
-    match client::accept_from(connection, config, peer.ip()) {
+    let accepted = client::accept_from(connection, config, peer.ip());
+    drop(pending);
+    match accepted {
         Ok(Some(session)) => serve(session, peer, config, connect, sessions),
         Ok(None) => debug!("{peer}: status answered, or login refused"),
         Err(e) => {
@@ -1041,7 +1045,9 @@ pub(crate) mod tests {
         let sessions = Arc::new(Sessions::default());
         let proxy = {
             let sessions = Arc::clone(&sessions);
-            std::thread::spawn(move || handle(proxy_end, peer(), &config(), &*connect, &sessions))
+            std::thread::spawn(move || {
+                handle(proxy_end, peer(), &config(), &*connect, &sessions, None)
+            })
         };
         let client = FakeClient {
             after_login: client_script,
@@ -1100,6 +1106,7 @@ pub(crate) mod tests {
                 &config(),
                 &*connect,
                 &Sessions::default(),
+                None,
             )
         });
         let recorder = Recorder::new();
@@ -1142,7 +1149,9 @@ pub(crate) mod tests {
         let sessions = Arc::new(Sessions::default());
         let proxy = {
             let sessions = Arc::clone(&sessions);
-            std::thread::spawn(move || handle(proxy_end, peer(), &config(), &*connect, &sessions))
+            std::thread::spawn(move || {
+                handle(proxy_end, peer(), &config(), &*connect, &sessions, None)
+            })
         };
         let player_trace = Recorder::new();
         let client = FakeClient {

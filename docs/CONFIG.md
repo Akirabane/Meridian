@@ -30,6 +30,8 @@ console's `reload` keeps the configuration in use when the new one is invalid.
 | `status-sample` | `12` | How many player names the server list shows, the longest online first | At most 100 |
 | `on-duplicate` | `"refuse"` | What a second login of a connected player does: `"refuse"` it ("You are already connected to this proxy"), or `"replace"` the session already open | `"refuse"` or `"replace"` |
 | `connections-per-minute` | `20` | Connections one address may open in a minute, server list pings included. Further ones are closed before any packet is read. `0` means no limit | None |
+| `max-pending-logins` | `2048` | Connections that may be logging in at once, from their accept to the end of their login (a login has 30 s, a status request 5 s). Further ones are closed before any packet is read, and counted in `meridian_connections_throttled_total`. `0` means no limit | None |
+| `max-pending-logins-per-address` | `0` | The same for one address (the player's, behind a trusted load balancer). `0`, the default, means no limit: many players may share an address, behind a school's or a LAN's router | None |
 | `auth-mode` | `"online"` | How players log in: `"online"`, `"offline"` or `"hybrid"` (see below) | One of the three. Must agree with `online-mode` if both are written |
 | `online-mode` | (follows `auth-mode`) | The older form of `auth-mode`: `true` means online, `false` offline | When `auth-mode` is also written, `true` goes only with `"online"` and `false` only with `"offline"`; neither goes with `"hybrid"` |
 | `compression-threshold` | `256` | Packets of at least this many bytes are compressed, on both sides of the proxy. A negative value turns compression off | None |
