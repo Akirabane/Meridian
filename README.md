@@ -100,6 +100,8 @@ cargo build --release
 
 The binary is `target/release/meridian` (`meridian.exe` on Windows).
 [docs/BUILD.md](docs/BUILD.md) has the checks and what a build costs.
+[docs/COMPAT.md](docs/COMPAT.md) explains how Meridian is kept in step with Horizon: the
+nightly build against Horizon's head and how to move the pinned commit.
 
 ## Quick start
 

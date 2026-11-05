@@ -33,8 +33,9 @@ git dependency pinned to one commit (`[workspace.dependencies]` in the root
 `Cargo.toml`). Cargo also builds the two Horizon crates it depends on,
 `horizon-core` and `horizon-world`; nothing else of Horizon is built.
 
-Moving the pin is a deliberate change: update the `rev`, run the tests, and note
-the commit here.
+Moving the pin is a deliberate change: `scripts/bump-horizon.sh` updates the `rev`,
+runs the tests and notes the commit here. A nightly build against Horizon's head warns
+when a change of Horizon would break Meridian; [COMPAT.md](COMPAT.md) describes both.
 
 Pinned commit: `f696adc8996d7d4b11e7d50a863f2735a21c8000`.
 
