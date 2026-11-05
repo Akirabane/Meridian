@@ -288,3 +288,90 @@ enabled = \"yes\""
         Err(ConfigError::Parse(_))
     ));
 }
+
+/// Balancing on, a balanced lobby with a sidecar, and the defaults otherwise; `change` sets the
+/// rest. Built in place: loading a file would read the sidecar's secret file.
+fn read_through_a_sidecar(change: impl FnOnce(&mut Config)) -> Config {
+    let mut config = Config {
+        sidecars: vec![Sidecar {
+            backend: "lobby".into(),
+            address: "127.0.0.1:25580".into(),
+            secret_file: "lobby.key".into(),
+            notices: false,
+        }],
+        balanced: vec![BalancedServer {
+            backend: "lobby".into(),
+            role: Role::Lobby,
+            soft_cap: 10,
+            hard_cap: 10,
+        }],
+        ..Config::default()
+    };
+    config.balancing.enabled = true;
+    change(&mut config);
+    config
+}
+
+/// The age a report is believed for must outlast the longest gap between two readings of a
+/// server that answers while another holds the rounds; shorter, the file is used and warned of.
+#[test]
+fn a_report_age_shorter_than_the_gap_between_two_readings_is_warned_of() {
+    // The defaults: rounds of 10 s, a silent server holds one for 5 s and 5 s; a server that
+    // answers is read at most 10 + 5 s apart, which is the 15 s a report is believed.
+    assert!(
+        read_through_a_sidecar(|_| {})
+            .balancing_warnings()
+            .is_empty()
+    );
+    // The bench of the validation: rounds of 3 s, held 10 s, read at most 15 s apart.
+    let bench = read_through_a_sidecar(|c| c.balancing.probe_interval_seconds = 3);
+    assert!(bench.balancing_warnings().is_empty());
+    // A shorter age is warned of, with what to raise and to what.
+    let short = read_through_a_sidecar(|c| c.balancing.state_max_age_seconds = 12);
+    let warnings = short.balancing_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with("state-max-age-seconds is 12 s, but up to 15000 ms can pass"),
+        "{}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].contains("Raise state-max-age-seconds to 15 or more"),
+        "{}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].contains("sidecar-timeout-ms or connect-timeout-ms"),
+        "{}",
+        warnings[0]
+    );
+    // Longer timeouts make the gap longer: 10 s, held 8 + 6 s, plus 8 s is 22 s.
+    let slower = |c: &mut Config| {
+        c.sidecar_timeout_ms = 8_000;
+        c.connect_timeout_ms = 6_000;
+    };
+    let slow = read_through_a_sidecar(slower);
+    let warnings = slow.balancing_warnings();
+    assert!(
+        warnings[0].contains("Raise state-max-age-seconds to 22 or more"),
+        "{warnings:?}"
+    );
+    // Without the measures of "ping", only the readings hold a round: 10 + 8 s.
+    let order = read_through_a_sidecar(|c| {
+        slower(c);
+        c.balancing.tie_break = TieBreak::Order;
+    });
+    let warnings = order.balancing_warnings();
+    assert!(
+        warnings[0].contains("Raise state-max-age-seconds to 18 or more"),
+        "{warnings:?}"
+    );
+    assert!(!warnings[0].contains("connect-timeout-ms"), "{warnings:?}");
+    // Nothing is read with balancing off, or with no sidecar: no report grows old.
+    let mut off = short.clone();
+    off.balancing.enabled = false;
+    assert!(off.balancing_warnings().is_empty());
+    let mut no_sidecar = short;
+    no_sidecar.sidecars.clear();
+    assert!(no_sidecar.balancing_warnings().is_empty());
+}
