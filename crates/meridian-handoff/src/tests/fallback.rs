@@ -325,3 +325,55 @@ fn a_client_that_does_not_acknowledge_is_disconnected() {
     assert!(matches!(losses.recv().unwrap(), Loss::Crashed(_)));
     drop(second);
 }
+
+/// A client may acknowledge the order to go back to the configuration phase before the
+/// session has closed the lost backend's connection, on a busy machine or a quick link.
+/// The replacement is then already the active lane: the connection closed must still be
+/// the lost one, and the player goes on with the replacement.
+#[test]
+fn an_acknowledgement_before_the_lost_connection_is_closed_keeps_the_replacement() {
+    let Moved {
+        handle,
+        run,
+        mut player,
+        source,
+        mut second,
+        losses,
+    } = moved(BOTH, true);
+    let (open, waits) = mpsc::channel();
+    let (tells, closed) = mpsc::channel();
+    *handle.0.moving_gate.lock().unwrap() = Some((waits, tells));
+    drop(source);
+    expect(&mut player, pc::START_CONFIGURATION).unwrap();
+    send(&mut player, ps::CONFIGURATION_ACKNOWLEDGED, &[]);
+    send(
+        &mut player,
+        cfg::serverbound::CLIENT_INFORMATION,
+        &INFORMATION,
+    );
+    // The replacement hears the client: it is the active lane, and the session has not
+    // closed the lost connection yet.
+    expect(&mut second, cfg::serverbound::CLIENT_INFORMATION).unwrap();
+    assert_eq!(handle.backend(), "fallback");
+    open.send(()).unwrap();
+    closed.recv_timeout(WAIT).unwrap();
+    // The replacement is still there, both ways.
+    send(&mut second, cfg::clientbound::REGISTRY_DATA, &REGISTRY);
+    send(&mut second, cfg::clientbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut player, cfg::clientbound::REGISTRY_DATA).unwrap();
+    expect(&mut player, cfg::clientbound::FINISH_CONFIGURATION).unwrap();
+    send(&mut player, cfg::serverbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut second, cfg::serverbound::FINISH_CONFIGURATION).unwrap();
+    let (id, payload) = packet(&login(TARGET_ID, OVERWORLD));
+    send(&mut second, id, &payload);
+    expect(&mut player, pc::LOGIN).unwrap();
+    assert_eq!(says(&mut player), SAYING);
+    send(&mut second, pc::KEEP_ALIVE, &7u64.to_be_bytes());
+    assert_eq!(
+        expect(&mut player, pc::KEEP_ALIVE).unwrap(),
+        7u64.to_be_bytes()
+    );
+    assert!(matches!(losses.recv().unwrap(), Loss::Crashed(_)));
+    drop(second);
+    let _ = run.join();
+}
