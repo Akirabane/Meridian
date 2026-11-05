@@ -117,6 +117,106 @@ struct Sidecars {
     during_export: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
+/// How the other threads of a test ended, and when, since its world was made. A failure that
+/// only says that the player's connection closed leaves open who closed it, and a failure in CI
+/// cannot be run again: the message of the failure carries this instead.
+#[derive(Clone)]
+struct Ended {
+    began: Instant,
+    notes: Arc<Mutex<Vec<String>>>,
+}
+
+impl Ended {
+    fn new() -> Self {
+        Ended {
+            began: Instant::now(),
+            notes: Arc::default(),
+        }
+    }
+
+    fn note(&self, who: &str, how: String) {
+        let at = self.began.elapsed();
+        self.notes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("{who} ended after {at:?}: {how}"));
+    }
+
+    fn report(&self) -> String {
+        // The failure is seen the moment a connection closes, a few microseconds before the
+        // thread that closed it has noted its ending: give it a moment.
+        let until = Instant::now() + Duration::from_secs(1);
+        while self
+            .notes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+            && Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
+        if notes.is_empty() {
+            format!(
+                "no other thread of the test had ended, {:?} after its world was made",
+                self.began.elapsed()
+            )
+        } else {
+            notes.join(
+                "
+",
+            )
+        }
+    }
+}
+
+thread_local! {
+    /// The `Ended` of the world the test thread made last.
+    static ENDED: std::cell::RefCell<Option<Ended>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What the threads of this test have reported so far.
+fn ended_report() -> String {
+    ENDED.with(|e| {
+        e.borrow()
+            .as_ref()
+            .map_or_else(|| "no world was made".to_owned(), Ended::report)
+    })
+}
+
+/// `thread`, and a note of how it ended in `ended`, the moment it does.
+fn watched<T: Send + 'static, E: std::fmt::Debug + Send + 'static>(
+    ended: &Ended,
+    who: &'static str,
+    thread: JoinHandle<Result<T, E>>,
+) -> JoinHandle<Result<T, E>> {
+    let ended = ended.clone();
+    std::thread::spawn(move || {
+        let result = thread.join().expect("a thread of the test panicked");
+        ended.note(
+            who,
+            match &result {
+                Ok(_) => "without an error".to_owned(),
+                Err(e) => format!("with {e:?}"),
+            },
+        );
+        result
+    })
+}
+
+/// The player's next packet; when their connection fails, says what the other threads of the
+/// test had reported by then.
+fn heard(player: &mut Connection) -> (i32, Vec<u8>) {
+    match player.recv() {
+        Ok(packet) => packet,
+        Err(e) => panic!(
+            "the player's connection failed: {e}
+{}",
+            ended_report()
+        ),
+    }
+}
+
 /// A proxy with "lobby" (the player's) and "east" (the fake target at
 /// `east`), each with a sidecar, and a player called Alex on lobby.
 struct World {
@@ -138,6 +238,8 @@ fn sidecar(backend: &str, port: u16) -> Sidecar {
 }
 
 fn world(sidecars: Sidecars) -> World {
+    let ended = Ended::new();
+    ENDED.with(|e| *e.borrow_mut() = Some(ended.clone()));
     let (east, signal, target) = spawn_target(TargetWorld::default());
     let config = Config {
         backends: vec![
@@ -216,7 +318,12 @@ fn world(sidecars: Sidecars) -> World {
         "lobby",
     )
     .unwrap();
-    let relay = std::thread::spawn(move || session.run());
+    let relay = watched(
+        &ended,
+        "the relay",
+        std::thread::spawn(move || session.run()),
+    );
+    let target = watched(&ended, "east", target);
     join_source(&mut player, &mut source);
     let proxy = Arc::new(proxy);
     let open = proxy.sessions.open(
@@ -254,7 +361,7 @@ fn chat(id: i32, payload: &[u8]) -> Option<String> {
 fn client_after_switch(player: &mut Connection) -> (Vec<String>, C) {
     let mut lines = Vec::new();
     loop {
-        let (id, payload) = player.recv().unwrap();
+        let (id, payload) = heard(player);
         lines.extend(chat(id, &payload));
         if id == pc::COMMANDS {
             break;
@@ -262,7 +369,7 @@ fn client_after_switch(player: &mut Connection) -> (Vec<String>, C) {
     }
     accept(player, 2, [41.0, 70.0, 41.0]);
     loop {
-        let (id, payload) = player.recv().unwrap();
+        let (id, payload) = heard(player);
         lines.extend(chat(id, &payload));
         if id == pc::UPDATE_MOB_EFFECT {
             return (lines, C::decode(id, &payload).unwrap());
@@ -378,7 +485,7 @@ fn a_switch_asked_in_game_tells_the_player() {
     // The switch's thread tells the player once the source let them go, which
     // may be after the target's first packet.
     while lines.is_empty() {
-        let (id, payload) = player.recv().unwrap();
+        let (id, payload) = heard(&mut player);
         lines.extend(chat(id, &payload));
     }
     assert_eq!(lines, ["You are now on east."]);
@@ -475,7 +582,7 @@ meridian_transfer_failures_total{step=\"prepare\"} 1
         ),
         "{page}"
     );
-    let (id, payload) = player.recv().unwrap();
+    let (id, payload) = heard(&mut player);
     assert!(
         chat(id, &payload)
             .unwrap()
@@ -484,7 +591,7 @@ meridian_transfer_failures_total{step=\"prepare\"} 1
     // Still on lobby, and relayed.
     assert!(Commands::builtin().execute(&proxy, "list")[1].contains(" on lobby for "));
     send_typed(&mut _source, &effect(CLIENT_ID));
-    let (id, payload) = player.recv().unwrap();
+    let (id, payload) = heard(&mut player);
     assert_eq!(C::decode(id, &payload).unwrap(), effect(CLIENT_ID));
 }
 
@@ -549,7 +656,7 @@ fn the_place_reserved_for_a_switch_is_given_back_when_it_ends() {
     // The switch's thread tells the player once the source let them go, which may be
     // after the target's first packet.
     while lines.is_empty() {
-        let (id, payload) = player.recv().unwrap();
+        let (id, payload) = heard(&mut player);
         lines.extend(chat(id, &payload));
     }
     assert_eq!(lines, ["You are now on east."]);
@@ -763,7 +870,11 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
         live::{End, Options, link, session_linked},
         trace::{Dir, Recorder},
     };
+    // What the other threads report when this test fails, in the message of the failure.
+    let ended = Ended::new();
+    ENDED.with(|e| *e.borrow_mut() = Some(ended.clone()));
     let (lobby, lobby_thread) = spawn_lobby();
+    let lobby_thread = watched(&ended, "lobby", lobby_thread);
     let (east, signal, east_thread) = spawn_target(TargetWorld {
         information: meridian_testkit::live::information_payload(),
         // The bot says nothing after the move until the test is done with it, which on a
@@ -771,6 +882,7 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
         idle: Duration::from_secs(60),
         ..TargetWorld::default()
     });
+    let east_thread = watched(&ended, "east", east_thread);
     let config = Config {
         backends: vec![
             Backend {
@@ -825,9 +937,9 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
     let (handle, link) = link();
     let recorder = Recorder::new();
     let bot = std::thread::spawn({
-        let recorder = recorder.clone();
+        let (recorder, ended) = (recorder.clone(), ended.clone());
         move || {
-            session_linked(
+            let end = session_linked(
                 &Options {
                     host: "127.0.0.1".into(),
                     port,
@@ -837,7 +949,9 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
                 },
                 &recorder,
                 &link,
-            )
+            );
+            ended.note("the bot", format!("{end:?}"));
+            end
         }
     });
     // The proxy refuses a move until it has the player's world: its Login packet must have
@@ -869,8 +983,22 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
     let moving = wait("Moving you to east...");
     let now_on = wait("You are now on east.");
     let (moving, now_on) = (
-        moving.unwrap_or_else(|| panic!("no answer: {:?}", handle.journal.lines())),
-        now_on.unwrap_or_else(|| panic!("not moved: {:?}", handle.journal.lines())),
+        moving.unwrap_or_else(|| {
+            panic!(
+                "no answer: {:?}
+{}",
+                handle.journal.lines(),
+                ended_report()
+            )
+        }),
+        now_on.unwrap_or_else(|| {
+            panic!(
+                "not moved: {:?}
+{}",
+                handle.journal.lines(),
+                ended_report()
+            )
+        }),
     );
     assert!(moving.seq < now_on.seq, "the move was announced first");
     // The proxy lists the bot on east, and the source's sidecar let them go.
@@ -894,7 +1022,14 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
         .wait_for(mark, Duration::from_secs(15), |line| {
             line.contains("nowhere")
         })
-        .unwrap_or_else(|| panic!("no answer: {:?}", handle.journal.lines()));
+        .unwrap_or_else(|| {
+            panic!(
+                "no answer to a move that cannot be made: {:?}
+{}",
+                handle.journal.lines(),
+                ended_report()
+            )
+        });
     assert!(!refused.text.contains("You are now on"), "{}", refused.text);
     eprintln!("{}", refused.text);
 
