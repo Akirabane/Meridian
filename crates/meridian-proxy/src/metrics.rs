@@ -652,6 +652,9 @@ pub fn respond(proxy: &Proxy, method: &str, path: &str) -> Answer {
 const MAX_CONNECTIONS: usize = 8;
 /// How long a client has to send its request and take the answer.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+/// The longest a request may take to arrive, whatever pace its bytes come at: a
+/// monitor sends its request at once.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(4);
 /// The most of a request that is read: the line and the headers.
 const MAX_REQUEST: usize = 8 * 1024;
 /// How often the stop flag is looked at while no one connects.
@@ -729,7 +732,15 @@ fn answer(mut stream: TcpStream, proxy: &Proxy) -> io::Result<()> {
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut request = Vec::new();
     let mut chunk = [0u8; 1024];
+    let deadline = std::time::Instant::now() + REQUEST_DEADLINE;
     while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < MAX_REQUEST {
+        // Each read waits at most until the deadline: a request that comes a byte at a
+        // time does not keep one of the few places past it.
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        stream.set_read_timeout(Some(left.min(IO_TIMEOUT)))?;
         let n = stream.read(&mut chunk)?;
         if n == 0 {
             break;
