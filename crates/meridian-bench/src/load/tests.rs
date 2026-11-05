@@ -241,6 +241,57 @@ fn a_proxy_of_another_machine_needs_its_address_and_its_file() {
     assert_eq!(remote.threshold, -1);
 }
 
+/// Ten ports in a row for the synthetic servers of a test: free now, and **outside the range the system
+/// draws the ports of outgoing connections from** (32768 and up on Linux, 49152 and up on Windows).
+/// The bots' sockets and the proxy's take their ports from that range, one after the other, so a port
+/// found there by binding to port 0 and giving it back can be taken by one of them before the server
+/// asks for it (and a plain `first + 9` after it can be taken by anything).
+fn free_ports() -> (u16, u16) {
+    use std::sync::atomic::AtomicU16;
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    // Tests of this process and of others start at different places.
+    let start = (std::process::id() as u16)
+        .wrapping_mul(7)
+        .wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed) * 13);
+    for step in 0..FREE_PORT_TRIES {
+        let first = FREE_PORTS_FROM + ((start.wrapping_add(step)) % FREE_PORT_TRIES) * 10;
+        let held: Vec<_> = (first..first + 10)
+            .map_while(|port| std::net::TcpListener::bind(("127.0.0.1", port)).ok())
+            .collect();
+        if held.len() == 10 {
+            return (first, first + 9);
+        }
+    }
+    panic!(
+        "no ten free ports in a row between {FREE_PORTS_FROM} and {}",
+        FREE_PORTS_FROM + FREE_PORT_TRIES * 10
+    );
+}
+
+/// Where [`free_ports`] looks: below every system's range for outgoing connections.
+const FREE_PORTS_FROM: u16 = 20_000;
+const FREE_PORT_TRIES: u16 = 900;
+
+#[test]
+fn ports_for_the_servers_of_a_test_are_free_and_outside_the_range_of_outgoing_connections() {
+    let mut seen = Vec::new();
+    for _ in 0..20 {
+        let (first, last) = free_ports();
+        assert_eq!(last, first + 9);
+        assert!((FREE_PORTS_FROM..32_768 - 10).contains(&first), "{first}");
+        // All ten can be listened on now.
+        let held: Vec<_> = (first..=last)
+            .map(|port| std::net::TcpListener::bind(("127.0.0.1", port)))
+            .collect();
+        assert!(held.iter().all(Result::is_ok), "{first}");
+        seen.push(first);
+    }
+    // Not the same place every time.
+    seen.sort_unstable();
+    seen.dedup();
+    assert!(seen.len() > 1, "{seen:?}");
+}
+
 /// What a run against a proxy of another machine does, with the proxy on this one: the servers
 /// listen on the address and ports the configuration names, and the figures are the bots'.
 #[test]
@@ -251,17 +302,13 @@ fn bots_play_through_a_proxy_reached_as_if_it_were_elsewhere() {
     };
     let _turn = ONE_PROXY.lock().unwrap_or_else(|e| e.into_inner());
     let secret = remote::fresh_secret().unwrap();
-    let first = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let (first, last) = free_ports();
     let mut s = settings(4);
     s.forwarding = secret.clone();
     let mut remote = remote::Remote {
         proxy: "127.0.0.1:1".parse().unwrap(),
         bind: "127.0.0.1".parse().unwrap(),
-        ports: (first, first + 9),
+        ports: (first, last),
         threshold: 256,
     };
     let mut proxy = crate::proxy::Proxy::start_with(&program, &s.dir, |listen| {
