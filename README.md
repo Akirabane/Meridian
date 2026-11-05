@@ -27,15 +27,18 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Login modes: online, offline, hybrid | Done | See [Login modes](#login-modes). The hybrid lookup has not been tried against the real account service |
 | Routing | Done | Forced hosts, groups of servers per kind of player, and a fallback list (`try`) at login |
 | Player limit and duplicate logins | Done | `max-players`; a second login is refused or replaces the first |
+| Waiting for a place when the network is full | Done (first level), off by default | `[queue]`: a player who finds `max-players` or every lobby at its cap waits for a place (`wait-seconds`, at most 20), first come first served, instead of being refused ([docs/OPERATING.md](docs/OPERATING.md), section 5.10). The client is told nothing while it waits, and no real client was tried. Keeping the player in the configuration phase with a message of their place is not built |
 | Connection limit per address | Done | Counted before any packet is read |
 | Backend health | Done | A server that just failed is tried last for a while |
 | Server list status | Done | The proxy's own message (or the one of the forced host the player typed), a favicon, player count, limit and a sample of names |
-| Console | Done | `list`, `servers`, `drain [--move]`, `undrain`, `switch`, `send`, `kick`, `ban`, `pardon`, `banlist`, `whitelist`, `alert`, `perm`, `reload`, `end`, `help` |
+| Console | Done | `list`, `servers`, `drain [--move]`, `undrain`, `switch`, `send`, `kick`, `ban`, `pardon`, `banlist`, `whitelist`, `alert`, `perm`, `queue`, `reload`, `end`, `help` |
+| Metrics and health check | Done, off by default | A Prometheus text page and a health check ([docs/OPERATING.md](docs/OPERATING.md), section 8.1). Without a password or TLS: keep it on the loopback or a private address |
+| Staying in step with Horizon | Built | A nightly build of Meridian against the head of Horizon opens an issue when it fails, and a script moves the pinned commit ([docs/COMPAT.md](docs/COMPAT.md)). It starts no Horizon server: it checks that the code builds and the tests pass against the new protocol, not that a real Horizon and Meridian still work together |
 | Reload | Done | Without a restart; `listen` needs a restart |
 | In-game commands | Done | `/server`, `/hub`, `/lobby`, `/play`; and `/send`, `/glist`, `/alert` for the players who have the permission; moving starts a seamless switch |
 | Load balancing | Done | Servers with a `role` are filled in order, with caps and a drain ([docs/LOAD-BALANCING.md](docs/LOAD-BALANCING.md)). Off by default |
-| Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests; no run on real servers is recorded yet ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for the first). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were still open on 2026-11-04 |
-| A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere (`drain <server> --move`, the panel's `[drain-before-stop]`, `[restart] evacuate`; [docs/RESTART.md](docs/RESTART.md)). A server that stops without warning, or kicks a player, no longer drops them: they are moved to another server with a loading screen (`[fallback]`, [OPERATING.md](docs/OPERATING.md) section 5.11) |
+| Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests, including a scripted player that types `/server east` through the real proxy; no run on real servers is recorded yet ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for the first). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were still open on 2026-11-04 |
+| A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere (`drain <server> --move`, the panel's `[drain-before-stop]`, `[restart] evacuate`; [docs/RESTART.md](docs/RESTART.md)). A server that stops without warning, or kicks a player, no longer drops them: they are moved to another server with a loading screen (`[fallback]`, [OPERATING.md](docs/OPERATING.md) section 5.11). Tested on fakes; not run with a real client |
 | Pass-through of a backend's status | Planned | The proxy shows its own |
 | PROXY protocol (version 1 and 2) from a load balancer | Done | `[proxy-protocol]`, read only from the addresses you list; off by default ([docs/CONFIG.md](docs/CONFIG.md)) |
 | Bans and whitelist | Done | By name, unique id, address or range; a file of their own, read at the start and at `reload` ([docs/OPERATING.md](docs/OPERATING.md), section 5.8) |
@@ -51,12 +54,48 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Moving the player's state between servers | Built, waiting on Horizon | The proxy and the sidecar ask Horizon's `player-*` requests ([docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md)); Horizon's pull requests for them were open on 2026-11-04 |
 | The switch itself | Built, tested on fakes | `switch`, `send`, `/server`, `/hub`, `/lobby`. Not yet run on real servers |
 | Proof that there is no loading screen | Planned | Milestones J4 and J5 of the design: two real servers with different maps |
-| Metrics | Built | A Prometheus text page and a health check, off by default ([docs/OPERATING.md](docs/OPERATING.md), section 8.1) |
 | Extensions | Planned | |
 
-Nothing has been measured about load, memory or the number of players a proxy can
-carry. [docs/RUNNING.md](docs/RUNNING.md) describes the one run made against a real
-Horizon server, one player at a time, and its limits.
+## Measures
+
+Load was measured with the `meridian-bench load` harness, against synthetic servers and
+synthetic bots: offline players, chunks that are made-up data, no game work. The limits are
+part of every figure, and each page says them first.
+
+- [docs/BASELINE.md](docs/BASELINE.md): up to 500 bots, on one Windows machine, over the
+  loopback, where the bots, the synthetic servers and the proxy share the processor. It says
+  what this proxy costs here (memory, threads, processor, added latency, logins, moves,
+  connections that come and go). It is not the proxy's performance in production and it is
+  not a promise. Not measured: more than 500 players, runs of minutes or hours, the online and
+  hybrid modes, the balancer, the queue and the fallback under load, slow clients.
+- [docs/LOAD-REMOTE.md](docs/LOAD-REMOTE.md) and [docs/LOAD-LAN-250.md](docs/LOAD-LAN-250.md):
+  the same bots against a proxy on another machine, once: 250 bots in two waves, a proxy on a
+  small Debian laptop, across a home network whose link negotiated 100 Mbit/s. The worlds sent
+  at each join very probably filled that link, so the login times are the link's. It was one run,
+  not repeated, and it lists defects it did not explain (the metrics page missing its deadline
+  during joins, memory not given back).
+- [docs/BENCH.md](docs/BENCH.md): the older latency benchmark, over the loopback, against a
+  stand-in server.
+
+No figure comes from a real Horizon server under load, real players, a real client or a network
+beyond those two machines, and none is a comparison with another proxy.
+
+### Not verified on a real Horizon
+
+These stay on this list until the validation run against real Horizon servers is merged and
+recorded in the docs:
+
+- the seamless switch (`switch`, `send`, `/server`, `/hub`, `drain --move`) and the state
+  transfer behind it;
+- the fallback of a player whose server stops or kicks them;
+- `[access.sync]`, the sync of bans and whitelist with the servers;
+- the queue, as a real client sees it while it waits;
+- the commands and chat that the scripted player of the test kit types, and what a real server
+  answers to them;
+- the hybrid mode's name lookup and the online mode's account check, against the real services.
+
+What was run against a real Horizon server is the relay with one scripted player at a time, on
+an earlier commit and not repeated since ([docs/RUNNING.md](docs/RUNNING.md), section 5).
 
 ## Installing
 
@@ -79,6 +118,14 @@ repository's release workflow from the tagged commit:
 ```
 gh attestation verify <archive> -R Akirabane/Meridian
 ```
+
+### Linux binaries from CI
+
+To try Meridian on a Linux machine that has no compiler, a workflow started by hand builds
+`meridian`, `meridian-sidecar`, `meridian-panel` and `meridian-bench` in release mode on Ubuntu
+22.04 and keeps them for 14 days as an artifact of the run, with `SHA256SUMS`. It makes no
+release and no tag. The steps, and what the archive holds, are in
+[docs/BUILD.md](docs/BUILD.md), "Linux binaries from CI".
 
 ### As a service or a container
 
@@ -223,8 +270,13 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   The sidecar has no TLS, so it listens on
   `127.0.0.1` ([docs/OPERATING.md](docs/OPERATING.md), sections 11 and 12).
 - The proxy has been run against a real Horizon server with one scripted player at a
-  time, in a debug build ([docs/RUNNING.md](docs/RUNNING.md)). Movement through the
-  proxy, many players and long sessions have not been tried.
+  time, in a debug build ([docs/RUNNING.md](docs/RUNNING.md)). Many players have been
+  tried only against synthetic servers with synthetic bots, on one machine and once across a
+  home network (see Measures). Movement through the proxy against a real server and long
+  sessions have not been tried.
+- The queue holds the login only: the player is told nothing about their place while they
+  wait, and the wait is at most 20 seconds, because the client gives up after 30 seconds of
+  silence ([docs/OPERATING.md](docs/OPERATING.md), section 5.10).
 - The hybrid mode's name lookup and the online mode's account check have not been
   tried against the real services in a recorded run.
 - Signed chat is not supported across the proxy: servers behind it should not enforce
@@ -248,6 +300,15 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   role, the caps and the drain.
 - [docs/RESTART.md](docs/RESTART.md): detecting that a server is about to restart, and
   sending its players elsewhere.
+- [docs/SECURITY.md](docs/SECURITY.md): who the proxy expects to be attacked by, the limit it
+  holds each input to, what it does not cover, and how to report a vulnerability.
+- [docs/COMPAT.md](docs/COMPAT.md): the Horizon commit Meridian is pinned to, the nightly
+  build against Horizon's head, and how to move the pin.
+- [docs/BASELINE.md](docs/BASELINE.md), [docs/LOAD-REMOTE.md](docs/LOAD-REMOTE.md),
+  [docs/LOAD-LAN-250.md](docs/LOAD-LAN-250.md), [docs/BENCH.md](docs/BENCH.md): the load
+  measurements and their limits (see Measures).
+- [docs/TESTING-FORK.md](docs/TESTING-FORK.md): the procedure for trying the seamless switch
+  on real servers with the Horizon fork.
 - [docs/PARITY.md](docs/PARITY.md): what Velocity and BungeeCord do, function by function, where
   Meridian stands, and what to build next.
 - [docs/BUILD.md](docs/BUILD.md): building and testing.
