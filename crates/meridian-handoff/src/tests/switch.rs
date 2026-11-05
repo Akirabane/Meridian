@@ -259,11 +259,59 @@ fn a_target_with_other_registries_is_refused_and_remembered() {
     still_on_source(&mut bench);
 }
 
+/// What a backend gave one client says nothing of what it gives a client that sent
+/// something else: a Horizon server sends the entries of a pack the client knows
+/// without their data. A backend that configured one client differently is still asked
+/// for a client that configured itself another way, and the switch goes through when
+/// that client's configuration matches.
+#[test]
+fn a_backend_refused_for_one_client_is_still_asked_for_another() {
+    let digests = Digests::default();
+    let options = options();
+    let log = Log::default();
+    // The first client: the backend named "target" configures it otherwise, and that
+    // is remembered.
+    let mut first = bench();
+    let (address, _imported, _target) = target(TargetWorld {
+        registry: vec![8; 300],
+        ..TargetWorld::default()
+    });
+    let failure = switch(
+        &first.handle,
+        target_backend(&address, &options),
+        &mut FakeControl::new("source", &log),
+        &mut FakeControl::new("target", &log),
+        &digests,
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(failure.step, Step::Prepare);
+    still_on_source(&mut first);
+    // Another client, which sent another Client Information, and which the same
+    // backend configures as its first server did.
+    let other = [6; 12];
+    let second = bench_as(&other);
+    let (address, imported, target_thread) = target(TargetWorld {
+        information: other.to_vec(),
+        ..TargetWorld::default()
+    });
+    let done = switch(
+        &second.handle,
+        target_backend(&address, &options),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, imported),
+        &digests,
+        &settings(),
+    );
+    assert!(done.is_ok(), "{:?}", done.err().map(|f| f.to_string()));
+    assert_eq!(second.handle.backend(), "target");
+    drop(target_thread);
+}
+
 /// A refusal on the registries says, in its one line, how the two configurations
 /// differ: sizes and short hashes on each side, and the first registry that differs.
-/// Refused again from what was remembered, it also says how many known packs the
-/// client of the earlier switch named, since a server sends the entries of a known pack
-/// without their data.
+/// Refused again from what was remembered, it says so, with the known packs the client
+/// named, since a server sends the entries of a known pack without their data.
 #[test]
 fn a_refusal_on_the_registries_says_how_they_differ() {
     let mut bench = bench();
@@ -323,8 +371,8 @@ fn a_refusal_on_the_registries_says_how_they_differ() {
         again.reason,
         format!(
             "target configures clients differently (registry data): the player would need a \
-             new configuration phase ({detail}; target's was seen in an earlier switch, with a \
-             client that named 0 known packs; this player named 0)"
+             new configuration phase ({detail}; target's was seen in an earlier switch of a \
+             client that sent what this player sent, which named 0 known packs)"
         )
     );
     still_on_source(&mut bench);

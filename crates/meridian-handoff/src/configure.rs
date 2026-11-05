@@ -50,6 +50,31 @@ impl ClientConfiguration {
             .and_then(|answer| Reader::new(answer).varint().ok())
             .map_or(0, |count| usize::try_from(count).unwrap_or(0))
     }
+
+    /// A hash of everything the client sent, which is everything a server's configuration
+    /// phase can depend on: two clients with the same key are configured the same way by
+    /// the same server. A Horizon server, as vanilla's, sends the entries of a pack the
+    /// client knows without their data, so a client that knows the core pack and one that
+    /// knows none get different registry data from the same server.
+    pub fn key(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        let mut part = |bytes: Option<&[u8]>| match bytes {
+            Some(bytes) => {
+                hash.update([1]);
+                hash.update((bytes.len() as u64).to_be_bytes());
+                hash.update(bytes);
+            }
+            None => hash.update([0]),
+        };
+        part(self.information.as_deref());
+        part(self.known_packs.as_deref());
+        part(Some(&(self.custom.len() as u64).to_be_bytes()));
+        for custom in &self.custom {
+            part(Some(custom));
+        }
+        part(Some(&[u8::from(self.accepted_conduct)]));
+        hash.finalize().into()
+    }
 }
 
 /// What must match between two servers' configuration phases, kind by kind.

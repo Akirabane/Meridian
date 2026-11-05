@@ -161,9 +161,14 @@ pub fn source_world() -> Vec<(i32, Vec<u8>)> {
 /// the test playing both: `player` is the client's end of the proxy, `source` the
 /// backend's. Each packet must come through the proxy as it was sent.
 pub fn join_source(player: &mut Connection, source: &mut Connection) {
+    join_source_as(player, source, &INFORMATION);
+}
+
+/// As [`join_source`], for a client that sends `information` as its Client Information.
+pub fn join_source_as(player: &mut Connection, source: &mut Connection, information: &[u8]) {
     player.reader.set_read_timeout(Some(WAIT)).unwrap();
     source.reader.set_read_timeout(Some(WAIT)).unwrap();
-    send(player, cfg::serverbound::CLIENT_INFORMATION, &INFORMATION);
+    send(player, cfg::serverbound::CLIENT_INFORMATION, information);
     expect(source, cfg::serverbound::CLIENT_INFORMATION).unwrap();
     send(source, cfg::clientbound::REGISTRY_DATA, &REGISTRY);
     send(source, cfg::clientbound::SELECT_KNOWN_PACKS, &PACKS);

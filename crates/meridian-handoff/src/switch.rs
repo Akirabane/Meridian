@@ -1,6 +1,6 @@
 //! The switch itself: prepare, freeze, hand over, commit (DESIGN.md section 5).
 use crate::{
-    configure::{Digest, Summary, configure, explain},
+    configure::{ClientConfiguration, Digest, Summary, configure, explain},
     control::{
         Arrival, Outcome, PlayerControl, Record, record_dimension, record_handover, uuid_text,
     },
@@ -214,10 +214,21 @@ pub struct TargetBackend<'a> {
     pub options: &'a BackendOptions,
 }
 
-/// The configuration digest last seen from each backend, so that a backend known
-/// to configure clients differently is refused before it is asked anything.
+/// The configuration digest last seen from each backend for each way a client
+/// configured itself, so that a backend known to configure such a client differently is
+/// refused before it is asked anything.
+///
+/// A server's configuration phase depends on what the client sent: a Horizon server
+/// sends the entries of a pack the client knows without their data. So what a backend
+/// gave one client says nothing of what it gives a client that sent something else, and
+/// the digest is kept under the client's [`ClientConfiguration::key`] as well as the
+/// backend's name.
 #[derive(Default)]
-pub struct Digests(Mutex<HashMap<String, Seen>>);
+pub struct Digests(Mutex<HashMap<(String, [u8; 32]), Seen>>);
+
+/// The most digests kept. Past it they are all forgotten: they only spare a prepare, and
+/// a forgotten one is learnt again by the next switch.
+const MOST_DIGESTS: usize = 1024;
 
 /// A backend's configuration as a switch saw it, and what the log of a refusal says of
 /// it.
@@ -225,21 +236,26 @@ pub struct Digests(Mutex<HashMap<String, Seen>>);
 pub(crate) struct Seen {
     pub digest: Digest,
     pub summary: Summary,
-    /// How many known packs the client of that switch named.
-    pub known_packs: usize,
 }
 
 impl Digests {
-    pub fn get(&self, backend: &str) -> Option<Digest> {
-        self.seen(backend).map(|seen| seen.digest)
+    /// The digest `backend` gave a client configured as `client`, if a switch saw one.
+    pub fn get(&self, backend: &str, client: &ClientConfiguration) -> Option<Digest> {
+        self.seen(backend, client).map(|seen| seen.digest)
     }
 
-    pub(crate) fn seen(&self, backend: &str) -> Option<Seen> {
-        lock(&self.0).get(backend).cloned()
+    pub(crate) fn seen(&self, backend: &str, client: &ClientConfiguration) -> Option<Seen> {
+        lock(&self.0)
+            .get(&(backend.to_owned(), client.key()))
+            .cloned()
     }
 
-    pub(crate) fn set(&self, backend: &str, seen: Seen) {
-        lock(&self.0).insert(backend.to_owned(), seen);
+    pub(crate) fn set(&self, backend: &str, client: &ClientConfiguration, seen: Seen) {
+        let mut digests = lock(&self.0);
+        if digests.len() >= MOST_DIGESTS {
+            digests.clear();
+        }
+        digests.insert((backend.to_owned(), client.key()), seen);
     }
 }
 
@@ -590,7 +606,7 @@ pub fn switch(
         }
     };
     let client = shared.up().client.clone();
-    if let Some(seen) = digests.seen(target.name)
+    if let Some(seen) = digests.seen(target.name, &client)
         && let Some(kind) = session_digest.differs(&seen.digest)
     {
         let detail = explain(
@@ -598,16 +614,15 @@ pub fn switch(
             (&session_digest, &session_summary),
             (&seen.digest, &seen.summary),
         );
-        let packs = format!(
-            "{}'s was seen in an earlier switch, with a client that named {} known packs; \
-             this player named {}",
+        let earlier = format!(
+            "{}'s was seen in an earlier switch of a client that sent what this player sent, \
+             which named {} known packs",
             target.name,
-            seen.known_packs,
             client.known_pack_count()
         );
         return Err(run.fail(
             Step::Check,
-            differs(target.name, kind, detail.into_iter().chain([packs])),
+            differs(target.name, kind, detail.into_iter().chain([earlier])),
         ));
     }
 
@@ -663,14 +678,7 @@ pub fn switch(
         (&session_digest, &session_summary),
         (&digest, &summary),
     );
-    digests.set(
-        target.name,
-        Seen {
-            digest,
-            summary,
-            known_packs: client.known_pack_count(),
-        },
-    );
+    digests.set(target.name, &client, Seen { digest, summary });
     if let Some(kind) = session_digest.differs(&digest) {
         let _ = run.drop_target();
         return Err(run.fail(Step::Prepare, differs(target.name, kind, detail)));
