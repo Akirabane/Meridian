@@ -278,10 +278,16 @@ fn context() -> report::Context {
 
 /// The time as `YYYY-MM-DDTHH:MM:SSZ`, in UTC.
 fn utc_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    utc_at(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+}
+
+/// The time `secs` seconds after the epoch as `YYYY-MM-DDTHH:MM:SSZ`, in UTC.
+pub(crate) fn utc_at(secs: u64) -> String {
     // Howard Hinnant's civil_from_days.
     let z = (secs / 86_400) as i64 + 719_468;
     let era = z.div_euclid(146_097);

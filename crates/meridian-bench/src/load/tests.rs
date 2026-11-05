@@ -187,3 +187,171 @@ fn some_bots_are_moved_to_another_server() {
     assert_eq!(get("move_failed"), "0", "{row:?}");
     assert_eq!(get("proxy_alive"), "true");
 }
+
+#[test]
+fn a_proxy_of_another_machine_needs_its_address_and_its_file() {
+    // An address is a proxy elsewhere; anything else is still the path of the program.
+    assert!(
+        parse(args(&["--proxy", "192.168.1.25:25565"]))
+            .unwrap_err()
+            .contains("--backend-bind")
+    );
+    let missing = parse(args(&[
+        "--proxy",
+        "192.168.1.25:25565",
+        "--backend-bind",
+        "192.168.1.18",
+    ]))
+    .unwrap_err();
+    assert!(missing.contains("--remote-config"), "{missing}");
+    assert!(parse(args(&["--backend-bind", "192.168.1.18"])).is_err());
+    assert!(
+        parse(args(&[
+            "--proxy",
+            "192.168.1.25:25565",
+            "--backend-bind",
+            "nope"
+        ]))
+        .is_err()
+    );
+    // Writing the file asks for no file; the run's compression decides the threshold in it.
+    let o = parse(args(&[
+        "--proxy",
+        "192.168.1.25:25565",
+        "--backend-bind",
+        "192.168.1.18",
+        "--backend-ports",
+        "25701-25710",
+        "--write-remote-config",
+        "somewhere",
+        "--compression",
+        "both-off",
+    ]))
+    .unwrap()
+    .unwrap();
+    let remote = o.settings.remote.unwrap();
+    assert_eq!(remote.proxy.to_string(), "192.168.1.25:25565");
+    assert_eq!(remote.server_address(0).to_string(), "192.168.1.18:25701");
+    assert_eq!(remote.server_address(1).to_string(), "192.168.1.18:25702");
+    assert_eq!(remote.threshold, -1);
+}
+
+/// What a run against a proxy of another machine does, with the proxy on this one: the servers
+/// listen on the address and ports the configuration names, and the figures are the bots'.
+#[test]
+fn bots_play_through_a_proxy_reached_as_if_it_were_elsewhere() {
+    let Some(program) = proxy_program() else {
+        eprintln!("skipped: the meridian program is not built next to this test");
+        return;
+    };
+    let _turn = ONE_PROXY.lock().unwrap_or_else(|e| e.into_inner());
+    let secret = remote::fresh_secret().unwrap();
+    let first = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut s = settings(4);
+    s.forwarding = secret.clone();
+    let mut remote = remote::Remote {
+        proxy: "127.0.0.1:1".parse().unwrap(),
+        bind: "127.0.0.1".parse().unwrap(),
+        ports: (first, first + 9),
+        threshold: 256,
+    };
+    let mut proxy = crate::proxy::Proxy::start_with(&program, &s.dir, |listen| {
+        remote.proxy = listen;
+        remote::generate(&remote, 256, &secret)
+    })
+    .unwrap();
+    s.remote = Some(remote);
+    let get = |row: &Row, name: &str| {
+        row.0
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    let idle = remote::idle(&s, 10).unwrap();
+    assert_eq!(get(&idle, "logged_in"), "10", "{idle:?}");
+    assert_eq!(get(&idle, "failed"), "0");
+    assert_eq!(get(&idle, "proxy_answered"), "true");
+    let mut direct = s.clone();
+    direct.window = Duration::from_secs(3);
+    // Two waves of five, a second apart.
+    s.waves = 2;
+    s.wave_gap = Duration::from_secs(1);
+    let active = remote::active(&s, &direct, 10, Compression::Same).unwrap();
+    assert_eq!(get(&active, "logged_in"), "10", "{active:?}");
+    for wave in ["w1", "w2"] {
+        assert_eq!(get(&active, &format!("{wave}_bots")), "5", "{active:?}");
+        assert_eq!(
+            get(&active, &format!("{wave}_logged_in")),
+            "5",
+            "{active:?}"
+        );
+        assert_ne!(
+            get(&active, &format!("{wave}_join_start_ms")),
+            "",
+            "{active:?}"
+        );
+    }
+    // The first wave's bots played while the second came in: the figures are there.
+    assert!(
+        !get(&active, "w2_rest_rtt_p99_during_us").is_empty(),
+        "{active:?}"
+    );
+    assert_eq!(get(&active, "proxy_answered"), "true");
+    assert_ne!(get(&active, "proxy_rtt_p50_us"), "0");
+    assert_ne!(get(&active, "raw_connect_p50_us"), "0");
+    // Another threshold than the file's is refused rather than measured wrongly.
+    assert!(remote::active(&s, &direct, 10, Compression::BothOff).is_err());
+    let windows = s.windows.table().csv();
+    for phase in ["join", "hold", "measure", "join wave 1", "join wave 2"] {
+        assert!(windows.contains(phase), "{windows}");
+    }
+    assert!(proxy.alive());
+    proxy.stop().unwrap();
+}
+
+#[test]
+fn a_run_against_a_proxy_of_another_machine_takes_its_secret_from_the_file() {
+    let secret = remote::fresh_secret().unwrap();
+    let remote = remote::Remote {
+        proxy: "192.168.1.25:25565".parse().unwrap(),
+        bind: "192.168.1.18".parse().unwrap(),
+        ports: (25701, 25710),
+        threshold: 256,
+    };
+    let dir = std::env::temp_dir().join(format!("meridian-remote-parse-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("meridian.toml");
+    std::fs::write(&file, remote::generate(&remote, 256, &secret)).unwrap();
+    let file_arg = file.to_str().unwrap();
+    let base = [
+        "--proxy",
+        "192.168.1.25:25565",
+        "--backend-bind",
+        "192.168.1.18",
+        "--remote-config",
+        file_arg,
+    ];
+    let o = parse(args(&base)).unwrap().unwrap();
+    // The secret is the file's, the scenarios are the two that can run, the compression the file's.
+    assert_eq!(o.settings.forwarding, secret);
+    assert_eq!(o.scenarios, ["idle", "active"]);
+    assert_eq!(o.compressions, [Compression::Same]);
+    assert_eq!(o.settings.remote.unwrap().threshold, 256);
+    let mut with = base.to_vec();
+    with.extend(["--scenarios", "moves"]);
+    assert!(
+        parse(args(&with))
+            .unwrap_err()
+            .contains("only idle and active")
+    );
+    // The ports of the run are those of the file.
+    let mut other = base.to_vec();
+    other.extend(["--backend-ports", "25801-25810"]);
+    assert!(parse(args(&other)).unwrap_err().contains("25701"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

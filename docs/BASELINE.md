@@ -278,6 +278,8 @@ The run needs a free ephemeral-port range: between steps it waits for the socket
 A smoke test of twenty bots for five seconds, against the synthetic server alone and in front of the proxy when `target/<profile>/meridian` was built,
 runs with `cargo test -p meridian-bench`; the move, which takes 30 s, runs with `-- --ignored`.
 
+To run against a proxy on another machine, with the bots and the synthetic servers staying here, see [LOAD-REMOTE.md](LOAD-REMOTE.md).
+
 ## Watching a run with a real client
 
 The official figures above were taken **without** a person's client: a graphical client uses the processor and the graphics card of the same machine and would change
