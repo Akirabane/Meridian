@@ -28,7 +28,7 @@ server, and their logs are not kept in this repository.**
 
 | | |
 | --- | --- |
-| Date and time | 5 November 2026, from 21:13:24 to 21:18:29 UTC (22:13 to 22:18 in Paris), 5 minutes 5 seconds |
+| Date and time | 5 November 2026. The bench was launched at 21:13:25 UTC (21:13:24.9), the first wave of scripted players came in at 21:13:27 and the run ended at 21:18:29 UTC (22:13 to 22:18 in Paris), 5 minutes 4 seconds from the launch |
 | Client | Horizon Nightly 2026-11-05 · `66f3981` (as the client's own log says), on Windows 11 Pro, the operating system of the player's machine (build 10.0.26200). Offline account |
 | Server | `horizon-server` Nightly `66f3981`. The release archive was installed with the SHA-256 `5bc6a9af...64b7` (the middle is not copied here) and its release signature was verified. A stock server: without the #7484 stack, so no seamless switch was tried |
 | Proxy | Meridian at commit `e1e2a0e6` (the merge of [#102](https://github.com/Akirabane/Meridian/pull/102)) |
@@ -165,29 +165,18 @@ The proxy's own counts at the end of the three runs: fallback by kick, moved: 2;
   entry.
 - **A shared machine**, as in the reference run, and an offline account.
 
-## 4. What this changes in the other pages
+## 4. Where the other pages point here
 
-The pages below were written before this one. Each sentence quoted here says or implies that no
-real client was tried, and each proposed sentence replaces it. None of these pages has been
-edited yet. None of the proposed sentences claims more than is written in sections 1 to 3.
+The pages that said that no real client was tried were reconciled with this page: the README,
+[OPERATING.md](OPERATING.md) (sections 0, 5.11 and 12), [TESTING-FORK.md](TESTING-FORK.md) and
+[PARITY.md](PARITY.md). Each now says what is recorded here and what is not.
 
-| Page and place | Now says | Proposed |
-| --- | --- | --- |
-| README, "Moving a player to another server" | "no run on real servers is recorded yet" | "Moves between three real Horizon servers with a real client are recorded ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 2) and were not repeated; the seamless switch has not been run on a real network" |
-| README, the list of what is not measured | "No figure comes from a real Horizon server under load (...), real players, a real client or a network" | "The figures of a real client come from one player: one run over the Internet to a proxy on a rented server, with 250 scripted players loading the proxy ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md)). No figure comes from a Horizon server under load or from several real players" |
-| README, known limits | "The switch has not been tried on a real network." | "The switch was run with a real client on one machine, not on a real network. A real client over the Internet was tried once, without a move between servers ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md))" |
-| README, known limits | "this has not run with a real client" (a server that stops or kicks) | "this ran with a real client over the Internet, once for each of a killed server, a kick and a clean stop: the player stayed in the game, saw a brief `Reconfiguring...` screen of 0.25 to 0.35 s, and arrived in about 0.2 s on the servers' side ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 3)" |
-| OPERATING.md, section 0, first point | "Meridian has not run on a real network yet ... Nothing was measured with real servers, a real network or real players." | "Meridian ran once over the Internet: a real client in France to a proxy on a rented server in Warsaw, with 250 scripted players, for 5 minutes ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)). That is one player, one run, a stock Horizon server and a shared machine; it is not a production figure. Nothing else was measured on a network" |
-| OPERATING.md, section 0, switch point | "no run on real servers is recorded in the repository yet" | "moves with a real client between three real servers are recorded ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2) from a one-machine run that was not repeated, and [TESTING-FORK.md](TESTING-FORK.md) is the procedure for a recorded one" |
-| OPERATING.md, section 5.11, "What the player sees" | "(no real client was tried)" | "(a real client saw a `Reconfiguring...` screen with a Disconnect button, then `Loading terrain...`, for 0.25 to 0.35 s, and stayed in the game; one player, one run of each case, [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3)" |
-| OPERATING.md, section 6 (the freeze/reconfigure sentence) | "this was not run with a real client" | Keep the claim and say why it still holds: "this was not run with a real client: none of the runs of [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md) covers a planned restart" |
-| OPERATING.md, section 8, first and second points | "Nothing has run on a real network" / "No run of it on real servers is recorded yet" | "One run over the Internet is recorded (a single real client, [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 1); the load figures of BENCH.md are still local" / "Moves on real servers are recorded from one machine ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2)" |
-| OPERATING.md, section 8, fallback point | "This has not run with a real client." | "This ran with a real client over the Internet, once each for a killed server, a kick and a clean stop ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3). The player kept the connection to the proxy and saw a brief loading screen; what the lost server had not saved was lost" |
-| TESTING-FORK.md, "Where things stand" | "tested against fake servers only; this bench is where it meets real ones for the first time" | "tested against fake servers and, with a real client on one machine, against three real servers once ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)); this bench is the procedure for a recorded run" |
-| PARITY.md, "Fallback when a backend kicks or crashes a player" (status cell) | "exists, not run with a real client" | "exists, run with a real client over the Internet (a killed server, a kick and a clean stop, once each, [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3)" |
-| PARITY.md, "Moving a player without a loading screen" | "No run on real servers is recorded" | "Run with a real client on one machine, not repeated and without the position ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)); not on a real network" |
-| PARITY.md, list item 7 | "Done, as a cold move; not run with a real client" | "Done, as a cold move; run with a real client over the Internet, once for each of three cases" |
+What those pages still say was not run with a real client, and this page does not change:
 
-Whoever edits the pages should check each sentence against its page before replacing it: the
-"Now says" column quotes the pages as they stand on the day this page was written, and some of
-the sentences are about more than one thing.
+- the seamless switch in a recorded run: only the public comment of section 2 describes moves with
+  a real client, on one machine, and it was not repeated; the runs of sections 1 and 3 used a stock
+  Horizon server, so the seamless transfer was not tried in them;
+- any move of a player over a real network by the seamless switch;
+- a planned restart, drain <server> --move and [restart] evacuate with a real client;
+- the queue as a real client sees it while it waits, the sync of bans and whitelist with a real
+  client, the hybrid and online modes, more than one real client, and long sessions.

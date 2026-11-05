@@ -48,7 +48,7 @@ the 250 bots arrive in **5 waves of 50**, 12 seconds after the last bot of the w
 | D | 5 waves of 50, the real client connected in the first phases and **gone at 21:05:53 UTC, 13 s into the phase through the proxy** (the real server logged its disconnection; the files do not say why), so the measured window of the phase through the proxy had **no client** | As a second run of the bots' side, with that reserve |
 | E | 5 waves of 50, the real client connected **without a break from before the first bot to after the last** | **The reference run** |
 
-The reference run E began at 21:13:26 UTC and ended at 21:18:29 UTC (five minutes, three seconds).
+In the reference run E the bench was launched at 21:13:25 UTC (21:13:24.9), the first wave of bots came in at 21:13:27 and the run ended at 21:18:29 UTC (five minutes, four seconds from the launch).
 
 ## What the bots saw (run E)
 
