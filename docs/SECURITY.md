@@ -56,6 +56,13 @@ Against the first two, the proxy guarantees the following. Each item is tested.
   sent each end the login.
 - **The forwarding secret stays with the proxy.** It is sent only to the servers, inside the
   signed player information, and never in a log line or debug output.
+- **One event, one log line.** A log line may quote text a player or a peer chose (the message
+  of `/alert`, an error their bytes caused). A line break, a carriage return, any other control
+  character and the characters that turn text around are written escaped (`\n`, `\u{1b}`), so a
+  quoted text can neither start a line that looks like the proxy's own nor move a terminal's
+  cursor (`crates/meridian-proxy/src/log.rs`, `line`).
+- **No panic from the wire.** Every reader of bytes that come from outside is fed thousands of
+  changed inputs in the tests (see below), and none may panic.
 
 ## Limits, input by input
 
@@ -71,12 +78,46 @@ Against the first two, the proxy guarantees the following. Each item is tested.
 | A player's name | 1 to 16 characters, from 33 to 126 | `client.rs` (`valid_name`) |
 | A frame after the login | 2 MiB, and 8 MiB once inflated | `horizon-protocol`, `frame.rs` (`MAX_FRAME`, `MAX_UNCOMPRESSED`) |
 | The client's silence in a session | 30 s for each read | `client.rs` (`READ_TIMEOUT`) |
-| Packets kept while a player waits in the queue | 64 | `crates/meridian-proxy/src/queue.rs` (`MAX_EARLY_PACKETS`) |
+| Packets kept while a player waits in the queue | 64 packets and 1 MiB in all | `crates/meridian-proxy/src/queue.rs` (`MAX_EARLY_PACKETS`, `MAX_EARLY_BYTES`) |
 | A wait in the queue | `wait-seconds`, at most 20 s | `crates/meridian-config/src/queue.rs` |
 | A sidecar's request | Signed with HMAC-SHA256 over a challenge fresh for each connection and an increasing number, so a replay or a request from another connection is refused | `crates/meridian-sidecar/src/wire.rs` |
+| A line between the proxy and a sidecar | 32 MiB and 4 KiB for a signed line, 256 bytes for the challenge, refused as soon as it passes the limit, before its signature is checked; 300 s of silence for each read | `crates/meridian-sidecar/src/wire.rs` (`read_line`, `MAX_SIGNED_LINE`, `MAX_CHALLENGE_LINE`), `main.rs` (`IDLE`) |
+| An answer of a server's control endpoint | 16 MiB, the endpoint's own limit | `crates/meridian-sidecar/src/endpoint.rs` (`read_json`), `request.rs` (`MAX_LINE`) |
 | A message of a server's management protocol | 256 KiB, fragments included; the answer to the upgrade 16 KiB | `crates/meridian-sidecar/src/websocket.rs` (`MAX_MESSAGE`, `MAX_HEAD`) |
-| A request to the metrics page | 8 KiB; 2 s for each read; 8 connections at once | `crates/meridian-proxy/src/metrics.rs` (`MAX_REQUEST`, `IO_TIMEOUT`, `MAX_CONNECTIONS`) |
+| A request to the metrics page | 8 KiB; 4 s in all, 2 s for each read; 8 connections at once | `crates/meridian-proxy/src/metrics.rs` (`MAX_REQUEST`, `REQUEST_DEADLINE`, `IO_TIMEOUT`, `MAX_CONNECTIONS`) |
 | The favicon | A 64 by 64 PNG of at most 16 KiB | `crates/meridian-config/src/favicon.rs` |
+
+## How the readers are tested against hostile input
+
+Each reader of outside bytes has tests that feed it what an attacker would: a VarInt too long
+or negative, a length of zero, huge or past the end, a packet cut short, a string too long or
+not UTF-8, a packet of the wrong state, a compressed size far above what follows, a WebSocket
+frame of an unknown kind, unmasked, in endless fragments or with a lying length, a PROXY header
+from an untrusted address, a sidecar line badly signed, replayed or too long, a request to the
+metrics page that never ends, and connections that come slowly or in numbers.
+
+Beside them, a mutation test runs on every reader: valid inputs are changed at random (a bit,
+a byte at an edge, bytes cut, repeated or inserted, a length made extreme) from a fixed seed,
+thousands of times, so that every run on every machine tries the same inputs. Each must be
+answered without a panic, the player's side within its deadline, and with no more kept than its
+limits allow. The changes are made by `crates/meridian-testkit/src/mutate.rs`, with no crate
+added, and the tests are named `hostile_*`:
+
+| Reader | Test |
+| --- | --- |
+| The handshake, the status and the login | `crates/meridian-net/src/client_fuzz_tests.rs` |
+| The PROXY protocol | `crates/meridian-net/src/proxy_protocol/tests.rs` |
+| The ghost and the delta of a switch | `crates/meridian-ghost/src/tests/fuzz.rs` |
+| The rewriting of entity ids | `crates/meridian-rewrite/src/tests.rs` |
+| The poses a switch carries | `crates/meridian-handoff/src/tests/hostile.rs` |
+| A sidecar's signed lines | `crates/meridian-sidecar/src/wire.rs` |
+| The management protocol's frames | `crates/meridian-sidecar/src/websocket.rs` |
+
+They take well under a second each and run with `cargo test`. A fuzzer that follows coverage,
+such as `cargo fuzz` (it needs a nightly compiler and `cargo install cargo-fuzz`), can be pointed
+at the same functions for a longer search: `client::accept`, `proxy_protocol::parse_v1` and
+`parse_v2`, `View::apply`, `Swap::clientbound` and `serverbound`, `wire::open` and
+`Socket::read_message`. It is not part of the repository or of CI.
 
 ## What is not covered
 
@@ -94,6 +135,16 @@ Against the first two, the proxy guarantees the following. Each item is tested.
   connection of the protocol layer. The deadline is checked before each packet, and a frame is
   bounded at 2 MiB, but within one packet the bytes may come slowly. By then the player has been
   checked by the session service: they have an account, which the operator can ban.
+- **A packet after the login may be large.** The protocol layer reads a frame of up to 2 MiB,
+  and sets aside the 8 MiB a compressed one says it inflates to, before it knows whether the
+  packet is valid. That is per connection and per packet, as a vanilla server allows, and the
+  limits on the number of connections bound the total.
+- **The operator's files are trusted.** The favicon is read whole before its size is checked,
+  and the configuration, `access.toml` and `permissions.toml` are read whole too. Someone who
+  can write them can do worse.
+- **A sidecar takes any number of connections.** It listens on the loopback by default, and a
+  connection that does not prove the secret makes it do nothing. Each one still costs a thread
+  until its first line is refused or its silence of 300 s ends it.
 - **Many addresses at once.** The limits above bound what one address costs, and how many
   connections log in at once. An attacker with many addresses can still fill
   `max-pending-logins` and keep new players waiting while they hold it. That is a matter for the
