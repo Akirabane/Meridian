@@ -1,0 +1,137 @@
+name: Horizon compat
+
+# Builds and tests Meridian against the head of Horizon's default branch, every night.
+# Meridian is pinned to one Horizon commit (Cargo.toml), so a change of Horizon's
+# protocol is otherwise found only on the day the pin is moved. This workflow is not
+# part of the pull request checks: it never blocks a merge. When it fails it opens
+# one issue, keeps it up to date, and closes it when the build is green again.
+# See docs/COMPAT.md.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+# One run at a time, so that two runs cannot both open the issue.
+concurrency:
+  group: horizon-compat
+  cancel-in-progress: false
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  compat:
+    name: Build and test against Horizon
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.bump.outcome }}
+      sha: ${{ steps.horizon.outputs.sha }}
+      pinned: ${{ steps.horizon.outputs.pinned }}
+      report: ${{ steps.report.outputs.text }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Find the head of Horizon
+        id: horizon
+        run: |
+          sha=$(git ls-remote https://github.com/horizon-rust/horizon HEAD | cut -f1)
+          if ! [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
+            echo "cannot read the head of horizon-rust/horizon" >&2
+            exit 1
+          fi
+          pinned=$(sed -n 's|.*horizon-rust/horizon", rev = "\([0-9a-f]\{40\}\)".*|\1|p' Cargo.toml)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      # Keyed on the pinned Cargo.lock: the crates.io dependencies are restored, only the
+      # Horizon crates and Meridian's own are built again.
+      - uses: Swatinem/rust-cache@v2
+      # Rewrites the revision in this checkout only (nothing is committed or pushed), then
+      # runs `cargo test --workspace`. Its output goes to the log, what broke to report.md.
+      - name: Test against the head of Horizon
+        id: bump
+        continue-on-error: true
+        env:
+          BUMP_REPORT: ${{ github.workspace }}/report.md
+        run: bash scripts/bump-horizon.sh "${{ steps.horizon.outputs.sha }}"
+      - name: Keep what broke
+        id: report
+        if: steps.bump.outcome == 'failure'
+        run: |
+          delimiter="report_$RANDOM$RANDOM"
+          {
+            echo "text<<$delimiter"
+            if [ -f report.md ]; then head -c 8000 report.md; else echo "No report was written."; fi
+            echo
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+      - name: Fail the run if the build or the tests failed
+        if: steps.bump.outcome == 'failure'
+        run: exit 1
+
+  issue:
+    name: Update the issue
+    needs: compat
+    # Only when the build or the tests ran. If the head of Horizon could not be read, or
+    # the runner broke before the tests, the state of the issue is left as it is.
+    if: ${{ always() && (needs.compat.outputs.outcome == 'success' || needs.compat.outputs.outcome == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # Passed as variables, never pasted into the script: the report quotes compiler
+      # output, which comes from Horizon's code.
+      OUTCOME: ${{ needs.compat.outputs.outcome }}
+      SHA: ${{ needs.compat.outputs.sha }}
+      PINNED: ${{ needs.compat.outputs.pinned }}
+      REPORT: ${{ needs.compat.outputs.report }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open, update or close the issue
+        run: |
+          label=horizon-compat
+          title="Horizon compat broken at ${SHA:0:12}"
+          number=$(gh issue list --label "$label" --state open --limit 1 --json number --jq '.[0].number // empty')
+
+          if [ "$OUTCOME" = success ]; then
+            if [ -n "$number" ]; then
+              gh issue close "$number" --comment "Back to green: Meridian builds and passes its tests against Horizon \`${SHA:0:12}\`. Run: $RUN_URL"
+            fi
+            exit 0
+          fi
+
+          {
+            echo "The nightly build of Meridian against the head of Horizon fails."
+            echo
+            echo "- Horizon head tested: [\`${SHA:0:12}\`](https://github.com/horizon-rust/horizon/commit/$SHA)"
+            echo "- Pinned in \`Cargo.toml\`: \`${PINNED:0:12}\`"
+            echo "- Last run: $RUN_URL"
+            echo
+            printf '%s\n' "$REPORT"
+            echo
+            echo "What to do is in [docs/COMPAT.md](https://github.com/$GH_REPO/blob/main/docs/COMPAT.md)."
+            echo "This issue is updated by the \`Horizon compat\` workflow and closed when the build is green again."
+          } > body.md
+
+          if [ -z "$number" ]; then
+            gh label create "$label" --color B60205 --description "Meridian does not build against Horizon's head" 2>/dev/null || true
+            gh issue create --title "$title" --label "$label" --body-file body.md
+          else
+            before=$(gh issue view "$number" --json title --jq .title)
+            gh issue edit "$number" --title "$title" --body-file body.md
+            if [ "$before" != "$title" ]; then
+              gh issue comment "$number" --body "Still broken, now at Horizon \`${SHA:0:12}\`. Run: $RUN_URL"
+            fi
+          fi
