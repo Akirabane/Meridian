@@ -451,7 +451,7 @@ fn a_player_who_never_joined_is_not_moved() {
 fn followed_over_tcp(kick: bool) {
     use crate::state::Proxy;
     use ids::configuration as cfg;
-    use meridian_testkit::live::{End, Moves, Options, session_counting};
+    use meridian_testkit::live::{End, Options, link, session_linked};
     use std::sync::atomic::AtomicBool;
 
     let mut lobby = vec![Step::Expect {
@@ -488,21 +488,22 @@ fn followed_over_tcp(kick: bool) {
         std::thread::spawn(move || crate::serve::serve(listener, &proxy))
     };
 
-    let moves = Moves::default();
+    let (handle, link) = link();
+    let moves = handle.moves.clone();
     let recorder = Recorder::new();
     let player = {
-        let (moves, recorder) = (moves.clone(), recorder.clone());
+        let recorder = recorder.clone();
         std::thread::spawn(move || {
-            session_counting(
+            session_linked(
                 &Options {
                     host: "127.0.0.1".into(),
                     port,
                     name: "Eve".into(),
-                    // Long enough to be moved, short of the scripted player's `list`.
-                    seconds: 2,
+                    // Long enough for a slow machine; the test ends the session itself.
+                    seconds: 30,
                 },
                 &recorder,
-                &moves,
+                &link,
             )
         })
     };
@@ -522,7 +523,8 @@ fn followed_over_tcp(kick: bool) {
     assert_eq!(moves.done(), 1, "the player came back to the world once");
     assert!(!on("lobby"));
 
-    // The player stays its time and leaves cleanly: it was not disconnected on the way.
+    // The player leaves when the test is done, cleanly: it was not disconnected on the way.
+    handle.controller.leave().unwrap();
     assert_eq!(player.join().unwrap(), End::Clean);
     // The chat line that says why the player was moved was among what they were sent.
     assert!(

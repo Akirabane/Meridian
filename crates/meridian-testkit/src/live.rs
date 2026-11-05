@@ -65,13 +65,17 @@ enum Order {
     Command(String),
     /// A chat message.
     Say(String),
+    /// Leave: close the connection, as a player who is done does.
+    Leave,
 }
 
 impl Order {
     /// The packet that carries it. A command goes unsigned, with no argument signatures, as a
     /// client without chat keys sends one; so does a message, with no signature.
-    fn encode(&self) -> Vec<u8> {
-        match self {
+    /// `None` for leaving, which is not a packet.
+    fn encode(&self) -> Option<Vec<u8>> {
+        Some(match self {
+            Order::Leave => return None,
             Order::Command(command) => play::Serverbound::ChatCommand(play::ChatCommand {
                 command: command.clone(),
             })
@@ -90,7 +94,7 @@ impl Order {
                 },
             })
             .encode(),
-        }
+        })
     }
 }
 
@@ -113,6 +117,15 @@ impl Controller {
     /// Says something in the chat.
     pub fn say(&self, text: &str) -> Result<(), NotSent> {
         self.send(text, Order::Say)
+    }
+
+    /// Has the player leave: what was typed before is sent, then the connection is closed and
+    /// the session ends with [`End::Clean`], whatever time was left. Like what is typed, it
+    /// happens once the player is in the world.
+    pub fn leave(&self) -> Result<(), NotSent> {
+        self.orders
+            .send(Order::Leave)
+            .map_err(|_| NotSent::SessionOver)
     }
 
     fn send(&self, text: &str, order: fn(String) -> Order) -> Result<(), NotSent> {
@@ -465,7 +478,11 @@ fn run(o: &Options, recorder: &Recorder, moves: &Moves, link: Option<&Link>) -> 
             // What the caller asked to type, in order.
             if let Some(link) = link {
                 while let Ok(order) = link.orders.try_recv() {
-                    if send(&mut connection, order.encode()).is_err() {
+                    let Some(body) = order.encode() else {
+                        connection.writer.shutdown();
+                        return End::Clean;
+                    };
+                    if send(&mut connection, body).is_err() {
                         return End::Closed;
                     }
                 }
@@ -845,12 +862,14 @@ mod tests {
 
     type Seen = Vec<(i32, Vec<u8>)>;
 
+    /// A player that stays long: the tests end it with `leave`, so that a slow machine cannot
+    /// make it go before the test is done with it.
     fn options(port: u16) -> Options {
         Options {
             host: "127.0.0.1".into(),
             port,
             name: "Bot".into(),
-            seconds: 1,
+            seconds: 30,
         }
     }
 
@@ -950,6 +969,7 @@ mod tests {
             handle.journal.lines()
         );
         assert!(wait("ran /hub").is_some(), "{:?}", handle.journal.lines());
+        handle.controller.leave().unwrap();
         assert_eq!(player.join().unwrap(), End::Clean);
 
         let seen = server.join().unwrap().unwrap();
@@ -1002,6 +1022,62 @@ mod tests {
                 ("ran /hub".to_owned(), false),
             ]
         );
+    }
+
+    /// `leave` sends what was typed before it, closes the connection and ends the session
+    /// cleanly at once, long before the time the player was given.
+    #[test]
+    fn leaving_ends_the_session_cleanly_after_what_was_typed() {
+        use ids::play::serverbound as sb;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = server(listener);
+        let (handle, link) = link();
+        let began = Instant::now();
+        let player = std::thread::spawn(move || {
+            let end = session_linked(
+                &Options {
+                    seconds: 600,
+                    ..options(port)
+                },
+                &Recorder::new(),
+                &link,
+            );
+            (end, link)
+        });
+        // The server has said its two lines (the second is for the action bar): it is done
+        // writing, so that the player's leaving cannot cut it off.
+        let until = Instant::now() + Duration::from_secs(10);
+        while handle.journal.lines().len() < 2 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        handle.controller.say("bye").unwrap();
+        handle.controller.leave().unwrap();
+        let (end, link) = player.join().unwrap();
+        assert_eq!(end, End::Clean);
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            began.elapsed()
+        );
+        let ids_seen: Vec<i32> = server
+            .join()
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(
+            ids_seen,
+            [
+                ids::configuration::serverbound::CLIENT_INFORMATION,
+                ids::configuration::serverbound::FINISH_CONFIGURATION,
+                sb::CHAT,
+            ]
+        );
+        // The session is over: nothing more can be typed.
+        drop(link);
+        assert_eq!(handle.controller.say("again"), Err(NotSent::SessionOver));
     }
 
     /// Something typed while the server has the player in a configuration phase waits for
@@ -1074,6 +1150,7 @@ mod tests {
             std::thread::spawn(move || session_linked(&options(port), &Recorder::new(), &link));
         told.recv_timeout(Duration::from_secs(10)).unwrap();
         handle.controller.command("late").unwrap();
+        handle.controller.leave().unwrap();
         let seen = server.join().unwrap().unwrap();
         assert_eq!(
             seen,
@@ -1087,7 +1164,7 @@ mod tests {
             ]
         );
         assert_eq!(handle.moves.done(), 1);
-        let _ = player.join();
+        assert_eq!(player.join().unwrap(), End::Clean);
     }
 
     #[test]
@@ -1303,8 +1380,15 @@ mod tests {
             }
         });
         let (handle, link) = link();
-        let end = session_linked(&options(port), &Recorder::new(), &link);
-        assert_eq!(end, End::Clean);
+        let player =
+            std::thread::spawn(move || session_linked(&options(port), &Recorder::new(), &link));
+        let line = handle
+            .journal
+            .wait_for(0, Duration::from_secs(10), |_| true)
+            .expect("the server's line");
+        assert_eq!(line.text, "commands.example");
+        handle.controller.leave().unwrap();
+        assert_eq!(player.join().unwrap(), End::Clean);
         server.join().unwrap().unwrap();
         let lines = handle.journal.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
