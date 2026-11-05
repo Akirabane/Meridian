@@ -182,6 +182,8 @@ The proxy's `check: the sidecar of <server>: <error>` and `cannot read the state
 | `INFO backend "<name>" is going down (<cause>): its players stay on it ([restart] evacuate is off)` | The evacuation is off, the default | Turn on `[restart] evacuate = true` if you want them moved |
 | `INFO backend "<name>" is going down: nobody is on it` | The evacuation had nobody to move | None |
 | `INFO backend "<name>" is going down: <n> moved, <m> stayed` | The evacuation ran | Look at the `stays on` lines for the rest |
+| `WARN <player> could not move from <x> to <y>: check: the player is already on <y>`, then `<player> stays on <x>: the move failed` | The server announced its stop and dropped its players about 78 ms later; the fallback had already moved the player | Nothing: the player is on another server. To move players before a stop, `drain <x> --move` first, or use the panel's `[drain-before-stop]` |
+| `WARN cannot read the lists of backend "<name>"'s server: bans: the sidecar refused: Invalid Request: Method cannot be dispatched pre server initialization` | The server is up but not initialised: it refuses the first read of its lists | None: the proxy tries again by itself and takes the lists a few seconds later |
 | `WARN <player> stays on <server>: <why>` | No other server of the role has room, or the move failed | Add capacity of the same role; the player is disconnected when the server stops |
 | `WARN cannot start the evacuation: <error>` | The proxy could not start the thread | Rare; the server is still drained |
 | `INFO backend "<name>" is back` | The server answers again (or `server/started`) | The server is offered again, unless you drained it yourself |

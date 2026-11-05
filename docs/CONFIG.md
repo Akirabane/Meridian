@@ -149,7 +149,7 @@ Without the table, nothing moves a player.
 
 | Key | Default | What it does | Checks |
 | --- | --- | --- | --- |
-| `evacuate` | `false` | Whether the players of a backend that is going down are sent to other servers of its role, one at a time, as `drain <server> --move` sends them. A player with nowhere to go stays and is named in the log. Off, the players stay on the backend | `true` or `false` |
+| `evacuate` | `false` | Whether the players of a backend that is going down are sent to other servers of its role, one at a time, as `drain <server> --move` sends them. It cannot beat a plain Horizon `stop`, which drops its players about 78 ms after announcing it; it acts when the server is announced early (the panel's `[drain-before-stop]`). A player with nowhere to go stays and is named in the log. Off, the players stay on the backend | `true` or `false` |
 | `silent-rounds` | `3` | How many readings in a row (one every `[balancing] probe-interval-seconds`) its sidecar may leave unanswered before the backend counts as going down. Needs `[balancing] enabled` and a sidecar | More than 0 |
 | `grace-seconds` | `60` | Seconds a backend that was told to stop may go on answering before it counts as back: it answers for a while as it shuts down | More than 0 |
 
