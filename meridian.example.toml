@@ -260,6 +260,16 @@ bind = "127.0.0.1:9100"
 [access]
 # file = "access.toml"
 
+# Keep the bans and the whitelist in step with the servers' own, through the sidecars (which
+# need --management-properties). Both are off. from-servers: what is banned, pardoned or
+# allowed on a server reaches the proxy's lists, so a player banned on one server cannot join
+# another through the proxy. to-servers: the console's ban, pardon and whitelist add/remove
+# are sent to every backend that has a sidecar, tried again when one cannot be reached.
+# See docs/OPERATING.md, section 5.12.
+# [access.sync]
+# from-servers = false
+# to-servers = false
+
 # The groups of permissions and the players in them have a file of their own too, which
 # the console changes (perm) and which is read at the start, at `reload` and on SIGHUP.
 # Without it /server, /hub, /lobby and /play are open to everyone, as before, and the

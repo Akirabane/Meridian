@@ -244,6 +244,27 @@ is written with hyphens or without. An entry with none or more than one of `name
 and `ip`, a name or an address that is not one, an entry twice, or a key that is not listed,
 is an error that names the entry.
 
+### `[access.sync]`
+
+Whether the proxy's bans and whitelist follow the servers' own, and the other way round
+([OPERATING.md](OPERATING.md), section 5.12). Both are off, so nothing changes until you turn
+one on. They go through the sidecars, which must be started with `--management-properties` (the
+servers' management protocol must be on, section 4).
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `from-servers` | `false` | A ban, a pardon or a whitelist addition made on a server is applied to the proxy's lists, so a player banned on one server cannot join another through the proxy. The ban is noted as `banned on <server>`. When the proxy starts, and whenever a sidecar connects to its server again, it also reads the lists the server holds and takes what it does not have. It never removes an entry of its own | `true` or `false` |
+| `to-servers` | `false` | A `ban`, `pardon` or `whitelist add\|remove` made at the console is sent to every backend that has a `[[sidecars]]` entry, on a thread of its own: a server that cannot be reached is tried again (six times, from 2 seconds to 2 minutes apart) and never holds the console or a login back | `true` or `false` |
+
+```toml
+[access.sync]
+from-servers = true
+to-servers = true
+```
+
+A reload applies the new values to the next round. Turning `to-servers` off drops what was still
+waiting to be sent.
+
 ## `[permissions]`
 
 Where the groups of permissions and the players in them are kept ([OPERATING.md](OPERATING.md),

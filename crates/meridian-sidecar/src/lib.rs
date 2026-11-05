@@ -11,6 +11,7 @@
 //!   address other machines can reach while the exchange is not encrypted.
 pub mod client;
 pub mod endpoint;
+pub mod lists;
 pub mod management;
 pub mod options;
 pub mod request;

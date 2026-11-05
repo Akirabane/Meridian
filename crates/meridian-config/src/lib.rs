@@ -16,7 +16,7 @@ mod queue;
 mod restart;
 mod sidecar;
 
-pub use access::{Access, AccessError, AccessSettings, Ban, Net, Refusal, Target};
+pub use access::{Access, AccessError, AccessSettings, AccessSync, Ban, Net, Refusal, Target};
 pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};

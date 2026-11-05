@@ -173,6 +173,11 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
     if let Err(e) = notices::spawn(&proxy) {
         warning!("cannot start the thread that reads what the backends announce: {e}");
     }
+    // Follows the servers' own bans and whitelists, and tells them the proxy's, when
+    // `[access.sync]` turns either on.
+    if let Err(e) = access::sync::spawn(&proxy) {
+        warning!("cannot start the threads that keep the bans in step with the servers: {e}");
+    }
     match serve::serve(listener, &proxy) {
         Ok(()) => {
             info!("stopped");

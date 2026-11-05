@@ -106,6 +106,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait_ms: Option<u64>,
     },
+    /// The changes of the server's allowlist, bans and ip bans that the sidecar heard on the
+    /// management protocol, numbered apart from the [`Request::Notices`]: same use of
+    /// `after` and `wait_ms`. The answer also tells how many connections to the server there
+    /// have been, which is how the proxy knows to read the lists again. The request never
+    /// reaches the backend's control endpoint.
+    AccessNotices {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u64>,
+    },
+    /// A call of the server's management protocol on its lists: `method` is one of
+    /// [`crate::lists::CALLABLE`] without `minecraft:` (`bans/add`, `allowlist`, ...) and
+    /// `params` the parameters by name (`{"add": [...]}`). The answer is the result the
+    /// server gave. The request never reaches the backend's control endpoint.
+    Manage {
+        method: String,
+        #[serde(default)]
+        params: Value,
+    },
 }
 
 /// The line a [`Request::Status`] becomes on the backend's control endpoint. It is a
@@ -282,7 +302,10 @@ impl Request {
             | Request::Release { uuid, .. }
             | Request::Confirm { uuid, .. }
             | Request::Drop { uuid, .. } => Some(uuid),
-            Request::Status {} | Request::Notices { .. } => None,
+            Request::Status {}
+            | Request::Notices { .. }
+            | Request::AccessNotices { .. }
+            | Request::Manage { .. } => None,
         }
     }
 
@@ -406,9 +429,11 @@ impl Request {
             Request::Drop { handover: None, .. } => format!("player-drop {uuid}"),
             Request::Drop { .. } => format!("player-drop {uuid} {handover}"),
             Request::Status {} => STATUS_LINE.to_owned(),
-            Request::Notices { .. } => {
+            Request::Notices { .. } | Request::AccessNotices { .. } | Request::Manage { .. } => {
                 return Err(
-                    "notices are heard by the sidecar and never sent to the backend".into(),
+                    "notices and management calls are made by the sidecar and never sent to \
+                     the backend's control endpoint"
+                        .into(),
                 );
             }
         })

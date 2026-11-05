@@ -1,4 +1,5 @@
 //! The console's `ban`, `pardon`, `banlist` and `whitelist`.
+use super::sync::{self, Change};
 use super::{enforce, not_saved, summary};
 use crate::console::{Commands, Reply, usage};
 use crate::log::info;
@@ -43,6 +44,13 @@ pub fn ban(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
     info!("{line}");
     let mut lines = vec![line];
     lines.extend(enforce(&proxy.sessions));
+    lines.extend(sync::send(
+        proxy,
+        &Change::Ban {
+            who: target,
+            reason,
+        },
+    ));
     saved(lines, result)
 }
 
@@ -60,7 +68,9 @@ pub fn pardon(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
     }
     let line = format!("pardoned {target}");
     info!("{line}");
-    saved(vec![line], result)
+    let mut lines = vec![line];
+    lines.extend(sync::send(proxy, &Change::Pardon { who: target }));
+    saved(lines, result)
 }
 
 pub fn banlist(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
@@ -103,7 +113,9 @@ pub fn whitelist(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
             }
             let line = format!("{target} added to the whitelist");
             info!("{line}");
-            saved(vec![line], result)
+            let mut lines = vec![line];
+            lines.extend(sync::send(proxy, &Change::Allow { who: target }));
+            saved(lines, result)
         }
         ["remove", who] => {
             let target = Target::parse(who)?;
@@ -116,7 +128,9 @@ pub fn whitelist(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
             }
             let line = format!("{target} removed from the whitelist");
             info!("{line}");
-            saved(vec![line], result)
+            let mut lines = vec![line];
+            lines.extend(sync::send(proxy, &Change::Disallow { who: target }));
+            saved(lines, result)
         }
         ["list"] | [] => {
             let access = proxy.sessions.access.snapshot();

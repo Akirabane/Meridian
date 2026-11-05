@@ -346,10 +346,67 @@ fn the_file_is_beside_the_configuration_unless_the_table_says_otherwise() {
         with("[access]\nfile = \"lists/bans.toml\"").access.file,
         Some(Path::new("conf").join("lists/bans.toml"))
     );
-    assert_eq!(Config::default().access, AccessSettings { file: None });
+    assert_eq!(
+        Config::default().access,
+        AccessSettings {
+            file: None,
+            sync: AccessSync::default()
+        }
+    );
     let error =
         Config::from_toml_str("[access]\nfiles = 1\n[[backends]]\nname = \"a\"\naddress = \"h:1\"")
             .unwrap_err()
             .to_string();
     assert!(error.contains("files"), "{error}");
+}
+
+#[test]
+fn the_sync_with_the_servers_is_off_unless_the_table_turns_it_on() {
+    assert_eq!(with("").access.sync, AccessSync::default());
+    assert!(!AccessSync::default().from_servers && !AccessSync::default().to_servers);
+    let sync = with("[access.sync]\nfrom-servers = true").access.sync;
+    assert_eq!(
+        sync,
+        AccessSync {
+            from_servers: true,
+            to_servers: false
+        }
+    );
+    let sync = with("[access]\n[access.sync]\nto-servers = true")
+        .access
+        .sync;
+    assert_eq!(
+        sync,
+        AccessSync {
+            from_servers: false,
+            to_servers: true
+        }
+    );
+    // A misspelt key is refused, not ignored: a sync that silently stays off is worse.
+    let error = Config::from_toml_str(
+        "[access.sync]\nfrom-server = true\n[[backends]]\nname = \"a\"\naddress = \"h:1\"",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("from-server"), "{error}");
+}
+
+#[test]
+fn a_net_says_whether_it_is_one_address() {
+    let Target::Net(one) = target("203.0.113.9") else {
+        panic!("an address is a net")
+    };
+    assert_eq!(one.address(), Some(ip("203.0.113.9")));
+    let Target::Net(range) = target("203.0.113.0/24") else {
+        panic!("a range is a net")
+    };
+    assert_eq!(range.address(), None);
+    let Target::Net(six) = target("2001:db8::1") else {
+        panic!("an address is a net")
+    };
+    assert_eq!(six.address(), Some(ip("2001:db8::1")));
+    let Target::Net(whole) = target("::/0") else {
+        panic!("a range is a net")
+    };
+    assert_eq!(whole.address(), None);
 }

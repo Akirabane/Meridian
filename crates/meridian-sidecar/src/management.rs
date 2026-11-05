@@ -20,10 +20,11 @@
 //! - The secret is in no message, no error and no `Debug` output of this module.
 //! - After a failure the sidecar waits, longer each time up to [`LONGEST_WAIT`], and
 //!   never retries in a tight loop.
+use crate::lists::{self, Lists, Reply};
 use crate::tls;
 use crate::websocket::{self, Next, Socket};
 use rustls::{ClientConnection, StreamOwned};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -80,6 +81,9 @@ struct Queue {
 pub struct Notices {
     queue: Mutex<Queue>,
     changed: Condvar,
+    /// The lists of the server (docs/OPERATING.md, section 5.10): what it announces of
+    /// them, and the calls the proxy makes on them over the same connection.
+    pub lists: Lists,
 }
 
 impl Default for Notices {
@@ -91,6 +95,7 @@ impl Default for Notices {
                 kept: VecDeque::new(),
             }),
             changed: Condvar::new(),
+            lists: Lists::default(),
         }
     }
 }
@@ -376,11 +381,32 @@ fn session(
         "meridian-sidecar: management protocol: connected to {}:{}",
         settings.host, settings.port
     );
+    notices.lists.begin_connection();
     notices.set_watching(true);
+    let result = listen(&mut socket, notices, stop);
+    notices.lists.end_connection();
+    result
+}
+
+/// What a connection hears and says until it ends: the notices go to their queues, the
+/// calls the proxy made are written between two reads, and the server's answers go back
+/// to whoever made them.
+fn listen(socket: &mut Socket<Link>, notices: &Notices, stop: &AtomicBool) -> Result<(), String> {
+    let mut waiting: HashMap<u64, Reply> = HashMap::new();
     while !stop.load(Ordering::Relaxed) {
+        for call in notices.lists.take_calls() {
+            // A call that cannot be written is dropped with the others: whoever made it
+            // is told the connection ended.
+            socket
+                .send_text(call.text())
+                .map_err(|e| format!("the connection broke: {e}"))?;
+            waiting.insert(call.id(), call.into_reply());
+        }
         match socket.read_message() {
             Ok(Next::Text(line)) => {
-                notices.offer(&line);
+                if !lists::answer(&line, &mut waiting) && !notices.offer(&line) {
+                    notices.lists.offer(&line);
+                }
             }
             Ok(Next::Idle) => {}
             Ok(Next::Closed) => return Ok(()),

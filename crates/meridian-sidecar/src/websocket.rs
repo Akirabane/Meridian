@@ -6,12 +6,14 @@
 //! What is left out, on purpose: the server's `Sec-WebSocket-Accept` is not checked
 //! (it needs SHA-1, which nothing else here uses), and the sidecar reads only a
 //! server on its own machine, which the caller has already seen is on a loopback
-//! address; and nothing is sent but pongs and a close.
+//! address; and what is sent is pongs, a close, and the requests of the management
+//! protocol (`send_text`).
 use std::io::{self, Read, Write};
 
 /// The longest message taken: a notification is a line, and anything near this is not
-/// one.
-pub const MAX_MESSAGE: usize = 256 << 10;
+/// one. The answer to a request for a server's ban list is the longest thing it reads, a
+/// couple of hundred bytes for each ban.
+pub const MAX_MESSAGE: usize = 4 << 20;
 
 /// The longest reply to the upgrade read before giving up.
 const MAX_HEAD: usize = 16 << 10;
@@ -175,6 +177,33 @@ impl<T: Read + Write> Socket<T> {
         let mut mask = [0u8; 4];
         getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
         let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
+        self.stream.write_all(&frame)?;
+        self.stream.flush()
+    }
+
+    /// Sends one text message (a request of the management protocol), in a single masked
+    /// frame.
+    pub fn send_text(&mut self, text: &str) -> io::Result<()> {
+        let payload = text.as_bytes();
+        if payload.len() > MAX_MESSAGE {
+            return Err(too_long());
+        }
+        let mut mask = [0u8; 4];
+        getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
+        let mut frame = vec![0x81];
+        match payload.len() {
+            n if n < 126 => frame.push(0x80 | n as u8),
+            n if n <= 0xffff => {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            n => {
+                frame.push(0x80 | 127);
+                frame.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
         frame.extend_from_slice(&mask);
         frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
         self.stream.write_all(&frame)?;
@@ -365,6 +394,48 @@ mod tests {
         );
         assert_eq!(socket.read_message().unwrap(), Next::Text("x".repeat(300)));
         assert_eq!(socket.read_message().unwrap(), Next::Closed);
+    }
+
+    /// The payload of the frame that starts at `from` in what the socket wrote, unmasked,
+    /// and where the frame ends.
+    fn unmask(written: &[u8], from: usize) -> (u8, Vec<u8>, usize) {
+        let head = &written[from..];
+        assert_ne!(head[1] & 0x80, 0, "a client frame is masked");
+        let (len, at) = match head[1] & 0x7f {
+            126 => (usize::from(u16::from_be_bytes([head[2], head[3]])), 4),
+            127 => (
+                usize::try_from(u64::from_be_bytes(head[2..10].try_into().unwrap())).unwrap(),
+                10,
+            ),
+            short => (usize::from(short), 2),
+        };
+        let mask = &head[at..at + 4];
+        let body = &head[at + 4..at + 4 + len];
+        let text = body
+            .iter()
+            .zip(mask.iter().cycle())
+            .map(|(b, m)| b ^ m)
+            .collect();
+        (head[0], text, from + at + 4 + len)
+    }
+
+    #[test]
+    fn a_text_is_sent_in_one_masked_frame_whatever_its_length() {
+        let mut socket = socket(Vec::new());
+        let texts = ["{}".to_owned(), "y".repeat(300), "z".repeat(70_000)];
+        for text in &texts {
+            socket.send_text(text).unwrap();
+        }
+        let mut from = REQUEST.len();
+        for text in &texts {
+            let (first, body, end) = unmask(&socket.stream.written, from);
+            assert_eq!(first, 0x81, "FIN and the text opcode");
+            assert_eq!(body, text.as_bytes());
+            from = end;
+        }
+        assert_eq!(from, socket.stream.written.len());
+        let too_long = "x".repeat(MAX_MESSAGE + 1);
+        assert!(socket.send_text(&too_long).is_err());
     }
 
     #[test]
