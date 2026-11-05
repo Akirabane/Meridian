@@ -451,14 +451,42 @@ pub fn active(
     // between the proxy and the servers twice; here both are one link, which `raw_connect` times
     // once, so about two of those round trips are the network's share of what the proxy "adds".
     let network = 2.0 * micros(raw.p50);
+    // What the proxy adds is the difference with the direct phase: it means something only if that
+    // phase kept all its bots.
+    let valid = direct_kept_all(direct.failed, direct.dropped, direct.tripped);
+    if !valid {
+        eprintln!(
+            "meridian-bench load: the direct phase lost bots ({} failed, {} cut off{}): the `added_*` columns \
+             are left empty; first reason: {}",
+            direct.failed,
+            direct.dropped,
+            if direct.tripped {
+                ", a guard tripped"
+            } else {
+                ""
+            },
+            if direct.first_failure.is_empty() {
+                "none noted"
+            } else {
+                &direct.first_failure
+            }
+        );
+    }
     let row = Row::new()
         .with("scenario", "active")
         .with("mode", "remote")
         .with("players", n)
         .with("compression", compression.name())
         .with("logged_in", proxied.logged)
+        // Both phases: the direct one, then the one through the proxy.
         .with("failed", proxied.failed + direct.failed)
         .with("dropped", proxied.dropped + direct.dropped)
+        .with("direct_logged", direct.logged)
+        .with("direct_failed", direct.failed)
+        .with("direct_dropped", direct.dropped)
+        .num("direct_login_p99_ms", ms(direct.logins.p99), 1)
+        .with("direct_first_failure", direct.first_failure.clone())
+        .with("added_valid", valid)
         .num("raw_connect_p50_us", micros(raw.p50), 0)
         .num("raw_connect_p95_us", micros(raw.p95), 0)
         .num("raw_connect_p99_us", micros(raw.p99), 0)
@@ -469,15 +497,7 @@ pub fn active(
         .num("proxy_rtt_p95_us", micros(p.p95), 0)
         .num("proxy_rtt_p99_us", micros(p.p99), 0)
         .num("proxy_rtt_max_us", micros(p.max), 0)
-        .num("added_p50_us", added(p.p50, d.p50), 0)
-        .num("added_p95_us", added(p.p95, d.p95), 0)
-        .num("added_p99_us", added(p.p99, d.p99), 0)
         .num("network_estimate_us", network, 0)
-        .num(
-            "added_less_network_p50_us",
-            added(p.p50, d.p50) - network,
-            0,
-        )
         .with("rtt_samples", p.count)
         .num(
             "down_mb_per_s",
@@ -509,13 +529,78 @@ pub fn active(
         .with("window_end_ms", proxied.measured_ms.1)
         .with("proxy_answered", proxied.logged > 0 && !proxied.tripped)
         .with("guard_tripped", proxied.tripped || direct.tripped)
-        .with("first_failure", proxied.first_failure.clone());
+        .with(
+            "first_failure",
+            first_failures(&proxied.first_failure, &direct.first_failure),
+        );
+    let row = figure(row, valid, "added_p50_us", added(p.p50, d.p50));
+    let row = figure(row, valid, "added_p95_us", added(p.p95, d.p95));
+    let row = figure(row, valid, "added_p99_us", added(p.p99, d.p99));
+    let row = figure(
+        row,
+        valid,
+        "added_less_network_p50_us",
+        added(p.p50, d.p50) - network,
+    );
     Ok(wave_columns(row, &proxied.waves, true))
+}
+
+/// Whether the direct phase kept every bot: only then is the difference with the phase through the proxy
+/// what the proxy adds.
+pub(super) fn direct_kept_all(failed: u64, dropped: u64, tripped: bool) -> bool {
+    failed == 0 && dropped == 0 && !tripped
+}
+
+/// A column of what the proxy adds: its value, or nothing when it cannot be read (the direct phase lost bots).
+fn figure(row: Row, valid: bool, name: &'static str, value: f64) -> Row {
+    if valid {
+        row.num(name, value, 0)
+    } else {
+        row.with(name, "")
+    }
+}
+
+/// The reasons the first bots failed, in the phase through the proxy and in the direct one.
+pub(super) fn first_failures(proxied: &str, direct: &str) -> String {
+    match (proxied.is_empty(), direct.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => proxied.to_owned(),
+        (true, false) => format!("direct: {direct}"),
+        (false, false) => format!("{proxied} | direct: {direct}"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_direct_phase_must_keep_every_bot_for_the_added_time_to_count() {
+        assert!(direct_kept_all(0, 0, false));
+        assert!(!direct_kept_all(1, 0, false));
+        assert!(!direct_kept_all(0, 3, false));
+        assert!(!direct_kept_all(0, 0, true));
+    }
+
+    #[test]
+    fn a_figure_that_cannot_be_read_is_left_empty() {
+        let row = figure(figure(Row::new(), true, "a", 12.4), false, "b", 7.0);
+        let table = Table { rows: vec![row] };
+        assert_eq!(
+            table.csv(),
+            "a,b
+12,
+"
+        );
+    }
+
+    #[test]
+    fn the_reasons_of_both_phases_are_written() {
+        assert_eq!(first_failures("", ""), "");
+        assert_eq!(first_failures("a", ""), "a");
+        assert_eq!(first_failures("", "b"), "direct: b");
+        assert_eq!(first_failures("a", "b"), "a | direct: b");
+    }
 
     fn remote() -> Remote {
         Remote {

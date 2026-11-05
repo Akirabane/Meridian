@@ -82,6 +82,11 @@ fn the_options_are_read_and_a_large_step_is_refused() {
         .unwrap()
         .unwrap();
     assert_eq!(total.max_total, Duration::from_secs(90));
+    let direct = parse(args(&["--direct-waves", "3"])).unwrap().unwrap();
+    assert_eq!(direct.direct_waves, 3);
+    assert_eq!(parse(args(&[])).unwrap().unwrap().direct_waves, 2);
+    assert!(parse(args(&["--direct-waves", "0"])).is_err());
+    assert!(parse(args(&["--direct-waves", "99"])).is_err());
     let default = parse(args(&[])).unwrap().unwrap();
     assert_eq!(default.max_total, Duration::from_secs(1800));
 }
@@ -276,11 +281,11 @@ fn bots_play_through_a_proxy_reached_as_if_it_were_elsewhere() {
     assert_eq!(get(&idle, "logged_in"), "10", "{idle:?}");
     assert_eq!(get(&idle, "failed"), "0");
     assert_eq!(get(&idle, "proxy_answered"), "true");
-    let mut direct = s.clone();
-    direct.window = Duration::from_secs(3);
-    // Two waves of five, a second apart.
+    // Two waves of five, a second apart, in both phases.
     s.waves = 2;
     s.wave_gap = Duration::from_secs(1);
+    let mut direct = s.clone();
+    direct.window = Duration::from_secs(3);
     let active = remote::active(&s, &direct, 10, Compression::Same).unwrap();
     assert_eq!(get(&active, "logged_in"), "10", "{active:?}");
     for wave in ["w1", "w2"] {
@@ -303,6 +308,15 @@ fn bots_play_through_a_proxy_reached_as_if_it_were_elsewhere() {
     );
     assert_eq!(get(&active, "proxy_answered"), "true");
     assert_ne!(get(&active, "proxy_rtt_p50_us"), "0");
+    // The direct phase is told apart, and its figures are there and valid.
+    assert_eq!(get(&active, "direct_logged"), "10", "{active:?}");
+    assert_eq!(get(&active, "direct_failed"), "0", "{active:?}");
+    assert_eq!(get(&active, "added_valid"), "true", "{active:?}");
+    assert!(!get(&active, "added_p50_us").is_empty(), "{active:?}");
+    assert!(
+        !get(&active, "direct_login_p99_ms").is_empty(),
+        "{active:?}"
+    );
     assert_ne!(get(&active, "raw_connect_p50_us"), "0");
     // Another threshold than the file's is refused rather than measured wrongly.
     assert!(remote::active(&s, &direct, 10, Compression::BothOff).is_err());
@@ -310,6 +324,8 @@ fn bots_play_through_a_proxy_reached_as_if_it_were_elsewhere() {
     for phase in ["join", "hold", "measure", "join wave 1", "join wave 2"] {
         assert!(windows.contains(phase), "{windows}");
     }
+    // The direct phase arrives in waves as well.
+    assert!(windows.contains("R2 direct,10,join wave 2"), "{windows}");
     assert!(proxy.alive());
     proxy.stop().unwrap();
 }
