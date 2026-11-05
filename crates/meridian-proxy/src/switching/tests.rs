@@ -701,3 +701,181 @@ fn a_freeze_limit_a_server_would_not_allow_is_warned_about_at_start() {
     // Without a sidecar no switch happens, so there is nothing to warn of.
     assert!(startup_warnings(&with(60_000, Vec::new())).is_empty());
 }
+
+// ---- The scripted player of a real run, over TCP, typing in game.
+
+/// A lobby on a TCP port of its own: it logs the proxy in, configures the player, sends them
+/// its world (the source's), and reads whatever comes until the proxy closes the connection.
+fn spawn_lobby() -> (String, JoinHandle<Result<(), String>>) {
+    use horizon_protocol::ids::configuration as cfg;
+    use meridian_testkit::{
+        backend::{FakeBackend, finish_configuration},
+        peer::Step,
+        trace::Recorder,
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let thread = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
+        let mut connection = Connection::from_stream(stream).map_err(|e| e.to_string())?;
+        FakeBackend {
+            after_login: vec![
+                Step::Expect {
+                    id: cfg::serverbound::CLIENT_INFORMATION,
+                },
+                Step::send(cfg::clientbound::REGISTRY_DATA, REGISTRY),
+                Step::send(cfg::clientbound::SELECT_KNOWN_PACKS, PACKS),
+                Step::Expect {
+                    id: cfg::serverbound::SELECT_KNOWN_PACKS,
+                },
+                finish_configuration(),
+                Step::Expect {
+                    id: cfg::serverbound::FINISH_CONFIGURATION,
+                },
+            ],
+            ..FakeBackend::default()
+        }
+        .run(&mut connection, &Recorder::new())?;
+        for (id, payload) in source_world() {
+            send(&mut connection, id, &payload);
+        }
+        connection
+            .reader
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .map_err(|e| e.to_string())?;
+        loop {
+            match connection.recv() {
+                Ok(_) => {}
+                Err(e) if e.is_end_of_stream() => return Ok(()),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    });
+    (address, thread)
+}
+
+/// A bot that logs in over TCP and types `/server east` in game, as the network simulator's
+/// bots will: the proxy answers in the chat, moves it from lobby to east with fake sidecars
+/// and a fake east, and the bot reads both lines.
+#[test]
+fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
+    use meridian_testkit::{
+        live::{End, Options, link, session_linked},
+        trace::Recorder,
+    };
+    let (lobby, lobby_thread) = spawn_lobby();
+    let (east, signal, east_thread) = spawn_target(TargetWorld {
+        information: meridian_testkit::live::information_payload(),
+        ..TargetWorld::default()
+    });
+    let config = Config {
+        backends: vec![
+            Backend {
+                name: "lobby".into(),
+                address: lobby,
+            },
+            Backend {
+                name: "east".into(),
+                address: east,
+            },
+        ],
+        default_backend: "lobby".into(),
+        online_mode: false,
+        auth_mode: AuthMode::Offline,
+        forwarding_secret: "secret".into(),
+        sidecars: vec![sidecar("lobby", 25580), sidecar("east", 25581)],
+        ..Config::default()
+    };
+    let mut proxy = Proxy::new(
+        config,
+        "does-not-exist/meridian.toml".into(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let log = Log::default();
+    let signal = Mutex::new(signal);
+    let controls = {
+        let log = log.clone();
+        move |sidecar: &Sidecar, _: Duration| -> Result<Box<dyn PlayerControl>, String> {
+            let east = sidecar.backend == "east";
+            Ok(Box::new(FakeSidecar {
+                backend: sidecar.backend.clone(),
+                log: log.clone(),
+                signal: east.then(|| signal.lock().unwrap().clone()),
+                refuse: None,
+                on_export: None,
+            }))
+        }
+    };
+    proxy.sessions = Arc::new(Sessions::with_switcher(Arc::new(Switcher {
+        controls: Arc::new(controls),
+        digests: Digests::default(),
+        metrics: Arc::default(),
+    })));
+    let proxy = Arc::new(proxy);
+    let listener = crate::serve::listen("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = {
+        let proxy = Arc::clone(&proxy);
+        std::thread::spawn(move || crate::serve::serve(listener, &proxy))
+    };
+
+    let (handle, link) = link();
+    let bot = std::thread::spawn(move || {
+        session_linked(
+            &Options {
+                host: "127.0.0.1".into(),
+                port,
+                name: "Bot".into(),
+                seconds: 2,
+            },
+            &Recorder::new(),
+            &link,
+        )
+    });
+    // Typed at once: it is sent when the bot is in lobby's world.
+    handle.controller.command("/server east").unwrap();
+    let wait = |wanted: &'static str| {
+        handle
+            .journal
+            .wait_for(0, Duration::from_secs(15), move |line| line == wanted)
+    };
+    let moving = wait("Moving you to east...");
+    let now_on = wait("You are now on east.");
+    let (moving, now_on) = (
+        moving.unwrap_or_else(|| panic!("no answer: {:?}", handle.journal.lines())),
+        now_on.unwrap_or_else(|| panic!("not moved: {:?}", handle.journal.lines())),
+    );
+    assert!(moving.seq < now_on.seq, "the move was announced first");
+    // The proxy lists the bot on east, and the source's sidecar let them go.
+    let on_east = proxy
+        .sessions
+        .players()
+        .iter()
+        .any(|p| p.name == "Bot" && p.backend == "east");
+    assert!(on_east, "{:?}", proxy.sessions.players());
+    assert!(
+        log.lines().contains(&"lobby release Moved".to_owned()),
+        "{:?}",
+        log.lines()
+    );
+
+    // A move that cannot be made is read as plainly: the answer names the server.
+    let mark = handle.journal.mark();
+    handle.controller.command("server nowhere").unwrap();
+    let refused = handle
+        .journal
+        .wait_for(mark, Duration::from_secs(15), |line| {
+            line.contains("nowhere")
+        })
+        .unwrap_or_else(|| panic!("no answer: {:?}", handle.journal.lines()));
+    assert!(!refused.text.contains("You are now on"), "{}", refused.text);
+    eprintln!("{}", refused.text);
+
+    // The bot stays its time and leaves cleanly: it was not disconnected on the way.
+    assert_eq!(bot.join().unwrap(), End::Clean);
+    proxy.stop();
+    server.join().unwrap().unwrap();
+    // The target waits for an attack the bot does not make: it ends when the bot leaves.
+    let _ = east_thread.join();
+    lobby_thread.join().unwrap().unwrap();
+}
