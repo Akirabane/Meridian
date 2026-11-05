@@ -556,6 +556,21 @@ pub struct AccessSettings {
     /// the table says otherwise; without one (a configuration built in code) the lists
     /// are kept in memory only.
     pub file: Option<PathBuf>,
+    /// The `[access.sync]` table: whether the bans and the whitelist follow the servers'.
+    pub sync: AccessSync,
+}
+
+/// The `[access.sync]` table: the two ways the proxy's bans and whitelist are kept in step
+/// with the backends' own, through their sidecars and the servers' management protocol.
+/// Both are off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AccessSync {
+    /// A ban, a pardon or a whitelist addition made on a server is applied to the proxy's
+    /// lists, so that a player banned on one server cannot join another through the proxy.
+    pub from_servers: bool,
+    /// A ban, a pardon or a whitelist change made at the proxy's console is sent to every
+    /// server whose sidecar answers.
+    pub to_servers: bool,
 }
 
 /// The `[access]` table as written.
@@ -563,6 +578,17 @@ pub struct AccessSettings {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct FileAccess {
     file: Option<PathBuf>,
+    #[serde(default)]
+    sync: FileAccessSync,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct FileAccessSync {
+    #[serde(default)]
+    from_servers: bool,
+    #[serde(default)]
+    to_servers: bool,
 }
 
 impl FileAccess {
@@ -570,6 +596,10 @@ impl FileAccess {
         let file = self.file.unwrap_or_else(|| PathBuf::from("access.toml"));
         AccessSettings {
             file: Some(sidecar::resolve(folder, &file)),
+            sync: AccessSync {
+                from_servers: self.sync.from_servers,
+                to_servers: self.sync.to_servers,
+            },
         }
     }
 }

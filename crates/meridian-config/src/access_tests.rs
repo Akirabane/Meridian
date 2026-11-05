@@ -346,10 +346,47 @@ fn the_file_is_beside_the_configuration_unless_the_table_says_otherwise() {
         with("[access]\nfile = \"lists/bans.toml\"").access.file,
         Some(Path::new("conf").join("lists/bans.toml"))
     );
-    assert_eq!(Config::default().access, AccessSettings { file: None });
+    assert_eq!(
+        Config::default().access,
+        AccessSettings {
+            file: None,
+            sync: AccessSync::default()
+        }
+    );
     let error =
         Config::from_toml_str("[access]\nfiles = 1\n[[backends]]\nname = \"a\"\naddress = \"h:1\"")
             .unwrap_err()
             .to_string();
     assert!(error.contains("files"), "{error}");
+}
+
+#[test]
+fn the_sync_with_the_servers_is_off_unless_the_table_turns_it_on() {
+    assert_eq!(with("").access.sync, AccessSync::default());
+    assert!(!AccessSync::default().from_servers && !AccessSync::default().to_servers);
+    let sync = with("[access.sync]\nfrom-servers = true").access.sync;
+    assert_eq!(
+        sync,
+        AccessSync {
+            from_servers: true,
+            to_servers: false
+        }
+    );
+    let sync = with("[access]\n[access.sync]\nto-servers = true")
+        .access
+        .sync;
+    assert_eq!(
+        sync,
+        AccessSync {
+            from_servers: false,
+            to_servers: true
+        }
+    );
+    // A misspelt key is refused, not ignored: a sync that silently stays off is worse.
+    let error = Config::from_toml_str(
+        "[access.sync]\nfrom-server = true\n[[backends]]\nname = \"a\"\naddress = \"h:1\"",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("from-server"), "{error}");
 }
