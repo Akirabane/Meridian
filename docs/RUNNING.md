@@ -178,6 +178,10 @@ the real proxy, is moved from one fake server to another, and reads both answers
 
 ## 5. What was seen
 
+The run below is the one of the relay, with the scripted player. Runs with a real Horizon client,
+through moves between three servers and a server killed or kicking a player, are in
+[REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md).
+
 This run dates from commit `ced4163`, which is before the proxy had its console,
 its routing and the hybrid login. The proxy has changed a great deal since, so
 the table below describes that commit, not today's proxy. The tests of the
