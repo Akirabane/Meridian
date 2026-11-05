@@ -4,7 +4,7 @@
 //! as little as possible.
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// The window the limit counts in.
@@ -48,10 +48,110 @@ impl Throttle {
     }
 }
 
+/// The connections that are logging in (`max-pending-logins`,
+/// `max-pending-logins-per-address`). A connection holds a place from its accept to the
+/// end of its login, whichever way the login ends, and the place is given back when its
+/// [`Pending`] is dropped. Each address is counted whether its own limit is on or not, so
+/// that turning it on at a reload counts the connections already there.
+#[derive(Default)]
+pub struct Logins {
+    state: Mutex<Counts>,
+}
+
+#[derive(Default)]
+struct Counts {
+    total: usize,
+    by_address: HashMap<IpAddr, u32>,
+}
+
+/// One connection's place among those logging in.
+pub struct Pending {
+    logins: Arc<Logins>,
+    address: IpAddr,
+}
+
+impl Logins {
+    /// A place for a connection from `address` that starts logging in, unless `max`
+    /// connections are logging in already, or `max_per_address` from that address. A
+    /// limit of 0 is none.
+    pub fn enter(
+        self: &Arc<Self>,
+        address: IpAddr,
+        max: u32,
+        max_per_address: u32,
+    ) -> Option<Pending> {
+        let mut counts = self.lock();
+        let from_address = counts.by_address.get(&address).copied().unwrap_or(0);
+        if (max > 0 && counts.total >= max as usize)
+            || (max_per_address > 0 && from_address >= max_per_address)
+        {
+            return None;
+        }
+        counts.total += 1;
+        *counts.by_address.entry(address).or_insert(0) += 1;
+        Some(Pending {
+            logins: Arc::clone(self),
+            address,
+        })
+    }
+
+    /// How many connections are logging in now.
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> usize {
+        self.lock().total
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Counts> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let mut counts = self.logins.lock();
+        counts.total = counts.total.saturating_sub(1);
+        if let Some(n) = counts.by_address.get_mut(&self.address) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                counts.by_address.remove(&self.address);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn the_connections_logging_in_are_held_to_their_limits() {
+        let logins = Arc::new(Logins::default());
+        // Without a limit for an address, one address may take every place.
+        let a: Vec<_> = (0..3).map(|_| logins.enter(A, 3, 0)).collect();
+        assert!(a.iter().all(Option::is_some));
+        assert!(logins.enter(B, 3, 0).is_none(), "every place is taken");
+        drop(a);
+        assert_eq!(logins.count(), 0, "the places are given back");
+        // With one, an address is stopped at it and the others are not.
+        let first = logins.enter(A, 3, 1);
+        assert!(first.is_some());
+        assert!(logins.enter(A, 3, 1).is_none());
+        let other = logins.enter(B, 3, 1);
+        assert!(other.is_some());
+        drop(first);
+        assert!(
+            logins.enter(A, 3, 1).is_some(),
+            "a place given back is taken again"
+        );
+        drop(other);
+        // 0 is no limit.
+        let many: Vec<_> = (0..100).map(|_| logins.enter(A, 0, 0)).collect();
+        assert!(many.iter().all(Option::is_some));
+        drop(many);
+        assert_eq!(logins.count(), 0);
+        assert!(logins.lock().by_address.is_empty(), "no address is kept");
+    }
 
     const A: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
     const B: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));

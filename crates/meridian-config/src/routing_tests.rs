@@ -499,6 +499,8 @@ fn core_settings_have_their_defaults() {
     let config = load("");
     assert_eq!(config.on_duplicate, OnDuplicate::Refuse);
     assert_eq!(config.connections_per_minute, 20);
+    assert_eq!(config.max_pending_logins, 2048);
+    assert_eq!(config.max_pending_logins_per_address, 0);
     assert_eq!(config.backend_retry_seconds, 10);
     assert_eq!(config.status_sample, 12);
 }
@@ -507,10 +509,13 @@ fn core_settings_have_their_defaults() {
 fn core_settings_are_read() {
     let config = load(
         "on-duplicate = \"replace\"\nconnections-per-minute = 0\n\
+         max-pending-logins = 0\nmax-pending-logins-per-address = 4\n\
          backend-retry-seconds = 0\nstatus-sample = 0",
     );
     assert_eq!(config.on_duplicate, OnDuplicate::Replace);
     assert_eq!(config.connections_per_minute, 0);
+    assert_eq!(config.max_pending_logins, 0);
+    assert_eq!(config.max_pending_logins_per_address, 4);
     assert_eq!(config.backend_retry_seconds, 0);
     assert_eq!(config.status_sample, 0);
 }

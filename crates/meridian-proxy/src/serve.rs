@@ -78,7 +78,7 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
                         timeout: Duration::from_millis(table.header_timeout_ms),
                         per_minute,
                     };
-                    start_player(stream, peer, proxy, &active, Some(header));
+                    start_player(stream, peer, proxy, &active, None, Some(header));
                 } else if table.mode == ProxyProtocolMode::Required {
                     // Not a balancer, and the proxy takes players only through one: the
                     // address of a direct client is never taken for a player's.
@@ -87,13 +87,15 @@ pub fn serve(listener: TcpListener, proxy: &Arc<Proxy>) -> io::Result<()> {
                 } else if proxy.sessions.access.address_banned(peer.ip()) {
                     banned_address(proxy, peer);
                     drop(stream);
-                } else if proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
-                    start_player(stream, peer, proxy, &active, None);
-                } else {
+                } else if !proxy.throttle.allow(peer.ip(), per_minute, Instant::now()) {
                     proxy.sessions.metrics().throttled();
                     // Closed before a byte is read: the cheapest answer, and a
                     // client in a loop learns nothing more from a reason.
                     debug!("{peer}: over {per_minute} connections this minute; closed");
+                    drop(stream);
+                } else if let Some(pending) = enter_login(proxy, &config, peer) {
+                    start_player(stream, peer, proxy, &active, Some(pending), None);
+                } else {
                     drop(stream);
                 }
             }
@@ -179,6 +181,7 @@ fn start_player(
     peer: SocketAddr,
     proxy: &Arc<Proxy>,
     active: &Arc<AtomicUsize>,
+    pending: Option<crate::throttle::Pending>,
     header: Option<HeaderRead>,
 ) {
     debug!("{peer}: connected");
@@ -193,14 +196,18 @@ fn start_player(
         .name(format!("player {peer}"))
         .spawn(move || {
             let _guard = guard;
-            let peer = match header {
-                None => peer,
+            let (peer, pending) = match header {
+                None => (peer, pending),
                 Some(header) => match player_address(&stream, peer, &header, &proxy) {
-                    Some(player) => player,
+                    // Behind a balancer the place is the player's address, known now.
+                    Some(player) => match enter_login(&proxy, &proxy.config(), player) {
+                        Some(pending) => (player, Some(pending)),
+                        None => return,
+                    },
                     None => return,
                 },
             };
-            handle(stream, peer, &proxy);
+            handle(stream, peer, &proxy, pending);
         });
     if let Err(e) = spawned {
         warning!("{peer}: cannot start a thread for the connection: {e}");
@@ -273,7 +280,31 @@ fn banned_address(proxy: &Proxy, address: SocketAddr) {
 
 /// One player's connection, from the first byte to the close. The configuration
 /// is read once here: a reload applies to the connections that come after it.
-fn handle(stream: TcpStream, peer: SocketAddr, proxy: &Proxy) {
+/// A place among the connections logging in for `peer`, or `None` when there is none
+/// left: the connection is to be closed, before a byte is read.
+fn enter_login(
+    proxy: &Proxy,
+    config: &meridian_config::Config,
+    peer: SocketAddr,
+) -> Option<crate::throttle::Pending> {
+    let pending = proxy.logins.enter(
+        peer.ip(),
+        config.max_pending_logins,
+        config.max_pending_logins_per_address,
+    );
+    if pending.is_none() {
+        proxy.sessions.metrics().throttled();
+        debug!("{peer}: too many connections logging in; closed");
+    }
+    pending
+}
+
+fn handle(
+    stream: TcpStream,
+    peer: SocketAddr,
+    proxy: &Proxy,
+    pending: Option<crate::throttle::Pending>,
+) {
     let connection = match Connection::from_stream(stream) {
         Ok(connection) => connection,
         Err(e) => {
@@ -282,7 +313,14 @@ fn handle(stream: TcpStream, peer: SocketAddr, proxy: &Proxy) {
         }
     };
     let config = proxy.config();
-    session::handle(connection, peer, &config, &*proxy.connect, &proxy.sessions);
+    session::handle(
+        connection,
+        peer,
+        &config,
+        &*proxy.connect,
+        &proxy.sessions,
+        pending,
+    );
     // The connections are dropped here, which closes the sockets.
 }
 
@@ -431,6 +469,109 @@ meridian_connections_throttled_total 1
         drop(first);
         proxy.stop();
         server.join().unwrap().unwrap();
+    }
+
+    /// Whether the proxy closed `stream` without waiting for anything from it.
+    fn closed_at_once(stream: &TcpStream) -> bool {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut rest = Vec::new();
+        let closed = (&*stream).read_to_end(&mut rest);
+        matches!(closed, Ok(0))
+            || closed
+                .as_ref()
+                .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset)
+    }
+
+    /// Whether the proxy keeps `stream` open, waiting for its handshake.
+    fn kept_waiting(stream: &TcpStream) -> bool {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        (&*stream).read(&mut byte).is_err_and(|e| {
+            matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            )
+        })
+    }
+
+    /// Waits until the proxy counts `n` connections logging in.
+    fn logging_in(proxy: &Proxy, n: usize) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while proxy.logins.count() != n {
+            assert!(
+                Instant::now() < until,
+                "{} logging in",
+                proxy.logins.count()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn connections_past_the_pending_logins_are_closed_at_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = proxy_with(Config {
+            connections_per_minute: 0,
+            max_pending_logins: 1,
+            ..Config::default()
+        });
+        let server = {
+            let proxy = Arc::clone(&proxy);
+            thread::spawn(move || serve(listener, &proxy))
+        };
+        // The first one logs in, slowly: it holds the only place.
+        let first = TcpStream::connect(address).unwrap();
+        assert!(kept_waiting(&first));
+        logging_in(&proxy, 1);
+        // The second is closed without a byte read.
+        let second = TcpStream::connect(address).unwrap();
+        assert!(closed_at_once(&second));
+        // Once the first is gone, its place is given back.
+        drop(first);
+        logging_in(&proxy, 0);
+        let third = TcpStream::connect(address).unwrap();
+        assert!(kept_waiting(&third));
+        let page = crate::metrics::render(&proxy);
+        assert!(
+            page.contains("\nmeridian_connections_throttled_total 1\n"),
+            "{page}"
+        );
+        drop(third);
+        proxy.stop();
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn the_pending_logins_of_one_address_have_no_limit_unless_set() {
+        for (per_address, second_kept) in [(0, true), (1, false)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let proxy = proxy_with(Config {
+                connections_per_minute: 0,
+                max_pending_logins_per_address: per_address,
+                ..Config::default()
+            });
+            let server = {
+                let proxy = Arc::clone(&proxy);
+                thread::spawn(move || serve(listener, &proxy))
+            };
+            let first = TcpStream::connect(address).unwrap();
+            assert!(kept_waiting(&first));
+            let second = TcpStream::connect(address).unwrap();
+            if second_kept {
+                assert!(kept_waiting(&second), "two players behind one address");
+            } else {
+                assert!(closed_at_once(&second));
+            }
+            drop((first, second));
+            proxy.stop();
+            server.join().unwrap().unwrap();
+        }
     }
 
     /// A stop wakes the blocking accept while no one connects, whether the proxy

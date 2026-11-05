@@ -29,6 +29,8 @@ pub struct Proxy {
     pub probe: Arc<Probe>,
     /// The connections each address opened this minute.
     pub throttle: Throttle,
+    /// The connections that are logging in now.
+    pub logins: Arc<crate::throttle::Logins>,
     /// Which backends are going down (docs/RESTART.md).
     pub restarts: Detector,
     /// The bans and whitelist changes still to be told to the servers (`[access.sync]`).
@@ -59,6 +61,7 @@ impl Proxy {
             connect: Arc::new(backend::connect),
             probe: Arc::new(tcp_probe),
             throttle: Throttle::default(),
+            logins: Arc::default(),
             restarts,
             access_sync: Arc::default(),
         }
