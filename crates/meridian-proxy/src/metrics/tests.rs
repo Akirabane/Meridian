@@ -567,3 +567,102 @@ fn a_giant_request_line_is_answered_from_its_first_bytes() {
     proxy.stop();
     thread.join().unwrap();
 }
+
+/// A player whose client stopped reading while their server still sends, as a client
+/// does on a saturated link while it receives its world: the relay is stuck writing to it.
+struct Stalled<'a> {
+    _open: crate::session::Open<'a>,
+    /// The client's socket, never read; dropping it ends the relay.
+    _client: TcpStream,
+    _server: horizon_protocol::connection::Connection,
+}
+
+fn stalled<'a>(proxy: &'a Proxy, name: &str) -> Stalled<'a> {
+    use horizon_protocol::connection::Connection;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+    let (proxy_backend, mut server) = meridian_testkit::pipe();
+    let session = meridian_net::client::ClientSession {
+        profile: meridian_net::Profile {
+            name: name.to_owned(),
+            uuid: offline_uuid(name).to_be_bytes(),
+            properties: Vec::new(),
+        },
+        auth: meridian_net::client::AuthKind::Offline,
+        virtual_host: None,
+        connection: Connection::from_stream(accepted).unwrap(),
+    };
+    let link = meridian_net::backend::BackendLink {
+        connection: proxy_backend,
+    };
+    let (relay, handle) = meridian_handoff::Session::new(session, link, "lobby").unwrap();
+    std::thread::spawn(move || relay.run());
+    let open = proxy
+        .sessions
+        .open(
+            Player {
+                name: name.into(),
+                uuid: offline_uuid(name).to_be_bytes(),
+                backend: "lobby".into(),
+                address: "198.51.100.7:50124".parse().unwrap(),
+                joined: std::time::Instant::now(),
+            },
+            handle,
+        )
+        .unwrap();
+    // The server sends its world, 64 MiB of it in packets of 1 MiB, far more than the
+    // client's socket holds: the relay is soon stuck writing the next packet.
+    let chunk = vec![7u8; 1 << 20];
+    for _ in 0..64 {
+        server
+            .send(&meridian_testkit::body(
+                horizon_protocol::ids::configuration::clientbound::CUSTOM_PAYLOAD,
+                &chunk,
+            ))
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    Stalled {
+        _open: open,
+        _client: client,
+        _server: server,
+    }
+}
+
+/// The page is answered at once while a player's client does not read: what it counts
+/// never waits for a relay that is writing to a client (a burst of arrivals on a busy
+/// link), and neither does a login, which counts the same way.
+#[test]
+fn the_page_does_not_wait_for_a_client_that_does_not_read() {
+    let proxy = proxy();
+    let _alex = join(&proxy, "Alex");
+    let _stuck = stalled(&proxy, "Steve");
+    let (done, answered) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    {
+        let proxy = Arc::clone(&proxy);
+        std::thread::spawn(move || {
+            let answer = respond(&proxy, "GET", "/metrics");
+            let counts = proxy.sessions.counts();
+            let _ = done.send((answer, counts));
+        });
+    }
+    let Ok((answer, counts)) = answered.recv_timeout(Duration::from_secs(3)) else {
+        // The sessions cannot be closed while the page holds them: they are left as they
+        // are, so that the failure is told rather than waited on.
+        let waited = started.elapsed();
+        std::mem::forget((_alex, _stuck));
+        panic!("the page was not answered within {waited:?}");
+    };
+    let took = started.elapsed();
+    eprintln!("the page was answered in {took:?}");
+    assert!(took < Duration::from_millis(500), "{took:?}");
+    assert_eq!(answer.status, 200);
+    assert_eq!(value(&answer.body, "meridian_players"), "2");
+    assert_eq!(
+        value(&answer.body, "meridian_backend_players{backend=\"lobby\"}"),
+        "2"
+    );
+    assert_eq!(counts.get("lobby"), Some(&2));
+}

@@ -117,6 +117,12 @@ pub struct SessionHandle(pub(crate) Arc<Shared>);
 pub(crate) struct Shared {
     pub profile: Profile,
     down: Mutex<Down>,
+    /// The active backend's name, as in [`Down::backend`], under a lock of its own: the
+    /// reader of the active lane holds `down` while it writes to the client, which waits
+    /// as long as the client does not read (a busy link), and what only asks where the
+    /// player is (the proxy's counts, its metrics page, a login placing another player)
+    /// must not wait for that. Changed only with `down` held, after `down.backend`.
+    backend: Mutex<String>,
     up: Mutex<Up>,
     client_closer: Closer,
     commands: Mutex<Option<Arc<CommandHook>>>,
@@ -274,8 +280,10 @@ impl Session {
             reconnecting: AtomicBool::new(false),
             pending: Mutex::new(None),
             disconnected: AtomicBool::new(false),
+            backend: Mutex::new(String::new()),
         });
         let handle = SessionHandle(Arc::clone(&shared));
+        *lock(&shared.backend) = name.to_owned();
         Ok((
             Session {
                 shared,
@@ -547,6 +555,7 @@ fn activate(shared: &Arc<Shared>) {
         let mut down = shared.down();
         let mut up = shared.up();
         down.active = lane.id;
+        *lock(&shared.backend) = backend.clone();
         down.backend = backend;
         down.ghost = View::ghost();
         down.swap = Swap::new(0, 0);
@@ -579,9 +588,10 @@ impl SessionHandle {
         self.0.down().phase
     }
 
-    /// The name of the backend the player is on.
+    /// The name of the backend the player is on. It never waits for the relay's
+    /// writes to the client (see `Shared::backend`).
     pub fn backend(&self) -> String {
-        self.0.down().backend.clone()
+        lock(&self.0.backend).clone()
     }
 
     /// The player.
@@ -648,6 +658,12 @@ impl SessionHandle {
 impl Shared {
     pub fn down(&self) -> MutexGuard<'_, Down> {
         lock(&self.down)
+    }
+
+    /// Notes that the player is now on `backend`; called with `down` held, once
+    /// `down.backend` is set.
+    pub fn set_backend(&self, backend: &str) {
+        *lock(&self.backend) = backend.to_owned();
     }
 
     pub fn up(&self) -> MutexGuard<'_, Up> {
