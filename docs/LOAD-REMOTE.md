@@ -71,6 +71,19 @@ A run stops by itself when more than a tenth of the bots (and at least ten) fail
 go on and write the losses instead (a test of a limit), give `--max-lost-percent 100`: the failures are then
 counted for each wave, and the first reasons are in `first_failure`.
 
+## The direct phase, and what it does to the figures
+
+`active` runs the bots twice: first straight to the synthetic server on the same machine (the direct phase, the reference), then
+through the proxy. The direct phase arrives in the same way as the other, in `--direct-waves N` waves (2 by default, with the same
+`--wave-gap-seconds`), so that the two are compared on the same arrival. The columns:
+
+- `failed` and `dropped` hold **both phases added together**. The columns of each wave (`wk_*`) are those of the phase through the proxy only.
+- `direct_logged`, `direct_failed`, `direct_dropped`, `direct_login_p99_ms`: the direct phase alone. `direct_first_failure` says why its first bots
+  failed, and `first_failure` writes the reasons of both phases (the one through the proxy first, then `direct: ...`).
+- `added_valid` says whether the direct phase kept every bot (no failure, no cut-off, no guard tripped). When it did not, the
+  difference with the phase through the proxy means nothing, so `added_p50_us`, `added_p95_us`, `added_p99_us` and `added_less_network_p50_us` are
+  **left empty**, and the screen says so with the first reason. The round trips of each phase on its own are still written.
+
 ## Steps
 
 1. **Write the proxy's configuration**, on machine A. It holds a secret of its own, new each time
@@ -124,7 +137,8 @@ D:\disque\dev\meridian-bench-outin-lan\meridian-bench.exe load --proxy 192.168.
   --backend-bind 192.168.1.18 --backend-ports 25701-25710 ^
   --remote-config D:\disque\dev\meridian-bench-outanc-lan\debian-load\meridian.toml ^
   --players 10 --seconds 30 --direct-seconds 10 --max-total-seconds 300 ^
-  --out-dir D:\disque\dev\meridian-bench-outanc-lanun-smoke --label "lan smoke"
+  --out-dir D:\disque\dev\meridian-bench-outanc-lan
+un-smoke --label "lan smoke"
 ```
 
 ## Limits
