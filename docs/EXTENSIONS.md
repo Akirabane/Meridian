@@ -3,10 +3,11 @@
 This page specifies how a program of the operator's own can take part in what the proxy
 decides: whether a player may enter, whether they may use a proxy command, and which server
 they go to. Nothing on this page is built yet. It is the plan that the pull requests of
-section 10 follow, and it is open to change until the first of them is merged.
+section 10 follow. The operator settled its choices on 2026-11-05 (section 10.3); what is
+still asked of Horizon is in section 10.4.
 
 Every statement about the code as it is today names a file and a line, checked by searching the
-code at `4f39d6e` (main after pull request #85). Statements about Horizon name its files on its
+code at `e2211c5` (main after pull request #98). Statements about Horizon name its files on its
 main branch at `85d8e283f`.
 
 This page replaces the recommendation of [DESIGN.md](DESIGN.md) section 13.5
@@ -68,7 +69,7 @@ the start of a plugin ecosystem inside the proxy.
 
 ## 2. Transport
 
-### 2.1 The proposal: JSON-RPC 2.0 over a WebSocket on the loopback
+### 2.1 JSON-RPC 2.0 over a WebSocket on the loopback
 
 The proxy and an extension talk with JSON-RPC 2.0 messages in WebSocket text frames, over TCP
 on a loopback address. This is the shape of Horizon's management protocol, which is vanilla's:
@@ -77,7 +78,7 @@ JSON-RPC 2.0 over a WebSocket, with namespaced methods such as
 `-32602`, `-32603`) and `rpc.discover` (Horizon `crates/horizon-server/src/management.rs:1-6`,
 `:478-482`, `:599-606`). Meridian's sidecar is already a client of that protocol
 (`crates/meridian-sidecar/src/management.rs:4-14`), over its own small WebSocket code
-(`crates/meridian-sidecar/src/websocket.rs:1-9`).
+(`crates/meridian-sidecar/src/websocket.rs:1-10`).
 
 **Who connects.** The proxy connects to the extension. The extension listens on a loopback
 port, and the proxy is a client of it, as the sidecar is a client of a server's management
@@ -87,24 +88,26 @@ protocol. The reasons:
 - The configuration says which extensions exist. Nothing can join the proxy as an extension
   because it found a port and a token.
 - The lifecycle is one Meridian already has: connect, and when the connection ends, connect
-  again after a wait that doubles up to a ceiling (`crates/meridian-sidecar/src/management.rs:397-438`,
-  `FIRST_WAIT` and `LONGEST_WAIT` at `:43-44`).
+  again after a wait that doubles up to a ceiling (`crates/meridian-sidecar/src/management.rs:434-464`,
+  `run`, with `FIRST_WAIT` and `LONGEST_WAIT` at `:44-45`).
 - It is what the operator chose: "an external program that Meridian calls".
 
-The other direction is possible (the proxy listens and extensions connect, as tools connect to
-Horizon's management protocol). It is open question U1.
+The other direction (the proxy listens and extensions connect, as tools connect to Horizon's
+management protocol) was set aside: the operator chose this one (decision U1, section 10.3).
 
 **Loopback only.** The extension's address must resolve only to loopback addresses (127.0.0.1,
 ::1). Any other address is refused when the configuration is read, by the rule the sidecar
 already applies to a server's management address
-(`crates/meridian-sidecar/src/management.rs:264-285`). An extension on another machine is a
+(`crates/meridian-sidecar/src/management.rs:269-290`, `Settings::addresses`). An extension on another machine is a
 later question, and would need TLS with a checked certificate. The sidecar does not check the
 certificate today (`crates/meridian-sidecar/src/tls.rs`).
 
 **One connection for each extension**, carrying both directions: the proxy's requests
 (decisions) and the extension's requests (orders). JSON-RPC ids are per direction. A message is
-at most 256 KiB, the limit the sidecar's WebSocket already reads
-(`crates/meridian-sidecar/src/websocket.rs:14`).
+at most 256 KiB. That limit is the extension protocol's own: the sidecar's reader has one limit
+today, 4 MiB, raised so that it can read a server's ban list
+(`crates/meridian-sidecar/src/websocket.rs:16`, `MAX_MESSAGE`), and the shared code takes the
+limit from its caller (section 2.5).
 
 ### 2.2 Authentication
 
@@ -130,7 +133,7 @@ So the token never crosses the wire:
 
 The token is a file the operator writes (`token-file`), read again at each connection as the
 sidecar reads its server's settings (`crates/meridian-sidecar/src/management.rs:18-19`). It is at
-least 32 bytes. Like the sidecar's `Secret` (`management.rs:193-211`), it is in no log line, no
+least 32 bytes. Like the sidecar's `Secret` (`management.rs:198-216`), it is in no log line, no
 error and no `Debug` output. Meridian already computes HMAC-SHA256 for player information
 forwarding (`crates/meridian-net/src/backend/forwarding.rs:51`). That function would move to
 where both uses reach it.
@@ -158,8 +161,8 @@ not used.
 | `addresses` | Players' IP addresses in what the extension receives (section 7) |
 
 Each decision point is granted to **one extension at most** in version 1. A configuration that
-grants the same point to two is refused when it is read. Chains of extensions are open
-question U3.
+grants the same point to two is refused when it is read. There are no chains of extensions in
+version 1 (decision U3, section 10.3).
 
 ### 2.4 The alternatives set aside
 
@@ -176,13 +179,25 @@ question U3.
   orders from the extension without a second channel, and gRPC brings an async runtime the
   proxy does not use (its model is a thread per connection: `DESIGN.md:976-990`).
 
-### 2.5 What is left to decide
+### 2.5 The WebSocket code
 
-- The direction of the connection (U1).
-- Whether the proxy's WebSocket code is the sidecar's, extended to send masked text frames and
-  moved into a crate both use, or a dependency (U6). The sidecar's code only listens: it sends
-  pongs and a close, and it does not check `Sec-WebSocket-Accept`
-  (`crates/meridian-sidecar/src/websocket.rs:6-9`).
+The proxy's WebSocket code is the sidecar's, extended and moved into a crate that the proxy, the
+sidecar and the SDK use, with no new dependency (decision U6, section 10.3).
+
+The sidecar's code is a client. It reads text messages, whole or in fragments, answers pings,
+and since the synchronisation of bans it also sends masked text frames
+(`crates/meridian-sidecar/src/websocket.rs:173-211`, `send` and `send_text`). It does not check
+the server's `Sec-WebSocket-Accept` (`websocket.rs:6-10`). The proxy is the client of an
+extension, so it uses that code nearly as it is. What the shared crate adds:
+
+- the limit of a message as a parameter, 4 MiB for the sidecar and 256 KiB for an extension;
+- the server side, for the SDK: reading the upgrade request, answering `101` with the
+  `Sec-WebSocket-Accept` a client expects, reading masked frames and sending unmasked ones;
+- the check of `Sec-WebSocket-Accept` on the client side, now that a server of Meridian's own
+  answers it.
+
+`Sec-WebSocket-Accept` is the base64 of a SHA-1. Both are already in the lock file (`sha1`
+through `horizon-protocol`, `base64` through `ureq`), so the shared crate adds no crate to it.
 
 ## 3. Versions
 
@@ -248,7 +263,7 @@ logged once each way (`extension "perms": not answering, decisions use their on-
 - The required fields are present and of their type. A field the proxy does not know is ignored.
 - A string shown to a player (a refusal's reason, a line) is plain text of at most 256
   characters, sent as a literal (`text::literal`, as `refuse` does today:
-  `crates/meridian-proxy/src/session.rs:860-863`). It is never read as a JSON text component,
+  `crates/meridian-proxy/src/session.rs:864-867`). It is never read as a JSON text component,
   so an extension cannot put a click event in a player's chat.
 - A server it names is one the proxy offered.
 
@@ -281,8 +296,9 @@ timeout-ms = 1000
 on-error = "default"                 # default | refuse
 ```
 
-It sits beside the other sections of the configuration crate (`crates/meridian-config/src/lib.rs:191-229`
-lists `commands`, `balancing`, `fallback`, `metrics`, `access`, `permissions` and `queue`), in a
+It sits beside the other sections of the configuration crate (`crates/meridian-config/src/lib.rs:197-235`
+lists `commands`, `balancing`, `restart`, `fallback`, `proxy_protocol`, `metrics`, `access`,
+`permissions` and `queue`), in a
 file of its own as those have (`meridian-config/src/queue.rs`, `fallback.rs`). It is read at the
 start and at `reload`. A reload that changes an extension closes its connection and opens the
 new one. The decisions under way keep their old deadline.
@@ -293,8 +309,8 @@ new one. The decisions under way keep their old deadline.
 can only add refusals: it never lets in a player the built-in modules turn away (see the order
 below).
 
-**Where.** `serve` in `crates/meridian-proxy/src/session.rs:474-520`, between the bans and
-whitelist (`:485-494`) and the check for a second login (`:497-517`).
+**Where.** `serve` in `crates/meridian-proxy/src/session.rs:478-524`, between the bans and
+whitelist (`:487-498`) and the check for a second login (`:499-521`).
 
 **Request** `meridian:decide/login`:
 
@@ -326,8 +342,8 @@ whitelist (`:485-494`) and the check for a second login (`:497-517`).
 `allow` and `default` both let the player go on to the built-in checks that follow. They
 differ only in the metrics and the log, where `allow` records that the extension looked.
 `deny` refuses the login with the reason. With no reason, the player reads `You cannot join
-this server right now.`. The refusal goes through `refuse` (`session.rs:860`), is logged as
-the bans' refusals are (`session.rs:490`), and counts as
+this server right now.`. The refusal goes through `refuse` (`session.rs:864`), is logged as
+the bans' refusals are (`session.rs:494`), and counts as
 `meridian_login_failures_total{reason="extension"}`.
 
 **Default without an extension:** nothing is asked. **Timeout:** 1000 ms.
@@ -336,10 +352,10 @@ the bans' refusals are (`session.rs:490`), and counts as
 
 1. The address ban and the connection limit, before a byte is read (`crates/meridian-proxy/src/serve.rs:87`).
 2. The login itself: the account check in online mode.
-3. The built-in bans and whitelist (`session.rs:485`).
+3. The built-in bans and whitelist (`session.rs:489`).
 4. **The extension's admission.**
-5. The second login: refused, or replacing the open session (`session.rs:497-517`).
-6. The player limit and the queue (`session.rs:518-545`).
+5. The second login: refused, or replacing the open session (`session.rs:499-521`).
+6. The player limit and the queue (`place`, `session.rs:540-564`).
 7. The choice of server (section 4.4).
 
 The extension comes after the built-in lists because they are local, instant and the operator's
@@ -349,9 +365,10 @@ have replaced. It comes before the queue, so that a refused player never waits, 
 the queue already keeps ("A refused player never waits": `docs/OPERATING.md` section 5.10).
 
 **The time budget of a login.** The proxy sends the client nothing while it decides, and a
-client gives up after 30 s of silence (`crates/meridian-net/src/client.rs:34`). The queue already
-refuses a configuration whose wait and connect timeout add up to more than 27 s
-(`crates/meridian-config/src/queue.rs:12`, checked at `:57-76`). That check must add the
+client gives up after 30 s of silence, as vanilla's does (`crates/meridian-net/src/client.rs:58`,
+`READ_TIMEOUT`). The queue already refuses a configuration whose wait and connect timeout add up
+to more than 27 s (`crates/meridian-config/src/queue.rs:12`, checked at `:57-80`). That check
+must add the
 admission's and the server choice's `timeout-ms`, or a slow extension and a full proxy together
 would let the client time out.
 
@@ -364,7 +381,7 @@ would let the client time out.
 `Typist::has` (`:30-32`), which asks `Permissions::allows`
 (`crates/meridian-config/src/permissions.rs:202`). The decision point wraps `Typist::has`. The
 call is on the thread that copies the player's packets to the server: `answer_command` runs in
-that loop (`crates/meridian-handoff/src/session.rs:806`, `:863-889`). While it waits, the
+that loop (`crates/meridian-handoff/src/session.rs:840`, `:897-926`). While it waits, the
 player's packets to the server wait too, keep-alive answers included. Hence the short default
 timeout of 250 ms, and the cache below.
 
@@ -404,7 +421,8 @@ times costs one request.
 `decide.command` is making the extension the source of rights for the proxy's commands (their
 own rank system, for instance), so the extension must be able to give a node the file does not.
 The file stays the answer when the extension says nothing, and the whole answer when the
-extension is down and the policy is `default`. This is open question U2.
+extension is down and the policy is `default`. The operator decided it so (decision U2, section
+10.3).
 
 **Default without an extension:** `permissions.toml`, unchanged. **Timeout:** 250 ms.
 
@@ -426,12 +444,12 @@ commands in its `hello`:
   characters.
 - So that the relay's thread does not wait for the run, the proxy takes the command, answers
   nothing at once, and sends the lines when they come through `SessionHandle::tell`
-  (`crates/meridian-handoff/src/session.rs:586`), which `/alert` already uses. This needs one
-  change in `answer_command` (`session.rs:863-889`), which today always sends the hook's reply at
+  (`crates/meridian-handoff/src/session.rs:604`), which `/alert` already uses. This needs one
+  change in `answer_command` (`session.rs:897-926`), which today always sends the hook's reply at
   once: a hook result that means "taken, the answer comes later". The timeout is 2000 ms. After
   it, the player reads `That command did not answer.`.
 - The commands are offered to the client's completion only if the proxy changes the command tree
-  the server sends. It does not today (`README.md:228`: `/server` is not offered by Tab
+  the server sends. It does not today (`README.md:232`: `/server` is not offered by Tab
   completion). Version 1 does not add it.
 
 ### 4.4 The choice of server
@@ -440,9 +458,9 @@ commands in its `hello`:
 their server is lost (the fallback). Not when a player names a server (`/server east`), and not
 for `/hub` and `/play` in version 1.
 
-**Where.** At login, between `route::candidates` and the health order
-(`crates/meridian-proxy/src/session.rs:566-568`), before the balancer (`:586-594`) and the loop
-that tries each candidate (`:597-623`). In the fallback, at the same step of `replace`
+**Where.** At login, in `place`, between `route::candidates` and the health order
+(`crates/meridian-proxy/src/session.rs:570-572`), before the balancer (`:588-598`) and the loop
+that tries each candidate (`:599-627`). In the fallback, at the same step of `replace`
 (`crates/meridian-proxy/src/fallback.rs:101-116`).
 
 **Request** `meridian:decide/server`:
@@ -480,7 +498,8 @@ that tries each candidate (`:597-623`). In the fallback, at the same step of `re
   candidates, and an answer that names another is invalid. With balancing on, the balancer is not
   asked for this login. Each server is reserved by the rule a named server follows
   (`crates/meridian-proxy/src/placing.rs:166`, `named`), so the hard cap still holds. A server at
-  its hard cap is passed over for the next one in the order. This is open question U4.
+  its hard cap is passed over for the next one in the order. The operator decided it so
+  (decision U4, section 10.3).
 - `refuse`: the login is refused with the reason (at the fallback, the player is disconnected
   with it, as when no server can take them).
 
@@ -490,7 +509,7 @@ in the configuration phase).
 
 **With the queue.** The choice comes after the player has a place under `max-players`. If every
 server the extension ordered is at its hard cap and the queue is on, the player waits as they
-do today when every lobby is full (`session.rs:625-643`, `queue.rs:170`). When they are woken,
+do today when every lobby is full (`session.rs:628-647`, `queue.rs:175`). When they are woken,
 the extension is asked again.
 
 ## 5. Orders: the extension asks the proxy
@@ -504,8 +523,8 @@ capability, and a request without it is answered `-32601`, as if the method did 
 | `meridian:players/list` | `list` (`console.rs:242`) | `orders.read` |
 | `meridian:players/find` (name or id) | `list` | `orders.read` |
 | `meridian:servers/list` (with counts, roles, caps, state) | `servers` (`console.rs:277`) | `orders.read` |
-| `meridian:queue/list` | `queue` (`queue.rs:410`) | `orders.read` |
-| `meridian:players/tell` (one player, a line) | none; `SessionHandle::tell` (`meridian-handoff/src/session.rs:586`) | `orders.message` |
+| `meridian:queue/list` | `queue` (`queue.rs:426`) | `orders.read` |
+| `meridian:players/tell` (one player, a line) | none; `SessionHandle::tell` (`meridian-handoff/src/session.rs:604`) | `orders.message` |
 | `meridian:broadcast` (all, or one server) | `alert` (`console.rs:456`, `staff.rs:128`) | `orders.message` |
 | `meridian:players/send` (a player, all, or a server's, to a server) | `send` (`console.rs:406`, `staff.rs:18`) | `orders.move` |
 | `meridian:players/kick` (a player, a reason) | `kick` (`console.rs:474`, `session.rs:395`) | `orders.moderate` |
@@ -533,12 +552,12 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
 
 | Notification | When | Where it starts in the code |
 | --- | --- | --- |
-| `meridian:notification/players/joined` | A session opens on a server | `session.rs:716` |
-| `meridian:notification/players/left` | A session ends | `session.rs:737-755` |
+| `meridian:notification/players/joined` | A session opens on a server | `session.rs:720` |
+| `meridian:notification/players/left` | A session ends | `session.rs:741-759` |
 | `meridian:notification/players/moved` | A switch ends (seamless, cold, or failed, and why) | `switching.rs`, `staff.rs:18` |
 | `meridian:notification/servers/up`, `.../servers/down` | The sidecar's status of a server comes back or fails | `crates/meridian-proxy/src/status.rs:145`, `:161` |
 | `meridian:notification/players/fallback` | A player is moved off a lost server | `fallback.rs:58` |
-| `meridian:notification/queue/entered`, `.../queue/left` (with the cause) | A player enters or leaves the line | `queue.rs:136`, `:252` |
+| `meridian:notification/queue/entered`, `.../queue/left` (with the cause) | A player enters or leaves the line | `queue.rs:212`, `:270` |
 
 - They go through a bounded queue for each extension, with one writer thread, so that no player's
   thread waits on a slow extension. Horizon's management protocol does the same for its
@@ -563,7 +582,7 @@ same machine without the token can open the port but learns nothing (section 2.2
 - the host name a player typed;
 - the commands of the proxy players type, with their arguments (only with `decide.command` or
   `commands`, and only the proxy's own commands, never what goes to a server);
-- players' addresses, **only** with the `addresses` capability.
+- players' addresses, **only** with the `addresses` capability (decision U7, section 10.3).
 
 **What it never sees:** the forwarding secret (`crates/meridian-config/src/lib.rs:162`), any
 extension's token, the sidecars' secrets, a player's session keys or encryption, their profile's
@@ -696,14 +715,22 @@ says `default`, and when the on-error policy is `default`.
 | Admission | A ban or the whitelist refuses first, and it is final | Can refuse a player the built-ins let in; cannot let in a player they refuse |
 | Permission of a proxy command | `permissions.toml` decides each node the extension leaves at `default` | `allow` or `deny` of a node wins |
 | Choice of server | Routes, health and the balancer, when the extension says `default` | `order` replaces them for that placement, inside the routes and the hard caps; `refuse` refuses |
-| Queue and player limit | Always the proxy's | Not asked in version 1 (a priority place is open question U5) |
+| Queue and player limit | Always the proxy's | Not asked in version 1 (a priority place may come later, below) |
+
+**A priority place in the queue, later.** Version 1 gives an extension no say in the queue
+(decision U5, section 10.3). It can be added later without breaking anything: an optional field
+of the admission answer, such as a priority, added in a minor version of the protocol once the
+queue has a second level (players who pass ahead of the others) and an operator needs it.
+Section 3 allows it: a field added inside a version is optional, and both sides ignore the fields
+they do not know. An extension that never sends it and a proxy that does not read it both go on
+working.
 
 Later, the built-in modules could be written again as extensions shipped with Meridian, so that
 the proxy itself has one way to decide. That is not proposed now. They work, they are tested,
 and moving them would put a socket in the path of every login of every operator, including
 those who need none.
 
-## 10. Plan, risks and open questions
+## 10. Plan, risks, decisions and questions
 
 ### 10.1 Pull requests
 
@@ -717,8 +744,9 @@ Windows.
    the queue's check. Nothing uses it. Proof: the configuration tests, and the existing tests
    unchanged.
 3. **The wire.** The types of protocol 0, the golden JSON, the proofs of the handshake (with the
-   HMAC moved to where both sides reach it), and the WebSocket code both sides need (U6). Proof:
-   the golden files and the test vectors.
+   HMAC moved to where both sides reach it), and the WebSocket code both sides need: the
+   sidecar's, extended and shared (section 2.5, decision U6). Proof: the golden files, the test
+   vectors, and the sidecar's tests unchanged.
 4. **The connection on the proxy.** Connect, hello, reconnect with the doubling wait,
    `max-in-flight`, the breaker, the metrics and the logs. No decision is wired yet. Proof: tests
    against a fake extension, including a wrong token on each side.
@@ -760,27 +788,36 @@ Windows.
   Windows). Mitigation: the configuration takes an address, the check of every resolved address
   is the sidecar's, and CI runs on both.
 
-### 10.3 Questions for the operator
+### 10.3 Decisions of the operator (2026-11-05)
 
-- **U1.** The proxy connects to the extension (recommended, section 2.1), or extensions connect
-  to the proxy?
-- **U2.** For the proxy's commands, does an extension's `allow` or `deny` win over
-  `permissions.toml` (recommended, section 4.3), or is a deny in the file final?
-- **U3.** One extension for each decision point in version 1 (recommended), or a chain in the
-  configuration's order?
-- **U4.** With balancing on, does an extension's `order` replace the balancer for that placement
-  (recommended, inside the hard caps), or only reorder what the balancer allows?
-- **U5.** Should admission be able to give a priority place in the queue (not in version 1)?
-- **U6.** The WebSocket code: extend the sidecar's and share it (no new dependency), or take a
-  maintained crate in the proxy and the SDK?
-- **U7.** Are players' addresses only for extensions granted `addresses` (recommended), or never
-  sent?
-- **U8.** The names: crate `meridian-extension`, configuration `[[extension]]`, methods
-  `meridian:...`?
+- **U1. The proxy connects to the extension, which listens on the loopback** (section 2.1). The
+  proxy opens no new port, and no program becomes an extension unless the configuration names
+  it.
+- **U2. An extension's `allow` or `deny` wins over `permissions.toml`** for the proxy's commands
+  (section 4.3). Granting `decide.command` makes the extension the source of rights for those
+  commands, and the file answers only what it leaves at `default`.
+- **U3. One extension for each decision point in version 1** (section 2.3). One answer for each
+  decision keeps its order, its deadline and its failure simple to follow.
+- **U4. An extension's `order` replaces the balancer for that placement, inside the hard caps**
+  (section 4.4). An operator's matchmaker must be able to put a player where it wants, and the
+  hard cap still protects each server.
+- **U5. No priority place in the queue in version 1** (section 9). It can come later, as an
+  optional field of the admission answer in a minor version, once the queue has a second level
+  and an operator needs it; section 3's rule on added fields keeps that compatible.
+- **U6. The sidecar's WebSocket code is extended and shared, with no new dependency** (section
+  2.5). One implementation serves the sidecar, the proxy and the SDK, and is tested on both
+  systems.
+- **U7. Players' addresses go only to extensions granted `addresses`** (section 7). An address
+  is personal data that most extensions do not need.
+- **U8. The names stay:** the crate `meridian-extension`, the configuration `[[extension]]` and
+  the methods `meridian:...`.
 
 ### 10.4 Questions for Kacper (Horizon)
 
-Asked on Horizon's issue #7484, comment 6657883380 (2026-11-05), still open:
+Asked on Horizon's issue #7484, comment 6657883380 (2026-11-05), still open. Nothing on this
+page changes Horizon's management protocol, and none of its methods is Meridian's: an extension
+speaks a separate protocol, with its methods under `meridian:`, which borrows only the form of
+Horizon's (JSON-RPC 2.0 over a WebSocket).
 
 - **K1.** Does Horizon have a preference, or a plan of its own, for how an operator plugs their
   own system into a proxy? If Horizon would one day call such a program itself, sharing this
