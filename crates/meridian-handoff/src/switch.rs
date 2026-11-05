@@ -1,6 +1,6 @@
 //! The switch itself: prepare, freeze, hand over, commit (DESIGN.md section 5).
 use crate::{
-    configure::{Digest, configure},
+    configure::{Digest, Summary, configure, explain},
     control::{
         Arrival, Outcome, PlayerControl, Record, record_dimension, record_handover, uuid_text,
     },
@@ -217,15 +217,29 @@ pub struct TargetBackend<'a> {
 /// The configuration digest last seen from each backend, so that a backend known
 /// to configure clients differently is refused before it is asked anything.
 #[derive(Default)]
-pub struct Digests(Mutex<HashMap<String, Digest>>);
+pub struct Digests(Mutex<HashMap<String, Seen>>);
+
+/// A backend's configuration as a switch saw it, and what the log of a refusal says of
+/// it.
+#[derive(Clone, Debug)]
+pub(crate) struct Seen {
+    pub digest: Digest,
+    pub summary: Summary,
+    /// How many known packs the client of that switch named.
+    pub known_packs: usize,
+}
 
 impl Digests {
     pub fn get(&self, backend: &str) -> Option<Digest> {
-        lock(&self.0).get(backend).copied()
+        self.seen(backend).map(|seen| seen.digest)
     }
 
-    fn set(&self, backend: &str, digest: Digest) {
-        lock(&self.0).insert(backend.to_owned(), digest);
+    pub(crate) fn seen(&self, backend: &str) -> Option<Seen> {
+        lock(&self.0).get(backend).cloned()
+    }
+
+    pub(crate) fn set(&self, backend: &str, seen: Seen) {
+        lock(&self.0).insert(backend.to_owned(), seen);
     }
 }
 
@@ -553,7 +567,7 @@ pub fn switch(
     let _switching = Switching(shared);
 
     // Check.
-    let (client_id, session_digest, dimension, secure_chat) = {
+    let (client_id, session_digest, session_summary, dimension, secure_chat) = {
         let down = shared.down();
         if down.backend == target.name {
             return Err(run.fail(
@@ -565,17 +579,37 @@ pub fn switch(
             return Err(run.fail(Step::Check, "the player is not in the play phase"));
         }
         match (down.ghost.player_id(), down.config_digest) {
-            (Some(id), Some(digest)) => (id, digest, down.dimension.clone(), down.secure_chat),
+            (Some(id), Some(digest)) => (
+                id,
+                digest,
+                down.config_summary.clone().unwrap_or_default(),
+                down.dimension.clone(),
+                down.secure_chat,
+            ),
             _ => return Err(run.fail(Step::Check, "the player has not joined yet")),
         }
     };
-    if let Some(kind) = digests
-        .get(target.name)
-        .and_then(|known| session_digest.differs(&known))
-    {
-        return Err(run.fail(Step::Check, differs(target.name, kind)));
-    }
     let client = shared.up().client.clone();
+    if let Some(seen) = digests.seen(target.name)
+        && let Some(kind) = session_digest.differs(&seen.digest)
+    {
+        let detail = explain(
+            target.name,
+            (&session_digest, &session_summary),
+            (&seen.digest, &seen.summary),
+        );
+        let packs = format!(
+            "{}'s was seen in an earlier switch, with a client that named {} known packs; \
+             this player named {}",
+            target.name,
+            seen.known_packs,
+            client.known_pack_count()
+        );
+        return Err(run.fail(
+            Step::Check,
+            differs(target.name, kind, detail.into_iter().chain([packs])),
+        ));
+    }
 
     // Prepare.
     let started = Instant::now();
@@ -617,17 +651,29 @@ pub fn switch(
                 .map(|()| digest)
                 .map_err(|e| e.to_string())
         });
-    let digest = match configured {
-        Ok(digest) => digest,
+    let (digest, summary) = match configured {
+        Ok(configured) => configured,
         Err(why) => {
             let _ = run.drop_target();
             return Err(run.fail(Step::Prepare, why));
         }
     };
-    digests.set(target.name, digest);
+    let detail = explain(
+        target.name,
+        (&session_digest, &session_summary),
+        (&digest, &summary),
+    );
+    digests.set(
+        target.name,
+        Seen {
+            digest,
+            summary,
+            known_packs: client.known_pack_count(),
+        },
+    );
     if let Some(kind) = session_digest.differs(&digest) {
         let _ = run.drop_target();
-        return Err(run.fail(Step::Prepare, differs(target.name, kind)));
+        return Err(run.fail(Step::Prepare, differs(target.name, kind, detail)));
     }
     note("prepare: the target configures clients as the first server did (digest)");
     let (reader, writer) = link.connection.split();
@@ -1099,9 +1145,16 @@ pub fn switch(
     })
 }
 
-fn differs(backend: &str, kind: &str) -> String {
-    format!(
+/// The reason of a refusal on the digest, with what the log may say of the two
+/// configurations: sizes, short hashes and registry names, never their content.
+fn differs(backend: &str, kind: &str, detail: impl IntoIterator<Item = String>) -> String {
+    let detail: Vec<String> = detail.into_iter().collect();
+    let mut reason = format!(
         "{backend} configures clients differently ({kind}): the player would need a new \
          configuration phase"
-    )
+    );
+    if !detail.is_empty() {
+        reason.push_str(&format!(" ({})", detail.join("; ")));
+    }
+    reason
 }

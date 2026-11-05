@@ -30,7 +30,7 @@
 //! in a circle: a target's prepare state, then what goes to the client ([`Down`]),
 //! then what goes to the backend ([`Up`]), then a lane's writer.
 use crate::{
-    configure::{ClientConfiguration, Digest, DigestBuilder},
+    configure::{ClientConfiguration, Digest, DigestBuilder, Summary},
     prepare::{Pose, Target},
 };
 use horizon_protocol::{
@@ -162,6 +162,8 @@ pub(crate) struct Down {
     /// The first backend's configuration phase, as the client got it.
     digest: DigestBuilder,
     pub config_digest: Option<Digest>,
+    /// The same configuration, as the log of a refused switch describes it.
+    pub config_summary: Option<Summary>,
     /// Packets the ghost could not read, for the log of the next switch.
     pub unreadable: Vec<String>,
     pub flow: Flow,
@@ -245,6 +247,7 @@ impl Session {
                 secure_chat: None,
                 digest: DigestBuilder::default(),
                 config_digest: None,
+                config_summary: None,
                 unreadable: Vec::new(),
                 flow: Flow::default(),
                 answering: None,
@@ -551,6 +554,7 @@ fn activate(shared: &Arc<Shared>) {
         down.secure_chat = None;
         down.digest = DigestBuilder::default();
         down.config_digest = None;
+        down.config_summary = None;
         down.unreadable.clear();
         down.notice = notice;
         up.lane = Arc::clone(&lane);
@@ -736,6 +740,7 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
                 if id == ids::configuration::clientbound::FINISH_CONFIGURATION {
                     if down.config_digest.is_none() {
                         down.config_digest = Some(down.digest.finish());
+                        down.config_summary = Some(down.digest.summary());
                     }
                     down.phase = Phase::Play;
                 }

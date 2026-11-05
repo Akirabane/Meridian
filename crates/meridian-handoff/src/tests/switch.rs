@@ -259,6 +259,77 @@ fn a_target_with_other_registries_is_refused_and_remembered() {
     still_on_source(&mut bench);
 }
 
+/// A refusal on the registries says, in its one line, how the two configurations
+/// differ: sizes and short hashes on each side, and the first registry that differs.
+/// Refused again from what was remembered, it also says how many known packs the
+/// client of the earlier switch named, since a server sends the entries of a known pack
+/// without their data.
+#[test]
+fn a_refusal_on_the_registries_says_how_they_differ() {
+    let mut bench = bench();
+    let log = Log::default();
+    let other = vec![8; 300];
+    let (address, _imported, _target) = target(TargetWorld {
+        registry: other.clone(),
+        ..TargetWorld::default()
+    });
+    let digests = Digests::default();
+    let options = options();
+    let short = |payload: &[u8]| -> String {
+        use sha2::{Digest as _, Sha256};
+        let mut hash = Sha256::new();
+        hash.update((payload.len() as u64).to_be_bytes());
+        hash.update(payload);
+        hash.finalize()[..4]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let detail = format!(
+        "registry data: the client's 1 packets, 300 bytes, hash {}, target's 1 packets, 300 \
+         bytes, hash {}; 1 registries differ, the first registry packet 1 (unreadable name) \
+         (the client's 300 bytes, target's 300 bytes)",
+        short(&REGISTRY),
+        short(&other)
+    );
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options),
+        &mut FakeControl::new("source", &log),
+        &mut FakeControl::new("target", &log),
+        &digests,
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(failure.step, Step::Prepare);
+    assert_eq!(
+        failure.reason,
+        format!(
+            "target configures clients differently (registry data): the player would need a \
+             new configuration phase ({detail})"
+        )
+    );
+    let again = switch(
+        &bench.handle,
+        target_backend(&address, &options),
+        &mut FakeControl::new("source", &log),
+        &mut FakeControl::new("target", &log),
+        &digests,
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(again.step, Step::Check);
+    assert_eq!(
+        again.reason,
+        format!(
+            "target configures clients differently (registry data): the player would need a \
+             new configuration phase ({detail}; target's was seen in an earlier switch, with a \
+             client that named 0 known packs; this player named 0)"
+        )
+    );
+    still_on_source(&mut bench);
+}
+
 #[test]
 fn a_target_in_another_dimension_is_refused_before_the_freeze() {
     let mut bench = bench();
