@@ -358,14 +358,16 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
             }
             // The client's confirmation, not the proxy's.
             step.set("the client's confirmation of the position sent after the import");
-            if accepted(&mut c)?.0 != 2 {
-                return Err("the client confirmed another teleport".into());
+            let confirmed = expect_unless_loaded(&mut c, ps::ACCEPT_TELEPORTATION)?;
+            match play::Serverbound::decode(ps::ACCEPT_TELEPORTATION, &confirmed) {
+                Ok(play::Serverbound::AcceptTeleportation(a)) if a.id == 2 => {}
+                _ => return Err("the client confirmed another teleport".into()),
             }
             step.set("the confirm (the control's signal)");
             next("confirm")?;
             send_typed(&mut c, &effect(TARGET_ID));
             step.set("the client's attack");
-            let attack = expect(&mut c, ps::ATTACK)?;
+            let attack = expect_unless_loaded(&mut c, ps::ATTACK)?;
             let attacked = Reader::new(&attack).varint().map_err(|e| e.to_string())?;
             Ok(TargetSaw { attacked })
         })();
@@ -403,6 +405,22 @@ pub fn accept(player: &mut Connection, id: i32, at: [f64; 3]) {
         pitch: 0.0,
     });
     player.send(&answer.encode()).unwrap();
+}
+
+/// As [`expect`], for a client that also says it has loaded the world: the game does after
+/// each position, and the scripted player of the test kit does as well. That packet is not what
+/// is waited for, and a server takes it at any time, so it is let go.
+fn expect_unless_loaded(connection: &mut Connection, id: i32) -> Result<Vec<u8>, String> {
+    loop {
+        let (got, payload) = connection.recv().map_err(|e| e.to_string())?;
+        if got == ps::PLAYER_LOADED && id != ps::PLAYER_LOADED {
+            continue;
+        }
+        if got != id {
+            return Err(format!("expected packet {id}, received {got}"));
+        }
+        return Ok(payload);
+    }
 }
 
 /// The next packet, which must be a whole Accept Teleportation: its id and the

@@ -156,6 +156,84 @@ fn a_player_is_switched_to_the_target() {
     run.join().unwrap().unwrap();
 }
 
+/// What the client says in answer to the target's world goes to the target. The switch writes
+/// the world to the client and, a moment later, changes the lane the client's packets go to; a
+/// client quick enough to answer in between (a loaded machine makes it so) must not have its
+/// answer sent to the server it has just left. The test stops the switch in that moment, has
+/// the client confirm the teleport of the delta, and looks where the confirmation went.
+#[test]
+fn the_answer_to_the_targets_world_goes_to_the_target() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        mut source,
+    } = bench();
+    let log = Log::default();
+    let (address, imported, target_thread) = target(TargetWorld::default());
+    let mut source_control = FakeControl::new("source", &log);
+    let mut target_control = target_control(&log, imported);
+    let digests = Digests::default();
+    let (written, world_written) = std::sync::mpsc::channel();
+    let (go, lane_may_change) = std::sync::mpsc::channel();
+    *handle.0.delta_gate.lock().unwrap() = Some((written, lane_may_change));
+    // The client, on a thread of its own, since the switch runs on this one.
+    let client = std::thread::spawn(move || {
+        // The target's world is written to the client; the lane is still the source's.
+        world_written.recv_timeout(WAIT).unwrap();
+        loop {
+            let (id, _) = player.recv().unwrap();
+            if id == pc::COMMANDS {
+                break;
+            }
+        }
+        accept(&mut player, 2, [41.0, 70.0, 41.0]);
+        // The client's packet has been read by now, and it is not on its way to the source.
+        source
+            .reader
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let wrongly = match source.recv() {
+            Err(e) if e.is_timed_out() => None,
+            other => Some(other.map(|(id, _)| id)),
+        };
+        go.send(()).unwrap();
+        (player, wrongly)
+    });
+    let done = switch(
+        &handle,
+        TargetBackend {
+            name: "target",
+            address: &address,
+            options: &options(),
+        },
+        &mut source_control,
+        &mut target_control,
+        &digests,
+        &settings(),
+    )
+    .unwrap();
+    let (mut player, wrongly) = client.join().unwrap();
+    assert!(
+        wrongly.is_none(),
+        "the client's answer to the target's world went to the source: {wrongly:?}"
+    );
+    assert_eq!(handle.backend(), "target");
+    assert_eq!(done.chunks, 9);
+    // The target got the confirmation, placed the player, and its first live packet reaches
+    // the client; the client attacks what it knows as 9.
+    loop {
+        let (id, _) = player.recv().unwrap();
+        if id == pc::UPDATE_MOB_EFFECT {
+            break;
+        }
+    }
+    attack(&mut player, TARGET_ID);
+    let saw = target_thread.join().unwrap().unwrap();
+    assert_eq!(saw.attacked, CLIENT_ID);
+    run.join().unwrap().unwrap();
+}
+
 fn target_backend<'a>(address: &'a str, options: &'a BackendOptions) -> TargetBackend<'a> {
     TargetBackend {
         name: "target",

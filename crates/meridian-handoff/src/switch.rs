@@ -1019,6 +1019,10 @@ pub fn switch(
                 ));
             }
         }
+        // From the first packet of the delta, what the client says answers the target's world:
+        // it waits for the lane to be the target's. Opened right after the lane is changed; the
+        // guard also opens it if the block is left before.
+        let routing = shared.routing.shut();
         let packets = delta(&down.ghost, &s.view);
         let extras = std::mem::take(&mut s.extras);
         let mut body = Vec::new();
@@ -1033,6 +1037,16 @@ pub fn switch(
             bytes += body.len() as u64;
             add(&mut down.flow, &body);
             let _ = down.ghost.apply(packet);
+        }
+        #[cfg(test)]
+        if let Some((written, go)) = shared
+            .delta_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = written.send(());
+            let _ = go.recv_timeout(Duration::from_secs(5));
         }
         let swap = s.swap.expect("a ready target has sent its Login");
         down.active = lane.id;
@@ -1053,6 +1067,9 @@ pub fn switch(
                 up.teleports.answered_by_proxy(teleport);
             }
         }
+        // The lane is the target's: the client's packets go on, on every path from here, the
+        // one that follows a failed write of the delta included.
+        drop(routing);
         let (chunks, entities) = s.view.counts();
         s.preparing = false;
         s.view = View::ghost();
