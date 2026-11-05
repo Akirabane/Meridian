@@ -761,11 +761,14 @@ fn spawn_lobby() -> (String, JoinHandle<Result<(), String>>) {
 fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
     use meridian_testkit::{
         live::{End, Options, link, session_linked},
-        trace::Recorder,
+        trace::{Dir, Recorder},
     };
     let (lobby, lobby_thread) = spawn_lobby();
     let (east, signal, east_thread) = spawn_target(TargetWorld {
         information: meridian_testkit::live::information_payload(),
+        // The bot says nothing after the move until the test is done with it, which on a
+        // slow machine can be long.
+        idle: Duration::from_secs(60),
         ..TargetWorld::default()
     });
     let config = Config {
@@ -820,20 +823,43 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
     };
 
     let (handle, link) = link();
-    let bot = std::thread::spawn(move || {
-        session_linked(
-            &Options {
-                host: "127.0.0.1".into(),
-                port,
-                name: "Bot".into(),
-                // Long enough for a slow machine; the test ends the session itself.
-                seconds: 30,
-            },
-            &Recorder::new(),
-            &link,
-        )
+    let recorder = Recorder::new();
+    let bot = std::thread::spawn({
+        let recorder = recorder.clone();
+        move || {
+            session_linked(
+                &Options {
+                    host: "127.0.0.1".into(),
+                    port,
+                    name: "Bot".into(),
+                    // Long enough for a slow machine; the test ends the session itself.
+                    seconds: 30,
+                },
+                &recorder,
+                &link,
+            )
+        }
     });
-    // Typed at once: it is sent when the bot is in lobby's world.
+    // The proxy refuses a move until it has the player's world: its Login packet must have
+    // gone through, and that, not the bot being in the play phase, is what the move needs. So
+    // type only once the bot has been sent it and the proxy lists the bot on lobby.
+    let joined = Instant::now() + Duration::from_secs(15);
+    let has_joined = || {
+        recorder.trace().ids(Dir::ToClient).contains(&pc::LOGIN)
+            && proxy
+                .sessions
+                .players()
+                .iter()
+                .any(|p| p.name == "Bot" && p.backend == "lobby")
+    };
+    while !has_joined() && Instant::now() < joined {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        has_joined(),
+        "the bot did not join: {:?}",
+        proxy.sessions.players()
+    );
     handle.controller.command("/server east").unwrap();
     let wait = |wanted: &'static str| {
         handle

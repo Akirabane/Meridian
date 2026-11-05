@@ -208,6 +208,11 @@ pub struct TargetWorld {
     /// The operator level the target gives the player at login, as the entity event
     /// 24 plus the level sent before the command tree; none sends no event.
     pub permission: Option<u8>,
+    /// How long the target waits for a packet of the client, once it is logged in, before it
+    /// gives up and closes the connection. The default is [`WAIT`], which suits the tests that
+    /// play the client by hand. A test whose client stays silent for as long as the test
+    /// takes, such as a bot that leaves when the test is done, gives more.
+    pub idle: Duration,
 }
 
 impl Default for TargetWorld {
@@ -220,6 +225,7 @@ impl Default for TargetWorld {
             chatter: Duration::ZERO,
             recenter: false,
             permission: None,
+            idle: WAIT,
         }
     }
 }
@@ -277,6 +283,9 @@ pub fn spawn_target(world: TargetWorld) -> (String, Signal, JoinHandle<Result<Ta
             ..FakeBackend::default()
         }
         .run(&mut c, &Recorder::new())?;
+        c.reader
+            .set_read_timeout(Some(world.idle))
+            .map_err(|e| e.to_string())?;
         // The held player's join sequence and world.
         send_typed(&mut c, &login(TARGET_ID, world.dimension));
         for (id, payload) in columns(2) {
