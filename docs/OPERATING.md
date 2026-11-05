@@ -714,6 +714,15 @@ What is not synchronised:
   unique id goes as an id. In offline mode, and for the unverified players of the hybrid mode, a
   name is not proof of who is playing (section 5.8), and neither is an entry synchronised from a
   name.
+- **A ban taken from a server is filed by unique id**, and `banlist` shows `uuid ...: banned on
+  east`. With the sync on and the proxy in offline mode, `pardon <name>` lifts it too (the id of
+  the name as typed and the id of the lower-case name are both tried, since a server may use
+  either, and only an entry marked `banned on <server>` is lifted), and sends the pardon to the
+  servers by name, as for any other pardon. By name, because a server removes an entry by id
+  only if it knows the profile (its user cache); a ban written in its file by hand is not
+  removed that way. In online and hybrid mode an account's id cannot
+  be known from a name, so none is guessed: give the id that `banlist` shows (`pardon
+  069a79f4-44e9-4726-a5be-fca90e38aaf5`). With the sync off, `pardon` is unchanged.
 - **The allowlist switch.** Whether a server enforces its allowlist (`use_allowlist`) is not read
   or changed; only the entries are.
 - **Operators, kicks, the rest of the protocol.** Nothing else is read or sent.
