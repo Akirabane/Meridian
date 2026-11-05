@@ -28,13 +28,25 @@ impl Proxy {
         secret: &str,
         dir: &Path,
     ) -> io::Result<Proxy> {
+        Proxy::start_with(binary, dir, |address| {
+            configuration(address, backend, secret)
+        })
+    }
+
+    /// As [`Proxy::start`], with the configuration `write` makes for the address the proxy is
+    /// to listen on.
+    pub fn start_with(
+        binary: &Path,
+        dir: &Path,
+        write: impl FnOnce(SocketAddr) -> String,
+    ) -> io::Result<Proxy> {
         // A free port, taken and given back at once.
         let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
             .local_addr()?
             .port();
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let config = dir.join("meridian.toml");
-        std::fs::write(&config, configuration(address, backend, secret))?;
+        std::fs::write(&config, write(address))?;
         let log = dir.join("meridian.log");
         let child = Command::new(binary)
             .arg(&config)
@@ -76,6 +88,16 @@ impl Proxy {
         let text = std::fs::read_to_string(&self.log).unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
         lines[lines.len().saturating_sub(5)..].join(" | ")
+    }
+
+    /// The proxy's whole log so far.
+    pub fn log_text(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Whether the proxy process is still there: it must be, all through a run.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Lines of the proxy's log at warning level or worse.

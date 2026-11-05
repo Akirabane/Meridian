@@ -3,6 +3,7 @@
 mod backend;
 mod cpu;
 mod echo;
+mod load;
 mod player;
 mod proxy;
 mod report;
@@ -24,6 +25,8 @@ Usage: meridian-bench [OPTIONS]
 
 Measures the proxy on this machine, over 127.0.0.1: the same players and packets
 directly to a stand-in backend, then through the real `meridian` program.
+
+       meridian-bench load [OPTIONS]    the load baseline: see `load --help`
 
 Options:
   --players LIST   player counts, one step each (default 10,100)
@@ -101,7 +104,13 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
 }
 
 fn main() -> ExitCode {
-    let options = match parse(std::env::args_os().skip(1)) {
+    // `meridian-bench load ...` is the load baseline (docs/BASELINE.md).
+    let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "load") {
+        args.remove(0);
+        return load::main(args);
+    }
+    let options = match parse(args) {
         Ok(Some(options)) => options,
         Ok(None) => {
             println!("{USAGE}");

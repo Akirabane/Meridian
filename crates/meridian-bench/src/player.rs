@@ -144,7 +144,7 @@ fn measure(
 /// An error that says the machine is out of something, rather than the proxy or
 /// the backend failing: out of ports (Windows' WSAEADDRINUSE and WSAENOBUFS, or
 /// EADDRNOTAVAIL) or out of descriptors (WSAEMFILE, EMFILE, ENFILE).
-fn classify(e: io::Error) -> Failure {
+pub(crate) fn classify(e: io::Error) -> Failure {
     let exhausted = matches!(
         e.kind(),
         io::ErrorKind::AddrInUse | io::ErrorKind::AddrNotAvailable
