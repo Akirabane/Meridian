@@ -556,14 +556,21 @@ fn a_giant_request_line_is_answered_from_its_first_bytes() {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    // 64 KiB of a path and no end of line: the proxy answers after MAX_REQUEST.
+    // A path with no end of line, exactly as long as what the proxy reads (MAX_REQUEST): it
+    // answers once it has read that much. Not a byte more: what the proxy has not read when it
+    // closes makes the system reset the connection, which can throw away an answer that is not
+    // yet sent, and the client then reads half of it.
     let mut line = b"GET /".to_vec();
-    line.extend(std::iter::repeat_n(b'a', 64 << 10));
-    let _ = stream.write_all(&line);
+    line.extend(std::iter::repeat_n(b'a', super::MAX_REQUEST - line.len()));
+    assert_eq!(line.len(), super::MAX_REQUEST);
+    let written = stream.write_all(&line);
     let mut answer = Vec::new();
-    let _ = stream.read_to_end(&mut answer);
+    let read = stream.read_to_end(&mut answer);
     let answer = String::from_utf8_lossy(&answer);
-    assert!(answer.starts_with("HTTP/1.1 404 "), "{answer}");
+    assert!(
+        answer.starts_with("HTTP/1.1 404 "),
+        "answer: {answer:?}; write: {written:?}; read: {read:?}"
+    );
     proxy.stop();
     thread.join().unwrap();
 }
