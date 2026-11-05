@@ -9,6 +9,7 @@
 //! 3. **Moves**: some of the bots are moved to another server while the rest play.
 //! 4. **Churn**: connections that come and go as fast as they can.
 use super::bot::{self, Live, Plan, Role};
+use super::remote::Windows;
 use super::sample::{Sample, Sampler, Watch, mean, mib, peak, percentile};
 use super::table::Row;
 use super::transfer::{Sidecar, Transfers};
@@ -49,7 +50,7 @@ impl Compression {
     }
 
     /// What the server asks for.
-    fn server(self) -> Option<i32> {
+    pub(super) fn server(self) -> Option<i32> {
         match self {
             Compression::Same => Some(256),
             Compression::ServerOff | Compression::BothOff => None,
@@ -57,7 +58,7 @@ impl Compression {
     }
 
     /// The proxy's `compression-threshold`, toward the players.
-    fn player(self) -> i32 {
+    pub(super) fn player(self) -> i32 {
         match self {
             Compression::Same | Compression::ServerOff => 256,
             Compression::BothOff => -1,
@@ -101,18 +102,22 @@ pub struct Settings {
     /// How long a connection of the churn stays, on average.
     pub churn_hold: Duration,
     pub spectator: Option<Spectator>,
+    /// The proxy is on another machine: where it is and where the servers listen for it.
+    pub remote: Option<super::remote::Remote>,
+    /// When each phase of each step began and ended, for whoever reads the proxy's side.
+    pub windows: Arc<super::remote::Windows>,
 }
 
 /// A server of the proxy's configuration.
-struct Server<'a> {
-    name: &'a str,
-    address: SocketAddr,
-    sidecar: Option<&'a str>,
+pub(super) struct Server<'a> {
+    pub(super) name: &'a str,
+    pub(super) address: SocketAddr,
+    pub(super) sidecar: Option<&'a str>,
 }
 
 /// The proxy's configuration for a run: offline, no limits, the servers, the compression, and
 /// for a spectator the host that leads to a real server.
-fn configuration(
+pub(super) fn configuration(
     listen: SocketAddr,
     servers: &[Server<'_>],
     threshold: i32,
@@ -224,6 +229,10 @@ pub(super) fn start_world(s: &Settings, spec: Spec) -> Result<World, String> {
         keepalive: s.keepalive,
         flavour: spec.flavour,
         transfers: spec.transfers,
+        bind: s.remote.as_ref().map_or_else(super::world::loopback, |r| {
+            // The first port of the range is the lobby's, the second the east server's.
+            r.server_address(usize::from(spec.name == "east"))
+        }),
     })
     .map_err(|e| e.to_string())
 }
@@ -237,7 +246,7 @@ pub(super) fn active_traffic(s: &Settings) -> Traffic {
 }
 
 /// The plans of `n` bots called `{prefix}{i}`.
-fn plans(
+pub(super) fn plans(
     s: &Settings,
     address: SocketAddr,
     n: usize,
@@ -264,7 +273,7 @@ fn plans(
 }
 
 /// Starts the bots, one thread each, `arrival` a second.
-fn launch(s: &Settings, plans: Vec<Plan>, live: &Arc<Live>) -> Vec<JoinHandle<()>> {
+pub(super) fn launch(s: &Settings, plans: Vec<Plan>, live: &Arc<Live>) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     for plan in plans {
         if s.stop.load(Ordering::Relaxed) {
@@ -289,7 +298,7 @@ fn launch(s: &Settings, plans: Vec<Plan>, live: &Arc<Live>) -> Vec<JoinHandle<()
 }
 
 /// Waits until `done` is true, `limit` has passed, or the run is stopped.
-fn wait_until(s: &Settings, limit: Duration, done: impl Fn() -> bool) -> bool {
+pub(super) fn wait_until(s: &Settings, limit: Duration, done: impl Fn() -> bool) -> bool {
     let began = Instant::now();
     while began.elapsed() < limit && !s.stop.load(Ordering::Relaxed) {
         if done() {
@@ -301,7 +310,7 @@ fn wait_until(s: &Settings, limit: Duration, done: impl Fn() -> bool) -> bool {
 }
 
 /// Sleeps `span`, or until the run is stopped.
-fn pause(s: &Settings, span: Duration) {
+pub(super) fn pause(s: &Settings, span: Duration) {
     let began = Instant::now();
     while began.elapsed() < span && !s.stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(50));
@@ -322,16 +331,16 @@ fn proc_now(pid: Pid) -> (u64, u64, u32) {
     (rss, commit, crate::cpu::threads(pid).unwrap_or(0))
 }
 
-fn ms(d: Duration) -> f64 {
+pub(super) fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1e3
 }
 
-fn us(value: u32) -> Duration {
+pub(super) fn us(value: u32) -> Duration {
     Duration::from_micros(u64::from(value))
 }
 
 /// Ends the bots and waits for their threads.
-fn end(live: &Live, handles: Vec<JoinHandle<()>>) {
+pub(super) fn end(live: &Live, handles: Vec<JoinHandle<()>>) {
     live.close_all();
     for handle in handles {
         let _ = handle.join();
@@ -339,7 +348,7 @@ fn end(live: &Live, handles: Vec<JoinHandle<()>>) {
 }
 
 /// The first line of a failure, for the row.
-fn first_failure(live: &Live) -> String {
+pub(super) fn first_failure(live: &Live) -> String {
     live.failures
         .lock()
         .unwrap()
@@ -491,6 +500,8 @@ pub(super) struct Played {
     /// The last status line, for a test to say what the run was doing when it failed.
     #[cfg(test)]
     pub(super) status: String,
+    /// When the measured window began and ended, in milliseconds since the epoch.
+    pub(super) measured_ms: (u64, u64),
 }
 
 /// `n` active bots against `address` for the window. `proxy` is the process to read, if any.
@@ -513,6 +524,7 @@ pub(super) fn play(
         Arc::clone(&s.stop),
         s.min_free,
     );
+    let joining_from = Windows::now_ms();
     let handles = launch(s, plans(s, address, n, "Act", Role::Active, 0, None), &live);
     wait_until(s, Duration::from_secs(120), || {
         live.logins.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed) >= n as u64
@@ -520,6 +532,8 @@ pub(super) fn play(
     wait_until(s, Duration::from_secs(60), || {
         live.joined.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed) >= n as u64
     });
+    s.windows
+        .record(label, n, "join", joining_from, Windows::now_ms());
     // The join of every player sends a whole world: let it be taken before the window opens.
     pause(s, Duration::from_secs(5));
     live.recent_round_trips.lock().unwrap().clear();
@@ -531,8 +545,12 @@ pub(super) fn play(
     );
     live.measuring.store(true, Ordering::Relaxed);
     let (from, began) = (sampler.now(), Instant::now());
+    let measured_from = Windows::now_ms();
     pause(s, s.window);
     live.measuring.store(false, Ordering::Relaxed);
+    let measured_ms = (measured_from, Windows::now_ms());
+    s.windows
+        .record(label, n, "measure", measured_ms.0, measured_ms.1);
     let (until, seconds) = (sampler.now(), began.elapsed().as_secs_f64());
     let after = (
         live.down_bytes.load(Ordering::Relaxed),
@@ -566,6 +584,7 @@ pub(super) fn play(
         first_failure: first_failure(&live),
         #[cfg(test)]
         status: live.status.lock().map(|s| s.clone()).unwrap_or_default(),
+        measured_ms,
     };
     end(&live, handles);
     drop(sampler);

@@ -24,6 +24,12 @@ meridian-testkit.workspace = true
 # The stand-in control endpoint answers in JSON, as the sidecar's own tests do. Already in the
 # workspace's lock file, through the proxy and the sidecar.
 serde_json = "1"
+# The secret of the configuration a run writes for a proxy on another machine is random bytes from
+# the system: 32 hexadecimal characters, new each time. Already in the workspace's lock file.
+getrandom = "0.3"
+# A run against a proxy on another machine reads the configuration that proxy was given, with the
+# proxy's own reader, for the secret its servers must use. A path dependency of this workspace.
+meridian-config.workspace = true
 # The stand-in backend's queue of waiting connections, as long as the proxy's.
 socket2 = "0.6"
 # The proxy process's CPU and memory, and the machine named in the report.
@@ -39,8 +45,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-# A test reads the configuration the load runs write with the proxy's own reader.
-meridian-config.workspace = true
 meridian-net.workspace = true
 
 # The workspace's lints, except that unsafe code is denied instead of forbidden:

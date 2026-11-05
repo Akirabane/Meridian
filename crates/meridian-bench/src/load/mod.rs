@@ -7,6 +7,7 @@
 //! under `--min-free-gib`.
 pub mod bot;
 mod micro;
+pub mod remote;
 pub mod sample;
 pub mod scenario;
 mod table;
@@ -59,7 +60,16 @@ Options:
   --max-seconds N       the longest window (default 60)
   --max-total-seconds N the whole run: past it the run is stopped, and cut a minute later (default 1800)
   --min-free-gib N      stop when the machine has less memory free (default 16)
-  --proxy PATH          the meridian program (default: next to this one)
+  --proxy PATH|ADDR     the meridian program (default: next to this one), or, when it is an
+                        address (192.168.1.25:25565), the proxy of ANOTHER machine to run against
+  --meridian PATH       the meridian program, when --proxy is an address (to check the file)
+  --remote-config FILE  with a proxy of another machine: the configuration it was given, read for
+                        its secret (written by --write-remote-config)
+  --write-remote-config DIR
+                        write meridian.toml for that proxy in DIR, with a new secret, check it with
+                        the meridian program, and stop (needs --proxy ADDR and --backend-bind)
+  --backend-bind IP     with a proxy of another machine: this machine's address the servers listen on
+  --backend-ports A-B   the ports of the servers (default 25701-25710; the first is the lobby's)
   --out-dir DIR         write each scenario's rows as CSV there, and the report
   --append              add to the CSV files that are there
   --label TEXT          written in each row: what this pass was (default \"no client\")
@@ -85,6 +95,8 @@ struct Options {
     label: String,
     /// The whole run may not last longer than this, whatever the steps do.
     max_total: Duration,
+    /// Write the configuration of a proxy on another machine there, check it, and stop.
+    write_remote: Option<PathBuf>,
     settings: Settings,
 }
 
@@ -127,11 +139,16 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             movers_percent: 10,
             churn_hold: Duration::from_millis(100),
             spectator: None,
+            remote: None,
+            windows: Arc::default(),
         },
+        write_remote: None,
     };
     let (mut max_bots, mut max_seconds) = (500usize, 60u64);
     let mut max_total = 1800u64;
     let mut proxy = None;
+    let (mut remote_proxy, mut bind, mut ports, mut remote_config) = (None, None, None, None);
+    let (mut scenarios_given, mut compressions_given) = (false, false);
     let (mut spectator, mut host, mut port) = (None, "localhost".to_owned(), 25565u16);
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -156,6 +173,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--scenarios" => {
+                scenarios_given = true;
                 o.scenarios = value("--scenarios")?
                     .split(',')
                     .map(|n| n.trim().to_owned())
@@ -180,6 +198,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
                     Duration::from_secs(number(&value("--direct-seconds")?, "--direct-seconds")?);
             }
             "--compression" => {
+                compressions_given = true;
                 o.compressions = value("--compression")?
                     .split(',')
                     .map(|name| match name.trim() {
@@ -233,7 +252,26 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
                 o.settings.min_free = (real(&value("--min-free-gib")?, "--min-free-gib")?
                     * (1u64 << 30) as f64) as u64
             }
-            "--proxy" => proxy = Some(PathBuf::from(value("--proxy")?)),
+            "--proxy" => {
+                let given = value("--proxy")?;
+                match given.parse::<std::net::SocketAddr>() {
+                    Ok(address) => remote_proxy = Some(address),
+                    Err(_) => proxy = Some(PathBuf::from(given)),
+                }
+            }
+            "--meridian" => proxy = Some(PathBuf::from(value("--meridian")?)),
+            "--backend-bind" => {
+                let given = value("--backend-bind")?;
+                bind =
+                    Some(given.parse::<std::net::Ipv4Addr>().map_err(|_| {
+                        format!("--backend-bind takes an IPv4 address, not {given:?}")
+                    })?);
+            }
+            "--backend-ports" => ports = Some(remote::parse_ports(&value("--backend-ports")?)?),
+            "--remote-config" => remote_config = Some(PathBuf::from(value("--remote-config")?)),
+            "--write-remote-config" => {
+                o.write_remote = Some(PathBuf::from(value("--write-remote-config")?))
+            }
             "--out-dir" => o.out_dir = Some(PathBuf::from(value("--out-dir")?)),
             "--append" => o.append = true,
             "--label" => o.label = value("--label")?,
@@ -283,6 +321,60 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             .map_err(|e| e.to_string())?
             .with_file_name(format!("meridian{}", std::env::consts::EXE_SUFFIX)),
     };
+    if let Some(address) = remote_proxy {
+        let bind = bind.ok_or("a proxy of another machine needs --backend-bind: this machine's address it reaches the servers by")?;
+        if o.settings.spectator.is_some() {
+            return Err(
+                "--spectator is for a proxy started by this program, not --proxy ADDR".into(),
+            );
+        }
+        let mut remote = remote::Remote {
+            proxy: address,
+            bind,
+            ports: ports.unwrap_or((25701, 25710)),
+            threshold: 256,
+        };
+        if compressions_given {
+            if o.compressions.len() != 1 {
+                return Err("a proxy of another machine has one compression setting: give one --compression".into());
+            }
+            remote.threshold = o.compressions[0].player();
+        }
+        if o.write_remote.is_none() {
+            let path = remote_config.ok_or(
+                "a run against a proxy of another machine needs --remote-config FILE (write it with --write-remote-config DIR first)",
+            )?;
+            let (secret, threshold) = remote::read_config(&path, &remote)?;
+            o.settings.forwarding = secret;
+            remote.threshold = threshold;
+            if !compressions_given {
+                o.compressions = vec![if threshold < 0 {
+                    Compression::BothOff
+                } else {
+                    Compression::Same
+                }];
+            }
+            if !scenarios_given {
+                o.scenarios = vec!["idle".into(), "active".into()];
+            }
+            if let Some(name) = o
+                .scenarios
+                .iter()
+                .find(|n| !["idle", "active", "micro"].contains(&n.as_str()))
+            {
+                return Err(format!(
+                    "{name} needs the proxy's own process and sidecar: against a proxy of another machine only idle and active run"
+                ));
+            }
+        }
+        o.settings.remote = Some(remote);
+    } else if o.write_remote.is_some()
+        || remote_config.is_some()
+        || bind.is_some()
+        || ports.is_some()
+    {
+        return Err("--backend-bind, --backend-ports, --remote-config and --write-remote-config go with --proxy ADDRESS".into());
+    }
     Ok(Some(o))
 }
 
@@ -315,7 +407,22 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let wants_proxy = options.scenarios.iter().any(|s| s != "micro");
+    if let Some(dir) = options.write_remote.clone() {
+        let remote = options.settings.remote.clone().expect("checked by parse");
+        return match remote::write_config(&dir, &remote, remote.threshold, &options.settings.proxy)
+        {
+            Ok(said) => {
+                println!("{said}");
+                ExitCode::SUCCESS
+            }
+            Err(why) => {
+                eprintln!("meridian-bench load: {why}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let wants_proxy =
+        options.settings.remote.is_none() && options.scenarios.iter().any(|s| s != "micro");
     if wants_proxy && !options.settings.proxy.exists() {
         eprintln!(
             "meridian-bench load: {} not found; build it with cargo build --release -p meridian-proxy, \
@@ -404,6 +511,21 @@ fn run(o: &Options) -> bool {
                     break;
                 }
                 let steps: Vec<(String, Step)> = match name.as_str() {
+                    "idle" if s.remote.is_some() => {
+                        vec![(format!("idle {n}"), remote::idle(s, n))]
+                    }
+                    "active" if s.remote.is_some() => o
+                        .compressions
+                        .iter()
+                        .map(|&c| {
+                            let mut direct = s.clone();
+                            direct.window = o.direct_window;
+                            (
+                                format!("active {n} {}", c.name()),
+                                remote::active(s, &direct, n, c),
+                            )
+                        })
+                        .collect(),
                     "idle" => vec![
                         (format!("idle {n}"), scenario::idle(s, n, false)),
                         (format!("idle bare {n}"), scenario::idle(s, n, true)),
@@ -427,10 +549,11 @@ fn run(o: &Options) -> bool {
                     match result {
                         Ok(mut row) => {
                             row.0.insert(0, ("label", o.label.clone()));
-                            ok &= row
-                                .0
-                                .iter()
-                                .any(|(k, v)| *k == "proxy_alive" && v == "true");
+                            // A proxy of another machine cannot be seen from here: it counts as
+                            // there if the bots all got in.
+                            ok &= row.0.iter().any(|(k, v)| {
+                                (*k == "proxy_alive" || *k == "proxy_answered") && v == "true"
+                            });
                             table.push(row);
                         }
                         Err(why) => {
@@ -445,7 +568,10 @@ fn run(o: &Options) -> bool {
                     std::thread::sleep(Duration::from_secs(3));
                 }
             }
-            print!("## {name}\n\n{}\n", table.markdown(columns(name)));
+            print!(
+                "## {name}\n\n{}\n",
+                table.markdown(columns(name, s.remote.is_some()))
+            );
         }
         if let Some(dir) = &o.out_dir {
             let path = dir.join(format!("{name}.csv"));
@@ -455,12 +581,66 @@ fn run(o: &Options) -> bool {
             }
         }
     }
+    // When each phase began and ended: for whoever reads the proxy on its own machine.
+    let windows = s.windows.table();
+    if !windows.rows.is_empty() {
+        print!(
+            "## windows
+
+{}
+",
+            windows.markdown(&[
+                "step",
+                "players",
+                "phase",
+                "start_utc",
+                "end_utc",
+                "seconds"
+            ])
+        );
+        if let Some(dir) = &o.out_dir {
+            let path = dir.join("windows.csv");
+            if let Err(e) = write(&windows, &path, o.append) {
+                eprintln!("meridian-bench load: cannot write {}: {e}", path.display());
+                ok = false;
+            }
+        }
+    }
     ok
 }
 
 /// The columns each scenario's table shows in the report; the CSV has all of them.
-fn columns(scenario: &str) -> &'static [&'static str] {
+fn columns(scenario: &str, remote: bool) -> &'static [&'static str] {
     match scenario {
+        "idle" if remote => &[
+            "players",
+            "logged_in",
+            "failed",
+            "raw_connect_p50_us",
+            "login_p50_ms",
+            "login_p99_ms",
+            "logins_per_s",
+            "keepalives_sent",
+            "keepalives_answered",
+            "window_start_utc",
+            "window_end_utc",
+        ],
+        "active" if remote => &[
+            "players",
+            "compression",
+            "logged_in",
+            "failed",
+            "raw_connect_p50_us",
+            "direct_rtt_p50_us",
+            "proxy_rtt_p50_us",
+            "added_p50_us",
+            "added_p99_us",
+            "network_estimate_us",
+            "added_less_network_p50_us",
+            "down_mb_per_s",
+            "window_start_utc",
+            "window_end_utc",
+        ],
         "idle" => &[
             "players",
             "logged_in",

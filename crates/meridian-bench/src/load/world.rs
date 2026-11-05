@@ -78,6 +78,9 @@ pub struct Options {
     pub flavour: u8,
     /// The hand-overs of switches, when the proxy moves players between servers.
     pub transfers: Option<Arc<Transfers>>,
+    /// Where it listens: this machine's loopback and a free port, unless the proxy is on another
+    /// machine and reaches the server by the network address and the port it was told.
+    pub bind: SocketAddr,
 }
 
 /// What a server counted.
@@ -107,17 +110,24 @@ pub struct World {
     thread: Option<JoinHandle<()>>,
 }
 
-fn listen() -> io::Result<TcpListener> {
+/// Where a server listens when nothing says otherwise.
+pub fn loopback() -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+}
+
+fn listen(bind: SocketAddr) -> io::Result<TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    socket
+        .bind(&bind.into())
+        .map_err(|e| io::Error::new(e.kind(), format!("cannot listen on {bind}: {e}")))?;
     socket.listen(if cfg!(windows) { -BACKLOG } else { BACKLOG })?;
     Ok(socket.into())
 }
 
 impl World {
     pub fn start(options: Options) -> io::Result<World> {
-        let listener = listen()?;
+        let listener = listen(options.bind)?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(Counters::default());
