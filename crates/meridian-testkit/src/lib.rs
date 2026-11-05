@@ -11,10 +11,12 @@
 //! - [`live`] is a quiet player for a real server, over TCP.
 //! - [`held`] is a source world and a fake target answering as Horizon's held
 //!   player, for switch tests.
+//! - [`mutate`] changes valid inputs into hostile ones, from a fixed seed.
 pub mod backend;
 pub mod client;
 pub mod held;
 pub mod live;
+pub mod mutate;
 pub mod peer;
 pub mod trace;
 

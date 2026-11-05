@@ -1932,3 +1932,7 @@ mod tests {
         assert!(error.contains("before the login is done"), "{error}");
     }
 }
+
+#[cfg(test)]
+#[path = "client_fuzz_tests.rs"]
+mod fuzz_tests;

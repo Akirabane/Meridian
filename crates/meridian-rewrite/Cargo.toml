@@ -10,5 +10,8 @@ repository.workspace = true
 [dependencies]
 horizon-protocol.workspace = true
 
+[dev-dependencies]
+meridian-testkit.workspace = true
+
 [lints]
 workspace = true

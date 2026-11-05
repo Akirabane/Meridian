@@ -374,4 +374,42 @@ mod tests {
         assert!(!constant_time_eq(b"same", b"sane"));
         assert!(!constant_time_eq(b"same", b"same!"));
     }
+
+    /// Signed lines changed at random, from a fixed seed: none is taken, and none
+    /// panics the reader.
+    #[test]
+    fn hostile_lines_are_refused_without_a_panic() {
+        use meridian_testkit::mutate::{Rng, mutate};
+        let secret = b"a shared secret of the right size";
+        let challenge = [7u8; CHALLENGE_LEN];
+        let line = seal(
+            secret,
+            &challenge,
+            Direction::Request,
+            3,
+            r#"{"request":"status"}"#,
+        );
+        let mut rng = Rng::new(0x7769_7265);
+        for _ in 0..3000 {
+            let changed = mutate(&mut rng, line.as_bytes());
+            let Ok(text) = String::from_utf8(changed) else {
+                continue;
+            };
+            if let Ok((seq, body)) = open(
+                secret,
+                &challenge,
+                Direction::Request,
+                &text,
+                Expected::After(2),
+            ) {
+                // Only a line that says the same thing is taken.
+                assert_eq!(
+                    (seq, body.as_str()),
+                    (3, r#"{"request":"status"}"#),
+                    "{text}"
+                );
+            }
+            let _ = read_challenge(&text);
+        }
+    }
 }

@@ -495,3 +495,38 @@ fn the_deadline_is_for_the_whole_header() {
     drop(reader);
     sender.join().unwrap();
 }
+
+// ---- Hostile headers ----
+
+/// Valid headers of both versions, changed at random from a fixed seed: each parser
+/// answers, without a panic, and a version 2 header never reads past its payload.
+#[test]
+fn hostile_headers_are_answered_without_a_panic() {
+    use meridian_testkit::mutate::{Rng, mutate};
+    let lines: [&[u8]; 4] = [
+        b"PROXY TCP4 203.0.113.9 198.51.100.2 51234 25565",
+        b"PROXY TCP6 2001:db8::7 2001:db8::1 40000 25565",
+        b"PROXY UNKNOWN",
+        b"PROXY TCP4 255.255.255.255 0.0.0.0 65535 0",
+    ];
+    let headers = [
+        v2(1, 0x11, &v4_payload()),
+        v2(1, 0x21, &v6_payload()),
+        v2(0, 0x00, &[]),
+    ];
+    let mut rng = Rng::new(0x5052_4f58_5921);
+    for _ in 0..5000 {
+        let which = rng.below(lines.len());
+        let line = mutate(&mut rng, lines[which]);
+        let _ = parse_v1(&line);
+        let (head, payload) = &headers[rng.below(headers.len())];
+        let mut whole = head.to_vec();
+        whole.extend(payload);
+        let whole = mutate(&mut rng, &whole);
+        if whole.len() >= 16 {
+            let head: [u8; 16] = whole[..16].try_into().unwrap();
+            let _ = v2_payload_length(&head);
+            let _ = parse_v2(&head, &whole[16..]);
+        }
+    }
+}
