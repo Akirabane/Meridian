@@ -43,13 +43,37 @@ pub fn write(level: Level, args: fmt::Arguments<'_>) {
     if level as u8 > MAX.load(Ordering::Relaxed) {
         return;
     }
-    let line = format!(
-        "{} {} {args}\n",
-        timestamp(SystemTime::now()),
-        level.label()
-    );
+    let line = line(level, SystemTime::now(), args);
     // One write per line, so lines from several threads do not interleave.
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
+}
+
+/// The line written for one event, ending with its line break. What it quotes may
+/// come from a player or a peer (a message of `/alert`, a name, an error a peer
+/// caused), so a control character in it is written escaped, as `\n` or `\u{1b}`: it
+/// can neither start a line that looks like the proxy's own nor move the cursor of a
+/// terminal. So are the characters that turn text around (U+202A to U+202E, U+2066 to
+/// U+2069).
+fn line(level: Level, time: SystemTime, args: fmt::Arguments<'_>) -> String {
+    use std::fmt::Write as _;
+    let text = args.to_string();
+    let mut out = format!("{} {} ", timestamp(time), level.label());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push('\t'),
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+            }
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('\n');
+    out
 }
 
 /// The time as `YYYY-MM-DDTHH:MM:SS.mmmZ`, in UTC.
@@ -121,6 +145,29 @@ mod tests {
         // 2024-02-29 00:00:00 UTC, then the next day.
         assert_eq!(at(1_709_164_800, 0), "2024-02-29T00:00:00.000Z");
         assert_eq!(at(1_709_164_800 + 86_400, 0), "2024-03-01T00:00:00.000Z");
+    }
+
+    /// Text a player chose (a message of `/alert`, a name a peer gave) cannot start a
+    /// line of its own, nor hide what follows it: each event stays one line.
+    #[test]
+    fn what_a_line_quotes_cannot_make_a_line_of_its_own() {
+        let typed = "hello\n2026-11-02T17:04:05.123Z INFO  Notch banned\r\u{1b}[2K\u{202e}x\u{7f}";
+        let written = line(
+            Level::Info,
+            UNIX_EPOCH,
+            format_args!("Alex alerted every server: {typed}"),
+        );
+        assert_eq!(written.matches('\n').count(), 1, "{written:?}");
+        assert!(written.ends_with('\n'));
+        assert!(
+            !written.contains(['\r', '\u{1b}', '\u{202e}', '\u{7f}']),
+            "{written:?}"
+        );
+        assert_eq!(
+            written,
+            "1970-01-01T00:00:00.000Z INFO  Alex alerted every server: hello\\n\
+             2026-11-02T17:04:05.123Z INFO  Notch banned\\r\\u{1b}[2K\\u{202e}x\\u{7f}\n"
+        );
     }
 
     #[test]
