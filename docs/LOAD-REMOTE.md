@@ -10,6 +10,8 @@ bots ──────► proxy (machine B, 192.168.1.25:25565) ─────
   \_____________ machine A ______________/                    \______________ machine A ______________/
 ```
 
+The bots can arrive all at once or in **waves** (`--waves N --wave-gap-seconds S`): N groups of equal
+size, all the bots of a group at once, the next group S seconds after the last of the one before is in.
 Only the scenarios `idle` and `active` run this way: a switch (`moves`) needs the proxy's sidecar and
 the connection limits are the proxy's own business (`churn`).
 
@@ -39,16 +41,35 @@ machine (`ps`, the cgroup of the service) **during the same windows**. The run w
 | --- | --- |
 | `step` | `idle`, `R2 direct`, `R2 proxy` |
 | `players` | bots of the step |
-| `phase` | `join` (the bots log in and take the world), `hold` (idle: the connections held), `measure` (active: the measured window) |
+| `phase` | `join` (the bots log in and take the world; with waves, `join wave 1`, `join wave 2`...), `hold` (idle: the connections held), `measure` (active: the measured window, once every wave is in) |
 | `start_utc`, `end_utc` | UTC, to the second |
 | `start_epoch_ms`, `end_epoch_ms` | milliseconds since the epoch, UTC |
 | `seconds` | the length |
 
-The windows to read on the proxy's machine are `idle` / `join`, `idle` / `hold`, `R2 proxy` / `join` and
-`R2 proxy` / `measure`. (`R2 direct` does not touch the proxy.) The two machines' clocks must agree to
+The windows to read on the proxy's machine are `idle` / `join` (or each `join wave k`), `idle` / `hold`,
+`R2 proxy` / `join` (or each `join wave k`) and `R2 proxy` / `measure`. (`R2 direct` does not touch the proxy.) The two machines' clocks must agree to
 about a second: check them (`w32tm /stripchart /computer:<the other machine>` on Windows, `chronyc tracking` or
-`timedatectl` on Linux) before reading the windows side by side. The result rows carry the same times
+`timedatectl` on Linux) before reading the windows side by side. (`w32tm /stripchart` only works if the other
+machine answers NTP; if it does not, compare `w32tm /query /status` here with `chronyc tracking` there: both should be
+synchronised to a time server, with an offset of milliseconds.) The result rows carry the same times
 (`window_start_utc`, `window_end_utc`, `window_start_ms`, `window_end_ms`).
+
+## Waves
+
+With `--waves 2 --wave-gap-seconds 30` and 250 bots, 125 bots log in at once, hold for 30 seconds after the
+last of them is in, then 125 more arrive while the first 125 play. The rows have, for each wave `k`:
+`wk_bots`, `wk_logged_in`, `wk_failed`, `wk_dropped` (cut off), `wk_login_p50/p95/p99/max_ms`, and when it arrived
+(`wk_join_start/end_utc` and `_ms`). For the waves after the first, `active` rows also have the figure that
+matters: the round trips of the bots **already in** (the earlier waves), at the 99th percentile,
+`wk_rest_rtt_p99_before_us` (in the ten seconds before the wave began), `wk_rest_rtt_p99_during_us` (while it was
+joining), `wk_rest_rtt_p99_after_us` (the ten seconds after it was in), with the worst one and the number of
+round trips behind the figure (`..._max_during_us`, `..._samples_during`). Few samples make a rough figure: a wave that
+joins in a second has a few dozen round trips in its window. The round trips are kept with their own times for this; `idle`
+bots send no measuring packets, so their rows have the wave columns without the round trips.
+
+A run stops by itself when more than a tenth of the bots (and at least ten) failed to log in or were cut. To
+go on and write the losses instead (a test of a limit), give `--max-lost-percent 100`: the failures are then
+counted for each wave, and the first reasons are in `first_failure`.
 
 ## Steps
 
@@ -93,6 +114,18 @@ about a second: check them (`w32tm /stripchart /computer:<the other machine>` on
    the servers will listen, and writes `idle.csv`, `active.csv` and `windows.csv` in `--out-dir`.
    The usual guards apply (the free memory of machine A, bots lost, a run that lasts too long); the proxy cannot be watched from here,
    so a proxy that went away shows as bots that failed or were cut.
+
+## Before the real run
+
+A run of ten bots, one wave, through the proxy checks the whole path (the firewall, the file, the secret, the clocks) before a large one:
+
+```
+D:\disque\dev\meridian-bench-outin-lan\meridian-bench.exe load --proxy 192.168.1.25:25565 ^
+  --backend-bind 192.168.1.18 --backend-ports 25701-25710 ^
+  --remote-config D:\disque\dev\meridian-bench-outanc-lan\debian-load\meridian.toml ^
+  --players 10 --seconds 30 --direct-seconds 10 --max-total-seconds 300 ^
+  --out-dir D:\disque\dev\meridian-bench-outanc-lanun-smoke --label "lan smoke"
+```
 
 ## Limits
 
