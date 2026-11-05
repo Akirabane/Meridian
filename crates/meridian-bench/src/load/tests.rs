@@ -278,15 +278,36 @@ fn bots_play_through_a_proxy_reached_as_if_it_were_elsewhere() {
     assert_eq!(get(&idle, "proxy_answered"), "true");
     let mut direct = s.clone();
     direct.window = Duration::from_secs(3);
+    // Two waves of five, a second apart.
+    s.waves = 2;
+    s.wave_gap = Duration::from_secs(1);
     let active = remote::active(&s, &direct, 10, Compression::Same).unwrap();
     assert_eq!(get(&active, "logged_in"), "10", "{active:?}");
+    for wave in ["w1", "w2"] {
+        assert_eq!(get(&active, &format!("{wave}_bots")), "5", "{active:?}");
+        assert_eq!(
+            get(&active, &format!("{wave}_logged_in")),
+            "5",
+            "{active:?}"
+        );
+        assert_ne!(
+            get(&active, &format!("{wave}_join_start_ms")),
+            "",
+            "{active:?}"
+        );
+    }
+    // The first wave's bots played while the second came in: the figures are there.
+    assert!(
+        !get(&active, "w2_rest_rtt_p99_during_us").is_empty(),
+        "{active:?}"
+    );
     assert_eq!(get(&active, "proxy_answered"), "true");
     assert_ne!(get(&active, "proxy_rtt_p50_us"), "0");
     assert_ne!(get(&active, "raw_connect_p50_us"), "0");
     // Another threshold than the file's is refused rather than measured wrongly.
     assert!(remote::active(&s, &direct, 10, Compression::BothOff).is_err());
     let windows = s.windows.table().csv();
-    for phase in ["join", "hold", "measure"] {
+    for phase in ["join", "hold", "measure", "join wave 1", "join wave 2"] {
         assert!(windows.contains(phase), "{windows}");
     }
     assert!(proxy.alive());

@@ -106,6 +106,9 @@ pub struct Settings {
     pub remote: Option<super::remote::Remote>,
     /// When each phase of each step began and ended, for whoever reads the proxy's side.
     pub windows: Arc<super::remote::Windows>,
+    /// The bots arrive in this many waves, `wave_gap` apart (a proxy of another machine only).
+    pub waves: usize,
+    pub wave_gap: Duration,
 }
 
 /// A server of the proxy's configuration.
@@ -268,6 +271,113 @@ pub(super) fn plans(
                 0.0
             },
             moves_to: (i < movers).then(|| target.map(str::to_owned)).flatten(),
+            wave: 0,
+        })
+        .collect()
+}
+
+/// What one wave of bots did.
+pub(super) struct WaveResult {
+    pub(super) bots: usize,
+    pub(super) logged: u64,
+    pub(super) failed: u64,
+    pub(super) dropped: u64,
+    pub(super) logins: Summary,
+    /// From the first bot of the wave starting to the last one being in, or giving up.
+    pub(super) joined_ms: (u64, u64),
+    /// The round trips of the bots of the earlier waves, in the ten seconds before this wave
+    /// began, while it joined, and in the ten seconds after (or until the next wave): the figure
+    /// of a load that is still arriving. Empty for the first wave.
+    pub(super) rest_before: Summary,
+    pub(super) rest_during: Summary,
+    pub(super) rest_after: Summary,
+}
+
+/// Where the bots of each wave started and ended arriving, and their threads.
+pub(super) struct Arrivals {
+    pub(super) handles: Vec<JoinHandle<()>>,
+    /// For each wave: when it began, when its last bot was in (or the wait ran out), its bots.
+    pub(super) spans: Vec<(u64, u64, usize)>,
+}
+
+/// Brings `n` bots in `s.waves` waves of equal size (the last takes the rest), `s.wave_gap` apart:
+/// each wave starts together, and the next one after the gap that follows the last of this one being in.
+/// Each wave's start and end are written to the windows file.
+pub(super) fn arrive(
+    s: &Settings,
+    label: &str,
+    n: usize,
+    live: &Arc<Live>,
+    address: SocketAddr,
+    prefix: &str,
+    role: Role,
+) -> Arrivals {
+    let waves = s.waves.clamp(1, bot::MAX_WAVES);
+    let mut all = plans(s, address, n, prefix, role, 0, None).into_iter();
+    let (mut handles, mut spans) = (Vec::new(), Vec::new());
+    for w in 0..waves {
+        let count = n / waves + if w + 1 == waves { n % waves } else { 0 };
+        let mut wave: Vec<Plan> = all.by_ref().take(count).collect();
+        for plan in &mut wave {
+            plan.wave = w;
+        }
+        let from = Windows::now_ms();
+        handles.extend(launch(s, wave, live));
+        let done = |counts: &[AtomicU64; bot::MAX_WAVES]| {
+            counts[w].load(Ordering::Relaxed) + live.wave_failed[w].load(Ordering::Relaxed)
+                >= count as u64
+        };
+        wait_until(s, Duration::from_secs(120), || done(&live.wave_logins));
+        wait_until(s, Duration::from_secs(60), || done(&live.wave_joined));
+        let to = Windows::now_ms();
+        let phase = if waves > 1 {
+            format!("join wave {}", w + 1)
+        } else {
+            "join".to_owned()
+        };
+        s.windows.record(label, n, &phase, from, to);
+        spans.push((from, to, count));
+        if w + 1 < waves {
+            pause(s, s.wave_gap);
+        }
+    }
+    Arrivals { handles, spans }
+}
+
+/// The figures of each wave, from what the bots counted.
+pub(super) fn wave_results(
+    live: &Live,
+    spans: &[(u64, u64, usize)],
+    measure_from: u64,
+) -> Vec<WaveResult> {
+    const SIDE: u64 = 10_000;
+    let timed = live.timed_round_trips.lock().unwrap().clone();
+    let logins = live.wave_login_times.lock().unwrap().clone();
+    let rest = |wave: usize, from: u64, to: u64| {
+        Summary::of(
+            timed
+                .iter()
+                .filter(|(at, w, _)| *w < wave && *at >= from && *at <= to)
+                .map(|(_, _, micros)| us(*micros))
+                .collect(),
+        )
+    };
+    spans
+        .iter()
+        .enumerate()
+        .map(|(w, &(from, to, bots))| {
+            let next = spans.get(w + 1).map_or(measure_from, |s| s.0);
+            WaveResult {
+                bots,
+                logged: live.wave_logins[w].load(Ordering::Relaxed),
+                failed: live.wave_failed[w].load(Ordering::Relaxed),
+                dropped: live.wave_dropped[w].load(Ordering::Relaxed),
+                logins: Summary::of(logins.get(w).cloned().unwrap_or_default()),
+                joined_ms: (from, to),
+                rest_before: rest(w, from.saturating_sub(SIDE), from),
+                rest_during: rest(w, from, to),
+                rest_after: rest(w, to, (to + SIDE).min(next.max(to))),
+            }
         })
         .collect()
 }
@@ -279,6 +389,7 @@ pub(super) fn launch(s: &Settings, plans: Vec<Plan>, live: &Arc<Live>) -> Vec<Jo
         if s.stop.load(Ordering::Relaxed) {
             break;
         }
+        let plan_wave = plan.wave;
         let (bot_live, stop) = (Arc::clone(live), Arc::clone(&s.stop));
         let spawned = std::thread::Builder::new()
             .name("load-bot".into())
@@ -287,7 +398,7 @@ pub(super) fn launch(s: &Settings, plans: Vec<Plan>, live: &Arc<Live>) -> Vec<Jo
         match spawned {
             Ok(handle) => handles.push(handle),
             Err(e) => {
-                live.fail_to_start(&e.to_string());
+                live.fail_to_start(plan_wave, &e.to_string());
             }
         }
         if s.arrival > 0 {
@@ -502,6 +613,8 @@ pub(super) struct Played {
     pub(super) status: String,
     /// When the measured window began and ended, in milliseconds since the epoch.
     pub(super) measured_ms: (u64, u64),
+    /// How each wave of bots fared, and how the earlier waves' bots did while it arrived.
+    pub(super) waves: Vec<WaveResult>,
 }
 
 /// `n` active bots against `address` for the window. `proxy` is the process to read, if any.
@@ -524,16 +637,11 @@ pub(super) fn play(
         Arc::clone(&s.stop),
         s.min_free,
     );
-    let joining_from = Windows::now_ms();
-    let handles = launch(s, plans(s, address, n, "Act", Role::Active, 0, None), &live);
-    wait_until(s, Duration::from_secs(120), || {
-        live.logins.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed) >= n as u64
-    });
-    wait_until(s, Duration::from_secs(60), || {
-        live.joined.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed) >= n as u64
-    });
-    s.windows
-        .record(label, n, "join", joining_from, Windows::now_ms());
+    if s.waves > 1 {
+        live.timed.store(true, Ordering::Relaxed);
+    }
+    let arrivals = arrive(s, label, n, &live, address, "Act", Role::Active);
+    let handles = arrivals.handles;
     // The join of every player sends a whole world: let it be taken before the window opens.
     pause(s, Duration::from_secs(5));
     live.recent_round_trips.lock().unwrap().clear();
@@ -585,6 +693,7 @@ pub(super) fn play(
         #[cfg(test)]
         status: live.status.lock().map(|s| s.clone()).unwrap_or_default(),
         measured_ms,
+        waves: wave_results(&live, &arrivals.spans, measured_ms.0),
     };
     end(&live, handles);
     drop(sampler);
@@ -1074,6 +1183,7 @@ pub fn churn(s: &Settings, n: usize, cycles: u64) -> Result<Row, String> {
                             up_rate: 0,
                             probe_rate: 0.0,
                             moves_to: None,
+                            wave: 0,
                         };
                         cycle += 1;
                         // Stays a while, as a player who joins and leaves at once does.

@@ -47,6 +47,10 @@ pub struct Watch {
     pub proxy: Option<Pid>,
 }
 
+/// The share of the bots, in percent, that may be lost (failed to log in, or cut) before the run
+/// stops; 100 or more never stops it for that. Set once by the options.
+pub static MAX_LOST_PERCENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10);
+
 /// The sampler's thread and what it read.
 pub struct Sampler {
     began: Instant,
@@ -215,6 +219,7 @@ fn follow(
         last = (0, logins, down);
         // The guards: each one that trips stops the run, and says why.
         let lost = live.dropped.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed);
+        let percent = MAX_LOST_PERCENT.load(Ordering::Relaxed);
         let reason = if free < min_free {
             Some(format!(
                 "free memory is {:.1} GiB, under the floor of {:.1} GiB",
@@ -223,9 +228,9 @@ fn follow(
             ))
         } else if watch.proxy.is_some() && rss == 0 {
             Some("the proxy process is gone".to_owned())
-        } else if lost > (watch.players as u64 / 10).max(10) {
+        } else if percent < 100 && lost > (watch.players as u64 * percent / 100).max(10) {
             Some(format!(
-                "{lost} bots failed to log in or were dropped, over a tenth of the {}",
+                "{lost} bots failed to log in or were dropped, over {percent} % of the {}",
                 watch.players
             ))
         } else if second.elapsed() > Duration::from_secs(4) {

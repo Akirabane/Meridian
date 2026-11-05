@@ -29,6 +29,9 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// How long a bot's read waits before it looks at whether the run is ending.
 const TICK: Duration = Duration::from_secs(1);
 
+/// The most waves of bots a run may have.
+pub const MAX_WAVES: usize = 8;
+
 /// What a bot does once it is in the world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -52,6 +55,8 @@ pub struct Plan {
     pub probe_rate: f64,
     /// Whether this bot asks to be moved when `Live::move_now` is set, and where to.
     pub moves_to: Option<String>,
+    /// The wave it arrives in: what it counts, it counts for that wave too.
+    pub wave: usize,
 }
 
 /// What every bot adds to, read once a second by the run.
@@ -67,6 +72,17 @@ pub struct Live {
     /// Bots whose connection ended while the run still wanted them.
     pub dropped: AtomicU64,
     pub login_times: Mutex<Vec<Duration>>,
+    /// The same, for each wave of bots: logged in, failed, in the world, cut off, and the times of
+    /// their logins.
+    pub wave_logins: [AtomicU64; MAX_WAVES],
+    pub wave_failed: [AtomicU64; MAX_WAVES],
+    pub wave_joined: [AtomicU64; MAX_WAVES],
+    pub wave_dropped: [AtomicU64; MAX_WAVES],
+    pub wave_login_times: Mutex<Vec<Vec<Duration>>>,
+    /// While this is set, every round trip is kept with the moment it was read (milliseconds
+    /// since the epoch) and the wave of the bot, whether or not a window is being measured.
+    pub timed: AtomicBool,
+    pub timed_round_trips: Mutex<Vec<(u64, usize, u32)>>,
     /// The last status line the sampler wrote, for a failure to show what the run was doing.
     pub status: Mutex<String>,
     /// Only while this is set are round trips kept.
@@ -103,14 +119,27 @@ impl Live {
     }
 
     /// A bot whose thread could not start counts as failed.
-    pub fn fail_to_start(&self, why: &str) {
-        self.fail(Failure::Other(format!(
-            "the bot's thread did not start: {why}"
-        )));
+    pub fn fail_to_start(&self, wave: usize, why: &str) {
+        self.fail(
+            wave,
+            Failure::Other(format!("the bot's thread did not start: {why}")),
+        );
     }
 
-    fn fail(&self, failure: Failure) {
+    /// A login that took `took`, for a bot of this wave.
+    fn logged_in(&self, wave: usize, took: Duration) {
+        self.login_times.lock().unwrap().push(took);
+        let mut waves = self.wave_login_times.lock().unwrap();
+        if waves.len() <= wave {
+            waves.resize(wave + 1, Vec::new());
+        }
+        waves[wave].push(took);
+        self.wave_logins[wave.min(MAX_WAVES - 1)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn fail(&self, wave: usize, failure: Failure) {
         self.failed.fetch_add(1, Ordering::Relaxed);
+        self.wave_failed[wave.min(MAX_WAVES - 1)].fetch_add(1, Ordering::Relaxed);
         let text = match failure {
             Failure::Exhausted(why) => {
                 self.exhausted.fetch_add(1, Ordering::Relaxed);
@@ -131,11 +160,11 @@ pub fn visit(plan: &Plan, live: &Arc<Live>, stop: &AtomicBool, hold: Duration) {
     let connection = match login(plan) {
         Ok(connection) => connection,
         Err(failure) => {
-            live.fail(failure);
+            live.fail(plan.wave, failure);
             return;
         }
     };
-    live.login_times.lock().unwrap().push(began.elapsed());
+    live.logged_in(plan.wave, began.elapsed());
     live.logins.fetch_add(1, Ordering::Relaxed);
     // The bot reads what it is sent while it stays, so that it does not close on unread data,
     // which the system answers with a reset.
@@ -161,11 +190,11 @@ pub fn run(plan: &Plan, live: &Arc<Live>, stop: &Arc<AtomicBool>) {
     let connection = match login(plan) {
         Ok(connection) => connection,
         Err(failure) => {
-            live.fail(failure);
+            live.fail(plan.wave, failure);
             return;
         }
     };
-    live.login_times.lock().unwrap().push(began.elapsed());
+    live.logged_in(plan.wave, began.elapsed());
     live.logins.fetch_add(1, Ordering::Relaxed);
     live.connected.fetch_add(1, Ordering::Relaxed);
     // The read wakes once a second to see whether the run is ending: closing the connection from
@@ -177,7 +206,10 @@ pub fn run(plan: &Plan, live: &Arc<Live>, stop: &Arc<AtomicBool>) {
         live.closers.lock().unwrap().push(closer);
     }
     let writer = Arc::new(Mutex::new(writer));
-    let state = Arc::new(State::default());
+    let state = Arc::new(State {
+        wave: plan.wave.min(MAX_WAVES - 1),
+        ..State::default()
+    });
     let acting = match plan.role {
         Role::Idle => None,
         Role::Active => {
@@ -200,6 +232,7 @@ pub fn run(plan: &Plan, live: &Arc<Live>, stop: &Arc<AtomicBool>) {
     live.connected.fetch_sub(1, Ordering::Relaxed);
     if !stop.load(Ordering::Relaxed) && !live.ending.load(Ordering::Relaxed) && ended.is_err() {
         live.dropped.fetch_add(1, Ordering::Relaxed);
+        live.wave_dropped[state.wave].fetch_add(1, Ordering::Relaxed);
     }
     if let Some(thread) = acting {
         let _ = thread.join();
@@ -245,6 +278,8 @@ fn login(plan: &Plan) -> Result<Connection, Failure> {
 /// What the two threads of a bot share.
 #[derive(Default)]
 struct State {
+    /// The wave this bot arrived in.
+    wave: usize,
     over: AtomicBool,
     /// The measuring packet in flight: its number, and when it left, in nanoseconds since
     /// `began`.
@@ -402,6 +437,7 @@ fn listen(
                 if !joined {
                     joined = true;
                     live.joined.fetch_add(1, Ordering::Relaxed);
+                    live.wave_joined[state.wave].fetch_add(1, Ordering::Relaxed);
                 }
             }
             pc::CHUNK_BATCH_FINISHED => {
@@ -410,13 +446,26 @@ fn listen(
             pc::CUSTOM_PAYLOAD => {
                 if let Some(seq) = echo::seq(&payload)
                     && seq == state.probe_seq.load(Ordering::Relaxed)
-                    && live.measuring.load(Ordering::Relaxed)
                 {
-                    let sent = state.probe_sent.load(Ordering::Relaxed);
-                    let now = began.elapsed().as_nanos() as u64;
-                    let micros = (now.saturating_sub(sent) / 1_000).min(u64::from(u32::MAX)) as u32;
-                    live.round_trips.lock().unwrap().push(micros);
-                    live.recent_round_trips.lock().unwrap().push(micros);
+                    let measuring = live.measuring.load(Ordering::Relaxed);
+                    let timed = live.timed.load(Ordering::Relaxed);
+                    if measuring || timed {
+                        let sent = state.probe_sent.load(Ordering::Relaxed);
+                        let now = began.elapsed().as_nanos() as u64;
+                        let micros =
+                            (now.saturating_sub(sent) / 1_000).min(u64::from(u32::MAX)) as u32;
+                        if measuring {
+                            live.round_trips.lock().unwrap().push(micros);
+                        }
+                        live.recent_round_trips.lock().unwrap().push(micros);
+                        if timed {
+                            live.timed_round_trips.lock().unwrap().push((
+                                super::remote::Windows::now_ms(),
+                                state.wave,
+                                micros,
+                            ));
+                        }
+                    }
                 }
             }
             pc::SYSTEM_CHAT => {

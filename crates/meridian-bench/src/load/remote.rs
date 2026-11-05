@@ -12,8 +12,8 @@
 use super::bot::{Live, Role};
 use super::sample::{Sampler, Watch, mean, mib, peak};
 use super::scenario::{
-    Compression, Server, Settings, Spec, active_traffic, configuration, end, first_failure, launch,
-    ms, pause, plans, play, start_world, wait_until,
+    Compression, Server, Settings, Spec, WaveResult, active_traffic, arrive, configuration, end,
+    first_failure, ms, pause, play, start_world, wave_results,
 };
 use super::table::{Row, Table};
 use super::world::Traffic;
@@ -71,7 +71,7 @@ pub fn parse_ports(text: &str) -> Result<(u16, u16), String> {
 struct Window {
     step: String,
     players: usize,
-    phase: &'static str,
+    phase: String,
     from: u64,
     to: u64,
 }
@@ -89,12 +89,12 @@ impl Windows {
             .as_millis() as u64
     }
 
-    pub fn record(&self, step: &str, players: usize, phase: &'static str, from: u64, to: u64) {
+    pub fn record(&self, step: &str, players: usize, phase: &str, from: u64, to: u64) {
         if let Ok(mut all) = self.0.lock() {
             all.push(Window {
                 step: step.to_owned(),
                 players,
-                phase,
+                phase: phase.to_owned(),
                 from,
                 to,
             });
@@ -109,7 +109,7 @@ impl Windows {
                 Row::new()
                     .with("step", &w.step)
                     .with("players", w.players)
-                    .with("phase", w.phase)
+                    .with("phase", &w.phase)
                     .with("start_utc", crate::utc_at(w.from / 1000))
                     .with("end_utc", crate::utc_at(w.to / 1000))
                     .with("start_epoch_ms", w.from)
@@ -143,7 +143,11 @@ pub fn generate(remote: &Remote, threshold: i32, secret: &str) -> String {
         "# Written by `meridian-bench load --write-remote-config`: the proxy of a load run, in front of\n\
          # the synthetic servers of the machine that runs the bots. It holds a secret: keep it private,\n\
          # and make a new file for each run.\n\
-         {}",
+         {}\n\
+         # The proxy's own counters, for whoever reads the proxy's side (on its loopback only).\n\
+         [metrics]\n\
+         enabled = true\n\
+         bind = \"127.0.0.1:9100\"\n",
         configuration(remote.proxy, &[lobby], threshold, secret, None)
     )
 }
@@ -283,28 +287,19 @@ pub fn idle(s: &Settings, n: usize) -> Result<Row, String> {
         Arc::clone(&s.stop),
         s.min_free,
     );
-    let began = Instant::now();
-    let joining_from = Windows::now_ms();
-    let handles = launch(
-        s,
-        plans(s, remote.proxy, n, "Idle", Role::Idle, 0, None),
-        &live,
+    let arrivals = arrive(s, "idle", n, &live, remote.proxy, "Idle", Role::Idle);
+    let handles = arrivals.handles;
+    let (joining_from, joined_at) = (
+        arrivals.spans.first().map_or(0, |w| w.0),
+        arrivals.spans.last().map_or(0, |w| w.1),
     );
-    let done =
-        |live: &Live| live.logins.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed);
-    wait_until(s, Duration::from_secs(120), || done(&live) >= n as u64);
-    let logins_took = began.elapsed();
-    wait_until(s, Duration::from_secs(60), || {
-        live.joined.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed) >= n as u64
-    });
-    let joined_at = Windows::now_ms();
-    s.windows.record("idle", n, "join", joining_from, joined_at);
     pause(s, Duration::from_secs(3));
     let held_from = Windows::now_ms();
     let (from, until) = (sampler.now(), sampler.now() + s.window.as_secs_f64());
     pause(s, s.window);
     let held_to = Windows::now_ms();
     s.windows.record("idle", n, "hold", held_from, held_to);
+    let waves = wave_results(&live, &arrivals.spans, held_from);
     let window = sampler.between(from, until.min(sampler.now()));
     let (sent, answered) = (
         world.counters.keepalives_sent.load(Ordering::Relaxed),
@@ -321,7 +316,7 @@ pub fn idle(s: &Settings, n: usize) -> Result<Row, String> {
     end(&live, handles);
     drop(sampler);
     drop(world);
-    Ok(Row::new()
+    let row = Row::new()
         .with("scenario", "idle")
         .with("mode", "remote")
         .with("players", n)
@@ -335,7 +330,7 @@ pub fn idle(s: &Settings, n: usize) -> Result<Row, String> {
         .num("login_p95_ms", ms(logins.p95), 1)
         .num("login_p99_ms", ms(logins.p99), 1)
         .num("login_max_ms", ms(logins.max), 1)
-        .num("logins_per_s", logged as f64 / logins_took.as_secs_f64(), 0)
+        .num("logins_per_s", first_wave_rate(&waves), 0)
         .with("keepalives_sent", sent)
         .with("keepalives_answered", answered)
         .num(
@@ -349,9 +344,54 @@ pub fn idle(s: &Settings, n: usize) -> Result<Row, String> {
         .with("window_end_utc", utc_ms(held_to))
         .with("window_start_ms", held_from)
         .with("window_end_ms", held_to)
-        .with("proxy_answered", logged > 0 && failed == 0 && !tripped)
+        .with("proxy_answered", logged > 0 && !tripped)
         .with("guard_tripped", tripped)
-        .with("first_failure", first))
+        .with("first_failure", first);
+    Ok(wave_columns(row, &waves, false))
+}
+
+/// Logins a second of the first wave: its bots over the time they took to be in the world.
+fn first_wave_rate(waves: &[WaveResult]) -> f64 {
+    waves.first().map_or(0.0, |w| {
+        w.logged as f64 / (w.joined_ms.1.saturating_sub(w.joined_ms.0).max(1) as f64 / 1000.0)
+    })
+}
+
+/// A name made at run time, for the columns of the waves (a few dozen in all, kept for good).
+fn leak(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
+/// The columns of each wave: its bots, failures, cuts, login times and when it arrived; and, for
+/// the waves after the first, the round trips of the bots already in, before, during and after.
+fn wave_columns(mut row: Row, waves: &[WaveResult], with_round_trips: bool) -> Row {
+    row = row.with("waves", waves.len());
+    for (i, w) in waves.iter().enumerate() {
+        let k = i + 1;
+        let name = |what: &str| leak(format!("w{k}_{what}"));
+        row = row
+            .with(name("bots"), w.bots)
+            .with(name("logged_in"), w.logged)
+            .with(name("failed"), w.failed)
+            .with(name("dropped"), w.dropped)
+            .num(name("login_p50_ms"), ms(w.logins.p50), 1)
+            .num(name("login_p95_ms"), ms(w.logins.p95), 1)
+            .num(name("login_p99_ms"), ms(w.logins.p99), 1)
+            .num(name("login_max_ms"), ms(w.logins.max), 1)
+            .with(name("join_start_utc"), utc_ms(w.joined_ms.0))
+            .with(name("join_end_utc"), utc_ms(w.joined_ms.1))
+            .with(name("join_start_ms"), w.joined_ms.0)
+            .with(name("join_end_ms"), w.joined_ms.1);
+        if k > 1 && with_round_trips {
+            row = row
+                .num(name("rest_rtt_p99_before_us"), micros(w.rest_before.p99), 0)
+                .num(name("rest_rtt_p99_during_us"), micros(w.rest_during.p99), 0)
+                .num(name("rest_rtt_p99_after_us"), micros(w.rest_after.p99), 0)
+                .num(name("rest_rtt_max_during_us"), micros(w.rest_during.max), 0)
+                .with(name("rest_rtt_samples_during"), w.rest_during.count);
+        }
+    }
+    row
 }
 
 /// R2: the same `n` active bots straight to the server on this machine, then through the remote
@@ -411,7 +451,7 @@ pub fn active(
     // between the proxy and the servers twice; here both are one link, which `raw_connect` times
     // once, so about two of those round trips are the network's share of what the proxy "adds".
     let network = 2.0 * micros(raw.p50);
-    Ok(Row::new()
+    let row = Row::new()
         .with("scenario", "active")
         .with("mode", "remote")
         .with("players", n)
@@ -467,12 +507,10 @@ pub fn active(
         .with("window_end_utc", utc_ms(proxied.measured_ms.1))
         .with("window_start_ms", proxied.measured_ms.0)
         .with("window_end_ms", proxied.measured_ms.1)
-        .with(
-            "proxy_answered",
-            proxied.logged > 0 && proxied.failed == 0 && !proxied.tripped,
-        )
+        .with("proxy_answered", proxied.logged > 0 && !proxied.tripped)
         .with("guard_tripped", proxied.tripped || direct.tripped)
-        .with("first_failure", proxied.first_failure))
+        .with("first_failure", proxied.first_failure.clone());
+    Ok(wave_columns(row, &proxied.waves, true))
 }
 
 #[cfg(test)]
@@ -517,6 +555,9 @@ mod tests {
         assert_eq!(config.backends[0].name, "lobby");
         assert_eq!(config.backends[0].address, "192.168.1.18:25701");
         assert_eq!(config.max_pending_logins, 0);
+        assert_eq!(config.max_players, 0);
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.bind.to_string(), "127.0.0.1:9100");
         // A run reads the secret and the threshold from the file, and refuses a file made for
         // other ports.
         let dir = std::env::temp_dir().join(format!("meridian-remote-test-{}", std::process::id()));

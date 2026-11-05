@@ -59,6 +59,11 @@ Options:
   --max-bots N          the most bots a step may have (default 500)
   --max-seconds N       the longest window (default 60)
   --max-total-seconds N the whole run: past it the run is stopped, and cut a minute later (default 1800)
+  --waves N             with a proxy of another machine: the bots arrive in N waves of equal size,
+                        all the bots of a wave at once (default 1, at most 8)
+  --wave-gap-seconds N  the time between the last of a wave being in and the next wave (default 30)
+  --max-lost-percent N  stop when more than N % of the bots (and 10) failed to log in or were cut
+                        (default 10); 100 never stops for that: the run goes on and writes the losses
   --min-free-gib N      stop when the machine has less memory free (default 16)
   --proxy PATH|ADDR     the meridian program (default: next to this one), or, when it is an
                         address (192.168.1.25:25565), the proxy of ANOTHER machine to run against
@@ -141,6 +146,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             spectator: None,
             remote: None,
             windows: Arc::default(),
+            waves: 1,
+            wave_gap: Duration::from_secs(30),
         },
         write_remote: None,
     };
@@ -248,6 +255,22 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             "--max-total-seconds" => {
                 max_total = number(&value("--max-total-seconds")?, "--max-total-seconds")?
             }
+            "--waves" => {
+                o.settings.waves = number(&value("--waves")?, "--waves")? as usize;
+                if o.settings.waves == 0 || o.settings.waves > bot::MAX_WAVES {
+                    return Err(format!("--waves takes 1 to {}", bot::MAX_WAVES));
+                }
+            }
+            "--wave-gap-seconds" => {
+                o.settings.wave_gap = Duration::from_secs(number(
+                    &value("--wave-gap-seconds")?,
+                    "--wave-gap-seconds",
+                )?)
+            }
+            "--max-lost-percent" => {
+                let percent = number(&value("--max-lost-percent")?, "--max-lost-percent")?;
+                sample::MAX_LOST_PERCENT.store(percent, std::sync::atomic::Ordering::Relaxed)
+            }
             "--min-free-gib" => {
                 o.settings.min_free = (real(&value("--min-free-gib")?, "--min-free-gib")?
                     * (1u64 << 30) as f64) as u64
@@ -321,6 +344,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             .map_err(|e| e.to_string())?
             .with_file_name(format!("meridian{}", std::env::consts::EXE_SUFFIX)),
     };
+    if o.settings.waves > 1 && remote_proxy.is_none() {
+        return Err("--waves goes with --proxy ADDRESS: the proxy of another machine".into());
+    }
     if let Some(address) = remote_proxy {
         let bind = bind.ok_or("a proxy of another machine needs --backend-bind: this machine's address it reaches the servers by")?;
         if o.settings.spectator.is_some() {
@@ -520,6 +546,7 @@ fn run(o: &Options) -> bool {
                         .map(|&c| {
                             let mut direct = s.clone();
                             direct.window = o.direct_window;
+                            direct.waves = 1;
                             (
                                 format!("active {n} {}", c.name()),
                                 remote::active(s, &direct, n, c),
