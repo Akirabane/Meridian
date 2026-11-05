@@ -84,7 +84,7 @@ fn a_target_is_configured_as_the_client_was() {
         send(&mut server, c::FINISH_CONFIGURATION, &[]);
         expect(&mut server, s::FINISH_CONFIGURATION).unwrap();
     });
-    let got = configure(&mut proxy, &client).unwrap();
+    let (got, _) = configure(&mut proxy, &client).unwrap();
     script.join().unwrap();
     use c::{REGISTRY_DATA, SELECT_KNOWN_PACKS};
     assert_eq!(
@@ -99,4 +99,136 @@ fn a_code_of_conduct_the_player_never_accepted_is_refused() {
     send(&mut server, cfg::clientbound::CODE_OF_CONDUCT, b"\x02hi");
     let error = configure(&mut proxy, &ClientConfiguration::default()).unwrap_err();
     assert!(error.contains("code of conduct"), "{error}");
+}
+
+/// A Registry Data payload: the registry's name, its number of entries, then `rest` as
+/// the entries.
+fn registry(name: &str, entries: i32, rest: &[u8]) -> Vec<u8> {
+    let mut w = horizon_protocol::buf::Writer::new();
+    w.string(name);
+    let mut payload = w.data;
+    horizon_protocol::buf::write_varint(&mut payload, entries);
+    payload.extend_from_slice(rest);
+    payload
+}
+
+fn configured(packets: &[(i32, Vec<u8>)]) -> (Digest, crate::configure::Summary) {
+    let mut builder = DigestBuilder::default();
+    for (id, payload) in packets {
+        builder.add(*id, payload);
+    }
+    (builder.finish(), builder.summary())
+}
+
+fn short(packets: &[&[u8]]) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hash = Sha256::new();
+    for payload in packets {
+        hash.update((payload.len() as u64).to_be_bytes());
+        hash.update(payload);
+    }
+    hash.finalize()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A refusal says, for the kind that differs, its packets, bytes and a short hash on
+/// each side, and which registry differs first, with its entries and bytes: enough to
+/// tell entries sent without their data (a pack the client knows) from entries sent
+/// with it.
+#[test]
+fn a_difference_in_the_registries_is_explained() {
+    use crate::configure::explain;
+    use cfg::clientbound::{REGISTRY_DATA, UPDATE_TAGS};
+    let banner = registry("minecraft:banner_pattern", 2, &[0, 0]);
+    let biome_known = registry("minecraft:worldgen/biome", 3, &[0, 0, 0]);
+    let biome_full = registry("minecraft:worldgen/biome", 3, &[1; 40]);
+    let extra = registry("minecraft:damage_type", 1, &[0]);
+    let ours = configured(&[
+        (REGISTRY_DATA, banner.clone()),
+        (REGISTRY_DATA, biome_known.clone()),
+        (UPDATE_TAGS, vec![5]),
+    ]);
+    let theirs = configured(&[
+        (REGISTRY_DATA, banner.clone()),
+        (REGISTRY_DATA, biome_full.clone()),
+        (REGISTRY_DATA, extra.clone()),
+        (UPDATE_TAGS, vec![5]),
+    ]);
+    let text = explain("game1", (&ours.0, &ours.1), (&theirs.0, &theirs.1)).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "registry data: the client's 2 packets, {} bytes, hash {}, game1's 3 packets, {} \
+             bytes, hash {}; 2 registries differ, the first minecraft:worldgen/biome (the \
+             client's 3 entries, {} bytes, game1's 3 entries, {} bytes)",
+            banner.len() + biome_known.len(),
+            short(&[&banner, &biome_known]),
+            banner.len() + biome_full.len() + extra.len(),
+            short(&[&banner, &biome_full, &extra]),
+            biome_known.len(),
+            biome_full.len(),
+        )
+    );
+    assert_eq!(
+        explain("game1", (&ours.0, &ours.1), (&ours.0, &ours.1)),
+        None
+    );
+    // The same registries in another order.
+    let swapped = configured(&[
+        (REGISTRY_DATA, biome_known.clone()),
+        (REGISTRY_DATA, banner.clone()),
+        (UPDATE_TAGS, vec![5]),
+    ]);
+    let text = explain("game1", (&ours.0, &ours.1), (&swapped.0, &swapped.1)).unwrap();
+    assert!(
+        text.ends_with("every registry is the same, so their order differs"),
+        "{text}"
+    );
+    // Another kind: its sizes and hashes, no registry.
+    let tags = configured(&[
+        (REGISTRY_DATA, banner.clone()),
+        (REGISTRY_DATA, biome_known.clone()),
+        (UPDATE_TAGS, vec![6, 6]),
+    ]);
+    let text = explain("game1", (&ours.0, &ours.1), (&tags.0, &tags.1)).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "tags: the client's 1 packets, 1 bytes, hash {}, game1's 1 packets, 2 bytes, hash {}",
+            short(&[&[5]]),
+            short(&[&[6, 6]])
+        )
+    );
+}
+
+/// A name that is not an identifier is not written: the packet is named by its place.
+#[test]
+fn a_registry_whose_name_cannot_be_read_is_named_by_its_place() {
+    use crate::configure::explain;
+    use cfg::clientbound::REGISTRY_DATA;
+    let ours = configured(&[(REGISTRY_DATA, vec![7; 30])]);
+    let theirs = configured(&[(REGISTRY_DATA, registry("Not\nA Name", 1, &[0]))]);
+    let text = explain("game1", (&ours.0, &ours.1), (&theirs.0, &theirs.1)).unwrap();
+    assert!(
+        text.ends_with(
+            "1 registries differ, the first registry packet 1 (unreadable name) (the client's \
+             30 bytes, game1's 13 bytes)"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Not"), "{text}");
+}
+
+#[test]
+fn the_known_packs_a_client_named_are_counted() {
+    use cfg::serverbound::SELECT_KNOWN_PACKS;
+    let mut client = ClientConfiguration::default();
+    assert_eq!(client.known_pack_count(), 0);
+    client.record(SELECT_KNOWN_PACKS, &[0]);
+    assert_eq!(client.known_pack_count(), 0);
+    // minecraft:core 26.3
+    client.record(SELECT_KNOWN_PACKS, b"\x01\x09minecraft\x04core\x0426.3");
+    assert_eq!(client.known_pack_count(), 1);
 }

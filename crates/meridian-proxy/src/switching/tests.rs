@@ -826,7 +826,8 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
                 host: "127.0.0.1".into(),
                 port,
                 name: "Bot".into(),
-                seconds: 2,
+                // Long enough for a slow machine; the test ends the session itself.
+                seconds: 30,
             },
             &Recorder::new(),
             &link,
@@ -871,7 +872,8 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
     assert!(!refused.text.contains("You are now on"), "{}", refused.text);
     eprintln!("{}", refused.text);
 
-    // The bot stays its time and leaves cleanly: it was not disconnected on the way.
+    // The bot leaves when the test is done, cleanly: it was not disconnected on the way.
+    handle.controller.leave().unwrap();
     assert_eq!(bot.join().unwrap(), End::Clean);
     proxy.stop();
     server.join().unwrap().unwrap();
