@@ -61,6 +61,8 @@ Options:
   --max-total-seconds N the whole run: past it the run is stopped, and cut a minute later (default 1800)
   --waves N             with a proxy of another machine: the bots arrive in N waves of equal size,
                         all the bots of a wave at once (default 1, at most 8)
+  --direct-waves N      the waves the bots of the direct phase of `active` arrive in (default 2, as
+                        the phase through the proxy; `--waves` is for the phase through the proxy)
   --wave-gap-seconds N  the time between the last of a wave being in and the next wave (default 30)
   --max-lost-percent N  stop when more than N % of the bots (and 10) failed to log in or were cut
                         (default 10); 100 never stops for that: the run goes on and writes the losses
@@ -94,6 +96,9 @@ struct Options {
     steps: Vec<usize>,
     compressions: Vec<Compression>,
     direct_window: Duration,
+    /// How many waves the bots of the direct phase arrive in: the same arrival as the phase through
+    /// the proxy, so that the two compare (a proxy of another machine only).
+    direct_waves: usize,
     churn_cycles: u64,
     out_dir: Option<PathBuf>,
     append: bool,
@@ -117,6 +122,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             Compression::BothOff,
         ],
         direct_window: Duration::from_secs(20),
+        direct_waves: 2,
         churn_cycles: 3_000,
         out_dir: None,
         append: false,
@@ -259,6 +265,12 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
                 o.settings.waves = number(&value("--waves")?, "--waves")? as usize;
                 if o.settings.waves == 0 || o.settings.waves > bot::MAX_WAVES {
                     return Err(format!("--waves takes 1 to {}", bot::MAX_WAVES));
+                }
+            }
+            "--direct-waves" => {
+                o.direct_waves = number(&value("--direct-waves")?, "--direct-waves")? as usize;
+                if o.direct_waves == 0 || o.direct_waves > bot::MAX_WAVES {
+                    return Err(format!("--direct-waves takes 1 to {}", bot::MAX_WAVES));
                 }
             }
             "--wave-gap-seconds" => {
@@ -546,7 +558,7 @@ fn run(o: &Options) -> bool {
                         .map(|&c| {
                             let mut direct = s.clone();
                             direct.window = o.direct_window;
-                            direct.waves = 1;
+                            direct.waves = o.direct_waves;
                             (
                                 format!("active {n} {}", c.name()),
                                 remote::active(s, &direct, n, c),
@@ -658,8 +670,12 @@ fn columns(scenario: &str, remote: bool) -> &'static [&'static str] {
             "logged_in",
             "failed",
             "raw_connect_p50_us",
+            "direct_logged",
+            "direct_failed",
+            "direct_login_p99_ms",
             "direct_rtt_p50_us",
             "proxy_rtt_p50_us",
+            "added_valid",
             "added_p50_us",
             "added_p99_us",
             "network_estimate_us",
