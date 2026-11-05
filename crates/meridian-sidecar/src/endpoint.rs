@@ -71,7 +71,8 @@ impl Endpoint {
 /// One line of JSON.
 fn read_json(reader: &mut impl BufRead) -> Result<Value, Error> {
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    // As long as the longest line the endpoint takes: an answer is never longer.
+    if crate::wire::read_line(reader, &mut line, crate::request::MAX_LINE)? == 0 {
         return Err(Error::Endpoint("the backend closed the connection".into()));
     }
     serde_json::from_str(line.trim())

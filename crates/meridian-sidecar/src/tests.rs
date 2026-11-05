@@ -8,7 +8,7 @@ use crate::request::Outcome;
 use crate::server::{Settings, serve};
 use crate::wire::{self, Direction};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1106,4 +1106,31 @@ fn the_requests_on_the_lists_take_no_other_field() {
         }
     );
     assert!(serde_json::from_str::<Request>(r#"{"op":"manage","method":"bans","x":1}"#).is_err());
+}
+
+/// A line longer than the longest signed line, from a peer that never ends it, is
+/// refused as it comes, before the line break that would end it: the sidecar does not
+/// keep more of it, nor wait for the rest, and closes the connection.
+#[test]
+fn a_line_past_the_longest_signed_line_is_refused_before_its_end() {
+    let running = Running::start(echo(), WAIT);
+    let raw = Raw::open(&running.address);
+    let mut writer = raw.writer.try_clone().unwrap();
+    let sender = std::thread::spawn(move || {
+        let chunk = vec![b'a'; 1 << 20];
+        for _ in 0..(wire::MAX_SIGNED_LINE >> 20) + 2 {
+            if writer.write_all(&chunk).is_err() {
+                return;
+            }
+        }
+    });
+    let started = std::time::Instant::now();
+    let mut rest = Vec::new();
+    let _ = raw.reader.into_inner().read_to_end(&mut rest);
+    assert!(
+        started.elapsed() < WAIT,
+        "the sidecar waited {:?} for the end of the line",
+        started.elapsed()
+    );
+    sender.join().unwrap();
 }

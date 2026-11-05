@@ -7,7 +7,7 @@ use crate::management::Notices;
 use crate::request::{NoticeHeard, NoticeReport, Request};
 use crate::wire::{self, Direction, Expected};
 use serde_json::{Value, json};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,7 +84,9 @@ fn serve_connection(stream: TcpStream, settings: &Settings) -> Result<(), Error>
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        // A line longer than any signed one is refused as it comes: whoever sends it
+        // does not have the secret, and the sidecar keeps no more of it.
+        if wire::read_line(&mut reader, &mut line, wire::MAX_SIGNED_LINE)? == 0 {
             return Ok(());
         }
         let opened = wire::open(

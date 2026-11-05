@@ -5,7 +5,7 @@ use crate::lists::AccessReport;
 use crate::request::{Arrival, NoticeReport, Outcome, Request, ServerStatus};
 use crate::wire::{self, Challenge, Direction, Expected};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ impl SidecarClient {
         let writer = stream.try_clone()?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+        if wire::read_line(&mut reader, &mut line, wire::MAX_CHALLENGE_LINE)? == 0 {
             return Err(Error::Refused("the sidecar closed the connection".into()));
         }
         let challenge = wire::read_challenge(line.trim())?;
@@ -113,7 +113,7 @@ impl SidecarClient {
         );
         writeln!(self.writer, "{line}")?;
         let mut reply = String::new();
-        if self.reader.read_line(&mut reply)? == 0 {
+        if wire::read_line(&mut self.reader, &mut reply, wire::MAX_SIGNED_LINE)? == 0 {
             return Err(Error::Endpoint("the sidecar closed the connection".into()));
         }
         // The sidecar refuses a line it cannot trust with an unsigned error, then

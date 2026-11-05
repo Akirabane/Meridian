@@ -27,9 +27,33 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::io::{self, BufRead, Read};
 
 /// The length of a challenge, in bytes.
 pub const CHALLENGE_LEN: usize = 32;
+
+/// The longest signed line read, line break included: a body as long as the longest
+/// line Horizon's control endpoint takes ([`crate::request::MAX_LINE`]), written as a
+/// JSON string, where each quote and backslash of the body is doubled, and the fields
+/// around it.
+pub const MAX_SIGNED_LINE: usize = 2 * crate::request::MAX_LINE + 4096;
+
+/// The longest first line, the challenge's: its 64 hex digits and the JSON around them.
+pub const MAX_CHALLENGE_LINE: usize = 256;
+
+/// Reads one line into `line`, as `BufRead::read_line` does, but never more than `max`
+/// bytes: a peer that sends a longer one, or never ends it, gets an error as soon as it
+/// passes `max`, and nothing more of it is kept.
+pub fn read_line(reader: &mut impl BufRead, line: &mut String, max: usize) -> io::Result<usize> {
+    let read = reader.take(max as u64 + 1).read_line(line)?;
+    if read > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a line longer than {max} bytes"),
+        ));
+    }
+    Ok(read)
+}
 
 /// A challenge: what makes one connection's signatures useless on another.
 pub type Challenge = [u8; CHALLENGE_LEN];
