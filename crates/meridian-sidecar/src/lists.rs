@@ -293,13 +293,16 @@ impl Lists {
             }
             let id = calls.next_id;
             calls.next_id += 1;
-            let text = json!({
+            let mut message = json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "method": format!("minecraft:{method}"),
-                "params": params,
-            })
-            .to_string();
+            });
+            // A method with no parameter takes no `params` at all: the server refuses a null.
+            if !params.is_null() {
+                message["params"] = params.clone();
+            }
+            let text = message.to_string();
             calls.waiting.push(Outgoing { id, text, reply });
         }
         match answer.recv_timeout(timeout.min(CALL_TIMEOUT)) {

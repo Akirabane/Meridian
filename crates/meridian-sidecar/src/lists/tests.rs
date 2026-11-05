@@ -478,6 +478,21 @@ fn a_call_is_written_to_the_server_and_its_answer_comes_back() {
 }
 
 #[test]
+fn a_call_with_no_parameter_sends_no_params() {
+    let server = fake(
+        1,
+        Arc::new(|request| Action::say(vec![result_of(request, json!([]))])),
+    );
+    let listening = listen(&server);
+    assert_eq!(
+        listening.notices.lists.call("bans", &Value::Null, WAIT),
+        Ok(json!([]))
+    );
+    let received = server.received.lock().unwrap();
+    assert!(received[0].get("params").is_none(), "{}", received[0]);
+}
+
+#[test]
 fn two_calls_get_their_own_answers() {
     let server = fake(
         1,
