@@ -48,7 +48,7 @@ jobs:
             echo "cannot read the head of horizon-rust/horizon" >&2
             exit 1
           fi
-          pinned=$(sed -n 's|.*horizon-rust/horizon", rev = "\([0-9a-f]\{40\}\)".*|\1|p' Cargo.toml)
+          pinned=$(sed -n 's|.*horizon-rust/horizon", rev = "\([0-9a-f]\{40\}\)".*|\1|p' Cargo.toml | head -n 1)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable

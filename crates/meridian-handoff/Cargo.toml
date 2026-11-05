@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 horizon-protocol.workspace = true
+horizon-world.workspace = true
 meridian-ghost.workspace = true
 meridian-net.workspace = true
 meridian-rewrite.workspace = true

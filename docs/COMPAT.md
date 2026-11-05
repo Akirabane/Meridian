@@ -5,7 +5,11 @@ Horizon's own code: the `horizon-protocol` crate, with the two crates it depends
 `horizon-core` and `horizon-world`. It is pinned to one commit of
 [horizon-rust/horizon](https://github.com/horizon-rust/horizon). The commit is
 `rev` in `[workspace.dependencies]` of the root `Cargo.toml`, and
-[BUILD.md](BUILD.md) repeats it under "Pinned commit". Meridian speaks the protocol of
+[BUILD.md](BUILD.md) repeats it under "Pinned commit". Two lines of that file name the
+revision, the one of `horizon-protocol` and the one of `horizon-world` (which
+`meridian-handoff` uses directly for the text components), and the two must stay identical:
+`scripts/bump-horizon.sh` rewrites both and refuses to go on if one is left behind. By hand,
+change both. Meridian speaks the protocol of
 Minecraft Java 26.3 ([PACKETS.md](PACKETS.md)), as the pinned commit does.
 
 The pin keeps a change in Horizon from breaking a build by surprise. It also means a
@@ -85,7 +89,7 @@ scripts/bump-horizon.sh <commit>     # to a given commit, branch or tag
 scripts/bump-horizon.sh --no-test    # rewrite and fetch, do not test
 ```
 
-The script rewrites `rev` in `Cargo.toml` and the "Pinned commit" line of
+The script rewrites `rev` on both lines of `Cargo.toml` that name it and the "Pinned commit" line of
 [BUILD.md](BUILD.md), lets Cargo update `Cargo.lock`, lists the Horizon commits that
 touched the protocol crates between the two, and runs `cargo test --workspace`. When
 that fails it prints the first compiler errors and the failed tests. The files keep

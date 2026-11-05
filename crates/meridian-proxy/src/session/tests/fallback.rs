@@ -3,7 +3,7 @@ use super::*;
 use crate::fallback::{Context, replacer};
 use horizon_protocol::{buf::Reader, ids, packets::play as packets};
 use meridian_config::{AuthKind, BalancedServer, Balancing, Role};
-use meridian_handoff::{Loss, Replacement};
+use meridian_handoff::{Loss, Notice, Replacement};
 use std::collections::VecDeque;
 
 const LOBBY: &str = "127.0.0.1:25601";
@@ -24,7 +24,7 @@ fn ask(
     sessions: &Sessions,
     up: Vec<(&str, bool)>,
     loss: Loss,
-) -> (Result<Replacement, String>, Vec<String>) {
+) -> (Result<Replacement, Notice>, Vec<String>) {
     let (connect, reachable) = reachable(up);
     let (_relay, handle, _player, _server) = idle_session_on("Alex", "lobby");
     let profile = Profile {
@@ -66,7 +66,7 @@ fn a_crash_sends_the_player_to_the_next_server_of_the_list() {
     assert_eq!(replacement.backend, "east");
     let notice = replacement.notice.unwrap();
     assert!(
-        notice.contains("lobby") && notice.contains("east"),
+        notice.to_string().contains("lobby") && notice.to_string().contains("east"),
         "{notice}"
     );
 }
@@ -90,9 +90,11 @@ fn when_no_server_answers_the_player_is_told_so() {
     let (answer, tried) = ask(&listed(), &sessions, vec![], crash());
     assert_eq!(tried, [EAST, WEST]);
     let message = answer.err().unwrap();
-    assert!(message.contains("lobby"), "{message}");
+    assert!(message.to_string().contains("lobby"), "{message}");
     assert!(
-        message.contains("No other server could take you"),
+        message
+            .to_string()
+            .contains("No other server could take you"),
         "{message}"
     );
 }
@@ -112,14 +114,71 @@ fn the_reason_of_a_kick_is_shown_whether_or_not_the_player_is_moved() {
     let kick = || Loss::Kicked("You have been kicked".into());
     let (moved, _) = ask(&listed(), &sessions, vec![(EAST, true)], kick());
     let notice = moved.unwrap().notice.unwrap();
-    assert!(notice.contains("You have been kicked"), "{notice}");
     assert!(
-        notice.contains("lobby") && notice.contains("east"),
+        notice.to_string().contains("You have been kicked"),
+        "{notice}"
+    );
+    assert!(
+        notice.to_string().contains("lobby") && notice.to_string().contains("east"),
         "{notice}"
     );
     let (stranded, _) = ask(&listed(), &sessions, vec![], kick());
     let message = stranded.err().unwrap();
-    assert!(message.starts_with("You have been kicked"), "{message}");
+    assert!(
+        message.to_string().starts_with("You have been kicked"),
+        "{message}"
+    );
+}
+
+/// The reason of a kick that is a translation key is passed to the client as the component the
+/// server sent, in the chat line of the move and in the disconnect when no server is left, not
+/// copied as its key: the key is all the proxy can read of it.
+#[test]
+fn a_reason_that_is_a_translation_key_is_left_for_the_client_to_translate() {
+    use horizon_protocol::{packets::configuration::Disconnect, text};
+    let sessions = Sessions::default();
+    let key = "multiplayer.disconnect.server_shutdown";
+    let kick = || {
+        Loss::Kicked(meridian_handoff::Reason::of(&Disconnect {
+            reason: text::translatable(key, &[]),
+        }))
+    };
+    let (moved, _) = ask(&listed(), &sessions, vec![(EAST, true)], kick());
+    let notice = moved.unwrap().notice.unwrap();
+    let reason = meridian_handoff::Reason::of(&Disconnect {
+        reason: text::translatable(key, &[]),
+    });
+    assert_eq!(
+        notice,
+        Notice::around(
+            "You were disconnected from lobby: ",
+            &reason,
+            ". You were moved to east."
+        )
+    );
+    // Not the same thing as the text with the key in it, which a client cannot translate.
+    assert_ne!(
+        notice,
+        Notice::from(format!(
+            "You were disconnected from lobby: {key}. You were moved to east."
+        ))
+    );
+    let (stranded, _) = ask(&listed(), &sessions, vec![], kick());
+    let message = stranded.err().unwrap();
+    assert_eq!(
+        message,
+        Notice::around(
+            "",
+            &reason,
+            "\n\n(No other server could take you right now.)"
+        )
+    );
+    assert_ne!(
+        message,
+        Notice::from(format!(
+            "{key}\n\n(No other server could take you right now.)"
+        ))
+    );
 }
 
 #[test]

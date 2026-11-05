@@ -14,7 +14,7 @@ use crate::placing;
 use crate::route;
 use crate::session::{Connect, Sessions};
 use meridian_config::{AuthKind, Config};
-use meridian_handoff::{Loss, Replacement, SessionHandle};
+use meridian_handoff::{Loss, Notice, Replacement, SessionHandle};
 use meridian_net::{Profile, backend::BackendOptions};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -55,7 +55,7 @@ impl Run {
 }
 
 /// The function the session calls when it loses the player's server.
-pub fn replacer<'a>(context: Context<'a>) -> impl FnMut(&Loss) -> Result<Replacement, String> + 'a {
+pub fn replacer<'a>(context: Context<'a>) -> impl FnMut(&Loss) -> Result<Replacement, Notice> + 'a {
     let mut run = Run::default();
     move |loss| {
         let result = replace(&context, &mut run, loss);
@@ -64,7 +64,7 @@ pub fn replacer<'a>(context: Context<'a>) -> impl FnMut(&Loss) -> Result<Replace
     }
 }
 
-fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, String> {
+fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, Notice> {
     let config = c.sessions.current_config(c.config);
     let name = &c.profile.name;
     let lost = c.handle.backend();
@@ -81,10 +81,12 @@ fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, S
     if matches!(loss, Loss::Crashed(_)) {
         c.sessions.health.failed(&lost, now);
     }
-    let sorry = |why: &str| -> String {
+    // What the player is told when no server can take them. The reason of a kick is the
+    // server's own component, so the client translates it.
+    let sorry = |why: &str| -> Notice {
         match loss {
-            Loss::Kicked(reason) => format!("{reason}\n\n({why})"),
-            Loss::Crashed(_) => format!("You lost the connection to {lost}. {why}"),
+            Loss::Kicked(reason) => Notice::around("", reason, &format!("\n\n({why})")),
+            Loss::Crashed(_) => format!("You lost the connection to {lost}. {why}").into(),
         }
     };
     let max = config.fallback.max_attempts;
@@ -184,16 +186,16 @@ fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, S
         c.peer, backend.name
     );
     let notice = match loss {
-        Loss::Kicked(reason) => {
-            format!(
-                "You were disconnected from {lost}: {reason}. You were moved to {}.",
-                backend.name
-            )
-        }
+        Loss::Kicked(reason) => Notice::around(
+            &format!("You were disconnected from {lost}: "),
+            reason,
+            &format!(". You were moved to {}.", backend.name),
+        ),
         Loss::Crashed(_) => format!(
             "You lost the connection to {lost}. You were moved to {}.",
             backend.name
-        ),
+        )
+        .into(),
     };
     Ok(Replacement {
         link,
