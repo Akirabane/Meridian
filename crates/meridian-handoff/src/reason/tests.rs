@@ -334,3 +334,96 @@ fn the_reason_goes_back_to_the_client_as_the_backend_sent_it() {
         play::Clientbound::Disconnect(disconnect_of(text::literal("Bye"))).encode()
     );
 }
+
+/// Every compound of `tag` says something: it has `text` or `translate`. A compound with neither
+/// is `{}` once it is a component, and a client refuses it.
+fn every_part_says_something(tag: &Tag) {
+    match tag {
+        Tag::Compound(map) => {
+            assert!(
+                map.contains_key(&"text".into()) || map.contains_key(&"translate".into()),
+                "a part says nothing: {tag:?}"
+            );
+            map.values().for_each(every_part_says_something);
+        }
+        Tag::List(items) => items.iter().for_each(every_part_says_something),
+        _ => {}
+    }
+}
+
+/// What the filter drops can leave a part with nothing: a part made only of a score, a selector,
+/// a key binding or an NBT path, or whose `text` is not a string. It comes out with an empty text,
+/// not as `{}`.
+#[test]
+fn a_part_left_with_nothing_says_an_empty_text() {
+    let language = english(&[("a.b", "[%s]")]);
+    for reason in [
+        // A key binding as an argument.
+        compound([
+            ("translate", string("a.b")),
+            (
+                "with",
+                Tag::List(vec![compound([("keybind", string("key.jump"))])]),
+            ),
+        ]),
+        // A selector in the extra.
+        compound([
+            ("translate", string("a.b")),
+            (
+                "extra",
+                Tag::List(vec![compound([("selector", string("@a"))])]),
+            ),
+        ]),
+        // A score and an NBT path, a text that is a list.
+        compound([
+            ("translate", string("a.b")),
+            (
+                "extra",
+                Tag::List(vec![
+                    compound([("score", compound([("name", string("@p"))]))]),
+                    compound([("nbt", string("Health"))]),
+                    compound([("text", Tag::List(vec![string("x")]))]),
+                    compound([]),
+                ]),
+            ),
+        ]),
+    ] {
+        let notice = Notice::around("", &Reason::of(&disconnect_of(reason)), "");
+        assert!(matches!(notice.0, Body::Component { .. }));
+        every_part_says_something(&sent(&notice));
+        // And nothing of what was dropped shows.
+        assert_eq!(shown(&notice, &language), "[]");
+    }
+}
+
+/// A `text` that is a number is shown as that number, as a game shows it; one that is another
+/// kind of tag is empty.
+#[test]
+fn a_text_that_is_a_number_is_shown_and_any_other_is_empty() {
+    let reason = compound([
+        ("translate", string("a.b")),
+        (
+            "with",
+            Tag::List(vec![
+                compound([("text", Tag::Int(5))]),
+                compound([("text", Tag::List(vec![string("x")]))]),
+            ]),
+        ),
+    ]);
+    let notice = Notice::around("", &Reason::of(&disconnect_of(reason)), "");
+    every_part_says_something(&sent(&notice));
+    assert_eq!(shown(&notice, &english(&[("a.b", "%s|%s")])), "5|");
+}
+
+/// The deepest a component may nest is `MAX_DEPTH` levels below the first: that one is a
+/// component, one more is text.
+#[test]
+fn the_depth_limit_is_exactly_the_one_written() {
+    let at_the_limit = Reason::of(&disconnect_of(deep(MAX_DEPTH)));
+    let notice = Notice::around("a ", &at_the_limit, " b");
+    assert!(matches!(notice.0, Body::Component { .. }), "{notice:?}");
+    every_part_says_something(&sent(&notice));
+    assert_eq!(shown(&notice, &english(&[(SHUTDOWN, "x")])), "a x b");
+    let past = Reason::of(&disconnect_of(deep(MAX_DEPTH + 1)));
+    assert!(matches!(Notice::around("a ", &past, " b").0, Body::Text(_)));
+}

@@ -9,7 +9,10 @@ Horizon's own code: the `horizon-protocol` crate, with the two crates it depends
 revision, the one of `horizon-protocol` and the one of `horizon-world` (which
 `meridian-handoff` uses directly for the text components), and the two must stay identical:
 `scripts/bump-horizon.sh` rewrites both and refuses to go on if one is left behind. By hand,
-change both. Meridian speaks the protocol of
+change both. The script reads and rewrites the lines that have the form
+`<name> = { git = "https://github.com/horizon-rust/horizon", rev = "<40 digits>" }`; a third
+Horizon dependency written another way (a `branch`, a `tag`, a `[patch]`, another URL) would not be
+rewritten, and the script would not notice: write it in that form, or extend the script. Meridian speaks the protocol of
 Minecraft Java 26.3 ([PACKETS.md](PACKETS.md)), as the pinned commit does.
 
 The pin keeps a change in Horizon from breaking a build by surprise. It also means a

@@ -244,8 +244,21 @@ impl Cleaning {
                 }
                 let mut kept: Vec<(&str, Tag)> = Vec::new();
                 let get = |key: &str| map.get(&key.into());
-                if let Some(Tag::String(s)) = get("text") {
-                    kept.push(("text", Tag::String(s.clone())));
+                match get("text") {
+                    Some(Tag::String(s)) => kept.push(("text", Tag::String(s.clone()))),
+                    // A number is shown as the number.
+                    Some(
+                        number @ (Tag::Byte(_)
+                        | Tag::Short(_)
+                        | Tag::Int(_)
+                        | Tag::Long(_)
+                        | Tag::Float(_)
+                        | Tag::Double(_)),
+                    ) => kept.push((
+                        "text",
+                        text::literal(&text::plain(number, &Default::default())),
+                    )),
+                    _ => {}
                 }
                 if let Some(Tag::String(key)) = get("translate") {
                     self.translated = true;
@@ -264,6 +277,15 @@ impl Cleaning {
                     && color.0.len() <= MAX_COLOR
                 {
                     kept.push(("color", Tag::String(color.clone())));
+                }
+                // A part that says nothing (only a score, a selector, a key binding or an NBT
+                // path, which are dropped, or a `text` of another kind) would be `{}`, which a
+                // client refuses as a component: it says an empty text.
+                if !kept
+                    .iter()
+                    .any(|(key, _)| matches!(*key, "text" | "translate"))
+                {
+                    kept.push(("text", text::literal("")));
                 }
                 Some(Tag::compound(kept))
             }
