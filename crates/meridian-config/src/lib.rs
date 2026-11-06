@@ -7,6 +7,7 @@ mod auth;
 mod balancing;
 mod commands;
 mod error;
+mod extension;
 mod fallback;
 mod favicon;
 mod metrics;
@@ -22,6 +23,10 @@ pub use auth::{AuthSettings, OnLookupFailure};
 pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
+pub use extension::{
+    CAPABILITIES, CommandDecision, DECIDE_COMMAND, DECIDE_LOGIN, DECIDE_SERVER, Extension,
+    LoginDecision, MAX_EXTENSION_NAME, MIN_EXTENSION_TOKEN, OnError, ServerDecision, ServerOnError,
+};
 pub use fallback::Fallback;
 pub use favicon::{FAVICON_SIDE, Favicon, MAX_FAVICON_BYTES};
 pub use metrics::Metrics;
@@ -39,6 +44,7 @@ use access::FileAccess;
 use auth::FileAuth;
 use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
+use extension::FileExtension;
 use fallback::FileFallback;
 use metrics::FileMetrics;
 use operators::FileOperators;
@@ -240,6 +246,8 @@ pub struct Config {
     pub queue: QueueSettings,
     /// The `[operators]` table.
     pub operators: OperatorSettings,
+    /// The `[[extension]]` tables: none by default.
+    pub extensions: Vec<Extension>,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -299,6 +307,7 @@ impl Default for Config {
             permissions: PermissionSettings::default(),
             queue: QueueSettings::default(),
             operators: OperatorSettings::default(),
+            extensions: Vec::new(),
         }
     }
 }
@@ -346,6 +355,7 @@ impl std::fmt::Debug for Config {
             permissions,
             queue,
             operators,
+            extensions,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -395,6 +405,8 @@ impl std::fmt::Debug for Config {
             .field("permissions", permissions)
             .field("queue", queue)
             .field("operators", operators)
+            // The paths of the token files only: the tokens are never kept.
+            .field("extensions", extensions)
             .finish()
     }
 }
@@ -455,6 +467,8 @@ struct File {
     queue: FileQueue,
     #[serde(default)]
     operators: FileOperators,
+    #[serde(default, rename = "extension")]
+    extensions: Vec<FileExtension>,
 }
 
 #[derive(Deserialize)]
@@ -656,6 +670,11 @@ impl Config {
             permissions: file.permissions.into_settings(folder),
             queue: file.queue.into_settings(),
             operators: file.operators.into_settings(),
+            extensions: file
+                .extensions
+                .into_iter()
+                .map(|e| e.into_settings(folder))
+                .collect::<Result<_, _>>()?,
         };
         config.validate()?;
         Ok(config)
@@ -728,7 +747,12 @@ impl Config {
         self.fallback.validate()?;
         self.proxy_protocol.validate()?;
         self.metrics.validate(self.listen)?;
-        self.queue.validate(self.connect_timeout_ms)?;
+        self.queue.validate(
+            self.connect_timeout_ms,
+            extension::login_budget_ms(&self.extensions),
+        )?;
+        extension::validate(&self.extensions)?;
+        self.validate_login_budget()?;
         for s in &self.sidecars {
             if self.backend(&s.backend).is_none() {
                 return Err(ConfigError::UnknownBackend {
@@ -1004,6 +1028,9 @@ mod permissions_tests;
 mod queue_tests;
 #[cfg(test)]
 mod sidecar_tests;
+
+#[cfg(test)]
+mod extension_tests;
 
 #[cfg(test)]
 mod fallback_tests;

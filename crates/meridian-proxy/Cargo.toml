@@ -15,9 +15,11 @@ path = "src/main.rs"
 ctrlc = "3.4"
 horizon-protocol.workspace = true
 meridian-config.workspace = true
+meridian-extension.workspace = true
 meridian-handoff.workspace = true
 meridian-net.workspace = true
 meridian-sidecar.workspace = true
+meridian-websocket.workspace = true
 # The notices of a backend's management protocol, read by restart.
 serde_json = "1"
 # The listener's queue length, which std sets to 128; see serve::listen.

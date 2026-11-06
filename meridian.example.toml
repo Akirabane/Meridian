@@ -328,3 +328,36 @@ enabled = ["server", "hub"]
 # hub-backend = "lobby"
 # Whether players may list the servers with /server.
 server-list = true
+
+# External programs the proxy connects to and asks for decisions (docs/EXTENSIONS.md,
+# docs/CONFIG.md). None by default, and then nothing changes. One [[extension]] for each
+# program, which listens on the loopback and shares a token with the proxy: the file holds
+# at least 32 bytes and is never logged. No decision point asks an extension anything yet.
+#
+# [[extension]]
+# name = "perms"                        # in logs and metrics: letters, digits, - and _
+# enabled = true                        # false: read and checked, not connected to
+# address = "127.0.0.1:25590"           # 127.x.y.z, [::1] or localhost; nothing else
+# token-file = "extensions/perms.token" # relative to this file; at least 32 bytes
+# grant = ["decide.login"]              # what it may have, from docs/EXTENSIONS.md 2.3;
+#                                       # a decision point goes to one extension at most
+# max-in-flight = 64                    # requests that may wait for its answers at once
+# breaker-failures = 5                  # failed decisions in a row that open the breaker
+# breaker-seconds = 30                  # and for how long
+#
+# # Only for a capability that is granted. on-error: what happens with no usable answer,
+# # "default" (as if there were no extension), "allow" or "deny". The timeouts of
+# # decide-login and decide-server count with [queue] wait-seconds and connect-timeout-ms
+# # against the 27 s a player may stay silent.
+# [extension.decide-login]
+# timeout-ms = 1000
+# on-error = "default"
+#
+# [extension.decide-command]            # needs "decide.command" in grant
+# timeout-ms = 250
+# on-error = "default"
+# cache-seconds-max = 300
+#
+# [extension.decide-server]             # needs "decide.server" in grant
+# timeout-ms = 1000
+# on-error = "default"                  # "default" or "refuse"

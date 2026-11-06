@@ -5,6 +5,7 @@ mod balance;
 mod commands;
 mod console;
 mod evacuate;
+mod extension;
 mod fallback;
 mod health;
 mod log;
@@ -153,6 +154,11 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
             .permissions
             .install(permissions, permissions_file);
     }
+    // The extensions the configuration enables (none by default): each keeps its connection up on
+    // a thread of its own.
+    for line in proxy.extensions.follow(&proxy.config()) {
+        info!("{line}");
+    }
     // SIGTERM stops the proxy and SIGHUP reloads it, where the system has them. Set before
     // the line below, which says the proxy is up, so that a signal sent once it is read
     // is not lost.
@@ -185,7 +191,10 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
     if let Err(e) = access::sync::spawn(&proxy) {
         warning!("cannot start the threads that keep the bans in step with the servers: {e}");
     }
-    match serve::serve(listener, &proxy) {
+    let served = serve::serve(listener, &proxy);
+    // The connections to the extensions end with a close, not with the process.
+    proxy.extensions.stop();
+    match served {
         Ok(()) => {
             info!("stopped");
             ExitCode::SUCCESS

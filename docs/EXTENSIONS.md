@@ -81,8 +81,8 @@ JSON-RPC 2.0 over a WebSocket, with namespaced methods such as
 `minecraft:notification/server/stopping`, its error codes (`-32700`, `-32600`, `-32601`,
 `-32602`, `-32603`) and `rpc.discover` (Horizon `crates/horizon-server/src/management.rs:1-6`,
 `:478-482`, `:599-606`). Meridian's sidecar is already a client of that protocol
-(`crates/meridian-sidecar/src/management.rs:4-14`), over its own small WebSocket code
-(`crates/meridian-sidecar/src/websocket.rs:1-10`).
+(`crates/meridian-sidecar/src/management.rs:4-14`), over a small WebSocket code of its own, now the
+`meridian-websocket` crate (`crates/meridian-websocket/src/lib.rs`, head comment).
 
 **Who connects.** The proxy connects to the extension. The extension listens on a loopback
 port, and the proxy is a client of it, as the sidecar is a client of a server's management
@@ -107,10 +107,12 @@ later question, and would need TLS with a checked certificate. The sidecar does 
 certificate today (`crates/meridian-sidecar/src/tls.rs`).
 
 **One connection for each extension**, carrying both directions: the proxy's requests
-(decisions) and the extension's requests (orders). JSON-RPC ids are per direction. A message is
-at most 256 KiB. That limit is the extension protocol's own: the sidecar's reader has one limit
+(decisions) and the extension's requests (orders). JSON-RPC ids are per direction: the proxy's
+are numbers, and an extension's may be numbers or text (a program in another language often takes a
+UUID), which the answer carries exactly as it came. A request with no id, or a null one, is a
+notification. A message is at most 256 KiB. That limit is the extension protocol's own: the sidecar's reader has one limit
 today, 4 MiB, raised so that it can read a server's ban list
-(`crates/meridian-sidecar/src/websocket.rs:16`, `MAX_MESSAGE`), and the shared code takes the
+(`crates/meridian-websocket/src/lib.rs`, `MAX_MESSAGE`), and the shared code takes the
 limit from its caller (section 2.5).
 
 ### 2.2 Authentication
@@ -123,24 +125,61 @@ process holds the port. A local program that started first on that port would le
 So the token never crosses the wire:
 
 1. The proxy opens the WebSocket with `Sec-WebSocket-Protocol: meridian-extension` and no
-   secret.
+   secret. The extension answers `101` with that subprotocol: an answer that names none is
+   refused by the proxy, since the program that answered is not one that speaks this protocol. The
+   extension refuses (`403`) an upgrade that carries an `Origin` header, which a browser sends: the
+   proofs would keep a page open on the same machine out anyway, and this keeps it from holding
+   the connection.
 2. The proxy's first message is `meridian:hello` with `proxy_nonce` (32 random bytes, hex).
 3. The extension answers with its own `extension_nonce` and
    `proof = HMAC-SHA256(token, "meridian-extension/extension" | proxy_nonce | extension_nonce)`.
 4. The proxy checks the proof in constant time. If it is wrong, the proxy closes the connection
-   and logs `extension "<name>": refused: wrong token`. It retries only after the longest wait,
-   and never says why to the other side.
+   with the WebSocket close code 1008 and no reason, and no JSON-RPC answer, and logs
+   `extension "<name>": refused: wrong token`. It retries only after the longest wait, and never
+   says why to the other side. The extension does the same when the proxy's proof is wrong. A
+   message over the limit closes the connection with the code 1009.
 5. The proxy sends `meridian:hello/confirm` with
    `proof = HMAC-SHA256(token, "meridian-extension/proxy" | extension_nonce | proxy_nonce)`.
    The extension checks it the same way. Neither side sends player data, and the extension
    sends no order, before both proofs are checked.
 
+**What the proof is computed over.** The `|` is a concatenation of bytes: the ASCII text of the
+label, then the **32 bytes each nonce stands for**, not the 64 characters of their hexadecimal. The
+nonces are written in lower case and read in either case, so the bytes are the same whatever case a
+side wrote. The two labels differ and the nonces change places, so a proof of one side is never the
+other's. A program in another language decodes the hexadecimal before it computes. This vector
+is in the code's tests (`crates/meridian-extension/src/handshake.rs`), and was computed apart from
+it, with Python's `hmac` and `hashlib`:
+
+```text
+token            "0123456789abcdef0123456789abcdef"                      (32 bytes of ASCII)
+proxy_nonce      00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+extension_nonce  ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+
+the extension's proof is over these 92 bytes (28 of label, 32 of proxy_nonce, 32 of extension_nonce):
+  6d6572696469616e2d657874656e73696f6e2f657874656e73696f6e
+  00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+  ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+proof            546198eb05cd02f2d5802912b4e6d9a00d173fdff4a1fd1a33434e875571bffd
+
+the proxy's proof is over these 88 bytes (24 of label, 32 of extension_nonce, 32 of proxy_nonce):
+  6d6572696469616e2d657874656e73696f6e2f70726f7879
+  ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+  00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+proof            3719587fddecaa8438f006341b2ae8c64e1bd94b1351f929e5da3870f6e1a226
+```
+
+For a check that the two sides agree on bytes: the same extension proof computed over the
+hexadecimal text of the nonces would be `4708a5d59de31016000e2141701f01aa5116188506bed5d93be9c32d17db1e5d`,
+which is not a valid proof.
+
 The token is a file the operator writes (`token-file`), read again at each connection as the
 sidecar reads its server's settings (`crates/meridian-sidecar/src/management.rs:18-19`). It is at
-least 32 bytes. Like the sidecar's `Secret` (`management.rs:198-216`), it is in no log line, no
-error and no `Debug` output. Meridian already computes HMAC-SHA256 for player information
-forwarding (`crates/meridian-net/src/backend/forwarding.rs:51`). That function would move to
-where both uses reach it.
+least 32 bytes, with the line end an editor leaves after it taken off. It is held in a type of its
+own, `Secret` of `meridian-extension`, as the sidecar's is (`management.rs:198-216`): `Debug` hides
+it, there is no `Display`, and it is in no log line and no error. Meridian already computed
+HMAC-SHA256 for player information forwarding (`crates/meridian-net/src/backend/forwarding.rs`).
+That function now lives in `meridian-hmac`, where both uses reach it.
 
 ### 2.3 Capabilities
 
@@ -190,15 +229,23 @@ sidecar and the SDK use, `meridian-websocket`, with no new dependency (decision 
 
 The sidecar's code is a client. It reads text messages, whole or in fragments, answers pings,
 and since the synchronisation of bans it also sends masked text frames
-(`crates/meridian-sidecar/src/websocket.rs:173-211`, `send` and `send_text`). It does not check
-the server's `Sec-WebSocket-Accept` (`websocket.rs:6-10`). The proxy is the client of an
+(`crates/meridian-websocket/src/lib.rs`, `Socket::send_text`). It did not check the server's
+`Sec-WebSocket-Accept`, and the sidecar's connection still does not: the servers it reads are on
+its own machine, and its tests answer without the header. The proxy is the client of an
 extension, so it uses that code nearly as it is. What the shared crate adds:
 
 - the limit of a message as a parameter, 4 MiB for the sidecar and 256 KiB for an extension;
 - the server side, for the SDK: reading the upgrade request, answering `101` with the
   `Sec-WebSocket-Accept` a client expects, reading masked frames and sending unmasked ones;
-- the check of `Sec-WebSocket-Accept` on the client side, now that a server of Meridian's own
-  answers it.
+- the check of `Sec-WebSocket-Accept` on the client side (`Socket::open_checked`), now that a
+  server of Meridian's own answers it. The proxy's connection to an extension uses it. It also
+  wants the subprotocol the request offered to be the one the answer names;
+- a socket in two halves (`Socket::split`): a reader on one thread, and a writer that is cloned
+  for the threads that send, all writes under one lock so that no two frames are mixed. The
+  proxy's threads ask decisions while the reader takes the answers (section 4.1);
+- close codes (`close`): `Socket::close` and `Writer::close` send one, and `close_code` returns the
+  code the other end closed with. The protocol uses 1000, 1008 for a wrong proof and 1009 for a
+  message over the limit.
 
 `Sec-WebSocket-Accept` is the base64 of a SHA-1. `meridian-websocket` names `sha1` and `base64`
 as direct dependencies rather than writing them again by hand: both are already in the lock file
@@ -224,7 +271,8 @@ as direct dependencies rather than writing them again by hand: both are already 
   parameters (omitted, or an empty array); `meridian:rpc.discover` is the same call. It is
   answered at any time, before the hello too, so that a tool can list what a program serves
   without opening a session. The result is an object with a `methods` array, as Horizon's
-  (`management.rs:711-727`): each item has the `name` of the method, with its `meridian:` prefix,
+  (`management.rs:711-727`; Horizon adds `openrpc`, `info` and `components`, which this protocol may
+  send and a reader ignores): each item has the `name` of the method, with its `meridian:` prefix,
   and `params`, a list of `{ "name", "required", "schema" }` (empty or left out when the method
   has none). `rpc.discover` itself is not listed. The proxy lists the orders its version and the
   granted capabilities allow; an extension lists the decision points it serves.
@@ -292,6 +340,7 @@ counts toward the breaker.
 ```toml
 [[extension]]
 name = "perms"                       # in logs, metrics and node names
+enabled = true                       # false: read and checked, not connected to
 address = "127.0.0.1:25590"          # loopback only
 token-file = "extensions/perms.token"
 grant = ["decide.command", "commands", "orders.read", "orders.message"]
@@ -312,6 +361,11 @@ cache-seconds-max = 300
 timeout-ms = 1000
 on-error = "default"                 # default | refuse
 ```
+
+The configuration crate checks the address without asking a name server: an IP address on the loopback
+or `localhost`, and any other host is refused. The proxy resolves it again at each connection and
+refuses an address that is not on the loopback. [CONFIG.md](CONFIG.md) lists every key with its checks,
+including the time the two decisions of a login add to the queue's.
 
 It sits beside the other sections of the configuration crate (`crates/meridian-config/src/lib.rs:197-235`
 lists `commands`, `balancing`, `restart`, `fallback`, `proxy_protocol`, `metrics`, `access`,
@@ -766,8 +820,7 @@ Windows.
 3. **The wire.** The types of protocol 0, the golden JSON, the proofs of the handshake (with the
    HMAC moved to where both sides reach it), and the WebSocket code both sides need: the
    sidecar's, extended and shared as `meridian-websocket` (section 2.5, decision U6). It also
-   corrects the head comment of the sidecar's `websocket.rs`, which still calls it "a client which
-   only listens". Proof: the golden files, the test vectors, and the sidecar's tests unchanged.
+   corrects the head comment of that code, which called it "a client which only listens". Proof: the golden files, the test vectors, and the sidecar's tests unchanged.
 4. **The connection on the proxy.** Connect, hello, reconnect with the doubling wait,
    `max-in-flight`, the breaker, the metrics and the logs. No decision is wired yet. Proof: tests
    against a fake extension, including a wrong token on each side.
