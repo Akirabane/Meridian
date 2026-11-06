@@ -10,6 +10,7 @@ mod health;
 mod log;
 mod metrics;
 mod notices;
+mod operators;
 mod permissions;
 mod placing;
 mod queue;

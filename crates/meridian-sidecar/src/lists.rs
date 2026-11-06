@@ -31,9 +31,10 @@ pub const MAX_WAIT: Duration = Duration::from_secs(30);
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The methods of the management protocol the proxy may call (without `minecraft:`): the
-/// three lists, to read and to change one entry at a time. Nothing that clears or sets a
-/// whole list, and nothing else of the protocol.
-pub const CALLABLE: [&str; 9] = [
+/// three lists, to read and to change one entry at a time, and the operators, to read. Nothing
+/// that clears or sets a whole list, nothing that changes the operators (the servers own
+/// them, the proxy only reflects them), and nothing else of the protocol.
+pub const CALLABLE: [&str; 10] = [
     "allowlist",
     "allowlist/add",
     "allowlist/remove",
@@ -43,10 +44,11 @@ pub const CALLABLE: [&str; 9] = [
     "ip_bans",
     "ip_bans/add",
     "ip_bans/remove",
+    "operators",
 ];
 
-/// Whether `line` is a JSON-RPC message that tells a change of one of the lists. The method
-/// is `minecraft:notification/bans/added` there; the prefix is optional.
+/// Whether `line` is a JSON-RPC message that tells a change of one of the lists, or of the
+/// operators. The method is `minecraft:notification/bans/added` there; the prefix is optional.
 pub fn is_list_notice(line: &str) -> bool {
     let Ok(message) = serde_json::from_str::<Value>(line) else {
         return false;
@@ -62,6 +64,8 @@ pub fn is_list_notice(line: &str) -> bool {
             | "notification/bans/removed"
             | "notification/ip_bans/added"
             | "notification/ip_bans/removed"
+            | "notification/operators/added"
+            | "notification/operators/removed"
     )
 }
 

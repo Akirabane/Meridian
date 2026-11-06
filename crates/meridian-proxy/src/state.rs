@@ -42,6 +42,7 @@ impl Proxy {
     /// is the flag Ctrl+C sets.
     pub fn new(config: Config, config_path: PathBuf, stop: Arc<AtomicBool>) -> Self {
         let sessions = Arc::new(Sessions::default());
+        sessions.operators.follow(&config);
         let settings = Settings::from(&config.restart);
         let config = Arc::new(RwLock::new(Arc::new(config)));
         sessions.follow_config(Arc::clone(&config));
@@ -77,6 +78,9 @@ impl Proxy {
     pub fn set_config(&self, config: Config) {
         // Players who wait for a place see the new limit at once.
         self.sessions.queue.set_max_players(config.max_players);
+        // An operator of a server that no longer counts, or that has no sidecar any more, stops
+        // being one at once.
+        self.sessions.operators.follow(&config);
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(config);
     }
 

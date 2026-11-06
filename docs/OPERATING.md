@@ -520,8 +520,8 @@ nothing at a reload, and a change that cannot be written holds in memory and say
 | Command | Effect |
 | --- | --- |
 | `perm list` | The groups, with their nodes and what they inherit, and the players in them |
-| `perm list <player>` | The groups a player is in |
-| `perm check <player> <node>` | Whether the player has the node. By name only unless the player is online or an id is given: a rank given to an id is not seen from a name |
+| `perm list <player>` | The groups a player is in, and a second line when they are also in the operator group because they are an operator of the server they are on (section 5.9, "The operators of the servers") |
+| `perm check <player> <node>` | Whether the player has the node, an online operator's group included. By name only unless the player is online or an id is given: a rank given to an id is not seen from a name |
 | `perm grant <player\|uuid> <group>`, `perm revoke <player\|uuid> <group>` | Puts a player in a group, or takes them out |
 | `perm group <group> create`, `perm group <group> delete` | Makes a group, or deletes it (it leaves the groups that inherit it and the players in it) |
 | `perm group <group> allow <node>`, `deny <node>`, `unset <node>` | What the group says of a node or a pattern (`meridian.server.*`); `unset` makes it say nothing |
@@ -536,6 +536,63 @@ What a name proves:
   do not give `meridian.send` or `meridian.alert` to a name**; the permissions are no barrier
   there, only a convenience on a network where every player is trusted. The same limit as the
   whitelist (section 5.8).
+
+#### The operators of the servers
+
+The proxy keeps no list of operators. Each Horizon server owns its own (`ops.json`, with a permission
+level from 0 to 4 for each), and with `[operators] from-servers = true` the proxy **reads** them and
+reflects them; it never changes them. An operator is a rank that the servers decide, not one you
+write in `permissions.toml`:
+
+```toml
+# meridian.toml
+[operators]
+from-servers = true
+group = "operator"   # the group of permissions.toml the operators are members of
+min-level = 4        # the lowest permission level that counts
+```
+
+```toml
+# permissions.toml: what the operators may do at the proxy
+[group.operator]
+allow = ["meridian.send", "meridian.glist", "meridian.alert"]
+```
+
+- **Who counts.** A player is an operator of the server they are on *now*, at `min-level` or above,
+  read from that server. An operator of `east` who is on `lobby` has nothing from `east`; one who
+  moves from `east` to `lobby` loses it with the move. There is no union of the servers: an operator
+  of a test server would otherwise have `/send all` on the whole network. `from = ["lobby", "east"]`
+  limits the servers whose operators count (the others are not even asked).
+- **What it gives.** For the proxy's commands only, the player is a member of `group`, with its
+  nodes, what it inherits and what it denies, as if `perm grant` had put them there. It is worked out
+  for each command and never written: `permissions.toml` does not change, `perm list` does not list
+  them as members, and `perm list <player>` and `perm check` say that the player is also in the group
+  as an operator. A group that `permissions.toml` does not define gives nothing, and a `deny` of one of
+  the player's own groups still wins a tie.
+- **How it is read.** Through the sidecar of each server (started with `--management-properties`,
+  with a `[[sidecars]]` entry), by the same rounds as the bans of section 5.12: the list `operators`
+  is read when the proxy starts, whenever a sidecar has connected to its server again or lost
+  notices, and whenever the server announces that an operator was added or removed. The list read
+  **replaces** what was known of that server: an operator removed on the server is removed here, at
+  the next command the player types after the sidecar has told the proxy (within a few seconds). The notice is only the
+  reason to read again; its content is not trusted.
+- **When a server cannot be read.** A server that has not been read has no operators: nobody is
+  refused less than before. What was read from a server is believed for `stale-after-seconds`
+  (600) after the last time the list was known to be right: it was read, or the sidecar was heard
+  connected to the server while no read was failing. Past that, the server has no operators until
+  it is read again. A deop made while the proxy could not hear thus does not last for ever. A server
+  that refuses the read (Horizon without the `operators` method, or not ready yet) is tried again
+  after a wait that grows, with a warning in the log; a read that fails renews nothing, so the list
+  it was meant to replace ages as above even while the sidecar stays connected.
+- **Reload.** A reload applies the new `[operators]` at once: with `from-servers` off, or for a server
+  that no longer counts, what was read is forgotten.
+- **What a name proves.** The operator is found by **unique id**. A server that lists an operator without an id is
+  matched by name only for a player whose account was checked (online mode, or a verified player of the
+  hybrid mode). The same limit as the rest of this section applies: in offline mode the name, and the
+  id made from it, is whatever the client says it is, and that is as true for Horizon's own `/op`.
+  **In offline mode do not turn this on for a network where players are not trusted.**
+- **Not done.** The proxy does not use `bypassesPlayerLimit` (an operator does not pass `max-players`)
+  and does not write operators to the servers (`/op` and `/deop` stay the servers' own).
 
 Not done: in-game commands to manage the groups, a permission for the backends' own commands (the
 proxy decides only what it answers), a group for a kind of login (verified or not), a rank that
@@ -689,7 +746,8 @@ Both go through the sidecars, which are already clients of the servers' manageme
 (section 4). Each sidecar must be started with `--management-properties` and have a `[[sidecars]]`
 entry in the proxy's configuration; a backend without either is left out, and the proxy says so
 once in its log. Nothing else of the management protocol is used: the sidecar lets through only
-the three lists and, for each, a read and the addition or removal of one entry.
+the three lists and, for each, a read and the addition or removal of one entry, and the read of the
+operators (section 5.9, which is a separate setting).
 
 **`from-servers`.** The proxy asks each sidecar for what its server announced about its lists,
 over the same signed exchange as the other requests.
@@ -761,7 +819,9 @@ What is not synchronised:
   spelling, so the name must be spelled as the id was made.
 - **The allowlist switch.** Whether a server enforces its allowlist (`use_allowlist`) is not read
   or changed; only the entries are.
-- **Operators, kicks, the rest of the protocol.** Nothing else is read or sent.
+- **Operators.** They are not synchronised like the bans: they are read, never written, and only
+  with `[operators] from-servers` (section 5.9, "The operators of the servers").
+- **Kicks, the rest of the protocol.** Nothing else is read or sent.
 - **Who banned and when.** The reason is the only note kept; the proxy keeps no author.
 
 Tried against real servers on 2026-11-05 ([VALIDATION.md](VALIDATION.md)): three Horizon servers of

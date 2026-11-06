@@ -14,6 +14,8 @@ const SECRET: &str = "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cD1fG3hJ5kL7m";
 const STOPPING: &str = r#"{"jsonrpc":"2.0","method":"minecraft:notification/server/stopping"}"#;
 const BANNED: &str = r#"{"jsonrpc":"2.0","method":"minecraft:notification/bans/added","params":[{"player":{"id":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Alex"},"source":"Rcon","reason":"griefing"}]}"#;
 const PARDONED: &str = r#"{"jsonrpc":"2.0","method":"minecraft:notification/bans/removed","params":[{"id":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Alex"}]}"#;
+const OPED: &str = r#"{"jsonrpc":"2.0","method":"minecraft:notification/operators/added","params":[{"player":{"id":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Alex"},"permissionLevel":4,"bypassesPlayerLimit":true}]}"#;
+const DEOPED: &str = r#"{"jsonrpc":"2.0","method":"minecraft:notification/operators/removed","params":[{"player":{"id":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Alex"},"permissionLevel":4,"bypassesPlayerLimit":true}]}"#;
 const JOINED: &str =
     r#"{"jsonrpc":"2.0","method":"minecraft:notification/players/joined","params":[{"name":"x"}]}"#;
 
@@ -26,6 +28,8 @@ fn only_the_changes_of_the_lists_are_list_notices() {
         "bans/removed",
         "ip_bans/added",
         "ip_bans/removed",
+        "operators/added",
+        "operators/removed",
     ] {
         let line = format!(r#"{{"jsonrpc":"2.0","method":"minecraft:notification/{method}"}}"#);
         assert!(is_list_notice(&line), "{method}");
@@ -34,8 +38,12 @@ fn only_the_changes_of_the_lists_are_list_notices() {
     }
     assert!(!is_list_notice(STOPPING));
     assert!(!is_list_notice(JOINED));
+    // Other notifications of the protocol are not the proxy's.
     assert!(!is_list_notice(
-        r#"{"jsonrpc":"2.0","method":"minecraft:notification/operators/added"}"#
+        r#"{"jsonrpc":"2.0","method":"minecraft:notification/gamerules/updated"}"#
+    ));
+    assert!(!is_list_notice(
+        r#"{"jsonrpc":"2.0","method":"minecraft:notification/server/status"}"#
     ));
     assert!(!is_list_notice("not json"));
     assert!(!is_list_notice(r#"{"jsonrpc":"2.0","id":1,"result":[]}"#));
@@ -102,6 +110,11 @@ fn only_the_calls_on_the_lists_are_allowed() {
         "bans/clear",
         "bans/set",
         "minecraft:bans",
+        // The servers own the operators: the proxy reads them and changes nothing.
+        "operators/add",
+        "operators/remove",
+        "operators/set",
+        "operators/clear",
     ] {
         assert_eq!(
             lists.call(method, &Value::Null, Duration::from_millis(50)),
@@ -594,6 +607,56 @@ fn the_notices_of_the_lists_are_kept_apart_from_those_of_the_servers_life() {
         lists.iter().map(|n| n.line.as_str()).collect::<Vec<_>>(),
         [BANNED, PARDONED]
     );
+}
+
+/// The operators ride in the queue of the lists: the proxy reads them again when one changes.
+#[test]
+fn the_notices_of_the_operators_come_with_those_of_the_lists() {
+    let server = fake(1, Arc::new(|_| Action::say(vec![])));
+    let listening = listen(&server);
+    for line in [OPED, STOPPING, BANNED, DEOPED] {
+        server.push.send(line.to_owned()).unwrap();
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut lists = Vec::new();
+    while lists.len() < 3 && Instant::now() < until {
+        lists = listening
+            .notices
+            .lists
+            .heard(Some(0), Duration::from_millis(50))
+            .notices;
+    }
+    assert_eq!(
+        lists.iter().map(|n| n.line.as_str()).collect::<Vec<_>>(),
+        [OPED, BANNED, DEOPED]
+    );
+}
+
+/// The proxy reads the operators with a call of no parameter, and gets Horizon's list: for each
+/// operator the player, the permission level and whether they pass the limit of players.
+#[test]
+fn the_operators_are_read_with_a_call_of_no_parameter() {
+    let list = json!([{
+        "player": { "id": "069a79f4-44e9-4726-a5be-fca90e38aaf5", "name": "Alex" },
+        "permissionLevel": 4,
+        "bypassesPlayerLimit": false
+    }]);
+    let answer = list.clone();
+    let server = fake(
+        1,
+        Arc::new(move |request| Action::say(vec![result_of(request, answer.clone())])),
+    );
+    let listening = listen(&server);
+    assert_eq!(
+        listening
+            .notices
+            .lists
+            .call("operators", &Value::Null, WAIT),
+        Ok(list)
+    );
+    let received = server.received.lock().unwrap();
+    assert_eq!(received[0]["method"], "minecraft:operators");
+    assert!(received[0].get("params").is_none(), "{}", received[0]);
 }
 
 #[test]

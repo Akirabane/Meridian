@@ -69,6 +69,15 @@ fn types(text: &str, replies: &[&str]) -> Vec<Step> {
 /// Alex logs in, with `permissions` (the text of `permissions.toml`) in force, and runs
 /// `steps` in play. The backend must see no command: it only waits for the close.
 fn alex_types(permissions: &str, steps: Vec<Step>) -> Sessions {
+    alex_types_with(permissions, |_| {}, steps)
+}
+
+/// As [`alex_types`], after `prepare` has set the sessions up (the operators the servers listed).
+fn alex_types_with(
+    permissions: &str,
+    prepare: impl FnOnce(&Sessions),
+    steps: Vec<Step>,
+) -> Sessions {
     let backend = FakeBackend {
         forwarding_secret: Some(SECRET.as_bytes().to_vec()),
         after_login: vec![
@@ -95,6 +104,7 @@ fn alex_types(permissions: &str, steps: Vec<Step>) -> Sessions {
     sessions
         .permissions
         .install(Permissions::parse(permissions).unwrap(), None);
+    prepare(&sessions);
     serve(session, peer(), &staff_config(), &*connect, &sessions);
     player.join().unwrap().unwrap();
     let (_, _, backend) = seen.lock().unwrap().take().unwrap();
@@ -194,4 +204,63 @@ fn send_starts_the_move_and_the_player_is_told_how_it_ended() {
     ));
     let sessions = alex_types(STAFF, steps);
     assert_eq!(sessions.count(), 0);
+}
+
+// ---- The operators of the servers (`[operators]`).
+
+const OPERATOR_GROUP: &str = r#"
+[group.operator]
+allow = ["meridian.glist"]
+"#;
+
+/// Alex is listed as an operator of `backend`, with `level`, by a server read through its
+/// sidecar, and the table is on.
+fn operator_of(backend: &'static str, level: u8) -> impl FnOnce(&Sessions) {
+    move |sessions: &Sessions| {
+        sessions
+            .operators
+            .configure(&meridian_config::OperatorSettings {
+                from_servers: true,
+                ..meridian_config::OperatorSettings::default()
+            });
+        sessions.operators.replace(
+            backend,
+            vec![crate::operators::Op {
+                id: Some(horizon_protocol::crypto::offline_uuid("Alex").to_be_bytes()),
+                name: "Alex".into(),
+                level,
+            }],
+            std::time::Instant::now(),
+        );
+    }
+}
+
+/// A player who is an operator of the server they are on has the nodes of the operator group
+/// when they type a command in game, without being in any group of the file.
+#[test]
+fn an_operator_of_the_server_they_are_on_may_use_what_the_operator_group_may() {
+    alex_types_with(
+        OPERATOR_GROUP,
+        operator_of("lobby", 4),
+        types("glist lobby", &["lobby (1): Alex"]),
+    );
+}
+
+/// Not an operator of the server they are on, or not at the level asked, or with the table off:
+/// refused, as any player.
+#[test]
+fn the_operator_of_another_server_or_of_too_low_a_level_is_refused() {
+    let refused = || types("glist", &["You do not have permission to use /glist."]);
+    alex_types_with(OPERATOR_GROUP, operator_of("east", 4), refused());
+    alex_types_with(OPERATOR_GROUP, operator_of("lobby", 3), refused());
+    alex_types_with(
+        OPERATOR_GROUP,
+        |sessions| {
+            operator_of("lobby", 4)(sessions);
+            sessions
+                .operators
+                .configure(&meridian_config::OperatorSettings::default());
+        },
+        refused(),
+    );
 }

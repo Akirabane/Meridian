@@ -466,3 +466,74 @@ fn the_staff_commands_are_known_to_the_commands_table_and_off_by_default() {
     assert!(!defaults.commands.is_enabled(ProxyCommand::Glist));
     assert!(!defaults.commands.is_enabled(ProxyCommand::Alert));
 }
+
+// ---- Groups a player is in for one question (the operators of the servers).
+
+#[test]
+fn a_group_given_for_one_question_gives_its_nodes_for_that_question_only() {
+    let p = parse(
+        r#"
+[group.operator]
+allow = ["meridian.send", "meridian.glist"]
+"#,
+    );
+    assert!(!p.allows("Alex", ALEX, node::SEND));
+    assert!(p.allows_in("Alex", ALEX, node::SEND, &["operator"]));
+    assert!(p.allows_in("Alex", ALEX, node::GLIST, &["operator"]));
+    assert!(
+        !p.allows_in("Alex", ALEX, node::ALERT, &["operator"]),
+        "not granted"
+    );
+    // Nothing was written: the player is in no group, and asked again without it they have nothing.
+    assert!(p.groups_of("Alex", ALEX).is_empty());
+    assert!(p.members().is_empty());
+    assert!(!p.allows("Alex", ALEX, node::SEND));
+    // Asking with no extra group is asking plainly.
+    assert_eq!(
+        p.allows_in("Alex", ALEX, node::SEND, &[]),
+        p.allows("Alex", ALEX, node::SEND)
+    );
+}
+
+#[test]
+fn a_group_that_is_not_defined_adds_nothing_and_the_open_commands_stay_open() {
+    let p = Permissions::default();
+    assert!(!p.allows_in("Alex", ALEX, node::SEND, &["operator"]));
+    assert!(p.allows_in("Alex", ALEX, node::SERVER, &["operator"]));
+}
+
+#[test]
+fn the_group_given_inherits_and_a_deny_of_the_players_own_group_still_wins_a_tie() {
+    let p = parse(
+        r#"
+[group.moderator]
+allow = ["meridian.glist"]
+[group.operator]
+inherits = ["moderator"]
+allow = ["meridian.send"]
+[group.muted]
+deny = ["meridian.send"]
+[[player]]
+name = "Alex"
+groups = ["muted"]
+"#,
+    );
+    assert!(
+        p.allows_in("Steve", STEVE, node::GLIST, &["operator"]),
+        "inherited"
+    );
+    assert!(p.allows_in("Steve", STEVE, node::SEND, &["operator"]));
+    // Alex is in a group that denies the node as precisely as the operator group allows it.
+    assert!(!p.allows_in("Alex", ALEX, node::SEND, &["operator"]));
+    // A player already in the group is not counted twice.
+    let q = parse(
+        r#"
+[group.operator]
+allow = ["meridian.send"]
+[[player]]
+name = "Alex"
+groups = ["operator"]
+"#,
+    );
+    assert!(q.allows_in("Alex", ALEX, node::SEND, &["operator"]));
+}

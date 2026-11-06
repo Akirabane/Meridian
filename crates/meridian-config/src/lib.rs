@@ -10,6 +10,7 @@ mod error;
 mod fallback;
 mod favicon;
 mod metrics;
+mod operators;
 mod permissions;
 mod proxy_protocol;
 mod queue;
@@ -24,6 +25,7 @@ pub use error::ConfigError;
 pub use fallback::Fallback;
 pub use favicon::{FAVICON_SIDE, Favicon, MAX_FAVICON_BYTES};
 pub use metrics::Metrics;
+pub use operators::{MAX_OPERATOR_LEVEL, MAX_OPERATOR_STALE_SECONDS, OperatorSettings};
 pub use permissions::{
     DEFAULT_GROUP, Member, PermissionGroup, PermissionSettings, Permissions, Setting,
     check_group_name, check_node, node,
@@ -39,6 +41,7 @@ use balancing::{FileBalancing, FileServer};
 use commands::FileCommands;
 use fallback::FileFallback;
 use metrics::FileMetrics;
+use operators::FileOperators;
 use permissions::FilePermissionSettings;
 use proxy_protocol::FileProxyProtocol;
 use queue::FileQueue;
@@ -233,6 +236,8 @@ pub struct Config {
     pub permissions: PermissionSettings,
     /// The `[queue]` table.
     pub queue: QueueSettings,
+    /// The `[operators]` table.
+    pub operators: OperatorSettings,
 }
 
 /// The most names the server list may show. The client only draws a short list,
@@ -291,6 +296,7 @@ impl Default for Config {
             access: AccessSettings::default(),
             permissions: PermissionSettings::default(),
             queue: QueueSettings::default(),
+            operators: OperatorSettings::default(),
         }
     }
 }
@@ -337,6 +343,7 @@ impl std::fmt::Debug for Config {
             access,
             permissions,
             queue,
+            operators,
         } = self;
         let secret = if forwarding_secret.is_empty() {
             "<empty>"
@@ -385,6 +392,7 @@ impl std::fmt::Debug for Config {
             .field("access", access)
             .field("permissions", permissions)
             .field("queue", queue)
+            .field("operators", operators)
             .finish()
     }
 }
@@ -443,6 +451,8 @@ struct File {
     permissions: FilePermissionSettings,
     #[serde(default)]
     queue: FileQueue,
+    #[serde(default)]
+    operators: FileOperators,
 }
 
 #[derive(Deserialize)]
@@ -643,6 +653,7 @@ impl Config {
             access: file.access.into_settings(folder),
             permissions: file.permissions.into_settings(folder),
             queue: file.queue.into_settings(),
+            operators: file.operators.into_settings(),
         };
         config.validate()?;
         Ok(config)
@@ -725,6 +736,7 @@ impl Config {
             }
         }
         sidecar::validate(&self.sidecars)?;
+        self.operators.validate(self)?;
         if self.sidecar_timeout_ms == 0 {
             return Err(ConfigError::ZeroSidecarTimeout);
         }
@@ -982,6 +994,8 @@ mod proxy_protocol_tests;
 #[cfg(test)]
 mod access_tests;
 
+#[cfg(test)]
+mod operators_tests;
 #[cfg(test)]
 mod permissions_tests;
 #[cfg(test)]

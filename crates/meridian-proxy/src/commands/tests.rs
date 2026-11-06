@@ -30,7 +30,31 @@ fn typist(auth: AuthKind, backend: &str, file: &str) -> Typist {
         name: "Alex".into(),
         uuid: [1; 16],
         permissions: Arc::new(Permissions::parse(file).unwrap()),
+        operator_groups: Vec::new(),
     }
+}
+
+/// An operator of the server they are on is in the group `[operators]` names, for this question
+/// only: the nodes of that group are theirs, and without it they are not.
+#[test]
+fn an_operator_has_the_nodes_of_the_operator_group_and_another_player_has_not() {
+    let file = "[group.operator]\nallow = [\"meridian.send\", \"meridian.alert\"]\n";
+    let plain = typist(AuthKind::Verified, "lobby", file);
+    assert!(!plain.has(node::SEND));
+    let operator = Typist {
+        operator_groups: vec!["operator".into()],
+        ..plain.clone()
+    };
+    assert!(operator.has(node::SEND));
+    assert!(operator.has(node::ALERT));
+    assert!(!operator.has(node::GLIST), "only what the group gives");
+    // A group the permissions do not define gives nothing, and the open commands stay open.
+    let nowhere = Typist {
+        operator_groups: vec!["staff".into()],
+        ..plain
+    };
+    assert!(!nowhere.has(node::SEND));
+    assert!(nowhere.has(node::SERVER));
 }
 
 /// The answer as one line: what the player is shown, or `move to <backend>`.

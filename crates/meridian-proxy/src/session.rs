@@ -69,6 +69,8 @@ pub struct Sessions {
     pub access: crate::access::Lists,
     /// The groups of permissions and the players in them.
     pub permissions: Arc<crate::permissions::Lists>,
+    /// The operators of the servers, as the servers listed them (`[operators]`).
+    pub operators: Arc<crate::operators::Operators>,
     /// The players who wait for a place.
     pub queue: crate::queue::LoginQueue,
     /// The configuration in force, which a reload replaces: set by the proxy that owns these
@@ -89,6 +91,8 @@ pub struct Shared {
     pub metrics: Arc<Metrics>,
     /// What a player is allowed to type in game.
     pub permissions: Arc<crate::permissions::Lists>,
+    /// The operators of the servers, who are members of a group of the permissions.
+    pub operators: Arc<crate::operators::Operators>,
 }
 
 impl Shared {
@@ -362,6 +366,7 @@ impl Sessions {
             statuses: Arc::clone(&self.statuses),
             metrics: Arc::clone(self.metrics()),
             permissions: Arc::clone(&self.permissions),
+            operators: Arc::clone(&self.operators),
         }
     }
 
@@ -772,13 +777,22 @@ fn commands_hook(
     let config = Arc::new(config.clone());
     let shared = sessions.shared();
     let typist = {
-        let (handle, permissions) = (handle.clone(), Arc::clone(&shared.permissions));
-        move || commands::Typist {
-            auth,
-            backend: handle.backend(),
-            name: handle.profile().name.clone(),
-            uuid: handle.profile().uuid,
-            permissions: Arc::new(permissions.snapshot()),
+        let (handle, permissions, operators) = (
+            handle.clone(),
+            Arc::clone(&shared.permissions),
+            Arc::clone(&shared.operators),
+        );
+        move || {
+            let backend = handle.backend();
+            let (name, uuid) = (handle.profile().name.clone(), handle.profile().uuid);
+            commands::Typist {
+                auth,
+                operator_groups: operators.groups_for(&backend, &name, uuid, auth),
+                backend,
+                name,
+                uuid,
+                permissions: Arc::new(permissions.snapshot()),
+            }
         }
     };
     // A move to a backend the player named: with balancing on, it may pass the soft
