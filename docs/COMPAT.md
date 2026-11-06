@@ -20,6 +20,10 @@ change of Horizon's protocol is invisible until someone moves the pin. Two thing
 close that gap: a build every night against Horizon's head, and a script that moves
 the pin.
 
+The pin was moved on 2026-11-06 from `f696adc8996d` to `0d21d5520ec2`, Horizon's head that day, with
+`scripts/bump-horizon.sh`: Meridian needed no change, and the format check, clippy with
+`-D warnings` and `cargo test --workspace` passed (999 tests, 2 ignored).
+
 ## The nightly build
 
 The `Horizon compat` workflow (`.github/workflows/horizon-compat.yml`) runs every
@@ -56,8 +60,10 @@ Measured on a Windows 11 machine, from an empty target directory, with Cargo lim
 to 3 jobs: `scripts/bump-horizon.sh` against Horizon's head (`66f3981f522b`, 2026-11-05)
 took 2 minutes 9 seconds in all, fetching the Horizon repository included, and left
 2.2 GB in the target directory, which is well inside the 14 GB of a hosted runner.
-All of the roughly 900 tests passed. A hosted Ubuntu runner has 4 cores, so expect a few
-minutes; that is an estimate, the workflow has not run yet. The Rust cache (the same
+All of the roughly 900 tests passed. A hosted Ubuntu runner has 4 cores. The workflow has been started by hand twice and both runs
+ended green: on 2026-11-05 against `66f3981f522b`, and on 2026-11-06 against `98af9399cd1c`,
+the second about 4 minutes from its start to its last test. The run planned for 03:23 UTC on
+2026-11-06 did not take place. The Rust cache (the same
 `rust-cache` as the main checks, keyed on the pinned `Cargo.lock`) restores the
 crates.io dependencies, so a night builds only the Horizon crates and Meridian's own.
 The job stops at 40 minutes. Cargo builds only `horizon-protocol`, `horizon-core` and

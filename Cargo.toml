@@ -26,8 +26,8 @@ repository = "https://github.com/Akirabane/Meridian"
 # `horizon-world` is a crate of the same repository that `horizon-protocol` already builds
 # (it holds the NBT tags of the text components): its `rev` is the same, and the two lines
 # are changed together by scripts/bump-horizon.sh.
-horizon-protocol = { git = "https://github.com/horizon-rust/horizon", rev = "f696adc8996d7d4b11e7d50a863f2735a21c8000" }
-horizon-world = { git = "https://github.com/horizon-rust/horizon", rev = "f696adc8996d7d4b11e7d50a863f2735a21c8000" }
+horizon-protocol = { git = "https://github.com/horizon-rust/horizon", rev = "0d21d5520ec26c49b774bf1533e53ea8af81278d" }
+horizon-world = { git = "https://github.com/horizon-rust/horizon", rev = "0d21d5520ec26c49b774bf1533e53ea8af81278d" }
 
 meridian-config = { path = "crates/meridian-config" }
 meridian-ghost = { path = "crates/meridian-ghost" }
