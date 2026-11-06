@@ -1029,3 +1029,125 @@ fn a_removed_or_disabled_extension_is_stopped_and_its_thread_ends() {
         until("the connection", || registry.links()[0].is_connected());
     }
 }
+
+// The real connection against the SDK's end of it (`meridian_extension::serve`): the two sides of the
+// protocol that Meridian ships, one against the other.
+
+mod sdk {
+    use super::*;
+    use meridian_extension::serve::{Extension as SdkExtension, Log, Running as SdkRunning};
+
+    #[derive(Default)]
+    struct Lines(Mutex<Vec<String>>);
+
+    impl Lines {
+        fn all(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Log for Lines {
+        fn info(&self, line: &str) {
+            self.0.lock().unwrap().push(format!("INFO {line}"));
+        }
+
+        fn warn(&self, line: &str) {
+            self.0.lock().unwrap().push(format!("WARN {line}"));
+        }
+    }
+
+    fn sdk(token: &[u8], lines: &Arc<Lines>) -> SdkRunning {
+        SdkExtension::new("sdk-extension", "0.3.1", Secret::new(token).unwrap())
+            .log(Arc::clone(lines) as Arc<dyn Log>)
+            .bind("127.0.0.1:0")
+            .unwrap()
+    }
+
+    fn link_to(running: &SdkRunning, folder: &Folder) -> (Registry, Arc<Link>) {
+        let mut settings = Settings::new(
+            "perms",
+            running.local_addr().to_string(),
+            folder.token(TOKEN),
+        );
+        settings.grant = vec!["decide.login".into()];
+        settings.timings = timings();
+        let registry = Registry::default();
+        let link = registry.start(settings).unwrap();
+        (registry, link)
+    }
+
+    #[test]
+    fn the_proxys_connection_and_the_sdk_do_the_hello_and_the_proxy_reads_what_the_sdk_declares() {
+        let lines = Arc::new(Lines::default());
+        let running = sdk(TOKEN, &lines);
+        let folder = Folder::new();
+        let (_registry, link) = link_to(&running, &folder);
+        until("the connection", || link.is_connected());
+        let info = link.info().unwrap();
+        assert_eq!(
+            (info.protocol, info.name.as_str(), info.version.as_str()),
+            (0, "sdk-extension", "0.3.1")
+        );
+        // It declares nothing yet (no handler is registered), so nothing is granted or refused.
+        assert!(info.granted.is_empty() && info.refused.is_empty());
+        until("the line", || {
+            lines.all().iter().any(|l| {
+                l.starts_with("INFO the proxy ") && l.ends_with("is connected, protocol 0")
+            })
+        });
+    }
+
+    #[test]
+    fn an_error_of_the_sdk_reaches_the_proxy_as_an_invalid_answer() {
+        let running = sdk(TOKEN, &Arc::default());
+        let folder = Folder::new();
+        let (_registry, link) = link_to(&running, &folder);
+        until("the connection", || link.is_connected());
+        // No handler serves this method: the SDK answers -32601.
+        let result = link.call(
+            "meridian:decide/login",
+            Some(&json!({"name": "Steve"})),
+            Duration::from_secs(2),
+            |_| Ok(()),
+        );
+        let Err(CallError::Invalid(why)) = result else {
+            panic!("{result:?}");
+        };
+        assert!(why.contains("-32601"), "{why}");
+        assert!(link.is_connected());
+    }
+
+    #[test]
+    fn a_wrong_token_is_refused_by_the_proxy_before_it_confirms_and_it_waits_the_longest() {
+        let lines = Arc::new(Lines::default());
+        // The SDK has another token than the file the proxy reads.
+        let running = sdk(b"another-token-0123456789abcdefghij0", &lines);
+        let folder = Folder::new();
+        let (_registry, link) = link_to(&running, &folder);
+        // The proxy checks the extension's proof first and closes for a policy; it never confirms.
+        until("the wait", || link.last_wait() == timings().longest_wait);
+        assert!(!link.is_connected());
+        assert!(link.info().is_none());
+        // The SDK saw a proxy that closed after the hello, and said nothing of the token.
+        until("the extension's line", || {
+            lines.all().iter().any(|l| l.contains("the hello failed"))
+        });
+        assert!(lines.all().iter().all(|l| !l.contains("another-token")));
+        assert!(
+            ping(&link, Duration::from_millis(50)).is_err(),
+            "no request goes out"
+        );
+    }
+
+    #[test]
+    fn stopping_the_sdk_ends_the_proxys_connection_and_the_proxy_keeps_trying() {
+        let running = sdk(TOKEN, &Arc::default());
+        let folder = Folder::new();
+        let (_registry, link) = link_to(&running, &folder);
+        until("the connection", || link.is_connected());
+        running.stop();
+        until("the end", || !link.is_connected());
+        // Nothing listens any more: the wait grows to the longest.
+        until("the wait", || link.last_wait() == timings().longest_wait);
+    }
+}
