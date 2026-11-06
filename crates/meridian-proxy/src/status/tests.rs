@@ -141,7 +141,7 @@ fn a_failure_keeps_the_last_answer_and_a_backend_that_never_answered_stays_unkno
 fn a_backend_that_does_not_know_the_request_is_alive_and_stays_unknown() {
     let statuses = Statuses::default();
     let ask = |_: &Sidecar, _: Duration| {
-        Err("the sidecar refused: unknown request \"status\"".to_owned())
+        Err("the sidecar refused: unknown request \"transfer-status\"".to_owned())
     };
     for _ in 0..5 {
         poll(&config(), &ask, &statuses);
@@ -292,6 +292,35 @@ fn the_proxy_reads_a_backends_state_through_its_sidecar() {
             accepts_transfers: Some(false),
         }
     );
+}
+
+/// Horizon's `transfer-status` answer, from the backend's endpoint to the proxy's report.
+#[test]
+fn the_proxy_reads_horizons_transfer_status_through_its_sidecar() {
+    let running = Running::start(
+        r#"{"ok":true,"players":12,"held":1,"expected":2,"frozen":0,"online":13,"max_players":20,"full":false}"#,
+    );
+    let status = ask_sidecar(&running.sidecar, Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        status,
+        ServerStatus {
+            players: Some(13),
+            capacity: Some(20),
+            accepts_transfers: Some(true),
+        }
+    );
+}
+
+/// A server whose transfer module is off answers an error to `transfer-status`: the proxy
+/// reads it as a report that the server takes no transfers, not as a failure.
+#[test]
+fn a_server_with_transfers_off_reports_that_it_takes_none() {
+    let running = Running::start(r#"{"error":"transfers are off on this server"}"#);
+    let status = ask_sidecar(&running.sidecar, Duration::from_secs(3)).unwrap();
+    assert_eq!(status.accepts_transfers, Some(false));
+    let statuses = Statuses::default();
+    statuses.record("lobby", status, Instant::now());
+    assert!(!statuses.failing("lobby"));
 }
 
 #[test]

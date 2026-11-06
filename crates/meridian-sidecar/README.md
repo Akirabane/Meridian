@@ -12,7 +12,7 @@ requests of a switch (DESIGN.md section 6, decision 8):
 | `confirm` (`handover`) | `player-confirm <uuid> <handover>` | places a held player whose record was imported with `place` false (refused when no player is held, its record was not imported, or it is another hand-over's) |
 | `release` (`handover`; `moved` with `announce`, or `abort`) | `player-release <uuid> <handover> moved [announce]`, `player-release <uuid> <handover> abort` | ends a switch: the player has gone for good, or stays. The source refuses `moved` once the freeze has run out |
 | `drop` (`handover`, optional) | `player-drop <uuid> [handover]` | forgets an expected or held player; after an import with `place` false, cancels the arrival without a word to anyone. After an import it names the record's `handover`, so that a late drop leaves a newer arrival alone |
-| `status` | `status` (a placeholder: the Horizon server has not fixed the command) | reports its state; the proxy reads `players`, `capacity` and `accepts_transfers` from the answer, and ignores the rest. Read only, and it names no player. See `docs/LOAD-BALANCING.md`, section 3 |
+| `status` | `transfer-status` | reports its state: `{"ok": true, "players", "held", "expected", "frozen", "online", "max_players", "full"}`. The proxy reads `online` (the players the limit counts), `max_players` and, from an answer that names it or an error of a server with transfers off, `accepts_transfers`, and ignores the rest. A Horizon from before the request answers `unknown request`. Read only, and it names no player. See `docs/LOAD-BALANCING.md`, section 3 |
 
 The lines are those of Horizon's player transfers (its `docs/server.md`, "A proxy moving
 a player between two servers"). They are a module of the server that is off by

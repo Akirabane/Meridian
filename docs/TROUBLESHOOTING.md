@@ -150,7 +150,7 @@ The proxy's `check: the sidecar of <server>: <error>` and `cannot read the state
 | `cannot reach it at <address>: <error>` | Nothing listens at `sidecar = "<address>"`, or a firewall blocks it | Start `meridian-sidecar`; check `--listen` and the address in the proxy's file |
 | `cannot read <path>: <error>` / `<path> holds <n> bytes; a sidecar secret has at least 16` | The proxy cannot read the sidecar's secret file | Fix the path (relative to the proxy's configuration file) and the file |
 | `the signature does not match the shared secret` (or `sequence number <n> where <m> was expected`) | The proxy and the sidecar hold different secrets, or a line was changed or replayed on the way | Give both the same secret. A final line break is ignored, any other difference is not |
-| `the sidecar refused: unknown request` | The Horizon server does not know the request. For `status` this is normal today (see below). For a `player-*` request it probably means a build with no transfer module | Use a Horizon build with the transfer module |
+| `the sidecar refused: unknown request` | The Horizon server does not know the request. For `transfer-status` it is a Horizon build from before that request (see below). For a `player-*` request it probably means a build with no transfer module | Use a Horizon build with the transfer module |
 | `the sidecar refused: the server is not open to players (it is still starting or is stopping; …)` | Horizon answers so to every `player-*` request while its server is not open: it has not finished starting, or it is stopping. A move that meets it does not go through | Wait until the server is open, then move the player again. A server that stays like this has a problem of its own: read its log |
 | `{"ok": false, "error": "...", "unreached": true}` | The sidecar could not get the server's answer: no answer in time, the control endpoint closed, or its file unreadable while the server restarts | The server is down, restarting or hung. `--endpoint-timeout-ms` (default 5000) bounds the wait |
 | `meridian-sidecar: --endpoint-file is required` | The option is missing | Give `--endpoint-file <server folder>/.horizon/engine.json` |
@@ -166,7 +166,7 @@ The proxy's `check: the sidecar of <server>: <error>` and `cannot read the state
 
 | Message | Cause | Action |
 | --- | --- | --- |
-| `WARN backend "<name>" does not answer the state request: its state is unknown, so it is treated as accepting players` | The Horizon server answered `unknown request` to the state read. Horizon has not defined that command yet | None. The server is alive and is balanced on the proxy's own count. Logged once |
+| `WARN backend "<name>" does not answer the state request: its state is unknown, so it is treated as accepting players` | The Horizon server answered `unknown request` to `transfer-status`: a build from before that request (Horizon's pull request #10527) | None, or use a newer Horizon. The server is alive and is balanced on the proxy's own count. Logged once; a Horizon with `transfer-status` does not log it |
 | `WARN cannot read the state of backend "<name>": <why>` | The sidecar is silent or refuses (see "The sidecar"). Logged once per failure run | Fix the sidecar. After `silent-rounds` readings the server counts as going down |
 | `INFO backend "<name>" reports its state again` | It answers again | None |
 | `servers` says `not offered (no report for <n> s)` | No answer for `state-max-age-seconds` | The sidecar or the server is down. The server takes no new player until it answers |

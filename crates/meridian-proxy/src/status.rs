@@ -147,8 +147,9 @@ pub fn poll(
                     }
                     statuses.record(&sidecar.backend, status, Instant::now());
                 }
-                // The backend answered, with "unknown request": the Horizon server has no
-                // state to report yet. It is alive; it is treated as accepting players.
+                // The backend answered, with "unknown request": a Horizon build from before
+                // `transfer-status` has no state to report. It is alive; it is treated as
+                // accepting players.
                 Err(why) if no_such_request(&why) => {
                     if statuses.unreported(&sidecar.backend) {
                         warning!(

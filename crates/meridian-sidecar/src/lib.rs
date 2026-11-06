@@ -62,6 +62,10 @@ impl Error {
 /// is still starting, or already stopping (`crates/horizon-client/src/game/dedicated/transfer.rs`).
 const NOT_OPEN: &str = "the server is not open to players";
 
+/// What Horizon answers to any `player-*` request and to `transfer-status` while its
+/// `[transfer]` module is off (its `docs/server.md`).
+pub(crate) const TRANSFERS_OFF: &str = "transfers are off on this server";
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

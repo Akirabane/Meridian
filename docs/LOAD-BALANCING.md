@@ -32,7 +32,7 @@ with whom, are not part of it.
 | Order of candidates | `route::candidates` gives the servers of the player's group in the listed order, and a login goes to the first that answers. Filling a server first is therefore what happens already, with no limit at all | A limit: the first server takes every player until it fails |
 | Player count per server | The proxy knows the backend of each session (`Sessions::players`). It is exact because backends are private and the proxy is the only way in (DESIGN.md section 12, decision 9) | `Sessions::counts` gives the count. A place is reserved with the count, under one lock, from the choice of a server until the session is open, so logins at the same time do not pass a cap. Players who joined a server some other way are not seen |
 | Capacity | `max-players` limits the whole proxy, not a server | Read and checked by this step (`soft-cap`, `hard-cap`) |
-| Does a server accept transfers | The proxy reads `accepts_transfers`, `players` and `capacity` through the sidecar (section 3). A failed login also marks a server "passed over" for `backend-retry-seconds` (`health.rs`) | The answer on the Horizon side: its command and its names are not fixed |
+| Does a server accept transfers | The proxy reads `accepts_transfers`, `players` and `capacity` through the sidecar (section 3). A failed login also marks a server "passed over" for `backend-retry-seconds` (`health.rs`) | Not run against a real Horizon: the answer is Horizon's `transfer-status` (section 3) |
 | Premium or offline | Done. Players are verified or unverified, decided at login (DESIGN.md section 15), and groups and routes keep the two kinds apart | Nothing for placement: it chooses among the servers the route already allows |
 | Ping | The proxy measures the TCP connection time to each server with a role and keeps it (section 5). Nothing measures a player. The relay passes keep-alives through as they are (`relay.rs`) | Player to proxy, not asked for |
 | Drain | A server that reports it does not accept transfers, or that the operator drains with the console's `drain`, is not offered to new players, not even to a named choice; its players stay | `drain <server> --move` sends the players off it, one at a time, to other servers of the same role (section 4); a player with nowhere to go stays. A removed server still keeps its players until they leave |
@@ -52,18 +52,26 @@ proxy, which asks the sidecar every `probe-interval-seconds`. No new port is ope
 What exists, and what does not:
 
 - **The sidecar side is done.** `Request::Status` becomes one line on the endpoint,
-  `status` (`STATUS_LINE`), and the answer is passed up as the backend gave it, like
-  every other answer. `SidecarClient::status` reads it as a `ServerStatus`.
-- **The Horizon side is not.** The Horizon server has not fixed the command that
-  reports its state, nor the names in its answer. `status` is a placeholder and
-  `STATUS_LINE` is the one place to change. Until a server answers it, the proxy
-  hears nothing from it and treats it as accepting players, which is what it does
-  without balancing.
-- **What the proxy reads** from the answer is three optional fields: `players` and
-  `capacity` (whole numbers) and `accepts_transfers` (true or false). A field that is
-  left out is unknown, not zero or false. Any other field, such as an activity, is
-  ignored. A field of the wrong type makes the whole answer an error. Changing these
-  names is a change in `ServerStatus::from_value`.
+  `transfer-status` (`STATUS_LINE`), and the answer is passed up as the backend gave it,
+  like every other answer. `SidecarClient::status` reads it as a `ServerStatus`.
+- **The Horizon side exists since its pull request #10527** (merged into its main). Its
+  `transfer-status` takes no argument, changes nothing, and answers
+  `{"ok": true, "players", "held", "expected", "frozen", "online", "max_players", "full"}`
+  (its `docs/server.md`). With the transfer module off it answers
+  `{"error": "transfers are off on this server"}`, which the sidecar client reads as a
+  status that says `accepts_transfers` is false. A build from before it answers
+  `unknown request`: the proxy hears nothing from that server and treats it as accepting
+  players, which is what it does without balancing. Not run against a real Horizon yet.
+- **What the proxy reads** from the answer is three optional values: the players,
+  from `online` (what the player limit counts: the placed players, the held ones and
+  the logins still joining; `players` when there is no `online`), the capacity, from
+  `max_players` (or `capacity`), and `accepts_transfers` (true or false; true for an
+  answer of `transfer-status`, which only a server with transfers on gives). A value
+  that is left out is unknown, not zero or false. The other fields, `full` included, are
+  ignored: `full` is `online` at `max_players` or above, which the caps already say, since
+  the capacity lowers the hard cap and the players are the larger of the proxy's count and
+  `online`. A field of the wrong type makes the whole answer an error. Changing these names
+  is a change in `ServerStatus::from_value`.
 - **The heartbeat is the answer itself.** The proxy keeps the time of the last answer
   of each backend (`status.rs`). It is believed for `state-max-age-seconds`.
 
@@ -230,8 +238,8 @@ Decided:
 
 Open:
 
-- The command and the field names of the Horizon server's report, until it defines
-  them (section 3). The proxy side reads `players`, `capacity` and
+- Horizon's `transfer-status` has been merged (section 3) but never read from a real
+  server by the proxy. The proxy side reads `online`, `max_players` and
   `accepts_transfers`.
 - What a player sees when every server of a role is at its hard cap. Today it is "The
   server is full".

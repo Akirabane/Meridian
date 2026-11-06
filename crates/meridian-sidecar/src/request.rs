@@ -12,7 +12,7 @@
 //! | confirm | `player-confirm <uuid> <handover>` |
 //! | release | `player-release <uuid> <handover> moved [announce]` or `player-release <uuid> <handover> abort` |
 //! | drop | `player-drop <uuid> [handover]` |
-//! | status | `status` (a placeholder: see [`STATUS_LINE`]) |
+//! | status | `transfer-status` (see [`STATUS_LINE`]) |
 //! | notices | none: the sidecar answers it from the notices of the backend's management protocol it heard |
 //!
 //! `<handover>` is the id that a `player-export` with `freeze` puts in its record
@@ -128,28 +128,35 @@ pub enum Request {
     },
 }
 
-/// The line a [`Request::Status`] becomes on the backend's control endpoint. It is a
-/// placeholder: the Horizon server has not fixed the command that reports its state,
-/// so this is the one place to change when it does. Until a server answers it, the
-/// proxy hears no report from it and goes on as if the server accepted players.
-pub const STATUS_LINE: &str = "status";
+/// The line a [`Request::Status`] becomes on the backend's control endpoint: Horizon's
+/// `transfer-status` (its `docs/server.md`), a read that names no player and changes
+/// nothing. A Horizon build from before it answers `unknown request`, and the proxy then
+/// goes on as if the server accepted players.
+pub const STATUS_LINE: &str = "transfer-status";
 
 /// What a backend reports of itself, as the proxy reads it from the answer to
 /// [`Request::Status`]. A field the backend leaves out is unknown, not zero or false,
 /// and any other field of the answer is ignored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ServerStatus {
-    /// The players on the backend now (`players`).
+    /// The players on the backend now. From Horizon's `online`, which counts the placed
+    /// players, the held ones and the logins still joining, as the player limit does;
+    /// `players` when the answer has no `online`.
     pub players: Option<u64>,
-    /// The most players it can take (`capacity`).
+    /// The most players it can take: Horizon's `max_players`, or `capacity`.
     pub capacity: Option<u64>,
-    /// Whether it takes players sent by the proxy (`accepts_transfers`).
+    /// Whether it takes players sent by the proxy (`accepts_transfers`). Horizon's
+    /// answer to `transfer-status` has no such field: a server that answers it has
+    /// transfers on, and one that has them off answers an error instead, which
+    /// [`crate::client::SidecarClient::status`] reads as `Some(false)`.
     pub accepts_transfers: Option<bool>,
 }
 
 impl ServerStatus {
-    /// Reads the answer of the backend: a JSON object, whose `players` and `capacity`
-    /// are whole numbers and `accepts_transfers` a boolean when they are there.
+    /// Reads the answer of the backend: a JSON object, whose `players` (or `online`),
+    /// `capacity` (or `max_players`) are whole numbers and `accepts_transfers` a boolean
+    /// when they are there. `full` and the other fields of Horizon's answer are not
+    /// read: a server is full when `online` reaches `max_players`, which the caps say.
     pub fn from_value(answer: &Value) -> Result<ServerStatus, String> {
         let Value::Object(map) = answer else {
             return Err(format!("the status is not a JSON object: {answer}"));
@@ -168,10 +175,18 @@ impl ServerStatus {
                 return Err(format!("accepts_transfers is not true or false: {other}"));
             }
         };
+        // Horizon's `held`, `expected` and `frozen` are numbers too, but are not read.
+        let horizon = map.contains_key("max_players");
         Ok(ServerStatus {
-            players: number("players")?,
-            capacity: number("capacity")?,
-            accepts_transfers,
+            players: match number("online")? {
+                Some(online) => Some(online),
+                None => number("players")?,
+            },
+            capacity: match number("max_players")? {
+                Some(max) => Some(max),
+                None => number("capacity")?,
+            },
+            accepts_transfers: accepts_transfers.or(horizon.then_some(true)),
         })
     }
 }
@@ -1081,6 +1096,42 @@ mod tests {
         );
     }
 
+    /// The answer of Horizon's `transfer-status`, as its `docs/server.md` gives it.
+    #[test]
+    fn horizons_answer_to_transfer_status_is_read() {
+        assert_eq!(STATUS_LINE, "transfer-status");
+        let answer = |text: &str| ServerStatus::from_value(&serde_json::from_str(text).unwrap());
+        // `online` is what the player limit counts, so it is the players; `players` are the
+        // placed ones only. A server that answers has transfers on.
+        assert_eq!(
+            answer(
+                r#"{"ok":true,"players":12,"held":1,"expected":2,"frozen":0,"online":13,"max_players":20,"full":false}"#
+            ),
+            Ok(ServerStatus {
+                players: Some(13),
+                capacity: Some(20),
+                accepts_transfers: Some(true),
+            })
+        );
+        assert_eq!(
+            answer(
+                r#"{"ok":true,"players":19,"held":1,"expected":0,"frozen":0,"online":20,"max_players":20,"full":true}"#
+            ),
+            Ok(ServerStatus {
+                players: Some(20),
+                capacity: Some(20),
+                accepts_transfers: Some(true),
+            })
+        );
+        // An answer that names `accepts_transfers` is believed over the default.
+        assert_eq!(
+            answer(r#"{"ok":true,"online":0,"max_players":20,"accepts_transfers":false}"#)
+                .unwrap()
+                .accepts_transfers,
+            Some(false)
+        );
+    }
+
     #[test]
     fn a_status_that_is_not_one_is_refused() {
         for bad in [
@@ -1093,6 +1144,8 @@ mod tests {
             json!({"capacity": true}),
             json!({"accepts_transfers": "yes"}),
             json!({"accepts_transfers": 1}),
+            json!({"online": "13", "max_players": 20}),
+            json!({"online": 13, "max_players": -1}),
         ] {
             assert!(ServerStatus::from_value(&bad).is_err(), "{bad}");
         }

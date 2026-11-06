@@ -225,9 +225,18 @@ impl SidecarClient {
 
     /// The state of the backend: its players, its capacity, whether it accepts
     /// transfers. What the backend leaves out is `None`; an answer that is not a status
-    /// is an error.
+    /// is an error. A backend whose transfer module is off answers that it is, which
+    /// is a state too: it does not accept transfers, and nothing else is known of it.
     pub fn status(&mut self) -> Result<ServerStatus, Error> {
-        let answer = self.request(&Request::Status {})?;
+        let answer = match self.request(&Request::Status {}) {
+            Err(Error::Refused(why)) if why == crate::TRANSFERS_OFF => {
+                return Ok(ServerStatus {
+                    accepts_transfers: Some(false),
+                    ..ServerStatus::default()
+                });
+            }
+            other => other?,
+        };
         ServerStatus::from_value(&answer)
             .map_err(|why| Error::Endpoint(format!("the status is not usable: {why}")))
     }
