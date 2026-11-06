@@ -6,6 +6,7 @@
 //! authentication (the extension protocol proves the token in its first messages, section 2.2 of
 //! docs/EXTENSIONS.md).
 use super::{MAX_HEAD, Role, Socket, base64, read_head};
+use base64::Engine;
 use sha1::{Digest, Sha1};
 use std::io::{Read, Write};
 
@@ -145,8 +146,11 @@ fn parse_request(head: &str) -> Result<(Upgrade, String), String> {
         .header("sec-websocket-key")
         .ok_or("the request has no Sec-WebSocket-Key")?
         .to_owned();
-    let alphabet = |c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/';
-    if key.len() != 24 || !key.ends_with("==") || !key[..22].chars().all(alphabet) {
+    // Strictly: the padding and the unused bits of the last character are as base64 writes them.
+    if !base64::engine::general_purpose::STANDARD
+        .decode(&key)
+        .is_ok_and(|bytes| bytes.len() == 16)
+    {
         return Err("the Sec-WebSocket-Key is not 16 bytes in base64".into());
     }
     Ok((upgrade, key))
@@ -431,6 +435,15 @@ mod tests {
                 "version 13",
             ),
             (request("").replace(KEY, "short"), "16 bytes in base64"),
+            // 24 characters that are not what base64 writes for 16 bytes (the last bits are not zero).
+            (
+                request("").replace(KEY, "AAAAAAAAAAAAAAAAAAAAA/=="),
+                "16 bytes in base64",
+            ),
+            (
+                request("").replace(KEY, "AAAAAAAAAAAAAAAAAAAAAAAA"),
+                "16 bytes in base64",
+            ),
             (
                 request("").replace(&format!("Sec-WebSocket-Key: {KEY}\r\n"), ""),
                 "no Sec-WebSocket-Key",
