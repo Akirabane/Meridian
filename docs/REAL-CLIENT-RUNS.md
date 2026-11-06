@@ -180,3 +180,7 @@ What those pages still say was not run with a real client, and this page does no
 - a planned restart, drain <server> --move and [restart] evacuate with a real client;
 - the queue as a real client sees it while it waits, the sync of bans and whitelist with a real
   client, the hybrid and online modes, more than one real client, and long sessions.
+
+A later page, [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md), records the seamless switch itself with
+real clients over a network (6 November 2026): one server on the proxy's machine, the other on the
+clients' machine across the Internet. It says what that run did not cover.
