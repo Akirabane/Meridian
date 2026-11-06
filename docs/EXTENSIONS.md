@@ -3,8 +3,12 @@
 This page specifies how a program of the operator's own can take part in what the proxy
 decides: whether a player may enter, whether they may use a proxy command, and which server
 they go to. Nothing on this page is built yet. It is the plan that the pull requests of
-section 10 follow. The operator settled its choices on 2026-11-05 (section 10.3); what is
-still asked of Horizon is in section 10.4.
+section 10 follow.
+
+**Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
+maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
+JSON-RPC with `rpc.discover` as the management protocol does (comment 6679084547 on Horizon's
+issue #7484). The questions asked of Horizon are in section 10.4, with what was answered.
 
 Every statement about the code as it is today names a file and a line, checked by searching the
 code at `e2211c5` (main after pull request #98). Statements about Horizon name its files on its
@@ -216,8 +220,20 @@ as direct dependencies rather than writing them again by hand: both are already 
   meaning never changes within a version.
 - The SDK's version follows the protocol's: `meridian-extension` 0.x speaks protocol 0.
 - Both sides answer `rpc.discover` with the methods they serve, as Horizon's management protocol
-  does (Horizon `management.rs:599-606`). The proxy lists the orders its version and the granted
-  capabilities allow.
+  does (Horizon `management.rs:599-606`, `:639`). The method is `rpc.discover`, with no
+  parameters (omitted, or an empty array); `meridian:rpc.discover` is the same call. It is
+  answered at any time, before the hello too, so that a tool can list what a program serves
+  without opening a session. The result is an object with a `methods` array, as Horizon's
+  (`management.rs:711-727`): each item has the `name` of the method, with its `meridian:` prefix,
+  and `params`, a list of `{ "name", "required", "schema" }` (empty or left out when the method
+  has none). `rpc.discover` itself is not listed. The proxy lists the orders its version and the
+  granted capabilities allow; an extension lists the decision points it serves.
+
+  ```json
+  {"jsonrpc": "2.0", "id": 1, "result": {"methods": [
+    {"name": "meridian:decide/login", "params": [{"name": "request", "required": true, "schema": {"type": "object"}}]}
+  ]}}
+  ```
 
 ## 4. The decision points of version 1
 
@@ -821,7 +837,8 @@ Windows.
 
 ### 10.4 Questions for Kacper (Horizon)
 
-Asked on Horizon's issue #7484, comment 6657883380 (2026-11-05), still open. Nothing on this
+Asked on Horizon's issue #7484, comment 6657883380 (2026-11-05), and answered in comment
+6679084547 (2026-11-06), except K3. Nothing on this
 page changes Horizon's management protocol, and none of its methods is Meridian's: an extension
 speaks a separate protocol, with its methods under `meridian:`, which borrows only the form of
 Horizon's (JSON-RPC 2.0 over a WebSocket).
@@ -830,14 +847,20 @@ Horizon's (JSON-RPC 2.0 over a WebSocket).
   own system into a proxy? If Horizon would one day call such a program itself, sharing this
   shape (JSON-RPC 2.0 over a WebSocket, `rpc.discover`, the hello) would let one extension serve
   both.
+  **Answered.** Horizon's maintainer chose the external program over a local socket, so that
+  crashes stay out of the proxy, and JSON-RPC with `rpc.discover` like the management protocol.
 - **K2.** Horizon's management protocol serves operators (`operators/add`, `operators/remove`,
   `operators/set`, `operators/clear` in Horizon `crates/horizon-server/src/management_schema.rs:39`
   and the lines around it), as well as the allowlist and bans. Would Horizon rather Meridian read
   the operators from the servers, for instance to give them the proxy's staff commands, than keep
   a list or ask an extension?
+  **Answered.** Yes: read the operators from the servers and keep no separate list in Meridian.
+  The proxy mirrors and the servers own them. This is built in the operators of the servers
+  (`[operators]`, [OPERATING.md](OPERATING.md) section 5.9), not through an extension.
 
 And one this page adds:
 
 - **K3.** Horizon checks a command with vanilla's permission levels. Is a hook planned where a
   server asks someone else whether a player may run a command? If so, an operator's rank system
   could answer both the proxy (section 4.3) and the servers with one program.
+  **Not answered** in that comment, so still open. Nothing on this page depends on it.
