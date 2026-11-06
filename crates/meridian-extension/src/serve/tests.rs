@@ -64,13 +64,25 @@ struct Proxy {
     next_id: u64,
 }
 
+/// Opens a connection as the proxy does. The extension takes one at a time and tells another `503`
+/// until the thread of the one before has ended, which a test that connects again right after a close
+/// can catch: this waits for the place, a few seconds at most.
 fn open(address: SocketAddr) -> Socket<TcpStream> {
-    let stream = TcpStream::connect(address).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
-    let request = wire::upgrade_request("127.0.0.1", address.port(), &new_key().unwrap());
-    Socket::open_checked(stream, &request, 2 * MAX_MESSAGE).unwrap()
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let request = wire::upgrade_request("127.0.0.1", address.port(), &new_key().unwrap());
+        match Socket::open_checked(stream, &request, 2 * MAX_MESSAGE) {
+            Ok(socket) => return socket,
+            Err(why) if why.contains("503") && Instant::now() < limit => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(why) => panic!("cannot open the connection: {why}"),
+        }
+    }
 }
 
 /// The next text, or `None` when the connection is closed. Gives up after ten seconds.
