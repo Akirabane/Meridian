@@ -341,6 +341,33 @@ A reload applies `enabled`, `wait-seconds` and `max-length` to the players who a
 and `max-players` to the players who wait as well: raising it serves the line at once. Turning
 the queue off does not send away the players already in it.
 
+## `[operators]`
+
+The operators of the servers, read from them ([OPERATING.md](OPERATING.md), section 5.9). The
+proxy has no list of operators of its own: the servers own theirs (Horizon's `operators`, kept in
+`ops.json`), and the proxy only reflects what they say. Off by default, and then nobody is an
+operator of the proxy and nothing else changes.
+
+With it on, a player who is an operator of the server they are on, at `min-level` or above, is
+treated as a member of `group` of `permissions.toml` when the proxy decides whether they may
+type one of its commands (`/send`, `/glist`, `/alert`). The group is written like any other
+(`allow`, `deny`, `inherits`); the operator is a member of it for that question only, and the
+file is never written. Each server's operators are read through its sidecar, started with
+`--management-properties`, and every backend whose operators count must have a `[[sidecars]]`
+entry.
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `from-servers` | `false` | Whether the operators of the servers are read | `true` or `false` |
+| `group` | `"operator"` | The group of `permissions.toml` the operators are members of | When on: letters, digits, underscores and hyphens. A group the file does not define gives nothing |
+| `min-level` | `4` | The lowest permission level (0 to 4) that counts | At most 4, whether or not it is on |
+| `from` | `[]` | The backends whose operators count. Empty means every backend that has a sidecar | When on: each is a backend with a `[[sidecars]]` entry, once |
+| `stale-after-seconds` | `600` | How long the list read from a server is believed after the server was last heard. A server that stays out of reach longer has no operators | When on: from 1 to 86400 |
+
+A player is an operator only of the server they are on now: an operator of `east` who is on
+`lobby` has nothing from `east`. A server that cannot be read, or has not been read yet, has no
+operators. A reload applies the new values to the next command a player types.
+
 ## `[commands]`
 
 The commands players type in game that the proxy answers itself.

@@ -200,9 +200,25 @@ impl Permissions {
     /// is refused, unless it is a command that was open before permissions existed
     /// (`meridian.server`, `.hub`, `.play`, and `meridian.server.<name>`).
     pub fn allows(&self, name: &str, uuid: [u8; 16], node: &str) -> bool {
+        self.allows_in(name, uuid, node, &[])
+    }
+
+    /// As [`Permissions::allows`] for a player who is also a member of the groups `extra`, as
+    /// the operators of the servers are of `[operators] group`. The membership is for this
+    /// question only: it is not written to the file, and a group that is not defined adds
+    /// nothing.
+    pub fn allows_in(&self, name: &str, uuid: [u8; 16], node: &str, extra: &[&str]) -> bool {
         let node = node.to_ascii_lowercase();
         let mut seen: Vec<&str> = Vec::new();
-        let own = self.groups_of(name, uuid);
+        let mut own = self.groups_of(name, uuid);
+        for wanted in extra {
+            // The group as this table names it, so that the list borrows from the table.
+            if let Some(group) = self.group(wanted)
+                && !own.contains(&group.name.as_str())
+            {
+                own.push(&group.name);
+            }
+        }
         // The player's groups level by level, then `default` level by level.
         for start in [own, vec![DEFAULT_GROUP]] {
             let mut level: Vec<&str> = start.into_iter().filter(|g| !seen.contains(g)).collect();
