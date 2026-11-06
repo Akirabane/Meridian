@@ -6,7 +6,7 @@
 //! an operator of the server they are on, at `min-level` or above, is a member of
 //! `[operators] group` of `permissions.toml` when the proxy decides about one of its commands.
 //! The cache is memory only; nothing of it reaches `permissions.toml`.
-use meridian_config::{AuthKind, OperatorSettings};
+use meridian_config::{AuthKind, Config, OperatorSettings};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -61,6 +61,16 @@ impl Operators {
         state.settings = settings.clone();
     }
 
+    /// Puts the `[operators]` of `config` in force, and forgets what was read from a backend that
+    /// has no sidecar in `config` any more: it can no longer be read, so it must not be believed
+    /// (until it ages out) whatever `from` says.
+    pub fn follow(&self, config: &Config) {
+        self.configure(&config.operators);
+        self.write()
+            .servers
+            .retain(|backend, _| config.sidecars.iter().any(|s| s.backend == *backend));
+    }
+
     /// The list `backend`'s server holds now, which replaces what was known of it: an operator
     /// the server no longer lists is no longer one.
     pub fn replace(&self, backend: &str, ops: Vec<Op>, now: Instant) {
@@ -69,8 +79,8 @@ impl Operators {
             .insert(backend.to_owned(), Heard { at: now, ops });
     }
 
-    /// `backend`'s server was heard connected, with nothing new to say: what is known of it
-    /// is believed for another `stale-after-seconds`.
+    /// `backend`'s server is still answering, with nothing new to say: what is known of it is
+    /// believed for another `stale-after-seconds`. (Not to be said when a read has just failed.)
     pub fn heard(&self, backend: &str, now: Instant) {
         if let Some(heard) = self.write().servers.get_mut(backend) {
             heard.at = now;
@@ -141,14 +151,17 @@ fn level_in(
     if !fresh(settings, heard, now) {
         return None;
     }
+    // A server may list the same player twice (once with an id, once without): the highest
+    // level they have there counts, not the one that comes first.
     heard
         .ops
         .iter()
-        .find(|op| match op.id {
+        .filter(|op| match op.id {
             Some(id) => id == uuid,
             None => auth == AuthKind::Verified && op.name.eq_ignore_ascii_case(name),
         })
         .map(|op| op.level)
+        .max()
         .filter(|level| *level >= settings.min_level)
 }
 

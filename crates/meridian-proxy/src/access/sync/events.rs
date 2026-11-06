@@ -100,8 +100,9 @@ pub fn is_operator_notice(line: &str) -> bool {
 }
 
 /// The operators in the list a server holds (`operators`), or `None` when the answer is not a
-/// list. An entry with no player name, or with a level that is not 0 to 4, is not taken: a
-/// player the proxy cannot name or whose level it cannot read has no standing.
+/// list. An entry with no player name, with a level that is not 0 to 4, or with an id that is
+/// present but is not a unique id, is not taken: a player the proxy cannot name or whose level or
+/// id it cannot read has no standing.
 pub fn operators(list: &Value) -> Option<Vec<Op>> {
     let entries = list.as_array()?;
     Some(
@@ -113,9 +114,15 @@ pub fn operators(list: &Value) -> Option<Vec<Op>> {
                 let level = u8::try_from(entry.get("permissionLevel")?.as_u64()?)
                     .ok()
                     .filter(|level| *level <= meridian_config::MAX_OPERATOR_LEVEL)?;
-                let id = match player.get("id").and_then(Value::as_str).map(Target::parse) {
-                    Some(Ok(Target::Uuid(id))) => Some(id),
-                    _ => None,
+                // No id (absent or null) is an entry the server could not give one for. An id that
+                // is there but cannot be read is not that: the entry is dropped, not matched by
+                // name.
+                let id = match player.get("id") {
+                    None | Some(Value::Null) => None,
+                    Some(id) => match id.as_str().map(Target::parse) {
+                        Some(Ok(Target::Uuid(id))) => Some(id),
+                        _ => return None,
+                    },
                 };
                 (!name.is_empty()).then(|| Op {
                     id,

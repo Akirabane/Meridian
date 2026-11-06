@@ -734,6 +734,108 @@ fn a_server_out_of_reach_for_longer_than_stale_after_loses_its_operators() {
     assert!(!typist(&sessions, "east", now + Duration::from_secs(stale + 5)).has(node::SEND));
 }
 
+/// A sidecar that stays connected to a server that keeps refusing the read renews nothing: the
+/// list it was meant to replace ages out like one that is out of reach, so a deop made while the
+/// proxy could not read does not last for ever.
+#[test]
+fn a_server_that_keeps_refusing_the_read_loses_its_operators_after_stale_after() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    {
+        let mut answers = script.operators.lock().unwrap();
+        answers.push_back(Ok(json!([operator(ID, "Alex", 4)])));
+        for _ in 0..8 {
+            answers.push_back(Err("Method cannot be dispatched".into()));
+        }
+    }
+    let mut config = operators_of_east();
+    config.operators.stale_after_seconds = 1;
+    run(&config, &script, &hearers, &sessions);
+    assert_eq!(operator_groups(&sessions, "east", "Alex", ID), ["operator"]);
+    // The server restarted (another connection) and refuses the read; the sidecar is connected
+    // at every round that follows.
+    script
+        .reports
+        .lock()
+        .unwrap()
+        .push_back(Ok(report(2, 0, vec![])));
+    run(&config, &script, &hearers, &sessions);
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 2);
+    std::thread::sleep(Duration::from_millis(700));
+    run(&config, &script, &hearers, &sessions);
+    std::thread::sleep(Duration::from_millis(700));
+    run(&config, &script, &hearers, &sessions);
+    // 1.4 s after the last good read, with the sidecar connected throughout.
+    assert!(
+        operator_groups(&sessions, "east", "Alex", ID).is_empty(),
+        "a refused read must not renew what is known"
+    );
+}
+
+/// A sidecar connected to a server whose list was read, and which has no change to say, keeps
+/// the list believed: only a failing read stops the renewal.
+#[test]
+fn a_connected_server_with_nothing_new_keeps_its_operators() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    script
+        .operators
+        .lock()
+        .unwrap()
+        .push_back(Ok(json!([operator(ID, "Alex", 4)])));
+    let mut config = operators_of_east();
+    config.operators.stale_after_seconds = 1;
+    run(&config, &script, &hearers, &sessions);
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(600));
+        run(&config, &script, &hearers, &sessions);
+    }
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 1);
+    assert_eq!(operator_groups(&sessions, "east", "Alex", ID), ["operator"]);
+}
+
+/// What was read from a backend that is no longer in the configuration (no sidecar) is forgotten
+/// at the next round, whether `from` names it or is empty.
+#[test]
+fn a_backend_taken_out_of_the_configuration_loses_its_operators() {
+    for from in [vec![], vec!["east".to_string(), "lobby".to_string()]] {
+        let sessions = Sessions::default();
+        let hearers = Hearers::default();
+        let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+        // Both servers are read, in parallel, from the same script: each gets an answer.
+        for _ in 0..2 {
+            script
+                .operators
+                .lock()
+                .unwrap()
+                .push_back(Ok(json!([operator(ID, "Alex", 4)])));
+        }
+        let mut both = config(false, false, &["east", "lobby"]);
+        both.operators = OperatorSettings {
+            from_servers: true,
+            from: from.clone(),
+            ..OperatorSettings::default()
+        };
+        run(&both, &script, &hearers, &sessions);
+        assert_eq!(script.operators_read.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            operator_groups(&sessions, "lobby", "Alex", ID),
+            ["operator"]
+        );
+        assert_eq!(operator_groups(&sessions, "east", "Alex", ID), ["operator"]);
+        // `east` leaves the configuration; `lobby` stays.
+        let mut only_lobby = config(false, false, &["lobby"]);
+        only_lobby.operators = both.operators.clone();
+        run(&only_lobby, &script, &hearers, &sessions);
+        assert!(
+            operator_groups(&sessions, "east", "Alex", ID).is_empty(),
+            "from = {from:?}"
+        );
+    }
+}
+
 /// A failure to read keeps what was known; it is not an answer.
 #[test]
 fn a_failed_read_of_the_operators_keeps_what_was_known() {

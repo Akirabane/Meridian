@@ -362,7 +362,7 @@ entry.
 | `group` | `"operator"` | The group of `permissions.toml` the operators are members of | When on: letters, digits, underscores and hyphens. A group the file does not define gives nothing |
 | `min-level` | `4` | The lowest permission level (0 to 4) that counts | At most 4, whether or not it is on |
 | `from` | `[]` | The backends whose operators count. Empty means every backend that has a sidecar | When on: each is a backend with a `[[sidecars]]` entry, once |
-| `stale-after-seconds` | `600` | How long the list read from a server is believed after the server was last heard. A server that stays out of reach longer has no operators | When on: from 1 to 86400 |
+| `stale-after-seconds` | `600` | How long the list read from a server is believed after it was last known to be right (read, or the sidecar connected with no read failing). A server that stays out of reach, or refuses the read, for longer has no operators | When on: from 1 to 86400 |
 
 A player is an operator only of the server they are on now: an operator of `east` who is on
 `lobby` has nothing from `east`. A server that cannot be read, or has not been read yet, has no

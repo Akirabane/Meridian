@@ -255,6 +255,27 @@ fn the_operators_of_a_server_are_its_listed_players_with_their_level() {
     assert_eq!(operators(&json!([])).unwrap(), vec![]);
 }
 
+/// An id that is there but cannot be read is not "no id": the entry would be matched by name,
+/// which a unique id was there to prevent.
+#[test]
+fn an_entry_with_an_id_that_cannot_be_read_is_not_taken_but_a_null_id_is() {
+    let list = json!([
+        { "player": { "id": "not-a-uuid", "name": "A" }, "permissionLevel": 4 },
+        { "player": { "id": 12, "name": "B" }, "permissionLevel": 4 },
+        { "player": { "id": "", "name": "C" }, "permissionLevel": 4 },
+        { "player": { "id": ["x"], "name": "D" }, "permissionLevel": 4 },
+        { "player": { "id": null, "name": "NoId" }, "permissionLevel": 4 },
+        { "player": { "name": "Absent" }, "permissionLevel": 4 },
+        { "player": { "id": ID, "name": "Fine" }, "permissionLevel": 4 },
+    ]);
+    let names: Vec<_> = operators(&list)
+        .unwrap()
+        .into_iter()
+        .map(|op| op.name)
+        .collect();
+    assert_eq!(names, ["NoId", "Absent", "Fine"]);
+}
+
 #[test]
 fn an_entry_the_proxy_cannot_name_or_whose_level_it_cannot_read_is_not_taken() {
     let list = json!([

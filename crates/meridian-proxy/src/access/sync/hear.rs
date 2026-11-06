@@ -16,7 +16,8 @@
 //! (docs/OPERATING.md, section 5.9). They are reflected, not followed: the list of a server
 //! replaces what was known of it, whenever the server is read again (the first answer, a
 //! reconnection, lost notices) and whenever it announces that an operator was added or removed.
-//! A server that cannot be read for `stale-after-seconds` has no operators.
+//! A server whose list could not be read for `stale-after-seconds`, whether it is out of reach or
+//! connected and refusing the read, has no operators.
 use super::events::{self, Event};
 use crate::access::{enforce, not_saved};
 use crate::log::{info, warning};
@@ -216,7 +217,7 @@ pub(super) fn retry_after(failures: u32) -> Duration {
 pub fn round(config: &Config, open: &Open<'_>, hearers: &Hearers, sessions: &Sessions) {
     let bans = config.access.sync.from_servers;
     let operators = config.operators.from_servers;
-    sessions.operators.configure(&config.operators);
+    sessions.operators.follow(config);
     if !bans && !operators {
         hearers.retain(|_| false);
         return;
@@ -323,10 +324,7 @@ fn ask(sidecar: &Sidecar, wants: Wants, open: &Open<'_>, slot: &mut Slot, sessio
         slot.ops_read = false;
         return;
     }
-    // A server heard connected is believed for another while; a read below may replace it.
-    if wants.operators {
-        sessions.operators.heard(backend, Instant::now());
-    } else {
+    if !wants.operators {
         slot.ops_read = false;
     }
     let behind_the_server = slot.after.is_none_or(|after| report.last < after);
@@ -373,6 +371,12 @@ fn ask(sidecar: &Sidecar, wants: Wants, open: &Open<'_>, slot: &mut Slot, sessio
             events::operators(&list).ok_or_else(|| "the answer is not a list".to_owned())
         });
         settle_operators(backend, read, slot, sessions);
+    }
+    // A server heard connected, whose list is right as far as is known, is believed for another
+    // while. A read that fails renews nothing: a server that stays connected but refuses the
+    // read ages like one that is out of reach.
+    if wants.operators && slot.ops_read && slot.ops_failures == 0 {
+        sessions.operators.heard(backend, Instant::now());
     }
     slot.connection = Some(report.connection);
     slot.after = Some(report.last);

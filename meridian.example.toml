@@ -304,7 +304,7 @@ max-length = 50
 # Each backend whose operators count needs a [[sidecars]] entry, started with
 # --management-properties. `from` lists the backends that count (empty: all that have a
 # sidecar). A server that cannot be read has no operators; a list read from a server is
-# forgotten after stale-after-seconds without hearing from it.
+# forgotten after stale-after-seconds without being read or heard answering.
 [operators]
 from-servers = false
 group = "operator"

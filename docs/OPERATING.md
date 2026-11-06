@@ -578,10 +578,12 @@ allow = ["meridian.send", "meridian.glist", "meridian.alert"]
   reason to read again; its content is not trusted.
 - **When a server cannot be read.** A server that has not been read has no operators: nobody is
   refused less than before. What was read from a server is believed for `stale-after-seconds`
-  (600) after the sidecar was last heard connected to it; past that, the server has no operators until
+  (600) after the last time the list was known to be right: it was read, or the sidecar was heard
+  connected to the server while no read was failing. Past that, the server has no operators until
   it is read again. A deop made while the proxy could not hear thus does not last for ever. A server
   that refuses the read (Horizon without the `operators` method, or not ready yet) is tried again
-  after a wait that grows, with a warning in the log, and its known list ages as above.
+  after a wait that grows, with a warning in the log; a read that fails renews nothing, so the list
+  it was meant to replace ages as above even while the sidecar stays connected.
 - **Reload.** A reload applies the new `[operators]` at once: with `from-servers` off, or for a server
   that no longer counts, what was read is forgotten.
 - **What a name proves.** The operator is found by **unique id**. A server that lists an operator without an id is

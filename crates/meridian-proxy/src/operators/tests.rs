@@ -162,6 +162,43 @@ fn reading_again_replaces_what_was_known() {
     );
 }
 
+/// A server may list a player twice, with and without an id: the level is the highest of the
+/// entries that are theirs, whatever the order.
+#[test]
+fn a_player_listed_twice_has_the_highest_of_their_levels_whatever_the_order() {
+    let now = Instant::now();
+    let min = OperatorSettings {
+        min_level: 3,
+        ..on()
+    };
+    for ops in [
+        vec![op("Alex", Some(ALEX), 1), op("Alex", None, 4)],
+        vec![op("Alex", None, 4), op("Alex", Some(ALEX), 1)],
+    ] {
+        let operators = heard(&min, "east", ops, now);
+        assert_eq!(
+            operators.level_of("east", "Alex", ALEX, AuthKind::Verified),
+            Some(4)
+        );
+        // The entry without an id is theirs only if their account was checked.
+        assert_eq!(
+            operators.level_of("east", "Alex", ALEX, AuthKind::Unverified),
+            None
+        );
+    }
+    // Two entries by id, as the file may hold after an edit by hand.
+    let operators = heard(
+        &min,
+        "east",
+        vec![op("Alex", Some(ALEX), 2), op("Alex", Some(ALEX), 4)],
+        now,
+    );
+    assert_eq!(
+        operators.level_of("east", "Alex", ALEX, AuthKind::Verified),
+        Some(4)
+    );
+}
+
 #[test]
 fn what_was_heard_is_believed_for_stale_after_seconds_and_hearing_the_server_renews_it() {
     let start = Instant::now();
