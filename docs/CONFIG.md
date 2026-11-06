@@ -341,6 +341,67 @@ A reload applies `enabled`, `wait-seconds` and `max-length` to the players who a
 and `max-players` to the players who wait as well: raising it serves the line at once. Turning
 the queue off does not send away the players already in it.
 
+## `[[extension]]`
+
+External programs the proxy connects to and asks for decisions ([EXTENSIONS.md](EXTENSIONS.md)).
+None by default, and then nothing changes: no thread, no connection, no line on the metrics page.
+One `[[extension]]` for each program. The proxy connects to the extension (never the other way), on
+the loopback, and proves itself to it, and asks it to prove itself, with a token kept in a file. The
+protocol is version 0, which is experimental. **The configuration is read and checked; no decision
+point asks an extension anything yet**, so an extension that is connected is not consulted and the
+proxy decides as it does without one.
+
+```toml
+[[extension]]
+name = "perms"
+address = "127.0.0.1:25590"
+token-file = "extensions/perms.token"
+grant = ["decide.login"]
+```
+
+| Key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `name` | none | In logs, metrics (`extension="perms"`) and node names | Letters, digits, `-` and `_`, at most 32, once |
+| `enabled` | `true` | Whether the proxy connects to it. A program that is switched off is still read and checked, so a spare can wait in the file | `true` or `false` |
+| `address` | none | Where it listens, as `host:port` | On the loopback: `127.0.0.1` (or any `127.x.y.z`), `[::1]` or `localhost`; any other host, a name included, is refused. Once. The proxy resolves it again at each connection and refuses an address that is not on the loopback |
+| `token-file` | none | The file that holds the token, taken from the folder of the configuration file when it is relative. The token is never in the configuration, a log or an error | When the extension is enabled: it can be read and holds at least 32 bytes, not counting the line end an editor leaves. Not the file of another extension |
+| `grant` | `[]` | The capabilities the operator grants. What the extension asks for beyond it is refused and logged; what is granted and not asked for is not used | Each one of the table in [EXTENSIONS.md](EXTENSIONS.md), 2.3, once. A decision point (`decide.login`, `decide.command`, `decide.server`) goes to one enabled extension at most |
+| `max-in-flight` | `64` | The most requests that may wait for its answers at once. A decision that finds no place does not wait | More than 0 |
+| `breaker-failures` | `5` | Decisions in a row without a usable answer that open the breaker | More than 0 |
+| `breaker-seconds` | `30` | How long the breaker stays open | More than 0 |
+
+A decision point has a table of its own, `[extension.decide-login]`, `[extension.decide-command]` or
+`[extension.decide-server]`, written under the `[[extension]]` it belongs to. It is accepted only
+when `grant` holds the capability of the same name.
+
+| Table and key | Default | What it does | Checks |
+| --- | --- | --- | --- |
+| `decide-login` `timeout-ms` | `1000` | How long the admission at login waits for the answer | More than 0 |
+| `decide-login` `on-error` | `"default"` | What happens with no usable answer (a timeout, an invalid answer, no connection, an open breaker, no free place): `"default"` as if there were no extension, `"allow"` lets the player go on to the checks that follow, `"deny"` refuses the login | One of the three |
+| `decide-command` `timeout-ms` | `250` | The same for the permission of a command | More than 0 |
+| `decide-command` `on-error` | `"default"` | The same three | One of the three |
+| `decide-command` `cache-seconds-max` | `300` | The longest an answer is kept, whatever the extension asks | None |
+| `decide-server` `timeout-ms` | `1000` | The same for the choice of server | More than 0 |
+| `decide-server` `on-error` | `"default"` | `"default"` as if there were no extension, or `"refuse"` | One of the two |
+
+**The time a player waits in silence.** The player's client gives up after 30 seconds without a
+packet, and the proxy sends it nothing while it decides, so the extensions' time counts with the
+others' against the 27 seconds that `[queue]` already keeps. When some enabled extension is granted
+`decide.login`, its `decide-login` `timeout-ms` counts; when granted `decide.server`, its
+`decide-server` `timeout-ms` counts. With the queue on, `wait-seconds`, `connect-timeout-ms` and
+those must add up to at most 27 seconds, so with an extension on both points the longest wait the
+queue allows is shorter than without. With the queue off, `connect-timeout-ms` and those must add up
+to at most 27 seconds. `decide-command` is not on the way of a login and is not counted. A
+configuration without an extension is checked as it always was.
+
+**A reload** closes the connection of an extension it removes or switches off, opens one for an
+extension it adds or switches on, and closes the connection of an extension whose `address`,
+`token-file`, `grant`, `max-in-flight`, `breaker-failures` or `breaker-seconds` changed and opens a
+new one (its breaker and counters start again). A change of a `decide-*` table keeps the connection
+and applies to the next decision. An extension that did not change is not touched. Decisions that
+wait on a connection that is closed take their on-error policy. The proxy says which of these it
+did, one line each, and closes the connections when it stops.
+
 ## `[operators]`
 
 The operators of the servers, read from them ([OPERATING.md](OPERATING.md), section 5.9). The
@@ -384,6 +445,8 @@ The commands players type in game that the proxy answers itself.
 logins that start after it: players already connected keep their server and their
 session. A server removed from the file keeps its players until they leave. `listen`
 is the exception: the proxy keeps listening where it started until a restart.
+
+The extensions are started, stopped or connected again as the section `[[extension]]` says.
 
 The bans and the whitelist (the file of `[access]`) and the permissions (the file of
 `[permissions]`) are read again at the same time. If either file cannot be read, nothing is

@@ -54,7 +54,13 @@ impl FileQueue {
 
 impl QueueSettings {
     /// Checked when the queue is on; the values of a queue that is off are not used.
-    pub(crate) fn validate(&self, connect_timeout_ms: u64) -> Result<(), ConfigError> {
+    /// `extension_ms` is what the extensions that decide a login may take (docs/EXTENSIONS.md, 4.2):
+    /// the client sees nothing during that time either.
+    pub(crate) fn validate(
+        &self,
+        connect_timeout_ms: u64,
+        extension_ms: u64,
+    ) -> Result<(), ConfigError> {
         if !self.enabled {
             return Ok(());
         }
@@ -69,11 +75,13 @@ impl QueueSettings {
                 .wait_seconds
                 .saturating_mul(1000)
                 .saturating_add(connect_timeout_ms)
+                .saturating_add(extension_ms)
                 > QUEUE_SILENCE_LIMIT_MS
         {
             return Err(ConfigError::QueueWaitTooLong {
                 wait_seconds: self.wait_seconds,
                 connect_timeout_ms,
+                extension_ms,
             });
         }
         Ok(())
