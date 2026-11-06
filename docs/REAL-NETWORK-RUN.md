@@ -16,8 +16,8 @@ repository; the numbers below were read from them.**
 | | |
 | --- | --- |
 | Date | 6 November 2026, 18:13 to 19:50 UTC (all times below are UTC; the clock of the machine of the clients is the reference, the clock of the rented machine is 0.485 s behind it) |
-| Proxy and server A (`real`) | A rented virtual server in Warsaw (4 vCores, about 8 GB of memory, Linux x86_64). The proxy at Meridian commit `91b2f536` (the merge of #132), the sidecar of the same commit, server A beside them on the loopback |
-| Server B (`real2`) and its sidecar | The Windows PC of the player, in France: Horizon server at the same commit as A (`98af9399c`), the sidecar of the proxy's commit. Both listen on the PC's loopback only |
+| Proxy and server A (`real`) | A rented virtual server (4 vCores, about 8 GB of memory, Linux x86_64). The proxy at Meridian commit `91b2f536` (the merge of #132), the sidecar of the same commit, server A beside them on the loopback |
+| Server B (`real2`) and its sidecar | The Windows PC of the player: Horizon server at the same commit as A (`98af9399c`), the sidecar of the proxy's commit. Both listen on the PC's loopback only |
 | Link between B and the proxy | A reverse SSH tunnel opened from the PC (Windows' own OpenSSH client): the proxy reaches B's game port and B's sidecar on two ports of its own loopback. Nothing listens on the PC's network, nothing is opened in the PC's firewall |
 | Clients | Three Horizon clients on the PC, `Net_A`, `Net_B` and `Net_C`, offline accounts, the Nightly 2026-11-05 `66f3981` (581 commits older than the servers' build). One window of 1280x720 for the runs that needed an unthrottled window, small minimised windows otherwise |
 | Link of the clients | TCP over the Internet from the PC to the rented machine. Round trip PC to rented machine over one SSH session: **44.2 / 44.7 / 45.6 ms** (min, median, max of 10 samples) |
