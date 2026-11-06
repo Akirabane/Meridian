@@ -3,6 +3,6 @@
   "id": 2,
   "method": "meridian:hello/confirm",
   "params": {
-    "proof": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    "proof": "3719587fddecaa8438f006341b2ae8c64e1bd94b1351f929e5da3870f6e1a226"
   }
 }

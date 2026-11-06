@@ -497,6 +497,8 @@ dependencies = [
 name = "meridian-extension"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
+ "meridian-hmac",
  "serde",
  "serde_json",
 ]
