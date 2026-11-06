@@ -21,7 +21,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 /// How long the steps of a connection take, and how long the proxy waits between two tries.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Timings {
     /// To open the TCP connection.
     pub connect: Duration,
@@ -51,7 +51,7 @@ impl Default for Timings {
 }
 
 /// One `[[extension]]` (docs/EXTENSIONS.md, 4.1).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// In logs and metrics.
     pub name: String,
@@ -85,6 +85,24 @@ impl Settings {
             max_in_flight: 64,
             breaker_failures: 5,
             breaker_open: Duration::from_secs(30),
+            timings: Timings::default(),
+        }
+    }
+}
+
+impl From<&meridian_config::Extension> for Settings {
+    /// What the connection needs of an `[[extension]]`. The decision points read their own tables
+    /// (`decide-login` and the others) from the configuration in force, so that changing a deadline
+    /// does not close the connection.
+    fn from(e: &meridian_config::Extension) -> Self {
+        Self {
+            name: e.name.clone(),
+            address: e.address.clone(),
+            token_file: e.token_file.clone(),
+            grant: e.grant.clone(),
+            max_in_flight: e.max_in_flight as usize,
+            breaker_failures: e.breaker_failures,
+            breaker_open: Duration::from_secs(e.breaker_seconds),
             timings: Timings::default(),
         }
     }

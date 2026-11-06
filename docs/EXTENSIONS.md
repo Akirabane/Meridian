@@ -340,6 +340,7 @@ counts toward the breaker.
 ```toml
 [[extension]]
 name = "perms"                       # in logs, metrics and node names
+enabled = true                       # false: read and checked, not connected to
 address = "127.0.0.1:25590"          # loopback only
 token-file = "extensions/perms.token"
 grant = ["decide.command", "commands", "orders.read", "orders.message"]
@@ -360,6 +361,11 @@ cache-seconds-max = 300
 timeout-ms = 1000
 on-error = "default"                 # default | refuse
 ```
+
+The configuration crate checks the address without asking a name server: an IP address on the loopback
+or `localhost`, and any other host is refused. The proxy resolves it again at each connection and
+refuses an address that is not on the loopback. [CONFIG.md](CONFIG.md) lists every key with its checks,
+including the time the two decisions of a login add to the queue's.
 
 It sits beside the other sections of the configuration crate (`crates/meridian-config/src/lib.rs:197-235`
 lists `commands`, `balancing`, `restart`, `fallback`, `proxy_protocol`, `metrics`, `access`,

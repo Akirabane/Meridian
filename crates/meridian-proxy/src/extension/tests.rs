@@ -863,3 +863,169 @@ fn the_metrics_page_has_the_extensions_and_none_without_one() {
         assert!(page.contains(line), "{line}\n{page}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+
+/// The configuration with one `[[extension]]` that leads to `fake`, the token in `folder`.
+fn configured(
+    fake: &Fake,
+    folder: &Folder,
+    change: impl FnOnce(&mut meridian_config::Extension),
+) -> meridian_config::Config {
+    let mut extension = meridian_config::Extension {
+        name: "perms".into(),
+        enabled: true,
+        address: fake.address.to_string(),
+        token_file: folder.token(TOKEN),
+        grant: vec!["decide.login".into()],
+        max_in_flight: 64,
+        breaker_failures: 5,
+        breaker_seconds: 30,
+        decide_login: Default::default(),
+        decide_command: Default::default(),
+        decide_server: Default::default(),
+    };
+    change(&mut extension);
+    meridian_config::Config {
+        extensions: vec![extension],
+        ..meridian_config::Config::default()
+    }
+}
+
+#[test]
+fn the_defaults_of_the_configuration_are_the_defaults_of_the_connection() {
+    let defaults = Settings::new("x", "127.0.0.1:1", "x.token");
+    let configured = Settings::from(&meridian_config::Extension {
+        name: "x".into(),
+        enabled: true,
+        address: "127.0.0.1:1".into(),
+        token_file: "x.token".into(),
+        grant: Vec::new(),
+        max_in_flight: 64,
+        breaker_failures: 5,
+        breaker_seconds: 30,
+        decide_login: Default::default(),
+        decide_command: Default::default(),
+        decide_server: Default::default(),
+    });
+    assert_eq!(configured, defaults);
+    // The shortest token the configuration accepts is the shortest the handshake accepts.
+    assert_eq!(
+        meridian_config::MIN_EXTENSION_TOKEN,
+        handshake::MIN_TOKEN_LEN
+    );
+}
+
+#[test]
+fn without_an_extension_in_the_configuration_nothing_starts() {
+    let registry = Registry::default();
+    assert!(
+        registry
+            .follow(&meridian_config::Config::default())
+            .is_empty()
+    );
+    assert!(registry.links().is_empty());
+    let mut page = String::new();
+    registry.render(&mut page);
+    assert!(page.is_empty());
+}
+
+#[test]
+fn the_registry_starts_what_the_configuration_enables_and_leaves_alone_what_did_not_change() {
+    let fake = Fake::start(Script::default());
+    let folder = Folder::new();
+    let registry = Registry::default();
+    let config = configured(&fake, &folder, |_| {});
+    let lines = registry.follow(&config);
+    assert_eq!(
+        lines,
+        [format!(
+            "extension \"perms\" added: connecting to {}",
+            fake.address
+        )]
+    );
+    let link = registry.links().remove(0);
+    until("the connection", || link.is_connected());
+    assert_eq!(link.info().unwrap().granted, ["decide.login"]);
+    assert!(ping(&link, Duration::from_secs(2)).is_ok());
+
+    // The same configuration: the same connection, and its counters are kept.
+    assert!(registry.follow(&config).is_empty());
+    assert!(Arc::ptr_eq(&link, &registry.links()[0]));
+    assert!(link.is_connected());
+    // What only a decision point reads does not touch the connection either.
+    let slower = configured(&fake, &folder, |e| e.decide_login.timeout_ms = 3000);
+    assert!(registry.follow(&slower).is_empty());
+    assert!(Arc::ptr_eq(&link, &registry.links()[0]));
+}
+
+#[test]
+fn a_changed_extension_gets_a_new_connection_and_the_old_one_is_closed() {
+    let fake = Fake::start(Script::default());
+    let folder = Folder::new();
+    let registry = Registry::default();
+    registry.follow(&configured(&fake, &folder, |_| {}));
+    let old = registry.links().remove(0);
+    until("the connection", || old.is_connected());
+
+    let lines = registry.follow(&configured(&fake, &folder, |e| {
+        e.max_in_flight = 2;
+        e.grant = vec!["decide.login".into(), "orders.read".into()];
+    }));
+    assert_eq!(
+        lines,
+        ["extension \"perms\" changed: its connection is closed and opened again"]
+    );
+    assert!(!old.is_connected());
+    assert_eq!(
+        ping(&old, Duration::from_millis(50)),
+        Err(CallError::Disconnected)
+    );
+    let new = registry.links().remove(0);
+    assert!(!Arc::ptr_eq(&old, &new));
+    until("the new connection", || new.is_connected());
+    assert_eq!(new.info().unwrap().granted, ["decide.login", "orders.read"]);
+    // The fake saw the first connection end and a second hello.
+    until("the second hello", || fake.seen(|s| s.hellos.len() == 2));
+    assert!(fake.seen(|s| !s.close_codes.is_empty()));
+}
+
+#[test]
+fn a_removed_or_disabled_extension_is_stopped_and_its_thread_ends() {
+    for (disabled, word) in [(false, "removed"), (true, "disabled")] {
+        let fake = Fake::start(Script::default());
+        let folder = Folder::new();
+        let registry = Registry::default();
+        registry.follow(&configured(&fake, &folder, |_| {}));
+        let link = registry.links().remove(0);
+        until("the connection", || link.is_connected());
+
+        let config = if disabled {
+            configured(&fake, &folder, |e| e.enabled = false)
+        } else {
+            meridian_config::Config::default()
+        };
+        let started = Instant::now();
+        let lines = registry.follow(&config);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            lines,
+            [format!(
+                "extension \"perms\" {word}: its connection is closed"
+            )]
+        );
+        assert!(registry.links().is_empty());
+        assert!(!link.is_connected());
+        until("the fake to see the end", || {
+            !fake.seen(|s| s.close_codes.is_empty())
+        });
+        // Nothing connects again.
+        let hellos = fake.seen(|s| s.hellos.len());
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(fake.seen(|s| s.hellos.len()), hellos);
+        // It can be enabled again: a new connection.
+        let lines = registry.follow(&configured(&fake, &folder, |_| {}));
+        assert_eq!(lines.len(), 1);
+        until("the connection", || registry.links()[0].is_connected());
+    }
+}
