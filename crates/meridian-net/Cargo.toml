@@ -14,8 +14,9 @@ meridian-config.workspace = true
 serde_json = "1"
 # The session service, over HTTPS. The same client and TLS as Horizon's.
 ureq = { version = "2", default-features = false, features = ["tls"] }
-# HMAC-SHA256 for the player information forwarding's signature.
-sha2 = "0.10"
+# HMAC-SHA256 for the player information forwarding's signature (the function is shared with
+# the extension protocol's proofs).
+meridian-hmac.workspace = true
 
 [dev-dependencies]
 meridian-testkit.workspace = true
