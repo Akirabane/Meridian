@@ -81,8 +81,8 @@ JSON-RPC 2.0 over a WebSocket, with namespaced methods such as
 `minecraft:notification/server/stopping`, its error codes (`-32700`, `-32600`, `-32601`,
 `-32602`, `-32603`) and `rpc.discover` (Horizon `crates/horizon-server/src/management.rs:1-6`,
 `:478-482`, `:599-606`). Meridian's sidecar is already a client of that protocol
-(`crates/meridian-sidecar/src/management.rs:4-14`), over its own small WebSocket code
-(`crates/meridian-sidecar/src/websocket.rs:1-10`).
+(`crates/meridian-sidecar/src/management.rs:4-14`), over a small WebSocket code of its own, now the
+`meridian-websocket` crate (`crates/meridian-websocket/src/lib.rs`, head comment).
 
 **Who connects.** The proxy connects to the extension. The extension listens on a loopback
 port, and the proxy is a client of it, as the sidecar is a client of a server's management
@@ -110,7 +110,7 @@ certificate today (`crates/meridian-sidecar/src/tls.rs`).
 (decisions) and the extension's requests (orders). JSON-RPC ids are per direction. A message is
 at most 256 KiB. That limit is the extension protocol's own: the sidecar's reader has one limit
 today, 4 MiB, raised so that it can read a server's ban list
-(`crates/meridian-sidecar/src/websocket.rs:16`, `MAX_MESSAGE`), and the shared code takes the
+(`crates/meridian-websocket/src/lib.rs`, `MAX_MESSAGE`), and the shared code takes the
 limit from its caller (section 2.5).
 
 ### 2.2 Authentication
@@ -190,15 +190,16 @@ sidecar and the SDK use, `meridian-websocket`, with no new dependency (decision 
 
 The sidecar's code is a client. It reads text messages, whole or in fragments, answers pings,
 and since the synchronisation of bans it also sends masked text frames
-(`crates/meridian-sidecar/src/websocket.rs:173-211`, `send` and `send_text`). It does not check
-the server's `Sec-WebSocket-Accept` (`websocket.rs:6-10`). The proxy is the client of an
+(`crates/meridian-websocket/src/lib.rs`, `Socket::send_text`). It did not check the server's
+`Sec-WebSocket-Accept`, and the sidecar's connection still does not: the servers it reads are on
+its own machine, and its tests answer without the header. The proxy is the client of an
 extension, so it uses that code nearly as it is. What the shared crate adds:
 
 - the limit of a message as a parameter, 4 MiB for the sidecar and 256 KiB for an extension;
 - the server side, for the SDK: reading the upgrade request, answering `101` with the
   `Sec-WebSocket-Accept` a client expects, reading masked frames and sending unmasked ones;
-- the check of `Sec-WebSocket-Accept` on the client side, now that a server of Meridian's own
-  answers it.
+- the check of `Sec-WebSocket-Accept` on the client side (`Socket::open_checked`), now that a
+  server of Meridian's own answers it. The proxy's connection to an extension uses it.
 
 `Sec-WebSocket-Accept` is the base64 of a SHA-1. `meridian-websocket` names `sha1` and `base64`
 as direct dependencies rather than writing them again by hand: both are already in the lock file
@@ -766,8 +767,7 @@ Windows.
 3. **The wire.** The types of protocol 0, the golden JSON, the proofs of the handshake (with the
    HMAC moved to where both sides reach it), and the WebSocket code both sides need: the
    sidecar's, extended and shared as `meridian-websocket` (section 2.5, decision U6). It also
-   corrects the head comment of the sidecar's `websocket.rs`, which still calls it "a client which
-   only listens". Proof: the golden files, the test vectors, and the sidecar's tests unchanged.
+   corrects the head comment of that code, which called it "a client which only listens". Proof: the golden files, the test vectors, and the sidecar's tests unchanged.
 4. **The connection on the proxy.** Connect, hello, reconnect with the doubling wait,
    `max-in-flight`, the breaker, the metrics and the logs. No decision is wired yet. Proof: tests
    against a fake extension, including a wrong token on each side.
