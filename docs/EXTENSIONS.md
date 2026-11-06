@@ -125,13 +125,19 @@ process holds the port. A local program that started first on that port would le
 So the token never crosses the wire:
 
 1. The proxy opens the WebSocket with `Sec-WebSocket-Protocol: meridian-extension` and no
-   secret.
+   secret. The extension answers `101` with that subprotocol: an answer that names none is
+   refused by the proxy, since the program that answered is not one that speaks this protocol. The
+   extension refuses (`403`) an upgrade that carries an `Origin` header, which a browser sends: the
+   proofs would keep a page open on the same machine out anyway, and this keeps it from holding
+   the connection.
 2. The proxy's first message is `meridian:hello` with `proxy_nonce` (32 random bytes, hex).
 3. The extension answers with its own `extension_nonce` and
    `proof = HMAC-SHA256(token, "meridian-extension/extension" | proxy_nonce | extension_nonce)`.
 4. The proxy checks the proof in constant time. If it is wrong, the proxy closes the connection
-   and logs `extension "<name>": refused: wrong token`. It retries only after the longest wait,
-   and never says why to the other side.
+   with the WebSocket close code 1008 and no reason, and no JSON-RPC answer, and logs
+   `extension "<name>": refused: wrong token`. It retries only after the longest wait, and never
+   says why to the other side. The extension does the same when the proxy's proof is wrong. A
+   message over the limit closes the connection with the code 1009.
 5. The proxy sends `meridian:hello/confirm` with
    `proof = HMAC-SHA256(token, "meridian-extension/proxy" | extension_nonce | proxy_nonce)`.
    The extension checks it the same way. Neither side sends player data, and the extension
@@ -169,10 +175,11 @@ which is not a valid proof.
 
 The token is a file the operator writes (`token-file`), read again at each connection as the
 sidecar reads its server's settings (`crates/meridian-sidecar/src/management.rs:18-19`). It is at
-least 32 bytes. Like the sidecar's `Secret` (`management.rs:198-216`), it is in no log line, no
-error and no `Debug` output. Meridian already computes HMAC-SHA256 for player information
-forwarding (`crates/meridian-net/src/backend/forwarding.rs:51`). That function would move to
-where both uses reach it.
+least 32 bytes, with the line end an editor leaves after it taken off. It is held in a type of its
+own, `Secret` of `meridian-extension`, as the sidecar's is (`management.rs:198-216`): `Debug` hides
+it, there is no `Display`, and it is in no log line and no error. Meridian already computed
+HMAC-SHA256 for player information forwarding (`crates/meridian-net/src/backend/forwarding.rs`).
+That function now lives in `meridian-hmac`, where both uses reach it.
 
 ### 2.3 Capabilities
 
@@ -231,7 +238,14 @@ extension, so it uses that code nearly as it is. What the shared crate adds:
 - the server side, for the SDK: reading the upgrade request, answering `101` with the
   `Sec-WebSocket-Accept` a client expects, reading masked frames and sending unmasked ones;
 - the check of `Sec-WebSocket-Accept` on the client side (`Socket::open_checked`), now that a
-  server of Meridian's own answers it. The proxy's connection to an extension uses it.
+  server of Meridian's own answers it. The proxy's connection to an extension uses it. It also
+  wants the subprotocol the request offered to be the one the answer names;
+- a socket in two halves (`Socket::split`): a reader on one thread, and a writer that is cloned
+  for the threads that send, all writes under one lock so that no two frames are mixed. The
+  proxy's threads ask decisions while the reader takes the answers (section 4.1);
+- close codes (`close`): `Socket::close` and `Writer::close` send one, and `close_code` returns the
+  code the other end closed with. The protocol uses 1000, 1008 for a wrong proof and 1009 for a
+  message over the limit.
 
 `Sec-WebSocket-Accept` is the base64 of a SHA-1. `meridian-websocket` names `sha1` and `base64`
 as direct dependencies rather than writing them again by hand: both are already in the lock file
