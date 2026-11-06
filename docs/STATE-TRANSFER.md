@@ -475,8 +475,8 @@ A JSON object:
 - Where the player arrives is given in the import request itself, not in the
   record. With `switch-carry-position = true` the proxy sends `position`,
   `rotation` and `on_ground` beside the record (Horizon's `docs/server.md`,
-  "Where the player arrives", from fork commit 46bfe5de0), with the `position`
-  part; they take the place of the compound's. A server without that change,
+  "Where the player arrives", merged into its main on 2026-11-05 as #8735 and not
+  yet run against a real server), with the `position` part; they take the place of the compound's. A server without that change,
   which is separate from the one that takes the import, ignores them and puts the
   player at the compound's place. They are where the player's client last said
   it stands and how it looks (its moves, and its answers to teleports). The client keeps moving while the
