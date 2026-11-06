@@ -23,6 +23,10 @@ pub enum Auth {
     /// The session service confirmed the account.
     Verified,
     /// Offline mode, or an unverified player of the hybrid mode: **the name and the id prove nothing**.
+    /// A word the extension does not know, which a later version of the proxy may send for a new kind
+    /// of account (a field a side does not know is ignored, section 3), is read as this: nothing is
+    /// taken as proved that was not said to be.
+    #[serde(other)]
     Unverified,
 }
 
@@ -123,8 +127,9 @@ enum Verdict {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginAnswer {
     decision: Verdict,
+    /// Any JSON value on the wire: it is read, and must be text, only on `deny`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
+    reason: Option<Value>,
 }
 
 impl From<&Decision> for LoginAnswer {
@@ -136,7 +141,9 @@ impl From<&Decision> for LoginAnswer {
             },
             Decision::Deny(reason) => Self {
                 decision: Verdict::Deny,
-                reason: reason.as_ref().map(|r| r.as_str().to_owned()),
+                reason: reason
+                    .as_ref()
+                    .map(|r| Value::String(r.as_str().to_owned())),
             },
             Decision::Default => Self {
                 decision: Verdict::Default,
@@ -147,18 +154,20 @@ impl From<&Decision> for LoginAnswer {
 }
 
 impl LoginAnswer {
-    /// The decision, if the answer is valid. A reason on `allow` or `default` is not read, and an empty
-    /// one on `deny` is no reason.
+    /// The decision, if the answer is valid. A reason on `allow` or `default` is not read, whatever it
+    /// is, and an empty or null one on `deny` is no reason; a reason on `deny` must be text.
     pub fn into_decision(self) -> Result<Decision, String> {
         Ok(match self.decision {
             Verdict::Allow => Decision::Allow,
             Verdict::Default => Decision::Default,
-            Verdict::Deny => match self.reason.as_deref() {
-                None | Some("") => Decision::Deny(None),
-                Some(text) => {
-                    Reason::check(text)?;
-                    Decision::Deny(Some(Reason(text.to_owned())))
+            Verdict::Deny => match self.reason {
+                None | Some(Value::Null) => Decision::Deny(None),
+                Some(Value::String(text)) if text.is_empty() => Decision::Deny(None),
+                Some(Value::String(text)) => {
+                    Reason::check(&text)?;
+                    Decision::Deny(Some(Reason(text)))
                 }
+                Some(_) => return Err("the reason is not text".into()),
             },
         })
     }
@@ -271,8 +280,28 @@ mod tests {
             serde_json::from_value::<LoginRequest>(extra).unwrap(),
             alex()
         );
-        // The kinds of account are the two words of the specification.
-        assert!(serde_json::from_value::<Auth>(json!("premium")).is_err());
+        // The kinds of account are the two words of the specification, and a word that is not one of them
+        // is an account that is not known to be verified, not a request that cannot be read.
+        assert_eq!(
+            serde_json::from_value::<Auth>(json!("verified")).unwrap(),
+            Auth::Verified
+        );
+        assert_eq!(
+            serde_json::from_value::<Auth>(json!("unverified")).unwrap(),
+            Auth::Unverified
+        );
+        assert_eq!(
+            serde_json::from_value::<Auth>(json!("premium")).unwrap(),
+            Auth::Unverified
+        );
+        let mut later = serde_json::to_value(alex()).unwrap();
+        later["player"]["auth"] = json!("xbox");
+        let read: LoginRequest = serde_json::from_value(later).unwrap();
+        assert_eq!(read.player.auth, Auth::Unverified);
+        assert_eq!(
+            serde_json::to_value(Auth::Unverified).unwrap(),
+            json!("unverified")
+        );
     }
 
     #[test]
@@ -323,7 +352,12 @@ mod tests {
                 json!({"decision": "deny", "reason": "Steve\u{1b}[0m"}),
                 "control character",
             ),
-            (json!({"decision": "deny", "reason": 7}), "invalid type"),
+            (json!({"decision": "deny", "reason": 7}), "not text"),
+            (json!({"decision": "deny", "reason": ["a"]}), "not text"),
+            (
+                json!({"decision": "deny", "reason": {"text": "a"}}),
+                "not text",
+            ),
         ] {
             let why = parse_login_answer(&bad).unwrap_err();
             assert!(why.contains(expected), "{bad}: {why}");
@@ -337,6 +371,24 @@ mod tests {
         assert_eq!(parse_login_answer(&allow).unwrap(), Decision::Allow);
         let default = json!({"decision": "default", "reason": "x".repeat(999)});
         assert_eq!(parse_login_answer(&default).unwrap(), Decision::Default);
+        // What the reason is does not matter where it is not read: it never makes an answer fail.
+        for odd in [
+            json!(7),
+            json!(true),
+            json!([1]),
+            json!({"a": 1}),
+            json!(null),
+        ] {
+            for word in ["allow", "default"] {
+                let answer = json!({"decision": word, "reason": odd});
+                assert!(parse_login_answer(&answer).is_ok(), "{answer}");
+            }
+        }
+        // On `deny`, null is no reason.
+        assert_eq!(
+            parse_login_answer(&json!({"decision": "deny", "reason": null})).unwrap(),
+            Decision::Deny(None)
+        );
         // A refusal without a reason, or with an empty one, is a refusal without a reason.
         assert_eq!(
             parse_login_answer(&json!({"decision": "deny"})).unwrap(),

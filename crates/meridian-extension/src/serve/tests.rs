@@ -1033,7 +1033,6 @@ mod login {
             Some(json!({})),
             Some(json!({"request": "PrivateName"})),
             Some(json!({"request": {"player": player("verified", json!(1)), "connected": false}})),
-            Some(json!({"request": {"player": player("premium", json!("u")), "connected": false}})),
             // The request itself, with no `request` around it: the params are named.
             Some(json!({"player": player("verified", json!("u")), "connected": false})),
         ] {
@@ -1044,6 +1043,28 @@ mod login {
         // The connection and the handler are fine after them.
         assert_eq!(answer(&mut proxy, "Bob"), json!({"decision": "allow"}));
         assert!(lines.all().iter().all(|l| !l.contains("PrivateName")));
+    }
+
+    #[test]
+    fn an_account_kind_the_extension_does_not_know_is_read_as_unverified() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let extension = {
+            let seen = Arc::clone(&seen);
+            Extension::new("gate", "1.0.0", token()).on_login(move |request| {
+                seen.lock().unwrap().push(request.player.auth);
+                Decision::Allow
+            })
+        };
+        let running = start(extension);
+        let mut proxy = Proxy::up(running.local_addr());
+        let mut request: Value = serde_json::from_str(&golden("login.request.json")).unwrap();
+        request["params"]["request"]["player"]["auth"] = json!("xbox");
+        proxy.send(&request.to_string());
+        let Message::Response { outcome, .. } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(outcome.unwrap(), json!({"decision": "allow"}));
+        assert_eq!(*seen.lock().unwrap(), [decide::Auth::Unverified]);
     }
 
     #[test]
