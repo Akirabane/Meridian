@@ -585,6 +585,35 @@ fn the_capacity_a_backend_reports_lowers_its_caps() {
     assert_eq!(tried, [EAST], "lobby holds one and can take one");
 }
 
+/// A lobby whose Horizon answers `full: true` to `transfer-status` is not given the login,
+/// and one that has room is: the answer as Horizon writes it, read as the proxy reads it.
+#[test]
+fn a_lobby_that_horizon_says_is_full_is_not_offered() {
+    let config = balanced(true, 5, 5);
+    let status =
+        |text: &str| ServerStatus::from_value(&serde_json::from_str(text).unwrap()).unwrap();
+    let sessions = Sessions::default();
+    report(
+        &sessions,
+        "lobby",
+        status(
+            r#"{"ok":true,"players":2,"held":1,"expected":0,"frozen":0,"online":3,"max_players":3,"full":true}"#,
+        ),
+    );
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [EAST], "lobby is at max_players");
+    let sessions = Sessions::default();
+    report(
+        &sessions,
+        "lobby",
+        status(
+            r#"{"ok":true,"players":1,"held":0,"expected":0,"frozen":0,"online":1,"max_players":3,"full":false}"#,
+        ),
+    );
+    let (tried, _) = login_one(&config, &sessions, up(), None, vec![Step::ExpectClose]);
+    assert_eq!(tried, [LOBBY], "lobby has room");
+}
+
 /// A capacity above the caps written raises nothing: the caps of the file are the
 /// operator's choice.
 #[test]

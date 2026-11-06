@@ -904,6 +904,57 @@ fn the_state_of_the_backend_comes_back_as_a_status() {
     assert_eq!(*running.seen.lock().unwrap(), [STATUS_LINE, STATUS_LINE]);
 }
 
+/// Horizon's own answer goes through the sidecar and is read as a status; a Horizon with
+/// its transfer module off answers an error, which is a status too: no transfers.
+#[test]
+fn horizons_transfer_status_comes_back_as_a_status() {
+    use crate::request::{STATUS_LINE, ServerStatus};
+    let running = Running::start(
+        Arc::new(|line| {
+            (line == STATUS_LINE).then(|| r#"{"ok":true,"players":12,"held":1,"expected":2,"frozen":0,"online":13,"max_players":20,"full":false}"#.to_owned())
+        }),
+        WAIT,
+    );
+    assert_eq!(
+        running.client(SECRET).status().unwrap(),
+        ServerStatus {
+            players: Some(13),
+            capacity: Some(20),
+            accepts_transfers: Some(true),
+        }
+    );
+    assert_eq!(*running.seen.lock().unwrap(), ["transfer-status"]);
+
+    let off = Running::start(
+        Arc::new(|_| Some(r#"{"error":"transfers are off on this server"}"#.to_owned())),
+        WAIT,
+    );
+    assert_eq!(
+        off.client(SECRET).status().unwrap(),
+        ServerStatus {
+            accepts_transfers: Some(false),
+            ..ServerStatus::default()
+        }
+    );
+}
+
+/// A Horizon from before `transfer-status` does not know it: that stays a refusal the proxy
+/// knows how to read (it treats the server as accepting players).
+#[test]
+fn a_horizon_without_transfer_status_is_still_a_refusal() {
+    let running = Running::start(
+        Arc::new(|_| Some(json!({"error": "unknown request \"transfer-status\""}).to_string())),
+        WAIT,
+    );
+    let error = running.client(SECRET).status().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("the sidecar refused: unknown request"),
+        "{error}"
+    );
+}
+
 #[test]
 fn a_backend_that_does_not_know_the_status_is_an_error_not_a_status() {
     let running = Running::start(

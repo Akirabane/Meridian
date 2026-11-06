@@ -222,11 +222,15 @@ the first listed (`"order"`). A server is not offered while it is past its caps,
 must be a `"lobby"`. `/play` (enable it under `[commands]`) places a player on a server of role
 `game`. [LOAD-BALANCING.md](LOAD-BALANCING.md) has the rules.
 
-The proxy reads each balanced server's state (`players`, `capacity`, `accepts_transfers`)
-through its sidecar. Horizon has not fixed the command that answers, so today the sidecar's
-`status` request gets `unknown request`, the proxy logs `does not answer the state request: its
-state is unknown, so it is treated as accepting players`, and the server is balanced on the
-proxy's own count of players. That is a working state, not a fault.
+The proxy reads each balanced server's state through its sidecar, with Horizon's
+`transfer-status` request (`online`, `max_players`; the other fields of its answer are not
+used). A server whose `online` has reached `max_players` is not offered, and a server never
+gets more players than it says it can take. A server whose `[transfer]` module is off answers
+that transfers are off, and is shown as `draining (it does not accept transfers)`. A Horizon
+build from before `transfer-status` answers `unknown request`: the proxy then logs `does not
+answer the state request: its state is unknown, so it is treated as accepting players` once,
+and the server is balanced on the proxy's own count of players. That is a working state, not a
+fault; with a Horizon that has `transfer-status` the line does not appear.
 
 ### 5.3 Starting and stopping
 
@@ -1080,7 +1084,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), their sync with the servers' own lists (section 5.12, off by default), groups of permissions with `perm`, `/send`, `/glist` and `/alert` in game (section 5.9), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for the bans and the groups, an expiry on a ban or a rank, a player database in the proxy |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
 | Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence. Horizon's `server/stopping` notice reaches the proxy (run on real servers, [VALIDATION.md](VALIDATION.md)) but only about 78 ms before the players are dropped | An early warning from Horizon itself: a delay between its announcement and the disconnect of its players |
-| Report of a server's state | The sidecar's `status` request and the proxy's reading of `players`, `capacity`, `accepts_transfers` | A Horizon command that answers it. Today balancing counts the proxy's own sessions |
+| Report of a server's state | The sidecar's `status` request, which is Horizon's `transfer-status`, and the proxy's reading of `online` and `max_players` (and `accepts_transfers`, from the error of a server with transfers off) | Not run against a real Horizon yet. Against one from before `transfer-status`, balancing counts the proxy's own sessions |
 
 ## 12. Known limits
 
