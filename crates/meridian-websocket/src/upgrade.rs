@@ -5,10 +5,11 @@
 //! fixed GUID. It proves that the other end is a WebSocket server and read this request; it is not
 //! authentication (the extension protocol proves the token in its first messages, section 2.2 of
 //! docs/EXTENSIONS.md).
-use super::{MAX_HEAD, Role, Socket, base64, read_head};
+use super::{HEAD_TIMEOUT, MAX_HEAD, Role, Socket, base64, read_head};
 use base64::Engine;
 use sha1::{Digest, Sha1};
 use std::io::{Read, Write};
+use std::time::{Duration, Instant};
 
 /// The GUID of RFC 6455, section 1.3.
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -167,14 +168,28 @@ impl<T: Read + Write> Socket<T> {
     /// The `stream` may have a read timeout: it applies to the request too, and a client that does not
     /// send one is given up on at that time.
     pub fn accept(
+        stream: T,
+        max_message: usize,
+        choose: impl FnOnce(&Upgrade) -> Result<Option<String>, String>,
+    ) -> Result<Self, String> {
+        Self::accept_within(stream, max_message, HEAD_TIMEOUT, choose)
+    }
+
+    /// As [`Socket::accept`], and the whole request must arrive within `head_timeout`: the stream's
+    /// read timeout counts each read, and a client that sends a byte before each one would otherwise
+    /// hold the connection as long as it likes. A read that is blocked when the time passes ends at the
+    /// stream's own timeout, so the stream should have one of a fraction of `head_timeout`.
+    pub fn accept_within(
         mut stream: T,
         max_message: usize,
+        head_timeout: Duration,
         choose: impl FnOnce(&Upgrade) -> Result<Option<String>, String>,
     ) -> Result<Self, String> {
         let mut buf = Vec::new();
         let end = read_head(
             &mut stream,
             &mut buf,
+            Instant::now() + head_timeout,
             &format!("the upgrade request is longer than {MAX_HEAD} bytes"),
             "the client closed the connection before it asked",
             "no upgrade request",
@@ -230,6 +245,8 @@ impl<T: Read + Write> Socket<T> {
             message: None,
             max_message,
             close_code: None,
+            message_timeout: None,
+            partial_since: None,
         })
     }
 }

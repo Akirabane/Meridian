@@ -128,6 +128,8 @@ impl Socket<TcpStream> {
             message: self.message,
             max_message: self.max_message,
             close_code: self.close_code,
+            message_timeout: self.message_timeout,
+            partial_since: self.partial_since,
         };
         Ok((reader, Writer { shared }))
     }
