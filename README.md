@@ -8,7 +8,8 @@ The goal is a proxy that does what proxies such as Velocity or BungeeCord do, bu
 for Horizon only, and that can move a player from one server to another without a
 loading screen. Today Meridian is a working relay with routing, login modes, load
 balancing and a console; the seamless switch is built and tested against fake servers,
-and needs a Horizon build that is not released yet. The tables below say where each part
+and needs a Horizon build that has the transfer module (merged into Horizon's main on
+2026-11-05, not yet run against a real server). The tables below say where each part
 stands. To run it, start with the [operating guide](docs/OPERATING.md).
 
 ## Status
@@ -37,7 +38,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Reload | Done | Without a restart; `listen` needs a restart |
 | In-game commands | Done | `/server`, `/hub`, `/lobby`, `/play`; and `/send`, `/glist`, `/alert` for the players who have the permission; moving starts a seamless switch |
 | Load balancing | Done | Servers with a `role` are filled in order, with caps and a drain ([docs/LOAD-BALANCING.md](docs/LOAD-BALANCING.md)). Off by default |
-| Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests, including a scripted player that types `/server east` through the real proxy; moves with a real client between three real servers, on one machine, are described in a public comment and were not repeated or recorded with a sheet ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 2); none was run over a real network ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for a recorded run). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were still open on 2026-11-04 |
+| Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests, including a scripted player that types `/server east` through the real proxy; moves with a real client between three real servers, on one machine, are described in a public comment and were not repeated or recorded with a sheet ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 2); none was run over a real network ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for a recorded run). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were merged into Horizon's main on 2026-11-05 (the Nightly of that day, `66f3981`, was built before the last four) |
 | A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere, but the move has to start BEFORE the stop: `drain <server> --move` or the panel's `[drain-before-stop]`. `[restart] evacuate` runs when the server announces its stop, and a Horizon `stop` drops its players about 78 ms after announcing it (measured on real servers), too soon for a move: the fallback takes over ([docs/RESTART.md](docs/RESTART.md), [docs/VALIDATION.md](docs/VALIDATION.md)). A server that stops without warning, or kicks a player, no longer drops them: they are moved to another server with a loading screen (`[fallback]`, [OPERATING.md](docs/OPERATING.md) section 5.11). Run against three real Horizon servers with scripted players, and with a real client over the Internet, once each for a killed server, a kick and a clean stop: the player stayed in the game and saw a brief `Reconfiguring...` screen of 0.25 to 0.35 s ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 3) |
 | Pass-through of a backend's status | Planned | The proxy shows its own |
 | PROXY protocol (version 1 and 2) from a load balancer | Done | `[proxy-protocol]`, read only from the addresses you list; off by default ([docs/CONFIG.md](docs/CONFIG.md)) |
@@ -51,7 +52,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | --- | --- | --- |
 | Model of what the client holds ("the ghost") | Done | The `meridian-ghost` crate, used by the switch (`meridian-handoff`) |
 | Rewriting of ids between servers | Done | The `meridian-rewrite` crate, used by the switch |
-| Moving the player's state between servers | Built, waiting on Horizon | The proxy and the sidecar ask Horizon's `player-*` requests ([docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md)); Horizon's pull requests for them were open on 2026-11-04 |
+| Moving the player's state between servers | Built, not yet run on a real Horizon | The proxy and the sidecar ask Horizon's `player-*` requests ([docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md)); Horizon's pull requests for them (#8700, #8709, #8716, #8730, #8735, #8742) were merged into its main on 2026-11-05, and the Nightly of that day (`66f3981`) was built before the last four |
 | The switch itself | Built, tested on fakes | `switch`, `send`, `/server`, `/hub`, `/lobby`. Not yet run on real servers |
 | Proof that there is no loading screen | Planned | Milestones J4 and J5 of the design: two real servers with different maps |
 | Extensions | Specified, not built | A separate program the proxy asks at login, for a proxy command and for the choice of server, over a local socket; Rust SDK only ([docs/EXTENSIONS.md](docs/EXTENSIONS.md)) |

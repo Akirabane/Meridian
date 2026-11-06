@@ -27,15 +27,17 @@ Read this before you plan a deployment.
 - **The relay is the proven part.** Login (online, offline, hybrid), routing, forwarding to
   the servers, the console and the player limits are tested in CI and were run against a real
   Horizon server.
-- **The seamless switch needs a Horizon build that is not released.** Moving a player
+- **The seamless switch needs a Horizon build with the transfer module.** Moving a player
   between servers (`switch`, `send`, `/server <name>`, `/hub`, `drain --move`, the evacuation
   of a restarting server) uses the `player-*` requests of Horizon's control endpoint and the
-  `[transfer]` module of its `server.toml`. On 2026-11-04 the Horizon pull requests that add
-  them (#8700, #8709, #8716, #8730, #8735, #8742) were open, not merged. The switch is built
+  `[transfer]` module of its `server.toml`. The Horizon pull requests that add them (#8700,
+  #8709, #8716, #8730, #8735, #8742) were merged into Horizon's main on 2026-11-05, the last four
+  at 23:47 UTC; the Nightly of that day (`66f3981`) was built before them. The switch is built
   and tested against fake servers. Moves with a real client between three real servers are
   described in a public comment ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2), on one
   machine and not repeated; [TESTING-FORK.md](TESTING-FORK.md) is the procedure for a recorded
-  run, with the fork build it names. Check Horizon's releases before relying on it. Without
+  run, with the fork build it names. Check that your Horizon build has the transfer module before
+  relying on it. Without
   those servers the proxy still relays players; a switch answers which step failed and the
   player stays where they are.
 - **A planned restart needs the panel, an operator typing `drain`, or the server's own announcement.**
@@ -988,8 +990,9 @@ switch, and keep the proxy's log and both servers' logs.
   [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)). Each is one run with its limits, against stand-in
   servers; the load figures in [BENCH.md](BENCH.md) are local. Plan your own test with your
   players' numbers before opening.
-- The seamless switch needs a Horizon build with the transfer module, which was not merged on
-  2026-11-04 (section 0). No recorded run of it on real servers; a public comment describes moves
+- The seamless switch needs a Horizon build with the transfer module, which was merged into
+  Horizon's main on 2026-11-05 and is not in the Nightly of that day (section 0). No recorded run
+  of it on real servers; a public comment describes moves
   with a real client on one machine, not repeated ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md),
   section 2).
 - Movement through the proxy was run with a real client on one machine only (a public comment,
@@ -1047,5 +1050,5 @@ this page, please report it):
 - Log and error messages: the strings in `crates/meridian-proxy/src`, `meridian-net/src`,
   `meridian-handoff/src` and `meridian-sidecar/src`.
 - Horizon's side (`forwarding.secret`, the log line): Horizon's `docs/hosting.md`, "Behind a
-  Velocity proxy". The transfer module: [STATE-TRANSFER.md](STATE-TRANSFER.md) and the open
+  Velocity proxy". The transfer module: [STATE-TRANSFER.md](STATE-TRANSFER.md) and the
   pull requests named in section 0.
