@@ -646,6 +646,8 @@ fn apply(proxy: &Proxy, new: Config) -> Vec<String> {
             new.listen, old.listen
         ));
     }
+    // The extensions the new configuration enables run, and the others do not.
+    lines.extend(proxy.extensions.follow(&new));
     if lines.is_empty() {
         // A setting this list does not name yet still takes effect.
         lines.push(format!("settings changed {next}"));
@@ -964,6 +966,82 @@ mod tests {
             ]
         );
         assert_eq!(proxy.config().max_players, 50);
+    }
+
+    /// A reload starts the extensions it enables, leaves alone the ones it did not change, opens
+    /// a new connection for one whose connection changed, and stops the ones it removes.
+    #[test]
+    fn a_reload_starts_follows_and_stops_the_extensions() {
+        let extension = |max_in_flight: u32, login_timeout_ms: u64| meridian_config::Extension {
+            name: "perms".into(),
+            enabled: true,
+            address: "127.0.0.1:1".into(),
+            token_file: "does-not-exist.token".into(),
+            grant: vec!["decide.login".into()],
+            max_in_flight,
+            breaker_failures: 5,
+            breaker_seconds: 30,
+            decide_login: meridian_config::LoginDecision {
+                timeout_ms: login_timeout_ms,
+                on_error: meridian_config::OnError::Default,
+            },
+            decide_command: Default::default(),
+            decide_server: Default::default(),
+        };
+        let with = |extensions| Config {
+            extensions,
+            ..config()
+        };
+        let proxy = proxy();
+        assert!(proxy.extensions.links().is_empty());
+
+        assert_eq!(
+            apply(&proxy, with(vec![extension(64, 1000)])),
+            [
+                "reloaded:",
+                "extension \"perms\" added: connecting to 127.0.0.1:1"
+            ]
+        );
+        let first = proxy.extensions.links().remove(0);
+
+        // A deadline is read at each decision: the connection stays.
+        assert_eq!(
+            apply(&proxy, with(vec![extension(64, 2000)])),
+            ["reloaded:", "settings changed for the next logins"]
+        );
+        assert!(Arc::ptr_eq(&first, &proxy.extensions.links()[0]));
+
+        assert_eq!(
+            apply(&proxy, with(vec![extension(8, 2000)])),
+            [
+                "reloaded:",
+                "extension \"perms\" changed: its connection is closed and opened again"
+            ]
+        );
+        let links = proxy.extensions.links();
+        assert_eq!(links.len(), 1);
+        assert!(!Arc::ptr_eq(&first, &links[0]));
+
+        let mut off = extension(8, 2000);
+        off.enabled = false;
+        assert_eq!(
+            apply(&proxy, with(vec![off])),
+            [
+                "reloaded:",
+                "extension \"perms\" disabled: its connection is closed"
+            ]
+        );
+        assert!(proxy.extensions.links().is_empty());
+
+        apply(&proxy, with(vec![extension(8, 2000)]));
+        assert_eq!(
+            apply(&proxy, with(Vec::new())),
+            [
+                "reloaded:",
+                "extension \"perms\" removed: its connection is closed"
+            ]
+        );
+        assert!(proxy.extensions.links().is_empty());
     }
 
     #[test]

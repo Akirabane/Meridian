@@ -175,11 +175,70 @@ pub enum ConfigError {
     QueueWaitTooLong {
         wait_seconds: u64,
         connect_timeout_ms: u64,
+        /// What the extensions' login decisions may take, 0 without any.
+        extension_ms: u64,
     },
     /// `favicon` names a file that is not a usable 64x64 PNG.
     InvalidFavicon {
         path: std::path::PathBuf,
         reason: String,
+    },
+    /// An `[[extension]]` has a name that cannot be used in logs, metrics and node names.
+    InvalidExtensionName { name: String, reason: &'static str },
+    /// Two extensions have the same name.
+    DuplicateExtension(String),
+    /// An extension's address is not `host:port` on the loopback.
+    InvalidExtensionAddress {
+        extension: String,
+        address: String,
+        reason: &'static str,
+    },
+    /// Two extensions name the same address.
+    SharedExtensionAddress {
+        first: String,
+        second: String,
+        address: String,
+    },
+    /// Two extensions name the same token file.
+    SharedExtensionToken {
+        first: String,
+        second: String,
+        path: std::path::PathBuf,
+    },
+    /// The token file of an enabled extension cannot be read or is too short.
+    ExtensionToken { extension: String, reason: String },
+    /// `grant` names a capability that does not exist.
+    UnknownCapability {
+        extension: String,
+        capability: String,
+    },
+    /// `grant` names a capability twice.
+    DuplicateCapability {
+        extension: String,
+        capability: String,
+    },
+    /// A decision point is granted to two extensions that are enabled.
+    SharedDecisionPoint {
+        capability: &'static str,
+        first: String,
+        second: String,
+    },
+    /// A `decide-*` table is written for an extension that is not granted its capability.
+    DecideWithoutGrant {
+        extension: String,
+        table: &'static str,
+        capability: &'static str,
+    },
+    /// A number of an extension that must be more than 0 is 0.
+    ZeroExtensionSetting {
+        extension: String,
+        setting: &'static str,
+    },
+    /// With the queue off, the extensions' login decisions and the connection to a backend take
+    /// longer than a client waits in silence.
+    ExtensionBudget {
+        extension_ms: u64,
+        connect_timeout_ms: u64,
     },
 }
 
@@ -461,15 +520,101 @@ impl fmt::Display for ConfigError {
             ConfigError::QueueWaitTooLong {
                 wait_seconds,
                 connect_timeout_ms,
+                extension_ms,
             } => write!(
                 f,
-                "[queue] wait-seconds = {wait_seconds} is too long: the player's client sees nothing                  from the proxy while it waits and gives up after 30 seconds, so the wait (at most                  {}) plus connect-timeout-ms ({connect_timeout_ms} ms) must stay under {} ms",
+                "[queue] wait-seconds = {wait_seconds} is too long: the player's client sees nothing                  from the proxy while it waits and gives up after 30 seconds, so the wait (at most                  {}) plus connect-timeout-ms ({connect_timeout_ms} ms){} must stay under {} ms",
                 crate::queue::MAX_QUEUE_WAIT_SECONDS,
+                if *extension_ms > 0 {
+                    format!(
+                        " and the timeouts of the extensions' decide-login and decide-server ({extension_ms} ms)"
+                    )
+                } else {
+                    String::new()
+                },
                 crate::queue::QUEUE_SILENCE_LIMIT_MS
             ),
             ConfigError::InvalidFavicon { path, reason } => {
                 write!(f, "favicon {}: {reason}", path.display())
             }
+            ConfigError::InvalidExtensionName { name, reason } => {
+                write!(f, "[[extension]] name \"{name}\": {reason}")
+            }
+            ConfigError::DuplicateExtension(name) => {
+                write!(f, "[[extension]] \"{name}\" is written twice")
+            }
+            ConfigError::InvalidExtensionAddress {
+                extension,
+                address,
+                reason,
+            } => write!(
+                f,
+                "extension \"{extension}\": address \"{address}\": {reason}"
+            ),
+            ConfigError::SharedExtensionAddress {
+                first,
+                second,
+                address,
+            } => write!(
+                f,
+                "extensions \"{first}\" and \"{second}\" both use the address {address}"
+            ),
+            ConfigError::SharedExtensionToken {
+                first,
+                second,
+                path,
+            } => write!(
+                f,
+                "extensions \"{first}\" and \"{second}\" both use the token file {}: each needs a token of its own",
+                path.display()
+            ),
+            ConfigError::ExtensionToken { extension, reason } => {
+                write!(f, "extension \"{extension}\": token-file: {reason}")
+            }
+            ConfigError::UnknownCapability {
+                extension,
+                capability,
+            } => write!(
+                f,
+                "extension \"{extension}\": grant names \"{capability}\", which is not a capability (see docs/EXTENSIONS.md, 2.3)"
+            ),
+            ConfigError::DuplicateCapability {
+                extension,
+                capability,
+            } => write!(
+                f,
+                "extension \"{extension}\": grant names \"{capability}\" twice"
+            ),
+            ConfigError::SharedDecisionPoint {
+                capability,
+                first,
+                second,
+            } => write!(
+                f,
+                "extensions \"{first}\" and \"{second}\" are both granted {capability}: a decision point has one extension at most"
+            ),
+            ConfigError::DecideWithoutGrant {
+                extension,
+                table,
+                capability,
+            } => write!(
+                f,
+                "extension \"{extension}\": [extension.{table}] is written and grant does not hold \"{capability}\""
+            ),
+            ConfigError::ZeroExtensionSetting { extension, setting } => {
+                write!(
+                    f,
+                    "extension \"{extension}\": {setting} must be more than 0"
+                )
+            }
+            ConfigError::ExtensionBudget {
+                extension_ms,
+                connect_timeout_ms,
+            } => write!(
+                f,
+                "the timeouts of the extensions' decide-login and decide-server ({extension_ms} ms) plus connect-timeout-ms ({connect_timeout_ms} ms) must stay under {} ms: the player's client sees nothing from the proxy while they run and gives up after 30 seconds",
+                crate::queue::QUEUE_SILENCE_LIMIT_MS
+            ),
             ConfigError::MaxPlayersTooLarge(n) => write!(
                 f,
                 "max-players = {n} is too large: the most is {}, and 0 means no limit",

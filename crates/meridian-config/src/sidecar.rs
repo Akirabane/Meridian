@@ -58,7 +58,7 @@ pub(crate) fn resolve(base: &Path, path: &Path) -> PathBuf {
 }
 
 /// The same file under another spelling counts as the same file.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,

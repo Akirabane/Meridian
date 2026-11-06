@@ -35,6 +35,9 @@ type Started = (Arc<Link>, Option<JoinHandle<()>>);
 #[derive(Default)]
 pub struct Registry {
     started: Mutex<Vec<Started>>,
+    /// Held while the registry follows a configuration, so that two reloads at once do not each
+    /// start the same extension.
+    following: Mutex<()>,
 }
 
 impl Registry {
@@ -52,6 +55,76 @@ impl Registry {
             .unwrap_or_else(|e| e.into_inner())
             .push((Arc::clone(&link), Some(thread)));
         Ok(link)
+    }
+
+    /// Makes the extensions that run the ones of `config` that are enabled: starts those that are
+    /// not running, stops those that are not in the configuration any more or are not enabled, and
+    /// opens a new connection for those whose connection settings changed. An extension that did
+    /// not change is left alone, with its connection, its breaker and its counters. Says what it
+    /// did, one line each. The decisions that wait on a connection that is closed end as
+    /// disconnected, and take their on-error policy.
+    pub fn follow(&self, config: &meridian_config::Config) -> Vec<String> {
+        let _following = self.following.lock().unwrap_or_else(|e| e.into_inner());
+        let wanted: Vec<Settings> = config.enabled_extensions().map(Settings::from).collect();
+        let mut lines = Vec::new();
+
+        // What must stop first, so that an extension that changed does not run twice.
+        let mut stopping = Vec::new();
+        let mut changed = Vec::new();
+        {
+            let mut started = self.started.lock().unwrap_or_else(|e| e.into_inner());
+            for (link, thread) in std::mem::take(&mut *started) {
+                let name = link.name().to_owned();
+                match wanted.iter().find(|w| w.name == name) {
+                    Some(w) if *w == link.settings => started.push((link, thread)),
+                    Some(_) => {
+                        changed.push(name.clone());
+                        lines.push(format!(
+                            "extension \"{name}\" changed: its connection is closed and opened again"
+                        ));
+                        stopping.push((link, thread));
+                    }
+                    None => {
+                        let why = if config.extensions.iter().any(|e| e.name == name) {
+                            "disabled"
+                        } else {
+                            "removed"
+                        };
+                        lines.push(format!(
+                            "extension \"{name}\" {why}: its connection is closed"
+                        ));
+                        stopping.push((link, thread));
+                    }
+                }
+            }
+        }
+        for (link, _) in &stopping {
+            link.stop();
+        }
+        for (_, thread) in stopping {
+            if let Some(thread) = thread {
+                let _ = thread.join();
+            }
+        }
+
+        for settings in wanted {
+            if self.links().iter().any(|l| l.name() == settings.name) {
+                continue;
+            }
+            let (name, address) = (settings.name.clone(), settings.address.clone());
+            match self.start(settings) {
+                Ok(_) => {
+                    // A changed extension was told of above.
+                    if !changed.contains(&name) {
+                        lines.push(format!(
+                            "extension \"{name}\" added: connecting to {address}"
+                        ));
+                    }
+                }
+                Err(e) => lines.push(format!("extension \"{name}\" not started: {e}")),
+            }
+        }
+        lines
     }
 
     /// The links, in the order they were started.
