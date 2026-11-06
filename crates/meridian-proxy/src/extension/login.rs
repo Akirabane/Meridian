@@ -53,8 +53,8 @@ pub(crate) fn admit(registry: &Registry, config: &Config, who: &Who<'_>) -> Outc
     // A reload may have just added the extension and not started it yet: no usable answer.
     let Some(link) = registry.link(&extension.name) else {
         debug!(
-            "{}: extension \"{}\" is not running; the login takes the on-error policy",
-            who.peer, extension.name
+            "extension \"{}\" is not running; the login takes the on-error policy",
+            extension.name
         );
         return by_policy(None, policy, &extension.name);
     };
@@ -94,11 +94,11 @@ pub(crate) fn admit(registry: &Registry, config: &Config, who: &Who<'_>) -> Outc
         timeout,
         decide::parse_login_answer,
     ) {
-        Ok(decision) => answered(&link, decision, who, &extension.name),
+        Ok(decision) => answered(&link, decision, &extension.name),
         Err(why) => {
             debug!(
-                "{}: extension \"{}\" gave no usable answer for a login: {why}",
-                who.peer, extension.name
+                "extension \"{}\" gave no usable answer for a login: {why}",
+                extension.name
             );
             by_policy(Some(&link), policy, &extension.name)
         }
@@ -106,11 +106,11 @@ pub(crate) fn admit(registry: &Registry, config: &Config, who: &Who<'_>) -> Outc
 }
 
 /// An answer the extension gave.
-fn answered(link: &Link, decision: Decision, who: &Who<'_>, name: &str) -> Outcome {
+fn answered(link: &Link, decision: Decision, name: &str) -> Outcome {
     match decision {
         Decision::Allow => {
             link.stats().decided(POINT, "allow");
-            debug!("{}: extension \"{name}\" allowed a login", who.peer);
+            debug!("extension \"{name}\" allowed a login");
             Outcome::Go
         }
         Decision::Default => {
