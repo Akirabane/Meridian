@@ -615,9 +615,23 @@ max-attempts = 3
   or, for a kick, `You were disconnected from lobby: <the server's reason>. You were moved to east.`
   A real client over the Internet saw a `Reconfiguring...` screen with a Disconnect button, then
   `Loading terrain...`, for 0.25 to 0.35 s in three runs, and stayed in the game
-  ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3). The reason is shown as the server gives
-  it: after a clean stop of a Horizon server it was its translation key,
-  `multiplayer.disconnect.server_shutdown`, not translated.
+  ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3). The reason was shown as the proxy
+  could read it: after a clean stop of a Horizon server it was its translation key,
+  `multiplayer.disconnect.server_shutdown`, not translated. That is what the change below is for.
+  When the server's reason is plain text (`test kick from the server console`), the line is that
+  text, as above. When it is a translation key, as a clean stop sends
+  (`multiplayer.disconnect.server_shutdown`), the proxy does not copy the key: it sends the line as
+  a chat component that holds the server's reason, and the player's game should translate it:
+  `You were disconnected from lobby: <the game's words for the key>. You were moved to east.` The
+  words would be the game's, in the player's language, not the proxy's, and a game that has no
+  text for the key would show the key, as before. This was tried against stand-ins, with the
+  component read back by the protocol crate's own reader, and not yet with a real client.
+  Only the parts of the server's component that say words are passed on: `text`, `translate` with
+  its `fallback` and arguments, `extra` and `color`. The click and hover events, the insertion, the
+  font, scores, selectors, key bindings and anything unknown are dropped, because the line is shown
+  on the server the player has just reached and the one they left must not be able to put a link or
+  a command to run in their chat. A reason that is empty, over 4 KiB, nested more than 8 levels
+  or made of more than 64 parts is shown as the text the proxy could read from it.
 - **Where to.** The servers a login would try for this player, in the same order and by the same
   rules: the forced host's, or the route's group, or the default server, then the `try` list; the
   servers that are down or failed lately last; and with `[balancing] enabled` the caps, the drain
@@ -627,7 +641,11 @@ max-attempts = 3
   and so does each one that loses the player in turn. A server that keeps the player for a minute
   ends the run and the count starts again. If no server is left, or the count is spent, the player
   is disconnected with a message that says the server was lost and that no other could take them
-  (for a kick, the server's own reason comes first).
+  (for a kick, the server's own reason comes first, passed on the same way: a translation key is
+  left for the game to translate). A kick that arrives when the session is already ending (the
+  proxy ended it, or the player left, or a move is under way) is shown to the player as the server
+  sent it, component included, on the disconnect screen, which runs no click; it is still limited
+  to 4 KiB.
 - **When it does not apply.** The proxy ended the session itself (`kick`, `ban`, a stop of the
   proxy, a second login that replaced this one); the player left; a switch of this player is under
   way (`switch`, `/server`, `drain --move`); the backend's disconnect was already passed on because
