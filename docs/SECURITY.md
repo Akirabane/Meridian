@@ -83,7 +83,8 @@ Against the first two, the proxy guarantees the following. Each item is tested.
 | A sidecar's request | Signed with HMAC-SHA256 over a challenge fresh for each connection and an increasing number, so a replay or a request from another connection is refused | `crates/meridian-sidecar/src/wire.rs` |
 | A line between the proxy and a sidecar | 32 MiB and 4 KiB for a signed line, 256 bytes for the challenge, refused as soon as it passes the limit, before its signature is checked; 300 s of silence for each read | `crates/meridian-sidecar/src/wire.rs` (`read_line`, `MAX_SIGNED_LINE`, `MAX_CHALLENGE_LINE`), `main.rs` (`IDLE`) |
 | An answer of a server's control endpoint | 16 MiB, the endpoint's own limit | `crates/meridian-sidecar/src/endpoint.rs` (`read_json`), `request.rs` (`MAX_LINE`) |
-| A message of a server's management protocol | 256 KiB, fragments included; the answer to the upgrade 16 KiB | `crates/meridian-websocket/src/lib.rs` (`MAX_MESSAGE`, `MAX_HEAD`) |
+| A message of a server's management protocol | 4 MiB, fragments included, so that a server's ban list fits; the answer to the upgrade 16 KiB | `crates/meridian-websocket/src/lib.rs` (`MAX_MESSAGE`, `MAX_HEAD`) |
+| A message of the extension protocol | 256 KiB, fragments included, set by the caller of the WebSocket code | `crates/meridian-extension/src/wire.rs` (`MAX_MESSAGE`) |
 | A request to the metrics page | 8 KiB; 4 s in all, 2 s for each read; 8 connections at once | `crates/meridian-proxy/src/metrics.rs` (`MAX_REQUEST`, `REQUEST_DEADLINE`, `IO_TIMEOUT`, `MAX_CONNECTIONS`) |
 | The favicon | A 64 by 64 PNG of at most 16 KiB | `crates/meridian-config/src/favicon.rs` |
 

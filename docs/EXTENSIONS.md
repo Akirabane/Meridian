@@ -107,8 +107,10 @@ later question, and would need TLS with a checked certificate. The sidecar does 
 certificate today (`crates/meridian-sidecar/src/tls.rs`).
 
 **One connection for each extension**, carrying both directions: the proxy's requests
-(decisions) and the extension's requests (orders). JSON-RPC ids are per direction. A message is
-at most 256 KiB. That limit is the extension protocol's own: the sidecar's reader has one limit
+(decisions) and the extension's requests (orders). JSON-RPC ids are per direction: the proxy's
+are numbers, and an extension's may be numbers or text (a program in another language often takes a
+UUID), which the answer carries exactly as it came. A request with no id, or a null one, is a
+notification. A message is at most 256 KiB. That limit is the extension protocol's own: the sidecar's reader has one limit
 today, 4 MiB, raised so that it can read a server's ban list
 (`crates/meridian-websocket/src/lib.rs`, `MAX_MESSAGE`), and the shared code takes the
 limit from its caller (section 2.5).
@@ -134,6 +136,36 @@ So the token never crosses the wire:
    `proof = HMAC-SHA256(token, "meridian-extension/proxy" | extension_nonce | proxy_nonce)`.
    The extension checks it the same way. Neither side sends player data, and the extension
    sends no order, before both proofs are checked.
+
+**What the proof is computed over.** The `|` is a concatenation of bytes: the ASCII text of the
+label, then the **32 bytes each nonce stands for**, not the 64 characters of their hexadecimal. The
+nonces are written in lower case and read in either case, so the bytes are the same whatever case a
+side wrote. The two labels differ and the nonces change places, so a proof of one side is never the
+other's. A program in another language decodes the hexadecimal before it computes. This vector
+is in the code's tests (`crates/meridian-extension/src/handshake.rs`), and was computed apart from
+it, with Python's `hmac` and `hashlib`:
+
+```text
+token            "0123456789abcdef0123456789abcdef"                      (32 bytes of ASCII)
+proxy_nonce      00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+extension_nonce  ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+
+the extension's proof is over these 92 bytes (28 of label, 32 of proxy_nonce, 32 of extension_nonce):
+  6d6572696469616e2d657874656e73696f6e2f657874656e73696f6e
+  00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+  ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+proof            546198eb05cd02f2d5802912b4e6d9a00d173fdff4a1fd1a33434e875571bffd
+
+the proxy's proof is over these 88 bytes (24 of label, 32 of extension_nonce, 32 of proxy_nonce):
+  6d6572696469616e2d657874656e73696f6e2f70726f7879
+  ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
+  00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+proof            3719587fddecaa8438f006341b2ae8c64e1bd94b1351f929e5da3870f6e1a226
+```
+
+For a check that the two sides agree on bytes: the same extension proof computed over the
+hexadecimal text of the nonces would be `4708a5d59de31016000e2141701f01aa5116188506bed5d93be9c32d17db1e5d`,
+which is not a valid proof.
 
 The token is a file the operator writes (`token-file`), read again at each connection as the
 sidecar reads its server's settings (`crates/meridian-sidecar/src/management.rs:18-19`). It is at
@@ -225,7 +257,8 @@ as direct dependencies rather than writing them again by hand: both are already 
   parameters (omitted, or an empty array); `meridian:rpc.discover` is the same call. It is
   answered at any time, before the hello too, so that a tool can list what a program serves
   without opening a session. The result is an object with a `methods` array, as Horizon's
-  (`management.rs:711-727`): each item has the `name` of the method, with its `meridian:` prefix,
+  (`management.rs:711-727`; Horizon adds `openrpc`, `info` and `components`, which this protocol may
+  send and a reader ignores): each item has the `name` of the method, with its `meridian:` prefix,
   and `params`, a list of `{ "name", "required", "schema" }` (empty or left out when the method
   has none). `rpc.discover` itself is not listed. The proxy lists the orders its version and the
   granted capabilities allow; an extension lists the decision points it serves.
