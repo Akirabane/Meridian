@@ -43,6 +43,8 @@ struct FakeSidecar {
     signal: Option<Signal>,
     refuse: Option<(&'static str, String)>,
     on_export: Option<Box<dyn FnMut()>>,
+    /// Whether the log says what each request asked to announce.
+    say_announce: bool,
 }
 
 impl FakeSidecar {
@@ -85,11 +87,16 @@ impl PlayerControl for FakeSidecar {
         _: &str,
         _: Record,
         _: Option<Vec<String>>,
-        _: Option<bool>,
+        announce: Option<bool>,
         place: bool,
         _: Option<meridian_handoff::Arrival>,
     ) -> Result<Imported, String> {
-        self.answer("import", format!("import place={place}"))
+        let said = if self.say_announce {
+            format!(" announce={announce:?}")
+        } else {
+            String::new()
+        };
+        self.answer("import", format!("import place={place}{said}"))
             .map(|()| Imported::default())
     }
 
@@ -97,8 +104,19 @@ impl PlayerControl for FakeSidecar {
         self.answer("confirm", "confirm".into())
     }
 
-    fn release(&mut self, _: &str, _: &str, outcome: Outcome, _: bool) -> Result<(), String> {
-        self.answer("release", format!("release {outcome:?}"))
+    fn release(
+        &mut self,
+        _: &str,
+        _: &str,
+        outcome: Outcome,
+        announce: bool,
+    ) -> Result<(), String> {
+        let said = if self.say_announce {
+            format!(" announce={announce}")
+        } else {
+            String::new()
+        };
+        self.answer("release", format!("release {outcome:?}{said}"))
     }
 
     fn drop_player(&mut self, _: &str, _: Option<&str>) -> Result<(), String> {
@@ -115,6 +133,9 @@ struct Sidecars {
     source_refuses: Option<(&'static str, String)>,
     /// Run when the source exports the player, in the middle of the switch.
     during_export: Option<Box<dyn Fn() + Send + Sync>>,
+    /// `switch-announce-arrival` and `switch-announce-departure` of the configuration, when
+    /// the test sets them; the log then says what each import and release asked to announce.
+    announce: Option<(bool, bool)>,
 }
 
 /// How the other threads of a test ended, and when, since its world was made. A failure that
@@ -259,6 +280,12 @@ fn world(sidecars: Sidecars) -> World {
         sidecars: vec![sidecar("lobby", 25580), sidecar("east", 25581)],
         ..Config::default()
     };
+    let say_announce = sidecars.announce.is_some();
+    let mut config = config;
+    if let Some((arrival, departure)) = sidecars.announce {
+        config.switch_announce_arrival = arrival;
+        config.switch_announce_departure = departure;
+    }
     let mut proxy = Proxy::new(
         config,
         "does-not-exist/meridian.toml".into(),
@@ -270,6 +297,7 @@ fn world(sidecars: Sidecars) -> World {
         target_refuses,
         source_refuses,
         during_export,
+        announce: _,
     } = sidecars;
     let during_export = during_export.map(Arc::new);
     let controls = {
@@ -290,6 +318,7 @@ fn world(sidecars: Sidecars) -> World {
                     source_refuses.clone()
                 },
                 on_export,
+                say_announce,
             }))
         }
     };
@@ -457,6 +486,66 @@ meridian_transfer_alerts_total 0
     attack(&mut player, TARGET_ID);
     assert_eq!(target.join().unwrap().unwrap().attacked, CLIENT_ID);
     relay.join().unwrap().unwrap();
+}
+
+/// What the proxy asks the servers to announce comes from `switch-announce-arrival` and
+/// `switch-announce-departure`: both on by default, and each one on its own request.
+#[test]
+fn a_switch_announces_what_the_configuration_says() {
+    for (announce, import, release) in [
+        (
+            (true, true),
+            "east import place=false announce=Some(true)",
+            "lobby release Moved announce=true",
+        ),
+        (
+            (false, true),
+            "east import place=false announce=Some(false)",
+            "lobby release Moved announce=true",
+        ),
+        (
+            (true, false),
+            "east import place=false announce=Some(true)",
+            "lobby release Moved announce=false",
+        ),
+        (
+            (false, false),
+            "east import place=false announce=Some(false)",
+            "lobby release Moved announce=false",
+        ),
+    ] {
+        let World {
+            proxy,
+            log,
+            mut player,
+            _source,
+            relay,
+            target,
+        } = world(Sidecars {
+            announce: Some(announce),
+            ..Sidecars::default()
+        });
+        let lines = Commands::builtin().execute(&proxy, "switch alex east");
+        assert!(
+            lines[0].starts_with("Alex moved from lobby to east"),
+            "{lines:?}"
+        );
+        assert_eq!(
+            log.lines(),
+            [
+                "east expect",
+                "lobby export",
+                import,
+                "east confirm",
+                release
+            ],
+            "{announce:?}"
+        );
+        let _ = client_after_switch(&mut player);
+        attack(&mut player, TARGET_ID);
+        target.join().unwrap().unwrap();
+        relay.join().unwrap().unwrap();
+    }
 }
 
 /// `/server east` in game starts the same switch on a thread of its own, and the
@@ -918,6 +1007,7 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
                 signal: east.then(|| signal.lock().unwrap().clone()),
                 refuse: None,
                 on_export: None,
+                say_announce: false,
             }))
         }
     };

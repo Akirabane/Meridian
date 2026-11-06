@@ -73,6 +73,14 @@ sidecar-timeout-ms = 5000
 # server last had them, or at its spawn.
 switch-carry-position = false
 
+# What the other players see when a player is moved from one server to another.
+# With true, the players of the new server see the join line and the list entry,
+# and the players of the old server see "left the game", as Velocity and BungeeCord
+# do, where changing server is a departure and an arrival for the others. With false
+# the arrival (or the departure) is quiet. Both are true by default.
+# switch-announce-arrival = true
+# switch-announce-departure = true
+
 # Milliseconds a player may stay frozen on the old server during a switch before
 # the switch is given up. It must be below every server's max_freeze_seconds in
 # its [transfer] table (30 s in Horizon by default).
