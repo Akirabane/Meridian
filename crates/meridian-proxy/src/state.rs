@@ -35,6 +35,9 @@ pub struct Proxy {
     pub restarts: Detector,
     /// The bans and whitelist changes still to be told to the servers (`[access.sync]`).
     pub access_sync: Arc<crate::access::sync::Outbox>,
+    /// The extensions the proxy keeps a connection to (docs/EXTENSIONS.md). None are started
+    /// until the configuration names them.
+    pub extensions: Arc<crate::extension::Registry>,
 }
 
 impl Proxy {
@@ -65,6 +68,7 @@ impl Proxy {
             logins: Arc::default(),
             restarts,
             access_sync: Arc::default(),
+            extensions: Arc::default(),
         }
     }
 
