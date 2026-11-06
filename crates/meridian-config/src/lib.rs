@@ -206,7 +206,9 @@ pub struct Config {
     pub sidecar_timeout_ms: u64,
     /// Whether a switch carries the player's position to the other server, where
     /// their client is at that moment. Without it they arrive where that server
-    /// last had them, or at its spawn.
+    /// last had them, or at its spawn. It needs servers that take the place in the import
+    /// request: Horizon does since #8735, merged into its main on 2026-11-05. It has not been
+    /// run against a real server.
     pub switch_carry_position: bool,
     /// Milliseconds a player may stay frozen on the old server during a switch before
     /// it is given up. Each server lets a freeze go by itself after its own

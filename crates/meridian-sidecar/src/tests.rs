@@ -325,6 +325,40 @@ fn a_backend_answer_that_is_not_json_is_an_error() {
     assert!(error.contains("did not answer with JSON"), "{error}");
 }
 
+/// A server that is not open yet says so in one fixed sentence: the operator is told what it
+/// means and what to do, and still sees the server's own words.
+#[test]
+fn a_server_that_is_not_open_to_players_is_explained() {
+    let running = Running::start(
+        Arc::new(|_| Some(r#"{"error":"the server is not open to players"}"#.to_owned())),
+        WAIT,
+    );
+    let mut client = running.client(SECRET);
+    for error in [
+        client.expect(UUID, None).unwrap_err(),
+        client.export(UUID, true).unwrap_err(),
+    ] {
+        assert!(matches!(&error, Error::Refused(_)), "{error}");
+        let text = error.to_string();
+        assert!(
+            text.contains("the server is not open to players")
+                && text.contains("still starting")
+                && text.contains("stopping")
+                && text.contains("tried again"),
+            "{text}"
+        );
+    }
+    // Any other reason is reported as it was said.
+    assert_eq!(
+        Error::Refused("no such player".into()).to_string(),
+        "the sidecar refused: no such player"
+    );
+    assert_eq!(
+        Error::Refused("the server is not open to players, sorry".into()).to_string(),
+        "the sidecar refused: the server is not open to players, sorry"
+    );
+}
+
 #[test]
 fn a_backend_error_is_passed_on() {
     let running = Running::start(
