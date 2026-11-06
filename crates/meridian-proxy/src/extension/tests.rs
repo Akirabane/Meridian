@@ -49,6 +49,8 @@ struct Script {
     drip: bool,
     /// Reads nothing for this long once the hello is done, as an extension that is stuck would.
     deaf: Option<Duration>,
+    /// How many of the connections (after the ones dropped) are deaf; the others read.
+    deaf_first: usize,
     /// Connections to drop as soon as they are accepted.
     drop_first: usize,
 }
@@ -65,6 +67,7 @@ impl Default for Script {
             big_message: false,
             drip: false,
             deaf: None,
+            deaf_first: usize::MAX,
             drop_first: 0,
         }
     }
@@ -115,11 +118,16 @@ impl Fake {
                         Ok((stream, _)) => {
                             let _ = stream.set_nonblocking(false);
                             seen.lock().unwrap().connected_at.push(Instant::now());
-                            if dropped.fetch_add(1, Ordering::Relaxed) < script.drop_first {
+                            let index = dropped.fetch_add(1, Ordering::Relaxed);
+                            if index < script.drop_first {
                                 continue;
                             }
+                            let mut script = script.clone();
+                            if index - script.drop_first >= script.deaf_first {
+                                script.deaf = None;
+                            }
                             let (script, seen, answer, current, stop) = (
-                                script.clone(),
+                                script,
                                 Arc::clone(&seen),
                                 Arc::clone(&answer),
                                 Arc::clone(&current),
@@ -840,50 +848,121 @@ fn an_extension_that_does_not_read_holds_no_player_for_longer_than_the_deadline(
     );
 }
 
-/// A write that cannot be done closes the connection, so that it is made again, and the breaker does not
-/// wait for a verdict that will not come.
+/// A write that gives up closes the connection and the proxy connects again. How much it takes to
+/// block a write is the system's to say (Linux sizes the buffers of a socket by itself, to several
+/// MiB, and Windows to much less), so this sends until the connection is closed, and fails, saying so, if
+/// 64 MiB did not do it.
 #[test]
 fn a_write_that_gives_up_closes_the_connection_and_the_proxy_connects_again() {
     let fake = Fake::start(Script {
-        deaf: Some(Duration::from_millis(1500)),
+        // The first connection reads nothing for as long as the test needs; the next ones read.
+        deaf: Some(Duration::from_secs(60)),
+        deaf_first: 1,
         ..Script::default()
     });
     let (_registry, link, _folder) = connect_with(&fake, |s| {
         s.timings.write = Duration::from_millis(200);
-        s.breaker_failures = 1;
-        s.breaker_open = Duration::from_millis(50);
+        // The deadlines of the calls must not open the breaker before the writes block.
+        s.breaker_failures = u32::MAX;
+        s.max_in_flight = 64;
     });
     until("the connection", || link.is_connected());
     let big = json!({ "filler": "x".repeat(200 << 10) });
-    for _ in 0..20 {
-        let _ = link.call(METHOD, Some(&big), Duration::from_millis(100), |_| Ok(()));
-        std::thread::sleep(Duration::from_millis(60));
+    let done = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicUsize::new(0));
+    let players: Vec<_> = (0..16)
+        .map(|_| {
+            let (link, big, done, sent) = (
+                Arc::clone(&link),
+                big.clone(),
+                Arc::clone(&done),
+                Arc::clone(&sent),
+            );
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    let asked =
+                        link.call(METHOD, Some(&big), Duration::from_millis(100), |_| Ok(()));
+                    // Only what was handed over counts: once the connection is closed the calls fail at
+                    // once, and they are not what blocked it.
+                    if asked == Err(CallError::Disconnected) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    } else {
+                        sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+    let limit = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        if fake.seen(|s| s.hellos.len() >= 2) {
+            break Ok(());
+        }
+        // 200 KiB a request: 328 of them are 64 MiB.
+        if sent.load(Ordering::Relaxed) > 328 || Instant::now() > limit {
+            break Err(format!(
+                "{} requests of 200 KiB did not block a write, or the proxy did not connect again",
+                sent.load(Ordering::Relaxed)
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    done.store(true, Ordering::Relaxed);
+    for player in players {
+        player.join().unwrap();
     }
-    // The write blocked past its time, the connection was closed, and the proxy made another.
-    until("a second hello", || fake.seen(|s| s.hellos.len() >= 2));
-    // The extension reads again once it is no longer stuck, and the breaker lets a request through.
-    until("an answer", || {
-        ping(&link, Duration::from_millis(500)).is_ok()
-    });
+    outcome.unwrap();
+    // The extension of the second connection reads, and answers.
+    until("an answer", || ping(&link, Duration::from_secs(1)).is_ok());
 }
 
-/// A request that cannot be handed over because the one that writes is stuck is a failure of the
-/// extension, the trial's included: the breaker must not stay waiting for the trial's result.
+/// A request that cannot be handed over because the thread that writes is stuck is a failure of the
+/// extension, the trial's included: the breaker must not stay waiting for the trial's result. The link
+/// is not run by a connection thread here, so that nothing closes the breaker or opens it behind the
+/// test's back, on a system that wakes a reader at a shutdown and on one that does not.
 #[test]
 fn a_trial_that_cannot_be_sent_ends_the_trial() {
     use super::breaker::Permit;
-    let fake = Fake::start(Script::default());
-    let (_registry, link, _folder) = connect_with(&fake, |s| {
-        s.breaker_failures = 1;
-        s.breaker_open = Duration::from_millis(30);
-        // The reader looks at the connection rarely, so that it does not notice the close at once.
-        s.timings.look = Duration::from_secs(1);
+    use super::link::Info;
+    // The writing half of a connection, and the other end kept open.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        Socket::accept(stream, wire::MAX_MESSAGE, |_| {
+            Ok(Some(wire::SUBPROTOCOL.to_owned()))
+        })
+        .unwrap()
     });
-    until("the connection", || link.is_connected());
+    let request = wire::upgrade_request(
+        "127.0.0.1",
+        address.port(),
+        &meridian_websocket::new_key().unwrap(),
+    );
+    let _peer = Socket::open_checked(
+        TcpStream::connect(address).unwrap(),
+        &request,
+        wire::MAX_MESSAGE,
+    )
+    .unwrap();
+    let (_reader, writer) = server.join().unwrap().split().unwrap();
+
+    let mut settings = Settings::new("x", "127.0.0.1:1", "x.token");
+    settings.breaker_failures = 1;
+    settings.breaker_open = Duration::from_millis(30);
+    let link = Link::new(settings);
     // An outbox that is full: the request cannot be handed over.
-    let (tx, _rx) = std::sync::mpsc::sync_channel::<String>(1);
-    tx.send(String::new()).unwrap();
-    link.lock().outbox = Some(tx);
+    let (outbox, _inbox) = std::sync::mpsc::sync_channel::<String>(1);
+    outbox.send(String::new()).unwrap();
+    let info = Info {
+        protocol: 0,
+        name: "x".into(),
+        version: "1".into(),
+        granted: Vec::new(),
+        refused: Vec::new(),
+        commands: Vec::new(),
+    };
+    link.connected(writer, outbox, info);
 
     // Not the trial: it fails, and opens the breaker.
     assert_eq!(
@@ -891,7 +970,7 @@ fn a_trial_that_cannot_be_sent_ends_the_trial() {
         Err(CallError::Disconnected)
     );
     std::thread::sleep(Duration::from_millis(60));
-    // The trial: it fails too, and the breaker is open again, not left in the trial.
+    // The trial: it fails too, and the breaker is open again, not left waiting for the trial.
     assert_eq!(
         ping(&link, Duration::from_secs(1)),
         Err(CallError::Disconnected)
