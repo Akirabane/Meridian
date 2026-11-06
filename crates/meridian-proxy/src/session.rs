@@ -4,6 +4,7 @@
 //! is, where they are, and the handle that ends the session.
 use crate::balance::Balancer;
 use crate::commands;
+use crate::extension::login;
 use crate::health::Health;
 use crate::log::{debug, info, warning};
 use crate::metrics::{LoginFailure, Metrics};
@@ -73,6 +74,8 @@ pub struct Sessions {
     pub operators: Arc<crate::operators::Operators>,
     /// The players who wait for a place.
     pub queue: crate::queue::LoginQueue,
+    /// The extensions the proxy keeps a connection to, which decide logins (docs/EXTENSIONS.md).
+    pub extensions: Arc<crate::extension::Registry>,
     /// The configuration in force, which a reload replaces: set by the proxy that owns these
     /// sessions, for what a session decides long after its login (the fallback).
     live: OnceLock<Arc<RwLock<Arc<Config>>>>,
@@ -501,9 +504,32 @@ pub(crate) fn serve(
         refuse(session.connection, &refusal.message());
         return;
     }
+    // The extension that decides logins comes after the bans and the whitelist, which are local, instant
+    // and the operator's own: a ban holds whatever an extension says, and a banned player costs no
+    // request. It comes before the second login, so that a login it refuses does not end the session
+    // that login would have replaced, and before the queue, so that a refused player never waits. It
+    // can only add a refusal (docs/EXTENSIONS.md, 4.2).
+    let identity = Identity::of(&session);
+    let who = login::Who {
+        peer,
+        name: &name,
+        uuid: hyphenated(uuid),
+        verified: session.auth == client::AuthKind::Premium,
+        host: session.virtual_host.as_deref(),
+        connected: sessions.is_connected(&identity),
+    };
+    if let login::Outcome::Refuse { by, message } = login::admit(&sessions.extensions, config, &who)
+    {
+        info!(
+            "{peer}: {name} ({}) refused by the extension \"{by}\"",
+            hyphenated(uuid)
+        );
+        sessions.metrics().login_failed(LoginFailure::Extension);
+        refuse(session.connection, &message);
+        return;
+    }
     // A second login of a connected player is settled before anything else, so
     // a refused one costs no place and no backend login.
-    let identity = Identity::of(&session);
     if sessions.is_connected(&identity) {
         match config.on_duplicate {
             OnDuplicate::Refuse => {
@@ -925,6 +951,7 @@ pub(crate) mod tests {
 
     mod access;
     mod balancing;
+    mod extension;
     mod fallback;
     mod staff;
 

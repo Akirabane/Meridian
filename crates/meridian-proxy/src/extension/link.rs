@@ -71,7 +71,9 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// The defaults of the specification: 64 in flight, 5 failures, 30 seconds.
+    /// The defaults of the specification: 64 in flight, 5 failures, 30 seconds. The proxy builds its
+    /// settings from the configuration, whose defaults are these; the tests build them here.
+    #[cfg(test)]
     pub fn new(
         name: impl Into<String>,
         address: impl Into<String>,
@@ -207,6 +209,7 @@ impl Link {
     }
 
     /// The wait the connection took before its latest try.
+    #[cfg(test)]
     pub fn last_wait(&self) -> Duration {
         Duration::from_millis(self.last_wait_ms.load(Ordering::Relaxed))
     }

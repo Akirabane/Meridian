@@ -62,6 +62,8 @@ pub struct Stats {
     breaker_open: AtomicBool,
     late: AtomicU64,
     methods: Mutex<BTreeMap<&'static str, Arc<Method>>>,
+    /// Decisions by point and by what became of them.
+    decisions: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
 }
 
 impl Stats {
@@ -69,6 +71,7 @@ impl Stats {
         self.connected.store(connected, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
@@ -101,7 +104,31 @@ impl Stats {
         }
     }
 
+    /// A decision of `point` (`"login"`) was taken: `decision` is what the extension answered (`"allow"`,
+    /// `"deny"`, `"default"`) or what the on-error policy did for want of an answer (`"policy_allow"`,
+    /// `"policy_deny"`, `"policy_default"`).
+    pub fn decided(&self, point: &'static str, decision: &'static str) {
+        *self
+            .decisions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry((point, decision))
+            .or_default() += 1;
+    }
+
+    /// How many decisions of `point` ended as `decision`.
+    #[cfg(test)]
+    pub fn decisions(&self, point: &'static str, decision: &'static str) -> u64 {
+        self.decisions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(point, decision))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// How many requests of `method` ended as `outcome`.
+    #[cfg(test)]
     pub fn count(&self, method: &'static str, outcome: Outcome) -> u64 {
         let i = Outcome::ALL
             .iter()
@@ -110,6 +137,7 @@ impl Stats {
         self.method(method).outcomes[i].load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn late(&self) -> u64 {
         self.late.load(Ordering::Relaxed)
     }
@@ -186,6 +214,22 @@ pub fn render(extensions: &[(String, Arc<Stats>)], out: &mut String) {
                     escaped(name),
                     escaped(method)
                 ),
+            );
+        }
+    }
+    family(
+        out,
+        "meridian_extension_decisions_total",
+        "counter",
+        "Decisions asked of the extension, by point and by what became of them: its answer, or the on-error policy.",
+    );
+    for (name, stats) in extensions {
+        let decisions = stats.decisions.lock().unwrap_or_else(|e| e.into_inner());
+        for ((point, decision), count) in decisions.iter() {
+            let _ = writeln!(
+                out,
+                "meridian_extension_decisions_total{{extension=\"{}\",point=\"{point}\",decision=\"{decision}\"}} {count}",
+                escaped(name),
             );
         }
     }

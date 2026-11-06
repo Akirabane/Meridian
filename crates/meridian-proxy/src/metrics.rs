@@ -85,10 +85,13 @@ pub enum LoginFailure {
     Banned,
     /// The whitelist is on and the player is not on it.
     NotWhitelisted,
+    /// An extension refused the login, or could not be asked and its on-error policy refuses
+    /// (docs/EXTENSIONS.md, 4.2).
+    Extension,
 }
 
 impl LoginFailure {
-    const ALL: [LoginFailure; 7] = [
+    const ALL: [LoginFailure; 8] = [
         LoginFailure::Protocol,
         LoginFailure::Duplicate,
         LoginFailure::Full,
@@ -96,6 +99,7 @@ impl LoginFailure {
         LoginFailure::Unreachable,
         LoginFailure::Banned,
         LoginFailure::NotWhitelisted,
+        LoginFailure::Extension,
     ];
 
     fn label(self) -> &'static str {
@@ -107,6 +111,7 @@ impl LoginFailure {
             LoginFailure::Unreachable => "unreachable",
             LoginFailure::Banned => "banned",
             LoginFailure::NotWhitelisted => "not_whitelisted",
+            LoginFailure::Extension => "extension",
         }
     }
 }
