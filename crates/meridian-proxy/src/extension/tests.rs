@@ -288,7 +288,12 @@ fn handle(
     };
     *current.lock().unwrap() = Some(writer.clone());
     if script.big_message {
-        let _ = writer.send_text(&"x".repeat(300 << 10));
+        // Over the proxy's limit (256 KiB) by far, so that most of it is still unread when the proxy
+        // closes: a close over unread bytes is a reset, which can take the close frame with it.
+        let _ = writer.send_text(&"x".repeat(900 << 10));
+        // An extension that is busy for a moment before it reads again: the close frame waits unread
+        // in its socket, where a reset from the proxy would take it away.
+        std::thread::sleep(Duration::from_millis(200));
     }
     while !stop.load(Ordering::Relaxed) {
         let text = match reader.read_message() {
@@ -734,6 +739,28 @@ fn a_message_over_the_limit_is_refused_with_the_code_for_a_message_too_big() {
     until("the close", || {
         fake.seen(|s| s.close_codes.contains(&Some(close::TOO_BIG)))
     });
+}
+
+/// The close must reach the extension whatever the size of the message it sent: the proxy reads the
+/// rest of it before it closes, so that its socket is not reset with the close frame unread.
+#[test]
+fn the_close_for_a_message_too_big_reaches_the_extension_every_time() {
+    for round in 0..20 {
+        let fake = Fake::start(Script {
+            big_message: true,
+            ..Script::default()
+        });
+        let (_registry, _link, _folder) = connect_with(&fake, |_| {});
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !fake.seen(|s| s.close_codes.contains(&Some(close::TOO_BIG))) {
+            assert!(
+                Instant::now() < limit,
+                "round {round}: the extension never read the close 1009; it read {:?}",
+                fake.seen(|s| s.close_codes.clone())
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 #[test]
