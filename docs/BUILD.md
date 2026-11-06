@@ -31,7 +31,9 @@ files.
 The Minecraft protocol is taken from the `horizon-protocol` crate of Horizon, as a
 git dependency pinned to one commit (`[workspace.dependencies]` in the root
 `Cargo.toml`). Cargo also builds the two Horizon crates it depends on,
-`horizon-core` and `horizon-world`; nothing else of Horizon is built.
+`horizon-core` and `horizon-world`; nothing else of Horizon is built. `horizon-world` is also a
+direct dependency of `meridian-handoff`, on a second line of the same `Cargo.toml` with the same
+`rev`; the two lines are kept identical ([COMPAT.md](COMPAT.md)).
 
 Moving the pin is a deliberate change: `scripts/bump-horizon.sh` updates the `rev`,
 runs the tests and notes the commit here. A nightly build against Horizon's head warns

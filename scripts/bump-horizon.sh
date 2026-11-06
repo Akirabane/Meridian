@@ -47,8 +47,9 @@ done
 
 cd "$(dirname "$0")/.."
 
-# The 40 digits of the revision now in Cargo.toml.
-old=$(sed -n 's|.*horizon-rust/horizon", rev = "\([0-9a-f]\{40\}\)".*|\1|p' Cargo.toml)
+# The 40 digits of the revision now in Cargo.toml: the first line that names one (the lines of
+# horizon-protocol and horizon-world carry the same).
+old=$(sed -n 's|.*horizon-rust/horizon", rev = "\([0-9a-f]\{40\}\)".*|\1|p' Cargo.toml | head -n 1)
 if [ "${#old}" -ne 40 ]; then
   echo "Cargo.toml has no horizon-protocol line with a 40-digit rev" >&2
   exit 2
@@ -85,8 +86,11 @@ rewrite() { # file, sed script
 }
 rewrite Cargo.toml "s|\\(horizon-rust/horizon\", rev = \"\\)[0-9a-f]\\{40\\}|\\1$new|"
 rewrite docs/BUILD.md "s|^\\(Pinned commit: \`\\)[0-9a-f]\\{40\\}|\\1$new|"
-if ! grep -q "rev = \"$new\"" Cargo.toml; then
-  echo "Cargo.toml was not rewritten" >&2
+# Every line that names a Horizon revision (horizon-protocol and horizon-world) must now carry it.
+total=$(grep -c 'horizon-rust/horizon", rev = "' Cargo.toml || true)
+moved=$(grep -c "horizon-rust/horizon\", rev = \"$new\"" Cargo.toml || true)
+if [ "$total" -lt 1 ] || [ "$total" -ne "$moved" ]; then
+  echo "Cargo.toml was not rewritten on every line that names a Horizon revision ($moved of $total)" >&2
   exit 2
 fi
 
