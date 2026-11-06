@@ -597,8 +597,10 @@ dependencies = [
 name = "meridian-websocket"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "getrandom 0.3.4",
  "meridian-testkit",
+ "sha1",
 ]
 
 [[package]]
