@@ -22,7 +22,7 @@ repository; the numbers below were read from them.**
 | Clients | Three Horizon clients on the PC, `Net_A`, `Net_B` and `Net_C`, offline accounts, the Nightly 2026-11-05 `66f3981` (581 commits older than the servers' build). One window of 1280x720 for the runs that needed an unthrottled window, small minimised windows otherwise |
 | Link of the clients | TCP over the Internet from the PC to the rented machine. Round trip PC to rented machine over one SSH session: **44.2 / 44.7 / 45.6 ms** (min, median, max of 10 samples) |
 | Horizon servers | Both with `[transfer] enabled = true` and the proxy's Velocity forwarding. A's server build was made by a CI workflow on the commit above (not signed, no `exporters/`, which only `horizon-prepare` uses); B was built on the PC from the same commit |
-| Proxy settings | Both servers had `role = "lobby"`, `soft-cap = 20`, balancing on with `tie-break = "order"` (new logins go to `real`); `switch-carry-position = false` until the first try of run 6, `true` after; the other `switch-*` settings at their defaults (freeze limit 8000 ms, commit margin 2000 ms). Difficulty: peaceful on both servers, set at their consoles (see the limits in section 6) |
+| Proxy settings | Both servers had `role = "lobby"`, `soft-cap = 20`, balancing on with `tie-break = "order"` (new logins go to `real`); `switch-carry-position = false` until the first try of run 6, `true` after; the other `switch-*` settings at their defaults (freeze limit 8000 ms, commit margin 2000 ms). Difficulty: both servers were set to peaceful at their consoles at the start; the restart of an engine put that server back to easy (B after run 5a, A after run 5b); B was set again in its configuration file before run 6 and A was not: **during run 6, A was easy and B peaceful** |
 
 The first measures (section 3, run 1) were made before B was moved to the PC: both servers were on
 the rented machine, the clients on the PC.
@@ -70,7 +70,8 @@ logs, 7 levels of experience and a speed effect (`/server real2`, `/server real`
 | Moves | 12 of 12 reached the target and ended with the proxy's `You are now on` line. 0 loading screen or reconnection screen. No step back |
 | Seen by the client (the 10 moves) | 34, 40, 32, 29, 33, 38, 32, 37, 32, 39 ticks: **29 / 33 / 40 ticks (1.45 / 1.65 / 2.00 s)**, min / median / max. The script's own measure, command to proxy line, 1.60 / 1.80 / 2.13 s |
 | Proxy, the two trial moves | Total 1587 ms (prepare 1053, freeze 85, hand over 369, commit 78; 1182 packets, 15 915 348 bytes, 429 chunks, 157 entities) and 1878 ms (prepare 1318, freeze 61, hand over 445, commit 52; 1197 packets, 18 458 377 bytes, 473 chunks, 156 entities). The same hand-over id from the first request to the release; nine parts imported (inventory, ender chest, experience, health, effects, game mode, spawn point, recipe book, advancements); no warning |
-| Where the time goes | In the **preparation**: the target's world around the player is sent to the client before the freeze (about 16 to 18 MB). The freeze, the time the player cannot act, was 61 to 85 ms |
+| Proxy, the 10 moves (min / average / max, in ms) | Total 1424 / 1691 / 1969; prepare 864 / 1138 / 1459; **freeze 60 / 75 / 89**; hand over 365 / 412 / 452; commit 46 / 64 / 81. 887 to 906 packets and 16.9 to 18.5 million bytes (457 to 473 chunks, 82 to 89 entities) for each. Towards `real2` (5 moves): total 1536 to 1644, freeze 88 to 89, hand over 365 to 420; towards `real` (5 moves): total 1424 to 1969, freeze 60 to 62, hand over 402 to 452 |
+| Where the time goes | In the **preparation**: the target's world around the player is sent to the client before the freeze (about 16 to 18 MB). The freeze, the time the player cannot act, was 60 to 89 ms |
 
 ### Run 2: server B on the PC, 10 round trips (20 moves)
 
@@ -82,6 +83,15 @@ the same objects, experience and effect.
 | Moves | 10 of 10 | 10 of 10 |
 | Seen by the client, ticks, min / median / max | 34 / 36 / 48 (1.70 / 1.80 / 2.40 s) | 30 / 38 / 42 (1.50 / 1.90 / 2.10 s) |
 | Loading or reconnection screen | none | none |
+
+Proxy side, the 20 moves (min / average / max, in ms): total 1437 / 1767 / 2308; prepare 844 / 1206
+/ 1733; **freeze 67 / 72 / 78**; hand over 378 / 410 / 438; commit 65 / 77 / 101. Towards B, on the
+PC (10 moves): total 1622 / 1769 / 2308, prepare 1101 / 1237 / 1733, freeze 67 / 72 / 78, hand over
+378 / 390 / 432, 1352 to 1408 packets and 16.4 million bytes (473 chunks, 67 to 130 entities); towards A
+(10 moves): total 1437 / 1765 / 2035, prepare 844 / 1175 / 1427, freeze 71 / 73 / 75, hand over 383 / 429
+/ 438, 1238 to 1260 packets and 18.3 to 18.5 million bytes. **The second machine did not make the
+hand-over slower**: through the tunnel, B's hand over was 378 to 432 ms, against 365 to 452 ms with both
+servers on the rented machine (run 1).
 
 The script's measure was 1.64 / 2.03 / 2.48 s for the 20 moves. The longest was the first move to B
 (48 ticks), the only one above 42. After every move to B the console of B gave the player's
@@ -106,6 +116,7 @@ the two commands 60 seconds apart.
 | | |
 | --- | --- |
 | Moves | 6 of 6, no screen, no step back, inventories identical (the experienced client keeps its 5 diamonds, 12 logs, level 7 and speed effect; the two others, fresh players, hold nothing) |
+| Proxy (min / average / max, in ms) | Total 1465 / 1668 / 1876; prepare 900 / 1099 / 1311; **freeze 60 / 72 / 86**; hand over 373 / 424 / 446; commit 55 / 71 / 86; 1223 to 1466 packets, 16.4 to 18.6 million bytes, 473 chunks. Towards `real2` (3 moves): total 1682 to 1812, freeze 82 to 86, hand over 373 to 424; towards `real` (3 moves): total 1465 to 1876, freeze 60 to 62, hand over 439 to 446 |
 | Order | One at a time, never in parallel: first drain at 19:03:56.7, 19:03:58.8 and 19:04:01.1 (2.1 to 2.3 s apart); second at 19:04:56.8, 19:04:58.6 and 19:05:00.8 (1.8 to 2.2 s apart), as the clients saw it, on the rented machine's clock |
 | What the others see | The players that stay on the source read `<name> left the game`, and those on the target `<name> joined the game`, for each move. The moved player reads only `You are now on X.` (see section 7, `announce`) |
 | Frame times | 34 to 35 ms for two of the clients; about 100 ms for the third, which is the throttling of a minimised window (section 1), not the move |
@@ -118,7 +129,9 @@ were moved to real.` and plays again on `real` with no loading screen. **The 3 d
 they had never been saved by B, and a fallback moves nobody's state. The inventory on `real` is the
 one `real` last saved (empty), experience level 0, health 20, food 20. The engine of B was started
 again by Horizon's supervisor 8 s later (`Done` at +8 s), listening again with its sidecar and the
-tunnel untouched.
+tunnel untouched. The proxy logged the fallback at 19:12:53.232 on its clock, 0.4 s after the kill, in
+**one line** that says the connection to `real2` was lost and that the player was moved to `real`, with
+no duration and no steps.
 
 **5b, the engine of A is killed with three clients on it:** kill at 19:20:39.115 on the proxy's clock;
 the supervisor saw it at 39.145; **the proxy moved the three clients to `real2` at 39.292, 39.292 and
@@ -136,7 +149,10 @@ target last had it.
 | | |
 | --- | --- |
 | First try, after a configuration `reload` | **Not carried, on 10 moves of 10.** The player was put at B's last saved place and, on the way back, at A's old login place. The proxy's log said `the target took the record, all but the position` and nine parts were imported: the setting was not applied (section 7) |
+| Proxy, first try (min / average / max, in ms) | Total 1426 / 1551 / 1712; prepare 855 / 1024 / 1216; freeze 43 / 60 / 91; hand over 351 / 382 / 409; commit 44 / 83 / 124; 1255 to 1537 packets and 16.3 to 18.5 million bytes: the same size as the moves without position (run 2) |
 | After a new login of the client | **Carried on 12 moves of 12**, in spectator mode, flying, from (100.5, 120.0, 100.5): the client's position before and after each move 0.00 blocks apart, and B's console read `[100.5d, 120.0d, 100.5d]` after each of the moves to B. Inventory identical, no screen, 33.9 to 35.3 ms frame times. Seen by the client: to B 34 / 36 / 37 ticks (1.70 / 1.80 / 1.85 s), to A 36 / 39 / 40 ticks (1.80 / 1.95 / 2.00 s) |
+| Proxy, carried position, the 12 moves of spectator mode (min / average / max, in ms) | Total 1616 / 1836 / 2320; prepare 903 / 1187 / 1314; freeze 42 / 67 / 90; hand over 346 / 504 / **1213**; commit 44 / 77 / 124. **The first move and the first move back were recentered** (the log says `recentered: true`: the target sends the chunks around the new place before it takes the player): their hand over lasted **1011 and 1213 ms**, against **346 to 416 ms** for the ten others (`recentered: false`), that is 2.4 to 3.5 times longer. Packets 508 to 722 and 13.8 to 17.8 million bytes: fewer than without position (1255 to 1537) |
+| Proxy, survival (6 moves) | Total 1426 / 1794 / 2282; prepare 832 / 1087 / 1250; freeze 64 / 70 / 80; hand over 398 / 568 / 888; commit 49 / 67 / 91. Again the first two moves were recentered: hand over **888 and 873 ms**, against 398 to 427 ms for the four others (2.1 to 2.2 times longer) |
 | In survival, window visible (6 moves) | The player stood on a stone platform built on B at the same coordinates as the ground of A. **Position exact** at (32.5, 91.0, -31.5) before and after, on the ground on arrival at each move, B's console reading the same place, health 20 and food 20 throughout. Frame times of the unthrottled window **12.9 to 22.7 ms**. Seen by the client: 45, 48, 37, 32, 36, 30 ticks (2.25 / 2.40 / 1.85 / 1.60 / 1.80 / 1.50 s) |
 
 Without the platform the player would have arrived at the same coordinates in a different world:
@@ -166,8 +182,10 @@ fresh players, A read 20.0 (food level 20) before any move, and B read 20.0 (foo
 the first move to B; the clients then read 20.0. The 5.0 → 20.0 change that two clients showed at
 their first move is therefore the **client's display** catching up, and nothing was lost on the way.
 (For the experienced client, B's console later read 9.0 and 10.0 while the client said 9.0 and then
-20.0, and 20.0 again afterwards. B was in peaceful difficulty, in which vanilla refills hunger by
-itself; that was not checked.)
+20.0, and 20.0 again afterwards. During that run B was in peaceful difficulty and A in easy; in
+peaceful, vanilla refills hunger and saturation of a player in survival by itself. So this is
+probably a **difference of difficulty between A and B**, not a defect of the transfer; it was not
+checked directly.)
 
 ## 6. What was not done
 
@@ -194,11 +212,11 @@ itself; that was not checked.)
 - **A client that a person touched**: on one of the three clients the log shows keyboard and mouse
   input that no script sent (a pause, walking, then a death by a skeleton on B). The cause is not
   known. That client's figures after the first fallback are not used; the moment of its fallback is.
-- B's difficulty came back to `easy` once when its engine was restarted (a value set at the console is
-  not kept; it was then set in its `server.toml`).
-- The proxy's own figures (section 3, runs 1 and 3, run 5b) are those the operator read in its log
-  and gave for these moves. The proxy's breakdown was not kept for each of the 20 moves of run 2,
-  the 6 of run 4 and the moves of run 6.
+- A server's difficulty came back to `easy` when its engine was restarted (a value set at the console
+  is not kept): B after run 5a, then set in its `server.toml`; A after run 5b, and left as it was, so
+  that A was easy and B peaceful during run 6.
+- The proxy's figures are those of its log (one line per move: the steps, the packets, the bytes, the
+  chunks and the entities), taken from a copy of the log in which the addresses were removed.
 
 ## 7. What was found
 
@@ -207,15 +225,18 @@ itself; that was not checked.)
    `/server` does. After the `reload` the log said `settings changed for the next logins`, and a move
    of a session that was already open did not carry the position (10 moves of 10). A new login did. The
    configuration and operating pages should say so.
-2. **A move that carries the position and recenters the arrival has a hand-over step about three
-   times longer** than one that does not (read in the proxy's log by the operator).
+2. **A move that carries the position and recenters the arrival has a hand-over step 2.1 to 3.5 times
+   longer** than one that does not: 1011 and 1213 ms against 346 to 416 ms in run 6 (spectator), 888
+   and 873 ms against 398 to 427 ms (survival). In each series it was the first two moves that were
+   recentered; the later moves to the same place were not.
 3. **`announce`**: the proxy sends `announce` true both ways (the target tells its players that
-   someone joined, the source tells its players that someone left) and has no setting for it. The
+   someone joined, the source tells its players that someone left) and had no setting for it. The
    other players therefore read `left the game` and `joined the game` for a moved player. Two settings,
-   `switch-announce-arrival` and `switch-announce-departure`, are proposed for this in
-   #139.
-4. **A fallback is logged with no duration.** The proxy's log says that the server was lost and
-   where the players went, but not how long it took; the times above come from comparing clocks.
+   `switch-announce-arrival` and `switch-announce-departure`, were added for this in #139 (merged).
+4. **A fallback is logged in one line, with no duration and no steps.** The proxy logs that the
+   connection to a server was lost and where the player was moved (19:12:53.232 for run 5a, 0.4 s after
+   the kill; 19:20:39.292, 39.292 and 39.330 for run 5b, 0.18 to 0.22 s after it), but not how long the
+   move took on the client's side; the times above come from comparing clocks.
 5. **A fallback moves no state.** What the player had changed since the last time the server saved it
    is lost, and the state on the new server is its own last saved state. This is the fallback's
    definition, and it is visible in run 5a.
@@ -227,5 +248,7 @@ itself; that was not checked.)
 8. **A `switch` or `send` from the console sends the player only `You are now on X.`**, so the duration
    the player sees can only be read for `/server`.
 9. **The client's frame time is only a measure with a window that is not throttled** (section 1).
-10. **Preparation is the long part**: the freeze is 60 to 85 ms on the proxy's side and the total
-    1.5 to 2.4 s as the client counts it; sending the target's world to the client is what takes the time.
+10. **Preparation is the long part**: the freeze is 42 to 91 ms on the proxy's side and the total
+    1.4 to 2.3 s there (1.5 to 2.4 s as the client counts it); preparation, which sends the target's
+    world to the client, is 830 to 1730 ms of it. A tunnel through a home line did not make the hand
+    over slower (run 2).
