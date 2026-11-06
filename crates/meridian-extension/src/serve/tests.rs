@@ -790,6 +790,125 @@ fn what_the_extension_logs_holds_neither_the_token_nor_a_message_nor_the_proxys_
 }
 
 // ---------------------------------------------------------------------------------------------
+// Time: a peer that sends a byte before each read timeout is let go at the time of the hello or of a
+// message, and does not hold the one place there is.
+
+mod slow {
+    use super::*;
+
+    /// Sends the head of a frame that announces 60000 bytes, then one byte every 20 ms for up to three
+    /// seconds, on a thread of its own, from the stream of `socket`.
+    fn drip(socket: &mut Socket<TcpStream>) -> std::thread::JoinHandle<()> {
+        let mut raw = socket.stream_mut().try_clone().unwrap();
+        std::thread::spawn(move || {
+            let mut head = vec![0x81, 0x80 | 126];
+            head.extend_from_slice(&60_000u16.to_be_bytes());
+            head.extend_from_slice(&[0, 0, 0, 0]);
+            if raw.write_all(&head).is_err() {
+                return;
+            }
+            for _ in 0..150 {
+                if raw.write_all(b"x").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    }
+
+    /// An extension whose hello and messages must be whole in 300 ms.
+    fn quick(lines: &Arc<Lines>) -> Extension {
+        let mut extension = echoing(lines);
+        extension.timings.hello = Duration::from_millis(300);
+        extension.timings.message = Duration::from_millis(300);
+        extension
+    }
+
+    /// Waits until a new proxy gets the place, and returns how long that took.
+    fn until_free(running: &Running) -> Duration {
+        let began = Instant::now();
+        until("the place", || {
+            let request = wire::upgrade_request(
+                "127.0.0.1",
+                running.local_addr().port(),
+                &new_key().unwrap(),
+            );
+            raw(running.local_addr(), &request).starts_with("HTTP/1.1 101")
+        });
+        began.elapsed()
+    }
+
+    #[test]
+    fn a_hello_that_drips_in_is_let_go_at_the_time_of_the_hello() {
+        let lines = Arc::new(Lines::default());
+        let running = start(quick(&lines));
+        let mut slow = Proxy::connect(running.local_addr());
+        let thread = drip(&mut slow.socket);
+        let took = until_free(&running);
+        assert!(took < Duration::from_millis(1500), "held for {took:?}");
+        until("the line", || {
+            lines.all().iter().any(|l| l.contains("the hello failed"))
+        });
+        drop(slow);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_message_that_drips_in_after_the_hello_is_let_go_too() {
+        let lines = Arc::new(Lines::default());
+        let running = start(quick(&lines));
+        let mut slow = Proxy::up(running.local_addr());
+        let thread = drip(&mut slow.socket);
+        let took = until_free(&running);
+        assert!(took < Duration::from_millis(1500), "held for {took:?}");
+        until("the line", || {
+            lines
+                .all()
+                .iter()
+                .any(|l| l.contains("the connection ended"))
+        });
+        drop(slow);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn an_upgrade_that_drips_in_is_let_go_at_the_time_of_the_hello() {
+        let running = start(quick(&Arc::default()));
+        let mut stream = TcpStream::connect(running.local_addr()).unwrap();
+        let thread = std::thread::spawn(move || {
+            // One byte every 40 ms, and never the blank line.
+            let head = b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            for byte in head {
+                if stream.write_all(&[*byte]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let took = until_free(&running);
+        assert!(took < Duration::from_millis(1500), "held for {took:?}");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn stopping_does_not_wait_for_a_message_that_drips_in() {
+        let running = start(quick(&Arc::default()));
+        let mut slow = Proxy::up(running.local_addr());
+        let thread = drip(&mut slow.socket);
+        std::thread::sleep(Duration::from_millis(50));
+        let began = Instant::now();
+        running.stop();
+        assert!(
+            began.elapsed() < Duration::from_millis(1500),
+            "stop took {:?}",
+            began.elapsed()
+        );
+        drop(slow);
+        thread.join().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The admission at login
 
 mod login {

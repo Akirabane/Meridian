@@ -51,6 +51,9 @@ pub(crate) struct Handler {
 pub(crate) struct Timings {
     /// For the upgrade and the whole of the hello.
     pub hello: Duration,
+    /// For a message to arrive in all, from its first byte to its last: a peer that sends a byte at a
+    /// time is let go at this time, since the stream's read timeout counts each read.
+    pub message: Duration,
     /// A write may not block longer than this.
     pub write: Duration,
     /// How often a connection that hears nothing looks at the stop flag.
@@ -63,6 +66,7 @@ impl Default for Timings {
     fn default() -> Self {
         Self {
             hello: Duration::from_secs(5),
+            message: Duration::from_secs(5),
             write: Duration::from_secs(5),
             look: Duration::from_millis(50),
             grace: Duration::from_secs(2),

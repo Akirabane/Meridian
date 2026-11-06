@@ -92,9 +92,10 @@ fn connection(stream: TcpStream, shared: &Arc<Shared>) {
     let log = &*extension.log;
     let _ = stream.set_nodelay(true);
     let _ = stream.set_write_timeout(Some(extension.timings.write));
-    // The upgrade is given the time of the hello; it is read with the blocking read of the stream.
+    // The upgrade is given the time of the hello, in all: a client that sends it a byte at a time is let
+    // go at that time, not held as long as it keeps sending.
     let _ = stream.set_read_timeout(Some(extension.timings.hello));
-    let socket = Socket::accept(stream, MAX_MESSAGE, |upgrade| {
+    let socket = Socket::accept_within(stream, MAX_MESSAGE, extension.timings.hello, |upgrade| {
         if upgrade.protocols().contains(&SUBPROTOCOL) {
             Ok(Some(SUBPROTOCOL.to_owned()))
         } else {
@@ -116,6 +117,8 @@ fn connection(stream: TcpStream, shared: &Arc<Shared>) {
     let _ = socket
         .stream_mut()
         .set_read_timeout(Some(extension.timings.look));
+    // A message that takes longer than this to arrive ends the connection, the hello's included.
+    socket.set_message_timeout(Some(extension.timings.message));
 
     let proxy = match hello(&mut socket, shared) {
         Ok(proxy) => proxy,
