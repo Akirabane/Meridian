@@ -223,3 +223,121 @@ fn keys_are_new_each_time_and_twenty_four_characters_of_base64() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The crate against itself: its client (checked) against its server, over a real socket.
+
+fn request_for(address: std::net::SocketAddr, extra_header: &str) -> (String, String) {
+    let key = new_key().unwrap();
+    let mut request = upgrade_request("127.0.0.1", address.port(), "unused", &key);
+    // The extension protocol sends no secret in the upgrade: a subprotocol instead.
+    request = request.replace("Authorization: Bearer unused\r\n", extra_header);
+    (request, key)
+}
+
+#[test]
+fn a_checked_client_and_the_crates_server_talk_both_ways_and_agree_on_a_subprotocol() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut socket = Socket::accept(stream, 256 << 10, |upgrade| {
+            assert_eq!(upgrade.protocols(), ["meridian-extension"]);
+            Ok(Some("meridian-extension".to_owned()))
+        })
+        .unwrap();
+        assert_eq!(socket.protocol(), Some("meridian-extension"));
+        let Next::Text(hello) = socket.read_message().unwrap() else {
+            panic!("a text was expected");
+        };
+        socket.send_text(&format!("you said: {hello}")).unwrap();
+        // A long answer, past one frame's short form.
+        socket.send_text(&"x".repeat(70_000)).unwrap();
+        assert_eq!(socket.read_message().unwrap(), Next::Closed);
+    });
+    let (request, _) = request_for(address, "Sec-WebSocket-Protocol: meridian-extension\r\n");
+    let stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut socket = Socket::open_checked(stream, &request, 256 << 10).unwrap();
+    assert_eq!(socket.protocol(), Some("meridian-extension"));
+    socket.send_text("hello").unwrap();
+    assert_eq!(
+        socket.read_message().unwrap(),
+        Next::Text("you said: hello".into())
+    );
+    assert_eq!(
+        socket.read_message().unwrap(),
+        Next::Text("x".repeat(70_000))
+    );
+    // Dropping the socket closes the stream: the server sees the end.
+    drop(socket);
+    server.join().unwrap();
+}
+
+#[test]
+fn the_server_refuses_what_its_caller_refuses_and_the_client_sees_the_refusal() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let refused = Socket::accept(stream, 1024, |_| Err("not for you".to_owned()))
+            .err()
+            .expect("refused");
+        assert_eq!(refused, "not for you");
+    });
+    let (request, _) = request_for(address, "");
+    let stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let refused = Socket::open_checked(stream, &request, 1024)
+        .err()
+        .expect("the upgrade is refused");
+    assert!(
+        refused.contains("refused") && refused.contains("403"),
+        "{refused}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn a_raw_client_sees_unmasked_frames_and_the_server_closes_on_an_unmasked_one() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut socket = Socket::accept(stream, 1024, |_| Ok(None)).unwrap();
+        socket.send_text("hi").unwrap();
+        // The client's frame below is not masked: the server refuses it.
+        let error = socket.read_message().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    });
+    let (request, key) = request_for(address, "");
+    let mut raw = TcpStream::connect(address).unwrap();
+    raw.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    raw.write_all(request.as_bytes()).unwrap();
+    let head = read_head(&mut raw);
+    assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+    assert!(
+        head.contains(&format!(
+            "Sec-WebSocket-Accept: {}\r\n",
+            meridian_websocket::accept_key(&key)
+        )),
+        "{head}"
+    );
+    // The server's text, as bytes: fin + text, a length without the mask bit, the text.
+    let mut frame = [0u8; 4];
+    raw.read_exact(&mut frame).unwrap();
+    assert_eq!(&frame, b"\x81\x02hi");
+    // A client frame that is not masked.
+    raw.write_all(&server_frame(0x1, b"no mask")).unwrap();
+    server.join().unwrap();
+}

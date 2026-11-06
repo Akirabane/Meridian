@@ -1,17 +1,25 @@
-//! The little of WebSocket (RFC 6455) that Meridian's processes speak: the upgrade with a
-//! bearer token, text messages (whole or in fragments), and the control frames.
+//! The little of WebSocket (RFC 6455) that Meridian's processes speak to each other: the upgrade,
+//! text messages (whole or in fragments), and the control frames, on both sides of a connection.
 //!
-//! This is the code the sidecar had in `websocket.rs`, moved here as it was so that the proxy and the
-//! extensions can share it (docs/EXTENSIONS.md, section 2.5); the sidecar uses it to read the
-//! notifications of a Horizon server's management protocol (`management.rs`) and to send its
-//! requests. What follows describes the code as it is, and was written for that use.
+//! It is the code the sidecar had, moved here and extended so that the proxy and the extensions
+//! share it (docs/EXTENSIONS.md, section 2.5):
 //!
-//! What is left out, on purpose: the server's `Sec-WebSocket-Accept` is not checked
-//! (it needs SHA-1, which nothing else here uses), and the sidecar reads only a
-//! server on its own machine, which the caller has already seen is on a loopback
-//! address; and what is sent is pongs, a close, and the requests of the management
-//! protocol (`send_text`).
+//! - **The client**, [`Socket::open`] and [`Socket::open_with`]: it sends the upgrade, reads the answer
+//!   (which must be a 101), then text messages, whole or in fragments, and answers pings and a close.
+//!   The sidecar is one, of a Horizon server's management protocol. It does not check the server's
+//!   `Sec-WebSocket-Accept`, because the servers it talks to are on its own machine and it has
+//!   always been so. A client that wants the check, [`Socket::open_checked`], has it.
+//! - **The server**, [`Socket::accept`]: it reads the upgrade request, lets the caller decide, answers
+//!   with the `Sec-WebSocket-Accept` a client expects, reads masked frames and sends unmasked
+//!   ones. It is for the extensions' side of the proxy's connection to them.
+//! - **The limit of a message** is the caller's to set ([`MAX_MESSAGE`] by default).
+//!
+//! What is left out, on purpose: extensions of the protocol (compression, `permessage-deflate`), binary
+//! messages (read and dropped), and TLS: the caller has seen that the other end is on a loopback address.
+mod upgrade;
+
 use std::io::{self, Read, Write};
+pub use upgrade::{Upgrade, accept_key};
 
 /// The longest message the sidecar takes, which is what [`Socket::open`] uses: a notification
 /// is a line, and anything near this is not one. The answer to a request for a server's ban
@@ -70,9 +78,21 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// Which end of the connection a socket is: a client masks what it sends and takes frames either way
+/// (as it always has); a server sends unmasked frames and refuses a client frame that is not masked
+/// (RFC 6455, 5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    Client,
+    Server,
+}
+
 /// A WebSocket the upgrade of which was accepted.
 pub struct Socket<T: Read + Write> {
     stream: T,
+    role: Role,
+    /// The subprotocol the other end chose (`Sec-WebSocket-Protocol`), if it named one.
+    protocol: Option<String>,
     /// Bytes read and not yet parsed.
     buf: Vec<u8>,
     /// The message being gathered from fragments: `None` between messages, and
@@ -91,38 +111,60 @@ impl<T: Read + Write> Socket<T> {
     }
 
     /// As [`Socket::open`], with messages of at most `max_message` bytes, read or sent.
-    pub fn open_with(mut stream: T, request: &str, max_message: usize) -> Result<Self, String> {
+    pub fn open_with(stream: T, request: &str, max_message: usize) -> Result<Self, String> {
+        Self::open_inner(stream, request, max_message, false)
+    }
+
+    /// As [`Socket::open_with`], and the answer is checked as RFC 6455 (4.2.2) asks of a client: it
+    /// carries `Upgrade: websocket`, `Connection: Upgrade` and the `Sec-WebSocket-Accept` that
+    /// the request's `Sec-WebSocket-Key` calls for, and a subprotocol it names is one the
+    /// request offered. The request must carry a key (as [`upgrade_request`] and [`new_key`] make one).
+    pub fn open_checked(stream: T, request: &str, max_message: usize) -> Result<Self, String> {
+        Self::open_inner(stream, request, max_message, true)
+    }
+
+    fn open_inner(
+        mut stream: T,
+        request: &str,
+        max_message: usize,
+        check: bool,
+    ) -> Result<Self, String> {
         stream
             .write_all(request.as_bytes())
             .and_then(|()| stream.flush())
             .map_err(|e| format!("cannot send the upgrade: {e}"))?;
         let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
-        let end = loop {
-            if let Some(end) = find(&buf, b"\r\n\r\n") {
-                break end;
-            }
-            if buf.len() > MAX_HEAD {
-                return Err("the answer to the upgrade is too long".into());
-            }
-            match stream.read(&mut chunk) {
-                Ok(0) => return Err("the server closed the connection before it answered".into()),
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                Err(e) => return Err(format!("no answer to the upgrade: {e}")),
-            }
-        };
+        let end = read_head(
+            &mut stream,
+            &mut buf,
+            "the answer to the upgrade is too long",
+            "the server closed the connection before it answered",
+            "no answer to the upgrade",
+        )?;
         let head = String::from_utf8_lossy(&buf[..end]).into_owned();
         let status = head.lines().next().unwrap_or_default();
         if !status.split(' ').nth(1).is_some_and(|code| code == "101") {
             return Err(format!("the upgrade was refused: {status}"));
         }
+        let protocol = if check {
+            upgrade::check_answer(request, &head)?
+        } else {
+            upgrade::header_of(&head, "sec-websocket-protocol")
+        };
         buf.drain(..end + 4);
         Ok(Self {
             stream,
+            role: Role::Client,
+            protocol,
             buf,
             message: None,
             max_message,
         })
+    }
+
+    /// The subprotocol the other end chose, if it named one.
+    pub fn protocol(&self) -> Option<&str> {
+        self.protocol.as_deref()
     }
 
     /// The stream under the socket, to set its timeouts.
@@ -184,42 +226,47 @@ impl<T: Read + Write> Socket<T> {
         }
     }
 
-    /// A frame the client sends: masked, as RFC 6455 requires of a client.
+    /// A control frame: a client masks it, as RFC 6455 requires, and a server does not.
     fn send(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {
         // A control frame carries 125 bytes at most.
         let payload = &payload[..payload.len().min(125)];
-        let mut mask = [0u8; 4];
-        getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
-        let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
-        frame.extend_from_slice(&mask);
-        frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
-        self.stream.write_all(&frame)?;
-        self.stream.flush()
+        self.write_frame(opcode, payload)
     }
 
-    /// Sends one text message (a request of the management protocol), in a single masked
-    /// frame.
+    /// Sends one text message (a request of the management protocol, or of the extension
+    /// protocol), in a single frame: masked for a client, not for a server.
     pub fn send_text(&mut self, text: &str) -> io::Result<()> {
         let payload = text.as_bytes();
         if payload.len() > self.max_message {
             return Err(too_long(self.max_message));
         }
-        let mut mask = [0u8; 4];
-        getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
-        let mut frame = vec![0x81];
+        self.write_frame(0x1, payload)
+    }
+
+    /// One whole frame (`fin` set), of any length.
+    fn write_frame(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {
+        let masked = self.role == Role::Client;
+        let mask_bit = if masked { 0x80 } else { 0 };
+        let mut frame = vec![0x80 | opcode];
         match payload.len() {
-            n if n < 126 => frame.push(0x80 | n as u8),
+            n if n < 126 => frame.push(mask_bit | n as u8),
             n if n <= 0xffff => {
-                frame.push(0x80 | 126);
+                frame.push(mask_bit | 126);
                 frame.extend_from_slice(&(n as u16).to_be_bytes());
             }
             n => {
-                frame.push(0x80 | 127);
+                frame.push(mask_bit | 127);
                 frame.extend_from_slice(&(n as u64).to_be_bytes());
             }
         }
-        frame.extend_from_slice(&mask);
-        frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
+        if masked {
+            let mut mask = [0u8; 4];
+            getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
+            frame.extend_from_slice(&mask);
+            frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
+        } else {
+            frame.extend_from_slice(payload);
+        }
         self.stream.write_all(&frame)?;
         self.stream.flush()
     }
@@ -233,6 +280,12 @@ impl<T: Read + Write> Socket<T> {
         }
         let (fin, opcode) = (buf[0] & 0x80 != 0, buf[0] & 0x0f);
         let masked = buf[1] & 0x80 != 0;
+        if self.role == Role::Server && !masked {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a WebSocket client frame that is not masked",
+            ));
+        }
         let (len, mut at) = match buf[1] & 0x7f {
             126 => {
                 if buf.len() < 4 {
@@ -297,6 +350,32 @@ fn too_long(limit: usize) -> io::Error {
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Reads from `stream` into `buf` until the blank line that ends the head of an HTTP message, and
+/// returns where it is. What follows it stays in `buf`. The three messages are the errors of a head
+/// that is too long, a stream that ends, and a read that fails.
+fn read_head<T: Read>(
+    stream: &mut T,
+    buf: &mut Vec<u8>,
+    too_long: &str,
+    closed: &str,
+    failed: &str,
+) -> Result<usize, String> {
+    let mut chunk = [0u8; 1024];
+    loop {
+        if let Some(end) = find(buf, b"\r\n\r\n") {
+            return Ok(end);
+        }
+        if buf.len() > MAX_HEAD {
+            return Err(too_long.into());
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err(closed.into()),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("{failed}: {e}")),
+        }
+    }
 }
 
 #[cfg(test)]
