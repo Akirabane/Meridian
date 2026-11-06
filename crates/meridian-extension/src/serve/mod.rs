@@ -7,6 +7,13 @@
 //! proxy is connected at a time, since the proxy opens one connection for each extension; another that
 //! connects meanwhile is told `503` and dropped.
 //!
+//! The places of `max-in-flight` are counted for the extension as a whole, not for each connection, and
+//! a place is held until its handler returns. **The SDK has no time limit for a handler**: it cannot stop
+//! a thread, and the proxy gives up on a request at its own deadline without telling the extension. A
+//! handler that never returns keeps its place for good, and when enough of them have, every request is
+//! answered with an error; that is a mistake of the extension's author, who bounds what a handler waits
+//! for (a lookup, a lock) in the handler itself.
+//!
 //! A handler that panics is answered with an internal error, and the connection goes on. What the panic
 //! says is written by Rust's default panic hook to the standard error stream, as for any panic in the
 //! program, and not through [`Log`]: a library sets no hook of its own, so a program that wants those
