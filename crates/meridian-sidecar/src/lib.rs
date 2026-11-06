@@ -17,7 +17,8 @@ pub mod options;
 pub mod request;
 pub mod server;
 mod tls;
-pub mod websocket;
+// The WebSocket code lives in its own crate now; the path `meridian_sidecar::websocket` is kept.
+pub use meridian_websocket as websocket;
 pub mod wire;
 
 #[cfg(test)]

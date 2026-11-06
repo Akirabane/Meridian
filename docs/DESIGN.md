@@ -464,6 +464,7 @@ about a minute (see [BUILD.md](BUILD.md)).
 | `meridian-handoff` | The player record, the control channel client, and the prepare, freeze, hand over and commit steps |
 | `meridian-ext` | The messages of the cooperative extension, shared with the Horizon client |
 | `meridian-sidecar` | A small process run next to each backend: it relays the proxy's player requests to the backend's local control endpoint over TLS |
+| `meridian-websocket` | The little of WebSocket (RFC 6455) that Meridian's own processes speak: the sidecar's, moved out of it so that the proxy and the extensions share it (EXTENSIONS.md, section 2.5) |
 | `meridian-policy` | The retention profiles of section 13, their evaluation on a record, and the traits where extensions plug in |
 | `meridian-auth` | The login modes of section 15: the session check, the name lookup with its cache, and the marking of players as verified or unverified |
 | `meridian-proxy` | The binary: wires the others together, runs the sessions, logs and metrics |
