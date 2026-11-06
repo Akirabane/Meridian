@@ -57,6 +57,10 @@ impl Error {
     }
 }
 
+/// What Horizon answers to any `player-*` request while its server is not open to players: it
+/// is still starting, or already stopping (`crates/horizon-client/src/game/dedicated/transfer.rs`).
+const NOT_OPEN: &str = "the server is not open to players";
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -64,6 +68,10 @@ impl fmt::Display for Error {
             Error::Timeout => f.write_str("no answer in time"),
             Error::Wire(e) => write!(f, "{e}"),
             Error::Endpoint(why) => f.write_str(why),
+            Error::Refused(why) if why == NOT_OPEN => write!(
+                f,
+                "the sidecar refused: {why} (it is still starting or is stopping; a move can be                  tried again once it is open)"
+            ),
             Error::Refused(why) => write!(f, "the sidecar refused: {why}"),
             Error::Unreached(why) => write!(f, "the sidecar got no answer from the backend: {why}"),
         }
