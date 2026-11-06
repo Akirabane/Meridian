@@ -1,22 +1,44 @@
-//! The little of WebSocket (RFC 6455) that Meridian's processes speak: the upgrade with a
-//! bearer token, text messages (whole or in fragments), and the control frames.
+//! The little of WebSocket (RFC 6455) that Meridian's processes speak to each other: the upgrade,
+//! text messages (whole or in fragments), and the control frames, on both sides of a connection.
 //!
-//! This is the code the sidecar had in `websocket.rs`, moved here as it was so that the proxy and the
-//! extensions can share it (docs/EXTENSIONS.md, section 2.5); the sidecar uses it to read the
-//! notifications of a Horizon server's management protocol (`management.rs`) and to send its
-//! requests. What follows describes the code as it is, and was written for that use.
+//! It is the code the sidecar had, moved here and extended so that the proxy and the extensions
+//! share it (docs/EXTENSIONS.md, section 2.5):
 //!
-//! What is left out, on purpose: the server's `Sec-WebSocket-Accept` is not checked
-//! (it needs SHA-1, which nothing else here uses), and the sidecar reads only a
-//! server on its own machine, which the caller has already seen is on a loopback
-//! address; and what is sent is pongs, a close, and the requests of the management
-//! protocol (`send_text`).
-use std::io::{self, Read, Write};
+//! - **The client**, [`Socket::open`] and [`Socket::open_with`]: it sends the upgrade, reads the answer
+//!   (which must be a 101), then text messages, whole or in fragments, and answers pings and a close.
+//!   The sidecar is one, of a Horizon server's management protocol. It does not check the server's
+//!   `Sec-WebSocket-Accept`, because the servers it talks to are on its own machine and it has
+//!   always been so. A client that wants the check, [`Socket::open_checked`], has it.
+//! - **The server**, [`Socket::accept`]: it reads the upgrade request, lets the caller decide, answers
+//!   with the `Sec-WebSocket-Accept` a client expects, reads masked frames and sends unmasked
+//!   ones. It is for the extensions' side of the proxy's connection to them.
+//! - **The limit of a message** is the caller's to set ([`MAX_MESSAGE`] by default).
+//!
+//! What is left out, on purpose: extensions of the protocol (compression, `permessage-deflate`), binary
+//! messages (read and dropped), and TLS: the caller has seen that the other end is on a loopback address.
+mod split;
+mod upgrade;
 
-/// The longest message taken: a notification is a line, and anything near this is not
-/// one. The answer to a request for a server's ban list is the longest thing it reads, a
-/// couple of hundred bytes for each ban.
+pub use split::{Half, Reader, Writer};
+use std::io::{self, Read, Write};
+pub use upgrade::{Upgrade, accept_key};
+
+/// The longest message the sidecar takes, which is what [`Socket::open`] uses: a notification
+/// is a line, and anything near this is not one. The answer to a request for a server's ban
+/// list is the longest thing it reads, a couple of hundred bytes for each ban. Another
+/// caller gives its own limit to [`Socket::open_with`] (an extension's messages are at most
+/// 256 KiB).
 pub const MAX_MESSAGE: usize = 4 << 20;
+
+/// Close codes (RFC 6455, 7.4.1) a side may end a connection with.
+pub mod close {
+    /// The connection ends as it should.
+    pub const NORMAL: u16 = 1000;
+    /// A message broke a rule of the protocol above (a proof that is wrong, for the extensions').
+    pub const POLICY: u16 = 1008;
+    /// A message was longer than this side takes.
+    pub const TOO_BIG: u16 = 1009;
+}
 
 /// The longest reply to the upgrade read before giving up.
 const MAX_HEAD: usize = 16 << 10;
@@ -50,68 +72,100 @@ pub fn new_key() -> io::Result<String> {
 
 /// Standard base64, with padding.
 pub fn base64(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(DIGITS[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Which end of the connection a socket is: a client masks what it sends and takes frames either way
+/// (as it always has); a server sends unmasked frames and refuses a client frame that is not masked
+/// (RFC 6455, 5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    Client,
+    Server,
 }
 
 /// A WebSocket the upgrade of which was accepted.
 pub struct Socket<T: Read + Write> {
     stream: T,
+    role: Role,
+    /// The subprotocol the other end chose (`Sec-WebSocket-Protocol`), if it named one.
+    protocol: Option<String>,
     /// Bytes read and not yet parsed.
     buf: Vec<u8>,
     /// The message being gathered from fragments: `None` between messages, and
     /// `Some(None)` for one that is not text, which is dropped.
     message: Option<Option<Vec<u8>>>,
+    /// The longest message read or sent; a longer one is an error.
+    max_message: usize,
+    /// The code of the close frame the other end sent, once it has.
+    close_code: Option<u16>,
 }
 
 impl<T: Read + Write> Socket<T> {
     /// Sends the upgrade and reads the answer, which must be a 101. The `stream` may
-    /// have a read timeout: it applies to the answer too.
-    pub fn open(mut stream: T, request: &str) -> Result<Self, String> {
+    /// have a read timeout: it applies to the answer too. Messages are at most
+    /// [`MAX_MESSAGE`].
+    pub fn open(stream: T, request: &str) -> Result<Self, String> {
+        Self::open_with(stream, request, MAX_MESSAGE)
+    }
+
+    /// As [`Socket::open`], with messages of at most `max_message` bytes, read or sent.
+    pub fn open_with(stream: T, request: &str, max_message: usize) -> Result<Self, String> {
+        Self::open_inner(stream, request, max_message, false)
+    }
+
+    /// As [`Socket::open_with`], and the answer is checked as RFC 6455 (4.2.2) asks of a client: it
+    /// carries `Upgrade: websocket`, `Connection: Upgrade` and the `Sec-WebSocket-Accept` that
+    /// the request's `Sec-WebSocket-Key` calls for, and a subprotocol it names is one the
+    /// request offered. The request must carry a key (as [`upgrade_request`] and [`new_key`] make one).
+    pub fn open_checked(stream: T, request: &str, max_message: usize) -> Result<Self, String> {
+        Self::open_inner(stream, request, max_message, true)
+    }
+
+    fn open_inner(
+        mut stream: T,
+        request: &str,
+        max_message: usize,
+        check: bool,
+    ) -> Result<Self, String> {
         stream
             .write_all(request.as_bytes())
             .and_then(|()| stream.flush())
             .map_err(|e| format!("cannot send the upgrade: {e}"))?;
         let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
-        let end = loop {
-            if let Some(end) = find(&buf, b"\r\n\r\n") {
-                break end;
-            }
-            if buf.len() > MAX_HEAD {
-                return Err("the answer to the upgrade is too long".into());
-            }
-            match stream.read(&mut chunk) {
-                Ok(0) => return Err("the server closed the connection before it answered".into()),
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                Err(e) => return Err(format!("no answer to the upgrade: {e}")),
-            }
-        };
+        let end = read_head(
+            &mut stream,
+            &mut buf,
+            "the answer to the upgrade is too long",
+            "the server closed the connection before it answered",
+            "no answer to the upgrade",
+        )?;
         let head = String::from_utf8_lossy(&buf[..end]).into_owned();
         let status = head.lines().next().unwrap_or_default();
         if !status.split(' ').nth(1).is_some_and(|code| code == "101") {
             return Err(format!("the upgrade was refused: {status}"));
         }
+        let protocol = if check {
+            upgrade::check_answer(request, &head)?
+        } else {
+            upgrade::header_of(&head, "sec-websocket-protocol")
+        };
         buf.drain(..end + 4);
         Ok(Self {
             stream,
+            role: Role::Client,
+            protocol,
             buf,
             message: None,
+            max_message,
+            close_code: None,
         })
+    }
+
+    /// The subprotocol the other end chose, if it named one.
+    pub fn protocol(&self) -> Option<&str> {
+        self.protocol.as_deref()
     }
 
     /// The stream under the socket, to set its timeouts.
@@ -132,12 +186,16 @@ impl<T: Read + Write> Socket<T> {
                     0x0 => {
                         if let Some(Some(text)) = &mut self.message {
                             text.extend_from_slice(&frame.payload);
-                            if text.len() > MAX_MESSAGE {
-                                return Err(too_long());
+                            if text.len() > self.max_message {
+                                return Err(too_long(self.max_message));
                             }
                         }
                     }
                     0x8 => {
+                        self.close_code = match frame.payload[..] {
+                            [high, low, ..] => Some(u16::from_be_bytes([high, low])),
+                            _ => None,
+                        };
                         let _ = self.send(0x8, &frame.payload);
                         return Ok(Next::Closed);
                     }
@@ -173,54 +231,58 @@ impl<T: Read + Write> Socket<T> {
         }
     }
 
-    /// A frame the client sends: masked, as RFC 6455 requires of a client.
+    /// The code of the close frame the other end sent, once `read_message` has returned
+    /// [`Next::Closed`] on one. A stream that ended with no close frame has none.
+    pub fn close_code(&self) -> Option<u16> {
+        self.close_code
+    }
+
+    /// Ends the connection politely: a close frame with `code` (see [`close`]) and a `reason` of a few
+    /// words, at most 123 bytes of it, cut at a character. The other end is told, and answers with its
+    /// own close; the caller then drops the socket.
+    pub fn close(&mut self, code: u16, reason: &str) -> io::Result<()> {
+        self.send(0x8, &close_payload(code, reason))
+    }
+
+    /// A control frame: a client masks it, as RFC 6455 requires, and a server does not.
     fn send(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {
         // A control frame carries 125 bytes at most.
         let payload = &payload[..payload.len().min(125)];
-        let mut mask = [0u8; 4];
-        getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
-        let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
-        frame.extend_from_slice(&mask);
-        frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
-        self.stream.write_all(&frame)?;
-        self.stream.flush()
+        self.write_frame(opcode, payload)
     }
 
-    /// Sends one text message (a request of the management protocol), in a single masked
-    /// frame.
+    /// Sends one text message (a request of the management protocol, or of the extension
+    /// protocol), in a single frame: masked for a client, not for a server.
     pub fn send_text(&mut self, text: &str) -> io::Result<()> {
         let payload = text.as_bytes();
-        if payload.len() > MAX_MESSAGE {
-            return Err(too_long());
+        if payload.len() > self.max_message {
+            return Err(too_long(self.max_message));
         }
-        let mut mask = [0u8; 4];
-        getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
-        let mut frame = vec![0x81];
-        match payload.len() {
-            n if n < 126 => frame.push(0x80 | n as u8),
-            n if n <= 0xffff => {
-                frame.push(0x80 | 126);
-                frame.extend_from_slice(&(n as u16).to_be_bytes());
-            }
-            n => {
-                frame.push(0x80 | 127);
-                frame.extend_from_slice(&(n as u64).to_be_bytes());
-            }
-        }
-        frame.extend_from_slice(&mask);
-        frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
+        self.write_frame(0x1, payload)
+    }
+
+    /// One whole frame (`fin` set), of any length, written with one `write_all`.
+    fn write_frame(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {
+        let frame = encode_frame(self.role == Role::Client, opcode, payload)?;
         self.stream.write_all(&frame)?;
         self.stream.flush()
     }
 
     /// The first whole frame in the buffer, taken out of it.
     fn take_frame(&mut self) -> io::Result<Option<Frame>> {
+        let max = self.max_message;
         let buf = &self.buf;
         if buf.len() < 2 {
             return Ok(None);
         }
         let (fin, opcode) = (buf[0] & 0x80 != 0, buf[0] & 0x0f);
         let masked = buf[1] & 0x80 != 0;
+        if self.role == Role::Server && !masked {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a WebSocket client frame that is not masked",
+            ));
+        }
         let (len, mut at) = match buf[1] & 0x7f {
             126 => {
                 if buf.len() < 4 {
@@ -234,14 +296,14 @@ impl<T: Read + Write> Socket<T> {
                 }
                 let len = u64::from_be_bytes(buf[2..10].try_into().expect("eight bytes"));
                 match usize::try_from(len) {
-                    Ok(len) if len <= MAX_MESSAGE => (len, 10),
-                    _ => return Err(too_long()),
+                    Ok(len) if len <= max => (len, 10),
+                    _ => return Err(too_long(max)),
                 }
             }
             short => (usize::from(short), 2),
         };
-        if len > MAX_MESSAGE {
-            return Err(too_long());
+        if len > max {
+            return Err(too_long(max));
         }
         let mask = if masked {
             if buf.len() < at + 4 {
@@ -276,15 +338,78 @@ struct Frame {
     payload: Vec<u8>,
 }
 
-fn too_long() -> io::Error {
+/// One whole frame (`fin` set), of any length: masked for a client, not for a server.
+fn encode_frame(masked: bool, opcode: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+    let mask_bit = if masked { 0x80 } else { 0 };
+    let mut frame = vec![0x80 | opcode];
+    match payload.len() {
+        n if n < 126 => frame.push(mask_bit | n as u8),
+        n if n <= 0xffff => {
+            frame.push(mask_bit | 126);
+            frame.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        n => {
+            frame.push(mask_bit | 127);
+            frame.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+    }
+    if masked {
+        let mut mask = [0u8; 4];
+        getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
+    } else {
+        frame.extend_from_slice(payload);
+    }
+    Ok(frame)
+}
+
+/// The payload of a close frame: the code, then a reason of at most 123 bytes, cut at a character.
+fn close_payload(code: u16, reason: &str) -> Vec<u8> {
+    let mut payload = code.to_be_bytes().to_vec();
+    let mut end = reason.len().min(123);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    payload.extend_from_slice(&reason.as_bytes()[..end]);
+    payload
+}
+
+fn too_long(limit: usize) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "a WebSocket message longer than the sidecar reads",
+        format!("a WebSocket message longer than the {limit} bytes this side takes"),
     )
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Reads from `stream` into `buf` until the blank line that ends the head of an HTTP message, and
+/// returns where it is. What follows it stays in `buf`. The three messages are the errors of a head
+/// that is too long, a stream that ends, and a read that fails.
+fn read_head<T: Read>(
+    stream: &mut T,
+    buf: &mut Vec<u8>,
+    too_long: &str,
+    closed: &str,
+    failed: &str,
+) -> Result<usize, String> {
+    let mut chunk = [0u8; 1024];
+    loop {
+        if let Some(end) = find(buf, b"\r\n\r\n") {
+            return Ok(end);
+        }
+        if buf.len() > MAX_HEAD {
+            return Err(too_long.into());
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err(closed.into()),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("{failed}: {e}")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +588,38 @@ mod tests {
     }
 
     #[test]
+    fn a_close_frame_has_its_code_and_a_reason_cut_at_a_character() {
+        let mut socket = socket(Vec::new());
+        let start = socket.stream.written.len();
+        socket.close(close::POLICY, "wrong proof").unwrap();
+        let (first, payload, _) = unmask(&socket.stream.written, start);
+        assert_eq!(first, 0x88);
+        assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+        assert_eq!(&payload[2..], b"wrong proof");
+
+        // 122 bytes of reason and a two-byte character after them: the 123 bytes that fit would cut
+        // the character in two, so it is left out.
+        let reason = format!("{}\u{e9}\u{e9}", "a".repeat(122));
+        let start = socket.stream.written.len();
+        socket.close(close::NORMAL, &reason).unwrap();
+        let (_, payload, _) = unmask(&socket.stream.written, start);
+        assert!(payload.len() <= 125);
+        assert_eq!(std::str::from_utf8(&payload[2..]).unwrap().len(), 122);
+    }
+
+    #[test]
+    fn the_code_of_the_close_that_was_read_is_kept() {
+        let mut socket = socket(frame(true, 0x8, &[0x03, 0xf0, b'x']));
+        assert_eq!(socket.close_code(), None);
+        assert_eq!(socket.read_message().unwrap(), Next::Closed);
+        assert_eq!(socket.close_code(), Some(1008));
+        // A close with no payload has no code.
+        let mut socket = self::socket(frame(true, 0x8, &[]));
+        assert_eq!(socket.read_message().unwrap(), Next::Closed);
+        assert_eq!(socket.close_code(), None);
+    }
+
+    #[test]
     fn a_message_that_is_too_long_is_an_error() {
         let mut bytes = vec![0x81, 127];
         bytes.extend_from_slice(&((MAX_MESSAGE as u64) + 1).to_be_bytes());
@@ -471,6 +628,56 @@ mod tests {
             socket.read_message().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    /// A socket that takes messages of at most `max` bytes, over the same pipe.
+    fn limited(after_head: Vec<u8>, max: usize) -> Socket<Pipe> {
+        let mut bytes = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n".to_vec();
+        bytes.extend(after_head);
+        Socket::open_with(
+            Pipe {
+                read: Cursor::new(bytes),
+                written: Vec::new(),
+            },
+            REQUEST,
+            max,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_limit_is_the_callers_to_set_and_a_message_at_it_still_passes() {
+        // Exactly at the limit: read. One byte over: refused, whole or in fragments.
+        let mut at = limited(frame(true, 0x1, &[b'a'; 256]), 256);
+        assert_eq!(at.read_message().unwrap(), Next::Text("a".repeat(256)));
+        let mut over = limited(frame(true, 0x1, &[b'a'; 257]), 256);
+        assert_eq!(
+            over.read_message().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut pieces = frame(false, 0x1, &[b'a'; 200]);
+        pieces.extend(frame(true, 0x0, &[b'a'; 57]));
+        let mut fragmented = limited(pieces, 256);
+        assert_eq!(
+            fragmented.read_message().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // What is sent is held to it too.
+        let mut sender = limited(Vec::new(), 256);
+        sender.send_text(&"a".repeat(256)).unwrap();
+        assert_eq!(
+            sender.send_text(&"a".repeat(257)).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // A frame that claims more than the limit is refused from its length alone, before
+        // its payload is waited for.
+        let mut head = vec![0x81, 127];
+        head.extend_from_slice(&257u64.to_be_bytes());
+        let mut claimed = limited(head, 256);
+        assert!(claimed.read_message().is_err());
+        // `open` keeps the sidecar's limit.
+        let mut default = socket(frame(true, 0x1, &[b'a'; 300]));
+        assert_eq!(default.read_message().unwrap(), Next::Text("a".repeat(300)));
     }
 
     #[test]
