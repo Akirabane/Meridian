@@ -13,9 +13,11 @@
 //! protocol (`send_text`).
 use std::io::{self, Read, Write};
 
-/// The longest message taken: a notification is a line, and anything near this is not
-/// one. The answer to a request for a server's ban list is the longest thing it reads, a
-/// couple of hundred bytes for each ban.
+/// The longest message the sidecar takes, which is what [`Socket::open`] uses: a notification
+/// is a line, and anything near this is not one. The answer to a request for a server's ban
+/// list is the longest thing it reads, a couple of hundred bytes for each ban. Another
+/// caller gives its own limit to [`Socket::open_with`] (an extension's messages are at most
+/// 256 KiB).
 pub const MAX_MESSAGE: usize = 4 << 20;
 
 /// The longest reply to the upgrade read before giving up.
@@ -76,12 +78,20 @@ pub struct Socket<T: Read + Write> {
     /// The message being gathered from fragments: `None` between messages, and
     /// `Some(None)` for one that is not text, which is dropped.
     message: Option<Option<Vec<u8>>>,
+    /// The longest message read or sent; a longer one is an error.
+    max_message: usize,
 }
 
 impl<T: Read + Write> Socket<T> {
     /// Sends the upgrade and reads the answer, which must be a 101. The `stream` may
-    /// have a read timeout: it applies to the answer too.
-    pub fn open(mut stream: T, request: &str) -> Result<Self, String> {
+    /// have a read timeout: it applies to the answer too. Messages are at most
+    /// [`MAX_MESSAGE`].
+    pub fn open(stream: T, request: &str) -> Result<Self, String> {
+        Self::open_with(stream, request, MAX_MESSAGE)
+    }
+
+    /// As [`Socket::open`], with messages of at most `max_message` bytes, read or sent.
+    pub fn open_with(mut stream: T, request: &str, max_message: usize) -> Result<Self, String> {
         stream
             .write_all(request.as_bytes())
             .and_then(|()| stream.flush())
@@ -111,6 +121,7 @@ impl<T: Read + Write> Socket<T> {
             stream,
             buf,
             message: None,
+            max_message,
         })
     }
 
@@ -132,8 +143,8 @@ impl<T: Read + Write> Socket<T> {
                     0x0 => {
                         if let Some(Some(text)) = &mut self.message {
                             text.extend_from_slice(&frame.payload);
-                            if text.len() > MAX_MESSAGE {
-                                return Err(too_long());
+                            if text.len() > self.max_message {
+                                return Err(too_long(self.max_message));
                             }
                         }
                     }
@@ -190,8 +201,8 @@ impl<T: Read + Write> Socket<T> {
     /// frame.
     pub fn send_text(&mut self, text: &str) -> io::Result<()> {
         let payload = text.as_bytes();
-        if payload.len() > MAX_MESSAGE {
-            return Err(too_long());
+        if payload.len() > self.max_message {
+            return Err(too_long(self.max_message));
         }
         let mut mask = [0u8; 4];
         getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
@@ -215,6 +226,7 @@ impl<T: Read + Write> Socket<T> {
 
     /// The first whole frame in the buffer, taken out of it.
     fn take_frame(&mut self) -> io::Result<Option<Frame>> {
+        let max = self.max_message;
         let buf = &self.buf;
         if buf.len() < 2 {
             return Ok(None);
@@ -234,14 +246,14 @@ impl<T: Read + Write> Socket<T> {
                 }
                 let len = u64::from_be_bytes(buf[2..10].try_into().expect("eight bytes"));
                 match usize::try_from(len) {
-                    Ok(len) if len <= MAX_MESSAGE => (len, 10),
-                    _ => return Err(too_long()),
+                    Ok(len) if len <= max => (len, 10),
+                    _ => return Err(too_long(max)),
                 }
             }
             short => (usize::from(short), 2),
         };
-        if len > MAX_MESSAGE {
-            return Err(too_long());
+        if len > max {
+            return Err(too_long(max));
         }
         let mask = if masked {
             if buf.len() < at + 4 {
@@ -276,10 +288,10 @@ struct Frame {
     payload: Vec<u8>,
 }
 
-fn too_long() -> io::Error {
+fn too_long(limit: usize) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "a WebSocket message longer than the sidecar reads",
+        format!("a WebSocket message longer than the {limit} bytes this side takes"),
     )
 }
 
@@ -471,6 +483,56 @@ mod tests {
             socket.read_message().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    /// A socket that takes messages of at most `max` bytes, over the same pipe.
+    fn limited(after_head: Vec<u8>, max: usize) -> Socket<Pipe> {
+        let mut bytes = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n".to_vec();
+        bytes.extend(after_head);
+        Socket::open_with(
+            Pipe {
+                read: Cursor::new(bytes),
+                written: Vec::new(),
+            },
+            REQUEST,
+            max,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_limit_is_the_callers_to_set_and_a_message_at_it_still_passes() {
+        // Exactly at the limit: read. One byte over: refused, whole or in fragments.
+        let mut at = limited(frame(true, 0x1, &[b'a'; 256]), 256);
+        assert_eq!(at.read_message().unwrap(), Next::Text("a".repeat(256)));
+        let mut over = limited(frame(true, 0x1, &[b'a'; 257]), 256);
+        assert_eq!(
+            over.read_message().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut pieces = frame(false, 0x1, &[b'a'; 200]);
+        pieces.extend(frame(true, 0x0, &[b'a'; 57]));
+        let mut fragmented = limited(pieces, 256);
+        assert_eq!(
+            fragmented.read_message().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // What is sent is held to it too.
+        let mut sender = limited(Vec::new(), 256);
+        sender.send_text(&"a".repeat(256)).unwrap();
+        assert_eq!(
+            sender.send_text(&"a".repeat(257)).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // A frame that claims more than the limit is refused from its length alone, before
+        // its payload is waited for.
+        let mut head = vec![0x81, 127];
+        head.extend_from_slice(&257u64.to_be_bytes());
+        let mut claimed = limited(head, 256);
+        assert!(claimed.read_message().is_err());
+        // `open` keeps the sidecar's limit.
+        let mut default = socket(frame(true, 0x1, &[b'a'; 300]));
+        assert_eq!(default.read_message().unwrap(), Next::Text("a".repeat(300)));
     }
 
     #[test]
