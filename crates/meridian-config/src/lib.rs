@@ -216,6 +216,12 @@ pub struct Config {
     /// request: Horizon does since #8735, merged into its main on 2026-11-05. It has not been
     /// run against a real server.
     pub switch_carry_position: bool,
+    /// Whether the players of the server a player is moved to see them arrive: the
+    /// join line and the entry in the player list. With `false` the arrival is quiet.
+    pub switch_announce_arrival: bool,
+    /// Whether the players of the server a player is moved from see the "left the game"
+    /// line. With `false` the departure is quiet.
+    pub switch_announce_departure: bool,
     /// Milliseconds a player may stay frozen on the old server during a switch before
     /// it is given up. Each server lets a freeze go by itself after its own
     /// `max_freeze_seconds` (30 s in Horizon by default), and this must be below it.
@@ -295,6 +301,8 @@ impl Default for Config {
             sidecars: Vec::new(),
             sidecar_timeout_ms: 5_000,
             switch_carry_position: false,
+            switch_announce_arrival: true,
+            switch_announce_departure: true,
             switch_freeze_limit_ms: 8_000,
             switch_commit_margin_ms: 2_000,
             balanced: Vec::new(),
@@ -343,6 +351,8 @@ impl std::fmt::Debug for Config {
             sidecars,
             sidecar_timeout_ms,
             switch_carry_position,
+            switch_announce_arrival,
+            switch_announce_departure,
             switch_freeze_limit_ms,
             switch_commit_margin_ms,
             balanced,
@@ -393,6 +403,8 @@ impl std::fmt::Debug for Config {
             .field("sidecars", sidecars)
             .field("sidecar_timeout_ms", sidecar_timeout_ms)
             .field("switch_carry_position", switch_carry_position)
+            .field("switch_announce_arrival", switch_announce_arrival)
+            .field("switch_announce_departure", switch_announce_departure)
             .field("switch_freeze_limit_ms", switch_freeze_limit_ms)
             .field("switch_commit_margin_ms", switch_commit_margin_ms)
             .field("balanced", balanced)
@@ -447,6 +459,8 @@ struct File {
     commands: FileCommands,
     sidecar_timeout_ms: Option<u64>,
     switch_carry_position: Option<bool>,
+    switch_announce_arrival: Option<bool>,
+    switch_announce_departure: Option<bool>,
     switch_freeze_limit_ms: Option<u64>,
     switch_commit_margin_ms: Option<u64>,
     #[serde(default)]
@@ -654,6 +668,12 @@ impl Config {
             switch_carry_position: file
                 .switch_carry_position
                 .unwrap_or(defaults.switch_carry_position),
+            switch_announce_arrival: file
+                .switch_announce_arrival
+                .unwrap_or(defaults.switch_announce_arrival),
+            switch_announce_departure: file
+                .switch_announce_departure
+                .unwrap_or(defaults.switch_announce_departure),
             switch_freeze_limit_ms: file
                 .switch_freeze_limit_ms
                 .unwrap_or(defaults.switch_freeze_limit_ms),

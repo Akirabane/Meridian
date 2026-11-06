@@ -183,6 +183,8 @@ fn attempt(
             info!("{who}: switch to {to}: {step} (+{} ms)", at.as_millis());
         })),
         carry_position: config.switch_carry_position,
+        announce_arrival: config.switch_announce_arrival,
+        announce_departure: config.switch_announce_departure,
         freeze_limit: Duration::from_millis(config.switch_freeze_limit_ms),
         commit_margin: Duration::from_millis(config.switch_commit_margin_ms),
         ..Settings::default()

@@ -689,6 +689,59 @@ fn a_source_that_refuses_moved_leaves_the_player_on_the_target() {
     finish(player, target_thread, run);
 }
 
+/// The arrival and the departure are announced by default, and each one is asked of its
+/// own server: the import of the target carries `announce` for the arrival, the release of
+/// the source carries it for the departure.
+#[test]
+fn the_arrival_and_the_departure_are_announced_as_the_settings_say() {
+    let default = Settings::default();
+    assert!(default.announce_arrival && default.announce_departure);
+    for (announce_arrival, announce_departure) in
+        [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let Bench {
+            handle,
+            run,
+            player,
+            source: _source,
+        } = bench();
+        let log = Log::default();
+        let (address, signal, target_thread) = target(TargetWorld::default());
+        switch(
+            &handle,
+            target_backend(&address, &options()),
+            &mut FakeControl::new("source", &log),
+            &mut target_control(&log, signal),
+            &Digests::default(),
+            &Settings {
+                announce_arrival,
+                announce_departure,
+                ..settings()
+            },
+        )
+        .unwrap();
+        let departure = if announce_departure {
+            " announce=true"
+        } else {
+            " announce=false"
+        };
+        assert_eq!(
+            log.lines(),
+            [
+                "target expect Some(10)".to_string(),
+                "source export freeze=true".to_string(),
+                format!(
+                    "target import parts=all-but-position announce=Some({announce_arrival}) place=false"
+                ),
+                "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69".to_string(),
+                format!("source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Moved{departure}"),
+            ],
+            "arrival {announce_arrival}, departure {announce_departure}"
+        );
+        finish(player, target_thread, run);
+    }
+}
+
 /// A switch that went through leaves nothing for an operator to look at.
 #[test]
 fn a_source_that_lets_the_player_go_keeps_nothing() {

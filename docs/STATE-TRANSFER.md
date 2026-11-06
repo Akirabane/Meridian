@@ -317,7 +317,7 @@ Each is one line; each answer is one JSON line, `{"ok": true, ...}` or
 | `player-export <uuid>` | source | The same read without a freeze: `handover` is null and the player goes on. The proxy does not use it for a switch |
 | `player-import <uuid> <json>` | target | The JSON is `{"record": ..., "parts": [...], "announce": bool, "place": bool}`. Checks the record's version, data version and `handover` id (a record without one, or another player's, is refused), applies it to the held player (body included) and sends that player the resulting changes. With `"place": false` the player stays held; otherwise it is placed at once. The reply comes only once the player's file is on the target's disk |
 | `player-confirm <uuid> <handover>` | target | Places a player imported with `place` false: files written first, then simulated, shown, announced |
-| `player-release <uuid> <handover> moved [announce]` | source | Removes the frozen player without saving their file and, by default, without a "left the game" message. Refused when the hand-over is over (the freeze ran out, the player died, or it is another hand-over's id): the target has already placed the player, so the proxy keeps the client there, closes the source's connection, and tells the operator (6.2.1) |
+| `player-release <uuid> <handover> moved [announce]` | source | Removes the frozen player without saving their file and, unless `announce` is given, without a "left the game" message (the server's own default is quiet; the proxy sends `announce` as `switch-announce-departure` says, see 6.2.2). Refused when the hand-over is over (the freeze ran out, the player died, or it is another hand-over's id): the target has already placed the player, so the proxy keeps the client there, closes the source's connection, and tells the operator (6.2.1) |
 | `player-release <uuid> <handover> abort` | source | Unfreezes the player; nothing happened |
 | `player-drop <uuid> [handover]` | target | Removes a held player whose switch was abandoned, without saving anything. After an import it names that record's `handover`, so a late drop leaves a newer arrival alone; before any import there is no id to name |
 
@@ -429,6 +429,25 @@ ERROR ALERT Alex: transfer 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 from lobby to east: 
 To settle it, find the id in the two servers' logs, and decide which `players/data/<uuid>.dat`
 (and advancements and stats) to keep. The target's is the right one unless the player
 died on the source, or was changed there by a command, in the freeze's last seconds.
+
+#### 6.2.2 What the other players see
+
+A move shows to the players of both servers, and the proxy decides what they see with
+two keys of its configuration ([CONFIG.md](CONFIG.md)), each sent to the server it
+concerns:
+
+| Key | Sent as | When `true` | When `false` |
+| --- | --- | --- | --- |
+| `switch-announce-arrival` (default `true`) | `"announce"` of `player-import` on the target | The players of the target see the join line ("<name> joined the game") and the entry in the player list | The player is placed on the target without either |
+| `switch-announce-departure` (default `true`) | the word `announce` after `moved` in `player-release` on the source | The players of the source see "<name> left the game" | The player is removed from the source without the line |
+
+Both default to `true`, as on Velocity and BungeeCord, where changing server is a departure
+and an arrival for the others. A release says nothing on its own (the server's default is
+quiet), so the proxy sends the field every time and the keys decide. A reload applies them
+to the next move. A move given up announces nothing: an aborted release never carries
+`announce`, and a held player is not announced until the target places it. When the player
+leaves the proxy in the middle of a move, the target keeps their record, and the departure
+is announced on the source as `switch-announce-departure` says.
 
 ### 6.3 The record
 

@@ -224,6 +224,43 @@ fn a_switch_carries_the_position_only_when_asked() {
 }
 
 #[test]
+fn a_switch_announces_the_arrival_and_the_departure_unless_told_not_to() {
+    let config = Config::from_toml_str(&text("", "", "")).unwrap();
+    assert!(config.switch_announce_arrival);
+    assert!(config.switch_announce_departure);
+    let config = Config::from_toml_str(&text("switch-announce-arrival = false", "", "")).unwrap();
+    assert!(!config.switch_announce_arrival);
+    assert!(config.switch_announce_departure);
+    let config = Config::from_toml_str(&text("switch-announce-departure = false", "", "")).unwrap();
+    assert!(config.switch_announce_arrival);
+    assert!(!config.switch_announce_departure);
+    let config = Config::from_toml_str(&text(
+        "switch-announce-arrival = false
+switch-announce-departure = false",
+        "",
+        "",
+    ))
+    .unwrap();
+    assert!(!config.switch_announce_arrival && !config.switch_announce_departure);
+    let config = Config::from_toml_str(&text(
+        "switch-announce-arrival = true
+switch-announce-departure = true",
+        "",
+        "",
+    ))
+    .unwrap();
+    assert!(config.switch_announce_arrival && config.switch_announce_departure);
+    // A value that is not true or false is refused, not read as one of them.
+    for bad in [
+        "switch-announce-arrival = \"no\"",
+        "switch-announce-departure = 0",
+    ] {
+        let e = Config::from_toml_str(&text(bad, "", "")).unwrap_err();
+        assert!(matches!(e, ConfigError::Parse(_)), "{bad}: {e}");
+    }
+}
+
+#[test]
 fn the_freeze_a_switch_may_use_has_a_limit_and_a_margin() {
     let config = Config::from_toml_str(&text("", "", "")).unwrap();
     assert_eq!(config.switch_freeze_limit_ms, 8_000);
