@@ -189,6 +189,7 @@ empty connections that the bench opens to time the network (four steps of 50, tw
   may spread them over several arenas, and an arena does not always give its free pages back; this was not checked), and it cannot be told from a leak with this run. Telling them apart takes either a run
   with the number of arenas limited (`MALLOC_ARENA_MAX=2`) against one without, or two runs one after the other on the same proxy, where the resting level would not rise again if it is the allocator.
   The baseline had seen memory that was not given back on one machine as well ([BASELINE.md](BASELINE.md)); neither run tells which it is.
+  **The cause was found afterwards and fixed (#119):** it was not the allocator but a leak, sessions that were never freed because a session and its command hook held each other. The figures above are those of a build from before the fix; how it was found, and the same cycles on the fixed build, are in [MEMORY.md](MEMORY.md).
 
 ## What this run does not say
 

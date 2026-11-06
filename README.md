@@ -75,13 +75,18 @@ part of every figure, and each page says them first.
   small Debian laptop, across a home network whose link negotiated 100 Mbit/s. The worlds sent
   at each join very probably filled that link, so the login times are the link's. It was one run,
   not repeated, and it lists defects it did not explain (the metrics page missing its deadline
-  during joins, memory not given back).
+  during joins, memory not given back; the memory was a leak, since found and fixed, see
+  [docs/MEMORY.md](docs/MEMORY.md)).
 - [docs/LOAD-VPS-250.md](docs/LOAD-VPS-250.md): 250 bots and a real client on a proxy on a VPS. One
   valid run of 250 bots, in 5 waves of 50, with one real client in the game, on a shared four-core
   VPS in Warsaw where the proxy was held to two cores, against synthetic servers on the same
   machine. It says what this proxy cost there on 5 November 2026; it is not the proxy's limit, it
   was not repeated for the reference configuration, and the bots and the proxy shared the machine.
   What the real client saw is in [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md).
+- [docs/MEMORY.md](docs/MEMORY.md): the memory the proxy kept after its players left. A load test
+  of cycles of 150 simulated players on a four-core VPS showed about 6 MiB kept for each cycle and
+  600 file descriptors never given back; the cause was a reference cycle in a session, fixed in
+  #119, and 13 cycles on the fixed build ended each at the same 7 descriptors and 16 to 17 MiB.
 - [docs/BENCH.md](docs/BENCH.md): the older latency benchmark, over the loopback, against a
   stand-in server.
 
