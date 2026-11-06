@@ -332,7 +332,7 @@ server-list = true
 # External programs the proxy connects to and asks for decisions (docs/EXTENSIONS.md,
 # docs/CONFIG.md). None by default, and then nothing changes. One [[extension]] for each
 # program, which listens on the loopback and shares a token with the proxy: the file holds
-# at least 32 bytes and is never logged. No decision point asks an extension anything yet.
+# at least 32 bytes and is never logged. Only the admission at login (decide.login) is asked yet.
 #
 # [[extension]]
 # name = "perms"                        # in logs and metrics: letters, digits, - and _

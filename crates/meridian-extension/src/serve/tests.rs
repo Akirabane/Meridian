@@ -217,6 +217,20 @@ fn the_hello_is_answered_with_a_proof_the_proxy_checks_and_ends_with_the_proxys(
 }
 
 #[test]
+fn a_capability_the_extension_asks_for_is_declared_once_after_those_of_its_handlers() {
+    let extension = echoing(&Arc::default())
+        .wants("addresses")
+        .wants("decide.login")
+        .wants("addresses")
+        .wants("events");
+    let running = start(extension);
+    let mut proxy = Proxy::connect(running.local_addr());
+    let (answer, outcome) = proxy.hello(&token());
+    assert_eq!(outcome.unwrap(), json!({}));
+    assert_eq!(answer.capabilities, ["decide.login", "addresses", "events"]);
+}
+
+#[test]
 fn the_golden_hello_request_gets_an_answer_the_golden_proxy_nonce_proves() {
     let running = start(echoing(&Arc::default()));
     let mut proxy = Proxy::connect(running.local_addr());

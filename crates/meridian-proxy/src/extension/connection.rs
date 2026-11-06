@@ -17,6 +17,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// How a try ended, which decides the wait before the next.
@@ -102,6 +103,7 @@ fn attempt(link: &Arc<Link>) -> End {
     };
     debug_assert_eq!(socket.protocol(), Some(SUBPROTOCOL));
     let _ = socket.stream_mut().set_read_timeout(Some(timings.look));
+    socket.set_message_timeout(Some(timings.message));
 
     let info = match hello(&mut socket, link, &token) {
         Ok(info) => info,
@@ -123,7 +125,35 @@ fn attempt(link: &Arc<Link>) -> End {
     if info.protocol == 0 {
         crate::log::info!("extension \"{name}\": protocol 0 is experimental");
     }
-    link.connected(writer.clone(), info);
+    for point in undeclared_points(settings, &info) {
+        crate::log::warning!(
+            "extension \"{name}\" is granted {point} but did not declare it: its requests are not sent to it"
+        );
+    }
+    // Requests are written by a thread of their own: a write that blocks (an extension that does not
+    // read) must not hold the threads of the players who are asking, one after the other.
+    let (outbox, inbox) = mpsc::sync_channel::<String>(settings.max_in_flight.max(1));
+    let sender = {
+        let (writer, name) = (writer.clone(), settings.name.clone());
+        std::thread::Builder::new()
+            .name(format!("extension-{name}-writer"))
+            .spawn(move || {
+                for text in inbox {
+                    if let Err(e) = writer.send_text(&text) {
+                        crate::log::warning!(
+                            "extension \"{name}\": cannot write to it: {e}; closing the connection"
+                        );
+                        // A frame may be half written: the connection is not used again.
+                        let _ = writer.shutdown();
+                        break;
+                    }
+                }
+            })
+    };
+    if let Err(e) = sender {
+        return End::Failed(format!("cannot start the thread that writes: {e}"));
+    }
+    link.connected(writer.clone(), outbox, info);
 
     let ended = serve(&mut reader, &writer, link);
     link.disconnected();
@@ -132,6 +162,25 @@ fn attempt(link: &Arc<Link>) -> End {
         Ok(()) => "the connection ended".to_owned(),
         Err(why) => format!("the connection ended: {why}"),
     })
+}
+
+/// The decision points the operator granted that the extension did not ask for in its hello. They are
+/// not used (docs/EXTENSIONS.md, 2.3), so a login or a command is not asked of it whatever its on-error
+/// policy says, which an operator who wrote `grant` in the belief that it does would not expect.
+pub(super) fn undeclared_points(
+    settings: &super::link::Settings,
+    info: &Info,
+) -> Vec<&'static str> {
+    [
+        meridian_config::DECIDE_LOGIN,
+        meridian_config::DECIDE_COMMAND,
+        meridian_config::DECIDE_SERVER,
+    ]
+    .into_iter()
+    .filter(|point| {
+        settings.grant.iter().any(|g| g == point) && !info.granted.iter().any(|g| g == point)
+    })
+    .collect()
 }
 
 /// The token, read again at each connection. The error names the file and never its content.

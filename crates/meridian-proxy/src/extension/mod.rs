@@ -2,28 +2,24 @@
 //! program, each on a loopback port, that the proxy connects to, proves itself to (and asks to prove
 //! itself) with the token, and asks for decisions.
 //!
-//! This is the connection, and only that: no decision point is wired to it yet. A [`Link`] keeps one
-//! extension's connection up, with the doubling wait, and offers [`Link::call`], which the decision
-//! points will use: it holds the `max-in-flight` places, the breaker, the deadline, the counters and the
-//! log lines. Without an extension in the [`Registry`], which is how the proxy starts, nothing here runs
-//! and nothing is on the metrics page.
-
-// Nothing calls a link outside the tests until the decision points are wired in the pull requests
-// that follow (docs/EXTENSIONS.md, 10.1, items 5 to 8).
-#![allow(
-    dead_code,
-    reason = "the decision points that call a link come in the next pull requests"
-)]
+//! A [`Link`] keeps one extension's connection up, with the doubling wait, and offers [`Link::call`],
+//! which the decision points use: it holds the `max-in-flight` places, the breaker, the deadline, the
+//! counters and the log lines. The admission at login ([`login`]) is the one decision point wired so far.
+//! Without an extension in the [`Registry`], which is how the proxy starts, nothing here runs and nothing
+//! is on the metrics page.
 
 mod breaker;
 mod connection;
 mod link;
+pub(crate) mod login;
 mod stats;
 
 #[cfg(test)]
 mod tests;
 
 pub use link::{Link, Settings};
+#[cfg(test)]
+pub(crate) use stats::Outcome as RequestOutcome;
 
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -125,6 +121,16 @@ impl Registry {
             }
         }
         lines
+    }
+
+    /// The link of the extension called `name`, if it is running.
+    pub fn link(&self, name: &str) -> Option<Arc<Link>> {
+        self.started
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(link, _)| link.name() == name)
+            .map(|(link, _)| Arc::clone(link))
     }
 
     /// The links, in the order they were started.

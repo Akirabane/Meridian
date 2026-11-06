@@ -91,6 +91,8 @@ pub struct Extension {
     pub(crate) timings: Timings,
     pub(crate) handlers: Vec<(String, Handler)>,
     pub(crate) commands: Vec<CommandSpec>,
+    /// Capabilities the extension asks for besides those of its handlers.
+    pub(crate) wanted: Vec<String>,
 }
 
 impl Extension {
@@ -107,6 +109,7 @@ impl Extension {
             timings: Timings::default(),
             handlers: Vec::new(),
             commands: Vec::new(),
+            wanted: Vec::new(),
         }
     }
 
@@ -170,13 +173,23 @@ impl Extension {
         )
     }
 
-    /// The capabilities the extension declares: those of its handlers, once each, in the order the
-    /// handlers were registered.
+    /// Asks for a capability that no handler implies, such as `addresses`, which gives the extension
+    /// the players' IP addresses in what it receives (docs/EXTENSIONS.md, 2.3). The proxy gives it only
+    /// if the operator granted it in `grant`. Asking twice, or for what a handler already asks for,
+    /// declares it once.
+    pub fn wants(mut self, capability: &str) -> Self {
+        self.wanted.push(capability.to_owned());
+        self
+    }
+
+    /// The capabilities the extension declares: those of its handlers, in the order the handlers were
+    /// registered, then those it asked for, once each.
     pub(crate) fn capabilities(&self) -> Vec<String> {
         let mut capabilities: Vec<String> = Vec::new();
-        for (_, handler) in &self.handlers {
-            if !capabilities.iter().any(|c| c == handler.capability) {
-                capabilities.push(handler.capability.to_owned());
+        let handlers = self.handlers.iter().map(|(_, h)| h.capability);
+        for capability in handlers.chain(self.wanted.iter().map(String::as_str)) {
+            if !capabilities.iter().any(|c| c == capability) {
+                capabilities.push(capability.to_owned());
             }
         }
         capabilities

@@ -12,6 +12,7 @@ use meridian_extension::wire::{
 };
 use meridian_websocket::{Next, Socket, Writer, close};
 use serde_json::{Value, json};
+use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -44,6 +45,12 @@ struct Script {
     reject_confirm: bool,
     request_before_confirm: bool,
     big_message: bool,
+    /// Sends, once the hello is done, a frame that announces 60000 bytes and then one byte every 20 ms.
+    drip: bool,
+    /// Reads nothing for this long once the hello is done, as an extension that is stuck would.
+    deaf: Option<Duration>,
+    /// How many of the connections (after the ones dropped) are deaf; the others read.
+    deaf_first: usize,
     /// Connections to drop as soon as they are accepted.
     drop_first: usize,
 }
@@ -58,6 +65,9 @@ impl Default for Script {
             reject_confirm: false,
             request_before_confirm: false,
             big_message: false,
+            drip: false,
+            deaf: None,
+            deaf_first: usize::MAX,
             drop_first: 0,
         }
     }
@@ -108,11 +118,16 @@ impl Fake {
                         Ok((stream, _)) => {
                             let _ = stream.set_nonblocking(false);
                             seen.lock().unwrap().connected_at.push(Instant::now());
-                            if dropped.fetch_add(1, Ordering::Relaxed) < script.drop_first {
+                            let index = dropped.fetch_add(1, Ordering::Relaxed);
+                            if index < script.drop_first {
                                 continue;
                             }
+                            let mut script = script.clone();
+                            if index - script.drop_first >= script.deaf_first {
+                                script.deaf = None;
+                            }
                             let (script, seen, answer, current, stop) = (
-                                script.clone(),
+                                script,
                                 Arc::clone(&seen),
                                 Arc::clone(&answer),
                                 Arc::clone(&current),
@@ -283,10 +298,29 @@ fn handle(
     }
     seen.lock().unwrap().confirms += 1;
     let _ = socket.send_text(&wire::result(&confirm_id, &json!({})));
+    let raw = socket.stream_mut().try_clone();
     let Ok((mut reader, writer)) = socket.split() else {
         return;
     };
     *current.lock().unwrap() = Some(writer.clone());
+    if script.drip
+        && let Ok(mut raw) = raw
+    {
+        std::thread::spawn(move || {
+            // A frame of a server: not masked.
+            let mut head = vec![0x81, 126];
+            head.extend_from_slice(&60_000u16.to_be_bytes());
+            if raw.write_all(&head).is_err() {
+                return;
+            }
+            for _ in 0..150 {
+                if raw.write_all(b"x").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+    }
     if script.big_message {
         // Over the proxy's limit (256 KiB) by far, so that most of it is still unread when the proxy
         // closes: a close over unread bytes is a reset, which can take the close frame with it.
@@ -294,6 +328,12 @@ fn handle(
         // An extension that is busy for a moment before it reads again: the close frame waits unread
         // in its socket, where a reset from the proxy would take it away.
         std::thread::sleep(Duration::from_millis(200));
+    }
+    if let Some(deaf) = script.deaf {
+        let until = Instant::now() + deaf;
+        while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     while !stop.load(Ordering::Relaxed) {
         let text = match reader.read_message() {
@@ -388,6 +428,7 @@ fn timings() -> Timings {
         connect: Duration::from_secs(1),
         hello: Duration::from_secs(2),
         write: Duration::from_secs(2),
+        message: Duration::from_millis(300),
         look: Duration::from_millis(20),
         first_wait: Duration::from_millis(20),
         longest_wait: Duration::from_millis(160),
@@ -739,6 +780,237 @@ fn a_message_over_the_limit_is_refused_with_the_code_for_a_message_too_big() {
     until("the close", || {
         fake.seen(|s| s.close_codes.contains(&Some(close::TOO_BIG)))
     });
+}
+
+/// The reader of the connection has a time for a message, from its first byte to its last: an extension
+/// that sends one a byte at a time is let go at that time and the proxy connects again, instead of
+/// waiting on it for as long as it keeps sending.
+#[test]
+fn an_extension_that_sends_a_message_a_byte_at_a_time_is_let_go_and_the_proxy_connects_again() {
+    let fake = Fake::start(Script {
+        drip: true,
+        ..Script::default()
+    });
+    let (_registry, _link, _folder) = connect_with(&fake, |_| {});
+    until("the second connection", || {
+        fake.seen(|s| s.connected_at.len() >= 2)
+    });
+    let gap = fake.seen(|s| s.connected_at[1] - s.connected_at[0]);
+    // The drip lasts three seconds or more; the message time is 300 ms.
+    assert!(gap < Duration::from_millis(1500), "{gap:?}");
+}
+
+/// An extension that has stopped reading must not hold the threads of the players who ask it, one
+/// after the other, each for the time of a write: the requests go through one thread that writes, and
+/// the calls wait for their answers at their own deadlines.
+#[test]
+fn an_extension_that_does_not_read_holds_no_player_for_longer_than_the_deadline() {
+    let fake = Fake::start(Script {
+        deaf: Some(Duration::from_secs(60)),
+        ..Script::default()
+    });
+    // A write that blocks may take 1.5 s before it gives up, which the old way paid one thread after
+    // the other.
+    let (_registry, link, _folder) = connect_with(&fake, |s| {
+        s.timings.write = Duration::from_millis(1500);
+        s.max_in_flight = 64;
+    });
+    until("the connection", || link.is_connected());
+    let big = json!({ "filler": "x".repeat(200 << 10) });
+    let began = Instant::now();
+    let players: Vec<_> = (0..8)
+        .map(|_| {
+            let (link, big) = (Arc::clone(&link), big.clone());
+            std::thread::spawn(move || {
+                let began = Instant::now();
+                let mut longest = Duration::ZERO;
+                for _ in 0..6 {
+                    let asked = Instant::now();
+                    let _ = link.call(METHOD, Some(&big), Duration::from_millis(300), |_| Ok(()));
+                    longest = longest.max(asked.elapsed());
+                }
+                (began.elapsed(), longest)
+            })
+        })
+        .collect();
+    for player in players {
+        let (_, longest) = player.join().unwrap();
+        // One call waits for its deadline (300 ms) and a margin, not for a write.
+        assert!(
+            longest < Duration::from_millis(1200),
+            "a call took {longest:?}"
+        );
+    }
+    let took = began.elapsed();
+    assert!(
+        took < Duration::from_secs(3),
+        "the players took {took:?} in all"
+    );
+}
+
+/// A write that gives up closes the connection and the proxy connects again. How much it takes to
+/// block a write is the system's to say (Linux sizes the buffers of a socket by itself, to several
+/// MiB, and Windows to much less), so this sends until the connection is closed, and fails, saying so, if
+/// 64 MiB did not do it.
+#[test]
+fn a_write_that_gives_up_closes_the_connection_and_the_proxy_connects_again() {
+    let fake = Fake::start(Script {
+        // The first connection reads nothing for as long as the test needs; the next ones read.
+        deaf: Some(Duration::from_secs(60)),
+        deaf_first: 1,
+        ..Script::default()
+    });
+    let (_registry, link, _folder) = connect_with(&fake, |s| {
+        s.timings.write = Duration::from_millis(200);
+        // The deadlines of the calls must not open the breaker before the writes block.
+        s.breaker_failures = u32::MAX;
+        s.max_in_flight = 64;
+    });
+    until("the connection", || link.is_connected());
+    let big = json!({ "filler": "x".repeat(200 << 10) });
+    let done = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicUsize::new(0));
+    let players: Vec<_> = (0..16)
+        .map(|_| {
+            let (link, big, done, sent) = (
+                Arc::clone(&link),
+                big.clone(),
+                Arc::clone(&done),
+                Arc::clone(&sent),
+            );
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    let asked =
+                        link.call(METHOD, Some(&big), Duration::from_millis(100), |_| Ok(()));
+                    // Only what was handed over counts: once the connection is closed the calls fail at
+                    // once, and they are not what blocked it.
+                    if asked == Err(CallError::Disconnected) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    } else {
+                        sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+    let limit = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        if fake.seen(|s| s.hellos.len() >= 2) {
+            break Ok(());
+        }
+        // 200 KiB a request: 328 of them are 64 MiB.
+        if sent.load(Ordering::Relaxed) > 328 || Instant::now() > limit {
+            break Err(format!(
+                "{} requests of 200 KiB did not block a write, or the proxy did not connect again",
+                sent.load(Ordering::Relaxed)
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    done.store(true, Ordering::Relaxed);
+    for player in players {
+        player.join().unwrap();
+    }
+    outcome.unwrap();
+    // The extension of the second connection reads, and answers.
+    until("an answer", || ping(&link, Duration::from_secs(1)).is_ok());
+}
+
+/// A request that cannot be handed over because the thread that writes is stuck is a failure of the
+/// extension, the trial's included: the breaker must not stay waiting for the trial's result. The link
+/// is not run by a connection thread here, so that nothing closes the breaker or opens it behind the
+/// test's back, on a system that wakes a reader at a shutdown and on one that does not.
+#[test]
+fn a_trial_that_cannot_be_sent_ends_the_trial() {
+    use super::breaker::Permit;
+    use super::link::Info;
+    // The writing half of a connection, and the other end kept open.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        Socket::accept(stream, wire::MAX_MESSAGE, |_| {
+            Ok(Some(wire::SUBPROTOCOL.to_owned()))
+        })
+        .unwrap()
+    });
+    let request = wire::upgrade_request(
+        "127.0.0.1",
+        address.port(),
+        &meridian_websocket::new_key().unwrap(),
+    );
+    let _peer = Socket::open_checked(
+        TcpStream::connect(address).unwrap(),
+        &request,
+        wire::MAX_MESSAGE,
+    )
+    .unwrap();
+    let (_reader, writer) = server.join().unwrap().split().unwrap();
+
+    let mut settings = Settings::new("x", "127.0.0.1:1", "x.token");
+    settings.breaker_failures = 1;
+    settings.breaker_open = Duration::from_millis(30);
+    let link = Link::new(settings);
+    // An outbox that is full: the request cannot be handed over.
+    let (outbox, _inbox) = std::sync::mpsc::sync_channel::<String>(1);
+    outbox.send(String::new()).unwrap();
+    let info = Info {
+        protocol: 0,
+        name: "x".into(),
+        version: "1".into(),
+        granted: Vec::new(),
+        refused: Vec::new(),
+        commands: Vec::new(),
+    };
+    link.connected(writer, outbox, info);
+
+    // Not the trial: it fails, and opens the breaker.
+    assert_eq!(
+        ping(&link, Duration::from_secs(1)),
+        Err(CallError::Disconnected)
+    );
+    std::thread::sleep(Duration::from_millis(60));
+    // The trial: it fails too, and the breaker is open again, not left waiting for the trial.
+    assert_eq!(
+        ping(&link, Duration::from_secs(1)),
+        Err(CallError::Disconnected)
+    );
+    let later = Instant::now() + Duration::from_secs(60);
+    assert_eq!(link.breaker().permit(later), Permit::Trial);
+}
+
+#[test]
+fn a_decision_point_that_is_granted_and_not_declared_is_named() {
+    use super::connection::undeclared_points;
+    use super::link::Info;
+    let info = |granted: &[&str]| Info {
+        protocol: 0,
+        name: "x".into(),
+        version: "1".into(),
+        granted: granted.iter().map(|g| (*g).to_owned()).collect(),
+        refused: Vec::new(),
+        commands: Vec::new(),
+    };
+    let mut settings = Settings::new("x", "127.0.0.1:1", "x.token");
+    settings.grant = vec![
+        "decide.login".into(),
+        "decide.command".into(),
+        "addresses".into(),
+    ];
+    // It declared the login only: the command is granted and not declared. `addresses` is not a
+    // decision point, and an extension may not need it.
+    assert_eq!(
+        undeclared_points(&settings, &info(&["decide.login"])),
+        ["decide.command"]
+    );
+    assert!(undeclared_points(&settings, &info(&["decide.login", "decide.command"])).is_empty());
+    assert_eq!(
+        undeclared_points(&settings, &info(&[])),
+        ["decide.login", "decide.command"]
+    );
+    // Nothing granted, nothing to say.
+    settings.grant.clear();
+    assert!(undeclared_points(&settings, &info(&[])).is_empty());
 }
 
 /// The close must reach the extension whatever the size of the message it sent: the proxy reads the

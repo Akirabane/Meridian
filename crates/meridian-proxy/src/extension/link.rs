@@ -29,6 +29,10 @@ pub struct Timings {
     pub hello: Duration,
     /// A write may not block longer than this.
     pub write: Duration,
+    /// A message of the extension must arrive in all within this, from its first byte to its last: the
+    /// stream's read timeout counts each read, and an extension that sends a byte at a time would hold
+    /// the reader as long as it liked.
+    pub message: Duration,
     /// How often a connection that hears nothing looks at the stop flag.
     pub look: Duration,
     /// The wait after the first failure; it doubles up to `longest_wait`.
@@ -43,6 +47,7 @@ impl Default for Timings {
             connect: Duration::from_secs(2),
             hello: Duration::from_secs(5),
             write: Duration::from_secs(5),
+            message: Duration::from_secs(5),
             look: Duration::from_millis(200),
             first_wait: Duration::from_secs(1),
             longest_wait: Duration::from_secs(30),
@@ -71,7 +76,9 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// The defaults of the specification: 64 in flight, 5 failures, 30 seconds.
+    /// The defaults of the specification: 64 in flight, 5 failures, 30 seconds. The proxy builds its
+    /// settings from the configuration, whose defaults are these; the tests build them here.
+    #[cfg(test)]
     pub fn new(
         name: impl Into<String>,
         address: impl Into<String>,
@@ -155,8 +162,14 @@ type Reply = Result<Value, RpcError>;
 
 #[derive(Default)]
 pub(super) struct State {
-    /// The writing half of the connection that is up.
+    /// The writing half of the connection that is up. A call closes it when it finds the extension
+    /// does not read; the requests themselves go through `outbox`.
     pub writer: Option<Writer>,
+    /// The requests to send, which a thread of the connection writes one at a time. A call puts its
+    /// request here and does not wait for the socket: an extension that has stopped reading blocks
+    /// that one thread, and the calls wait for their answers at their own deadlines instead of in
+    /// turn for the write.
+    pub outbox: Option<mpsc::SyncSender<String>>,
     next_id: u64,
     waiting: HashMap<u64, mpsc::Sender<Reply>>,
     pub info: Option<Info>,
@@ -207,6 +220,7 @@ impl Link {
     }
 
     /// The wait the connection took before its latest try.
+    #[cfg(test)]
     pub fn last_wait(&self) -> Duration {
         Duration::from_millis(self.last_wait_ms.load(Ordering::Relaxed))
     }
@@ -215,7 +229,7 @@ impl Link {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn breaker(&self) -> MutexGuard<'_, Breaker> {
+    pub(super) fn breaker(&self) -> MutexGuard<'_, Breaker> {
         self.breaker.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -252,10 +266,11 @@ impl Link {
     }
 
     /// A connection was checked: calls may go, and the breaker is closed.
-    pub(super) fn connected(&self, writer: Writer, info: Info) {
+    pub(super) fn connected(&self, writer: Writer, outbox: mpsc::SyncSender<String>, info: Info) {
         {
             let mut state = self.lock();
             state.writer = Some(writer);
+            state.outbox = Some(outbox);
             state.info = Some(info);
         }
         self.stats.set_connected(true);
@@ -268,6 +283,8 @@ impl Link {
         let waiting = {
             let mut state = self.lock();
             state.writer = None;
+            // The thread that writes ends when the last sender is gone.
+            state.outbox = None;
             state.info = None;
             // Dropping the senders wakes every call that waits.
             std::mem::take(&mut state.waiting)
@@ -334,9 +351,9 @@ impl Link {
         parse: impl FnOnce(&Value) -> Result<T, String>,
     ) -> Result<T, CallError> {
         // A place, and an id.
-        let (id, writer, replies) = {
+        let (id, writer, outbox, replies) = {
             let mut state = self.lock();
-            let Some(writer) = state.writer.clone() else {
+            let (Some(writer), Some(outbox)) = (state.writer.clone(), state.outbox.clone()) else {
                 drop(state);
                 self.end(method, Outcome::Disconnected, None);
                 return Err(CallError::Disconnected);
@@ -350,7 +367,7 @@ impl Link {
             let id = state.next_id;
             let (sender, replies) = mpsc::channel();
             state.waiting.insert(id, sender);
-            (id, writer, replies)
+            (id, writer, outbox, replies)
         };
         let forget = |id: u64| {
             self.lock().waiting.remove(&id);
@@ -368,9 +385,17 @@ impl Link {
         // The request, and the wait for its answer.
         let started = Instant::now();
         let request = wire::request(id, method, params);
-        if writer.send_text(&request).is_err() {
+        // Handed to the thread that writes, without waiting for the socket. The outbox holds as many
+        // requests as there are places; it is full only when that thread has been stuck on a write for
+        // as long as the places took to fill, which is an extension that does not read. Then this is a
+        // failure of the extension, the trial's included (a trial that ended with no verdict would
+        // leave the breaker waiting for it), and the connection is closed so that it is made again.
+        if outbox.try_send(request).is_err() {
             forget(id);
             self.end(method, Outcome::Disconnected, None);
+            let change = self.breaker().failure(Instant::now(), trial);
+            self.breaker_changed(change);
+            let _ = writer.shutdown();
             return Err(CallError::Disconnected);
         }
         let outcome = match replies.recv_timeout(timeout) {
