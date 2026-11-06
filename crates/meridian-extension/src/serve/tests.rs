@@ -698,7 +698,12 @@ fn stopping_closes_the_connection_with_a_normal_close_waits_for_a_request_and_fr
     assert!(began.elapsed() < Duration::from_secs(5));
     // It waited for the request that was running.
     assert!(finished.load(Ordering::SeqCst));
-    // The proxy sees a normal close.
+    // The proxy gets the answer of the request that was running, and only then a normal close: nothing
+    // is sent after a close frame.
+    let Message::Response { id, outcome } = message(&mut proxy.socket) else {
+        panic!("the answer comes before the close");
+    };
+    assert_eq!((id, outcome), (Some(Id::Number(5)), Ok(Value::Null)));
     assert_eq!(next(&mut proxy.socket), None);
     assert_eq!(proxy.socket.close_code(), Some(close::NORMAL));
     // The port is free.

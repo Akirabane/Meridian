@@ -431,12 +431,10 @@ fn drain(reader: &mut Reader) {
     }
 }
 
-/// The end of a connection that was up: a normal close when the extension is stopping, and a wait for
-/// the requests that are still running.
+/// The end of a connection that was up: a wait for the requests that are still running, which answer
+/// before anything else (nothing may be sent after a close frame, RFC 6455, 5.5.1), then a normal close
+/// when the extension is stopping.
 fn finish(reader: &mut Reader, writer: &Writer, shared: &Shared) {
-    if shared.stopped() && writer.close(close::NORMAL, "").is_ok() {
-        drain(reader);
-    }
     let until = Instant::now() + shared.extension.timings.grace;
     while shared.in_flight.load(Ordering::SeqCst) > 0 {
         if Instant::now() >= until {
@@ -447,6 +445,9 @@ fn finish(reader: &mut Reader, writer: &Writer, shared: &Shared) {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+    if shared.stopped() && writer.close(close::NORMAL, "").is_ok() {
+        drain(reader);
     }
     let _ = writer.shutdown();
 }
@@ -556,6 +557,9 @@ fn run_handler(
                 } else {
                     answer
                 };
+                // The place is given back before the answer goes: a proxy that has its answer may send the
+                // next request at once, and must find the place free.
+                drop(guard);
                 reply(&writer, &shared, &answer);
             }
         });
