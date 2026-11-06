@@ -241,6 +241,85 @@ fn a_proxy_of_another_machine_needs_its_address_and_its_file() {
     assert_eq!(remote.threshold, -1);
 }
 
+/// Ten ports in a row for the synthetic servers of a test: free now, **outside the range the system
+/// draws the ports of outgoing connections from**, and **never given twice in this process**.
+///
+/// The bots' sockets and the proxy's take their ports from the system's range (32768 and up on Linux by
+/// default, 49152 and up on Windows; the Linux value is read when it can be), one after the other, so a port found
+/// there by binding to port 0 and giving it back can be taken by one of them before the server asks for it. The
+/// tests of a process also run at the same time: every range handed out is kept in a list for the life of the
+/// process, and a caller takes the next one that is not on it, so two tests never choose ranges that overlap,
+/// whatever the order they ask in (the list is locked while a range is probed, so they ask one at a time).
+fn free_ports() -> (u16, u16) {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU16;
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    static HANDED_OUT: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+    let slots = (outgoing_ports_start().saturating_sub(FREE_PORTS_FROM) / 10).min(900);
+    assert!(
+        slots >= 20,
+        "the system draws the ports of outgoing connections from below {}",
+        FREE_PORTS_FROM + 200
+    );
+    // Processes and calls start at different places.
+    let start = (std::process::id() as u16)
+        .wrapping_mul(7)
+        .wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed).wrapping_mul(13));
+    let mut handed_out = HANDED_OUT.lock().unwrap_or_else(|e| e.into_inner());
+    for step in 0..slots {
+        let first = FREE_PORTS_FROM + (start.wrapping_add(step) % slots) * 10;
+        if handed_out.contains(&first) {
+            continue;
+        }
+        let held: Vec<_> = (first..first + 10)
+            .map_while(|port| std::net::TcpListener::bind(("127.0.0.1", port)).ok())
+            .collect();
+        if held.len() == 10 {
+            handed_out.push(first);
+            return (first, first + 9);
+        }
+    }
+    panic!(
+        "no ten free ports in a row between {FREE_PORTS_FROM} and {}",
+        FREE_PORTS_FROM + slots * 10
+    );
+}
+
+/// Where [`free_ports`] begins to look: below every system's range for outgoing connections.
+const FREE_PORTS_FROM: u16 = 20_000;
+
+/// The first port of the range the system draws the ports of outgoing connections from.
+fn outgoing_ports_start() -> u16 {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|text| text.split_whitespace().next()?.parse().ok())
+        .unwrap_or(if cfg!(windows) { 49_152 } else { 32_768 })
+}
+
+#[test]
+fn ports_for_the_servers_of_tests_running_together_never_overlap() {
+    // Eight tests of the process asking at once, five times each.
+    let threads: Vec<_> = (0..8)
+        .map(|_| std::thread::spawn(|| (0..5).map(|_| free_ports()).collect::<Vec<(u16, u16)>>()))
+        .collect();
+    let mut all: Vec<(u16, u16)> = threads
+        .into_iter()
+        .flat_map(|t| t.join().unwrap())
+        .collect();
+    assert_eq!(all.len(), 40);
+    all.sort_unstable();
+    for pair in all.windows(2) {
+        assert!(pair[0].1 < pair[1].0, "{pair:?} overlap");
+    }
+    let ceiling = outgoing_ports_start();
+    for (first, last) in all {
+        assert_eq!(last, first + 9);
+        // Below the range of outgoing connections, and in our own, from the start of it.
+        assert!((FREE_PORTS_FROM..ceiling).contains(&first), "{first}");
+        assert!(last < ceiling, "{last}");
+    }
+}
+
 /// What a run against a proxy of another machine does, with the proxy on this one: the servers
 /// listen on the address and ports the configuration names, and the figures are the bots'.
 #[test]
@@ -251,17 +330,13 @@ fn bots_play_through_a_proxy_reached_as_if_it_were_elsewhere() {
     };
     let _turn = ONE_PROXY.lock().unwrap_or_else(|e| e.into_inner());
     let secret = remote::fresh_secret().unwrap();
-    let first = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let (first, last) = free_ports();
     let mut s = settings(4);
     s.forwarding = secret.clone();
     let mut remote = remote::Remote {
         proxy: "127.0.0.1:1".parse().unwrap(),
         bind: "127.0.0.1".parse().unwrap(),
-        ports: (first, first + 9),
+        ports: (first, last),
         threshold: 256,
     };
     let mut proxy = crate::proxy::Proxy::start_with(&program, &s.dir, |listen| {
