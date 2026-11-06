@@ -82,14 +82,15 @@ a `management-server-host` that is not a loopback address is refused, since a ce
 server made itself is not verified. The secret is in no log and no error. See
 [docs/RESTART.md](../../docs/RESTART.md), "How the announcement reaches the proxy".
 
-## Following and changing the server's bans and whitelist
+## Following and changing the server's bans and whitelist, and reading its operators
 
 With the same option the sidecar can also carry the lists of the server's management protocol
-(`allowlist`, `bans`, `ip_bans`) for the proxy, when its `[access.sync]` is on. Two more
-requests:
+(`allowlist`, `bans`, `ip_bans`) for the proxy, when its `[access.sync]` is on, and the list of
+its operators (`operators`), when the proxy's `[operators]` is on. Two more requests:
 
 - `{"op": "access-notices", "after": N, "wait_ms": W}` answers the changes of the lists the
-  server announced (`notification/bans/added`, `.../removed`, `ip_bans`, `allowlist`), numbered
+  server announced (`notification/bans/added`, `.../removed`, `ip_bans`, `allowlist`,
+  `operators`), numbered
   apart from the `notices` above, so that a run of bans never pushes a stop notice out of its
   queue. The answer also says how many connections to the server there have been, and whether
   notices were lost; the proxy reads the lists again when either moves.
@@ -97,7 +98,9 @@ requests:
   the sidecar already holds and answers its result. Only the three lists and, for each, a read
   and the addition or removal of an entry go through (`allowlist`, `allowlist/add`,
   `allowlist/remove`, `bans`, `bans/add`, `bans/remove`, `ip_bans`, `ip_bans/add`,
-  `ip_bans/remove`); nothing else of the protocol, and nothing that clears or sets a whole list.
+  `ip_bans/remove`), and the read of the operators (`operators`; the servers own them, so no
+  `operators/add`, `operators/remove`, `operators/set` or `operators/clear`); nothing else of the
+  protocol, and nothing that clears or sets a whole list.
   A server that does not answer in 10 seconds, or a connection that is down, is `unreached`
   (the proxy may ask again); a server that answers with an error is a refusal.
 

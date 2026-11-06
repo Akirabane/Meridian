@@ -3,7 +3,7 @@ use super::{not_saved, summary};
 use crate::console::{Commands, Reply, usage};
 use crate::log::info;
 use crate::state::Proxy;
-use meridian_config::{AccessError, Permissions, Setting, Target, check_node};
+use meridian_config::{AccessError, AuthKind, Permissions, Setting, Target, check_node};
 
 fn saved(mut lines: Vec<String>, result: Result<(), AccessError>) -> Reply {
     if let Err(e) = result {
@@ -58,11 +58,13 @@ pub fn perm(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
             let p = lists.snapshot();
             let (name, uuid) = identity(proxy, &who);
             let groups = p.groups_of(&name, uuid);
-            Ok(vec![if groups.is_empty() {
+            let mut lines = vec![if groups.is_empty() {
                 format!("{who} is in no group (only default)")
             } else {
                 format!("{who} is in {}", groups.join(", "))
-            }])
+            }];
+            lines.extend(operator_line(proxy, &who, &name));
+            Ok(lines)
         }
         ["check", who, node] => {
             let who = player(who)?;
@@ -71,7 +73,9 @@ pub fn perm(proxy: &Proxy, commands: &Commands, args: &[&str]) -> Reply {
                 return Err("check takes a node, not a pattern".to_owned());
             }
             let (name, uuid) = identity(proxy, &who);
-            let allowed = lists.snapshot().allows(&name, uuid, &node);
+            let extra = operator_groups(proxy, &name);
+            let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+            let allowed = lists.snapshot().allows_in(&name, uuid, &node, &extra);
             let mut line = format!(
                 "{who} {} {node}",
                 if allowed { "has" } else { "does not have" }
@@ -194,6 +198,37 @@ fn identity(proxy: &Proxy, who: &Target) -> (String, [u8; 16]) {
         },
         Target::Net(_) => (String::new(), [0; 16]),
     }
+}
+
+/// The groups an online player is in because they are an operator of the server they are on
+/// (`[operators]`). Their account is not known here, so one that the server lists without a
+/// unique id is not found by name.
+fn operator_groups(proxy: &Proxy, name: &str) -> Vec<String> {
+    match proxy.sessions.find(name) {
+        Some(online) => proxy.sessions.operators.groups_for(
+            &online.backend,
+            &online.name,
+            online.uuid,
+            AuthKind::Unverified,
+        ),
+        None => Vec::new(),
+    }
+}
+
+/// The line that says a player is in a group because they are an operator, if they are.
+fn operator_line(proxy: &Proxy, who: &Target, name: &str) -> Option<String> {
+    let online = proxy.sessions.find(name)?;
+    let level = proxy.sessions.operators.level_of(
+        &online.backend,
+        &online.name,
+        online.uuid,
+        AuthKind::Unverified,
+    )?;
+    let group = proxy.config().operators.group.clone();
+    Some(format!(
+        "{who} is also in {group}: an operator of {} (level {level})",
+        online.backend
+    ))
 }
 
 /// What a reload says of the permissions: what they hold when they changed.

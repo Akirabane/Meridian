@@ -157,6 +157,16 @@ pub enum ConfigError {
     InvalidMetricsBind(String),
     /// `[metrics]` is on and listens where the proxy takes players.
     MetricsOnListen(std::net::SocketAddr),
+    /// `[operators] min-level` is above the highest permission level.
+    OperatorLevelTooHigh(u8),
+    /// `[operators] group` is not a group name.
+    BadOperatorGroup(String),
+    /// `[operators] stale-after-seconds` is zero or too large.
+    OperatorStaleOutOfRange(u64),
+    /// `[operators] from` names a backend that has no sidecar to be read through.
+    OperatorSourceWithoutSidecar(String),
+    /// `[operators] from` names a backend twice.
+    DuplicateOperatorSource(String),
     /// `[queue] wait-seconds` is zero.
     ZeroQueueWait,
     /// `[queue] max-length` is zero.
@@ -427,6 +437,25 @@ impl fmt::Display for ConfigError {
                 "[metrics] bind = \"{address}\" is where the proxy takes players (listen): \
                  give the metrics a port of their own"
             ),
+            ConfigError::OperatorLevelTooHigh(level) => write!(
+                f,
+                "[operators] min-level = {level} is above {}, the highest permission level",
+                crate::operators::MAX_OPERATOR_LEVEL
+            ),
+            ConfigError::BadOperatorGroup(why) => write!(f, "[operators] group: {why}"),
+            ConfigError::OperatorStaleOutOfRange(seconds) => write!(
+                f,
+                "[operators] stale-after-seconds = {seconds} must be between 1 and {}",
+                crate::operators::MAX_OPERATOR_STALE_SECONDS
+            ),
+            ConfigError::OperatorSourceWithoutSidecar(name) => write!(
+                f,
+                "[operators] from names \"{name}\", which has no [[sidecars]] entry: its operators \
+                 are read through its sidecar"
+            ),
+            ConfigError::DuplicateOperatorSource(name) => {
+                write!(f, "[operators] from names \"{name}\" twice")
+            }
             ConfigError::ZeroQueueWait => write!(f, "[queue] wait-seconds must be more than 0"),
             ConfigError::ZeroQueueLength => write!(f, "[queue] max-length must be more than 0"),
             ConfigError::QueueWaitTooLong {

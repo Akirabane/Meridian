@@ -297,6 +297,21 @@ enabled = false
 wait-seconds = 15
 max-length = 50
 
+# The operators of the servers, read from them (docs/OPERATING.md, section 5.9). The proxy keeps
+# no list of its own: a player who is an operator of the server they are on, at min-level or
+# above (0 to 4), is a member of `group` of permissions.toml for the commands the proxy
+# answers (/send, /glist, /alert), so give that group the nodes you want. Off: nobody is.
+# Each backend whose operators count needs a [[sidecars]] entry, started with
+# --management-properties. `from` lists the backends that count (empty: all that have a
+# sidecar). A server that cannot be read has no operators; a list read from a server is
+# forgotten after stale-after-seconds without being read or heard answering.
+[operators]
+from-servers = false
+group = "operator"
+min-level = 4
+from = []
+stale-after-seconds = 600
+
 # Commands players type in game that the proxy answers itself; it never passes
 # them to the backend. Any other command goes to the backend as usual.
 [commands]

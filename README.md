@@ -45,6 +45,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Bans and whitelist | Done | By name, unique id, address or range; a file of their own, read at the start and at `reload` ([docs/OPERATING.md](docs/OPERATING.md), section 5.8) |
 | Bans and whitelist in step with the servers' | Done, off by default | `[access.sync]`: what is banned on a server reaches the proxy, and what the console bans is sent to the servers, through the sidecars. Run against three real Horizon servers with scripted players, in both directions ([docs/VALIDATION.md](docs/VALIDATION.md), section 7): it found one defect, in `pardon <name>`, since fixed. Not run with a real client or over a network ([docs/OPERATING.md](docs/OPERATING.md), section 5.12) |
 | Permissions | Done | Groups with inheritance and nodes in `permissions.toml`, managed with `perm`; the commands in game check them. In offline mode a name proves nothing ([docs/OPERATING.md](docs/OPERATING.md), section 5.9) |
+| Operators of the servers | Done, off by default | `[operators]`: the proxy reads each server's operators through its sidecar and treats the operators of the server a player is on as members of a group of `permissions.toml`; it keeps no list of its own and writes nothing to the servers. Tried against stand-ins, not yet against a real Horizon ([docs/OPERATING.md](docs/OPERATING.md), section 5.9) |
 
 ### The seamless switch
 
