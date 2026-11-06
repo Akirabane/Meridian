@@ -347,9 +347,10 @@ External programs the proxy connects to and asks for decisions ([EXTENSIONS.md](
 None by default, and then nothing changes: no thread, no connection, no line on the metrics page.
 One `[[extension]]` for each program. The proxy connects to the extension (never the other way), on
 the loopback, and proves itself to it, and asks it to prove itself, with a token kept in a file. The
-protocol is version 0, which is experimental. **The configuration is read and checked; no decision
-point asks an extension anything yet**, so an extension that is connected is not consulted and the
-proxy decides as it does without one.
+protocol is version 0, which is experimental. **One decision point is wired: the admission at login**
+(`decide.login`, [EXTENSIONS.md](EXTENSIONS.md) section 4.2). The permission of a command and the choice
+of server are not asked yet, so an extension that is granted them is connected and not consulted for
+them, and the proxy decides as it does without one.
 
 ```toml
 [[extension]]

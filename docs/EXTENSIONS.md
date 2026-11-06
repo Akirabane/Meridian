@@ -427,6 +427,25 @@ that an extension that means to refuse is never turned into a failure that the o
 the bans' refusals are (`session.rs:494`), and counts as
 `meridian_login_failures_total{reason="extension"}`.
 
+**An extension can only add a refusal.** `allow` is not a pass: the bans and the whitelist are
+settled before the extension is asked, so an `allow` never lets in a player they turned away (a
+banned player costs the extension no request at all), and the second login, the player limit and the
+queue, and the choice of server still follow it. `default` and `allow` are the same for the checks;
+they differ in the metrics and the log. The tests of `meridian-proxy` (`session/tests/extension.rs`)
+check each of these: an `allow` for a banned player, for one the whitelist keeps out and for one who
+is connected already.
+
+**What is asked, and of whom.** The `[[extension]]` that is enabled and is granted `decide.login`
+(at most one). Nothing is asked when none is, nor when the extension did not declare `decide.login` in
+its hello (granted but not declared is not used). When there is no usable answer (no connection, an
+open breaker, no free place, a timeout of `timeout-ms`, an invalid answer, or an extension a reload
+added and has not started), the player takes the `on-error` policy of `[extension.decide-login]`:
+`default` and `allow` let the player go on, `deny` refuses with the proxy's own words. The address of
+the player is in the request only if the operator granted `addresses` and the extension declared it.
+The refusal is counted as `meridian_login_failures_total{reason="extension"}`, and what became of each
+decision as `meridian_extension_decisions_total{extension,point,decision}` (`allow`, `deny`, `default`,
+or `policy_allow`, `policy_deny`, `policy_default` for want of an answer).
+
 **Default without an extension:** nothing is asked. **Timeout:** 1000 ms.
 
 **The order of the checks, and why:**
