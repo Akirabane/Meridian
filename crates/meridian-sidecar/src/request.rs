@@ -198,21 +198,29 @@ pub struct Arrival {
     pub on_ground: Option<bool>,
 }
 
-/// The farthest a coordinate may be, as Horizon checks it.
+/// The farthest an arrival may be from the origin, east-west and north-south. Horizon takes
+/// 30,000,512 (the record's own limit); the world border's 30,000,000 is kept here.
 pub const MAX_COORDINATE: f64 = 30_000_000.0;
-/// The fastest a velocity component may be, in blocks per tick.
+/// The highest or lowest an arrival may be, as Horizon checks it (20,000,000 up or down).
+pub const MAX_HEIGHT: f64 = 20_000_000.0;
+/// The fastest a velocity component may be, in blocks per tick. This only keeps absurd numbers
+/// out. Horizon itself takes a component over 10 as 0, without an error, so a fast player
+/// (an explosion, an elytra, a knockback) arrives still instead of not arriving: a velocity
+/// between 10 and this is sent, not refused.
 pub const MAX_VELOCITY: f64 = 100.0;
 
 impl Arrival {
     /// Why Horizon would refuse it, before it is sent.
     fn check(&self) -> Result<(), String> {
-        if !self
-            .position
-            .iter()
-            .all(|v| v.is_finite() && v.abs() <= MAX_COORDINATE)
+        let [x, y, z] = self.position;
+        if !(x.is_finite() && y.is_finite() && z.is_finite())
+            || x.abs() > MAX_COORDINATE
+            || z.abs() > MAX_COORDINATE
+            || y.abs() > MAX_HEIGHT
         {
             return Err(format!(
-                "an arrival position is finite and within {MAX_COORDINATE} blocks: {:?}",
+                "an arrival position is finite, within {MAX_COORDINATE} blocks of the origin \
+                 east-west and north-south and within {MAX_HEIGHT} up or down: {:?}",
                 self.position
             ));
         }
@@ -859,6 +867,71 @@ mod tests {
             },
         ] {
             assert!(import(None, bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The limits of an arrival are Horizon's: the same edges are taken, the next step is not.
+    #[test]
+    fn the_bounds_of_an_arrival_are_where_horizon_stops_taking_it() {
+        let arrival = |position, velocity| Arrival {
+            position,
+            rotation: [0.0, 0.0],
+            velocity,
+            on_ground: None,
+        };
+        let taken = |a: Arrival| a.check().is_ok();
+        // East-west and north-south: 30,000,000 either way, not a block more.
+        for edge in [30_000_000.0, -30_000_000.0] {
+            assert!(taken(arrival([edge, 64.0, 0.0], None)), "x {edge}");
+            assert!(taken(arrival([0.0, 64.0, edge], None)), "z {edge}");
+        }
+        for past in [30_000_001.0, -30_000_001.0, 30_000_512.0] {
+            assert!(!taken(arrival([past, 64.0, 0.0], None)), "x {past}");
+            assert!(!taken(arrival([0.0, 64.0, past], None)), "z {past}");
+        }
+        // Up and down: 20,000,000, which Horizon holds to, not the 30,000,000 of the others.
+        for edge in [20_000_000.0, -20_000_000.0] {
+            assert!(taken(arrival([0.0, edge, 0.0], None)), "y {edge}");
+        }
+        for past in [20_000_001.0, -20_000_001.0, 25_000_000.0, 30_000_000.0] {
+            assert!(!taken(arrival([0.0, past, 0.0], None)), "y {past}");
+        }
+        // The three axes at once, each at its own edge.
+        assert!(taken(arrival(
+            [30_000_000.0, -20_000_000.0, 30_000_000.0],
+            None
+        )));
+        // Velocity: a component over 10 is not refused (Horizon takes it as 0 and the move goes
+        // on); the bound only keeps absurd numbers out.
+        for edge in [
+            10.0,
+            -10.0,
+            10.000_001,
+            11.0,
+            50.0,
+            MAX_VELOCITY,
+            -MAX_VELOCITY,
+        ] {
+            for axis in 0..3 {
+                let mut v = [0.0; 3];
+                v[axis] = edge;
+                assert!(taken(arrival([0.0, 64.0, 0.0], Some(v))), "{v:?}");
+            }
+        }
+        for past in [100.000_001, -100.000_001, 101.0, 1e9] {
+            for axis in 0..3 {
+                let mut v = [0.0; 3];
+                v[axis] = past;
+                assert!(!taken(arrival([0.0, 64.0, 0.0], Some(v))), "{v:?}");
+            }
+        }
+        // And what is not a number is neither a position nor a velocity.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!taken(arrival([0.0, bad, 0.0], None)), "y {bad}");
+            assert!(
+                !taken(arrival([0.0, 64.0, 0.0], Some([bad, 0.0, 0.0]))),
+                "v {bad}"
+            );
         }
     }
 
