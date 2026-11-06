@@ -12,6 +12,7 @@ use meridian_extension::wire::{
 };
 use meridian_websocket::{Next, Socket, Writer, close};
 use serde_json::{Value, json};
+use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -44,6 +45,8 @@ struct Script {
     reject_confirm: bool,
     request_before_confirm: bool,
     big_message: bool,
+    /// Sends, once the hello is done, a frame that announces 60000 bytes and then one byte every 20 ms.
+    drip: bool,
     /// Connections to drop as soon as they are accepted.
     drop_first: usize,
 }
@@ -58,6 +61,7 @@ impl Default for Script {
             reject_confirm: false,
             request_before_confirm: false,
             big_message: false,
+            drip: false,
             drop_first: 0,
         }
     }
@@ -283,10 +287,29 @@ fn handle(
     }
     seen.lock().unwrap().confirms += 1;
     let _ = socket.send_text(&wire::result(&confirm_id, &json!({})));
+    let raw = socket.stream_mut().try_clone();
     let Ok((mut reader, writer)) = socket.split() else {
         return;
     };
     *current.lock().unwrap() = Some(writer.clone());
+    if script.drip
+        && let Ok(mut raw) = raw
+    {
+        std::thread::spawn(move || {
+            // A frame of a server: not masked.
+            let mut head = vec![0x81, 126];
+            head.extend_from_slice(&60_000u16.to_be_bytes());
+            if raw.write_all(&head).is_err() {
+                return;
+            }
+            for _ in 0..150 {
+                if raw.write_all(b"x").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+    }
     if script.big_message {
         // Over the proxy's limit (256 KiB) by far, so that most of it is still unread when the proxy
         // closes: a close over unread bytes is a reset, which can take the close frame with it.
@@ -388,6 +411,7 @@ fn timings() -> Timings {
         connect: Duration::from_secs(1),
         hello: Duration::from_secs(2),
         write: Duration::from_secs(2),
+        message: Duration::from_millis(300),
         look: Duration::from_millis(20),
         first_wait: Duration::from_millis(20),
         longest_wait: Duration::from_millis(160),
@@ -739,6 +763,24 @@ fn a_message_over_the_limit_is_refused_with_the_code_for_a_message_too_big() {
     until("the close", || {
         fake.seen(|s| s.close_codes.contains(&Some(close::TOO_BIG)))
     });
+}
+
+/// The reader of the connection has a time for a message, from its first byte to its last: an extension
+/// that sends one a byte at a time is let go at that time and the proxy connects again, instead of
+/// waiting on it for as long as it keeps sending.
+#[test]
+fn an_extension_that_sends_a_message_a_byte_at_a_time_is_let_go_and_the_proxy_connects_again() {
+    let fake = Fake::start(Script {
+        drip: true,
+        ..Script::default()
+    });
+    let (_registry, _link, _folder) = connect_with(&fake, |_| {});
+    until("the second connection", || {
+        fake.seen(|s| s.connected_at.len() >= 2)
+    });
+    let gap = fake.seen(|s| s.connected_at[1] - s.connected_at[0]);
+    // The drip lasts three seconds or more; the message time is 300 ms.
+    assert!(gap < Duration::from_millis(1500), "{gap:?}");
 }
 
 /// The close must reach the extension whatever the size of the message it sent: the proxy reads the

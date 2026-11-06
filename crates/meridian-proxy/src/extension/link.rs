@@ -29,6 +29,10 @@ pub struct Timings {
     pub hello: Duration,
     /// A write may not block longer than this.
     pub write: Duration,
+    /// A message of the extension must arrive in all within this, from its first byte to its last: the
+    /// stream's read timeout counts each read, and an extension that sends a byte at a time would hold
+    /// the reader as long as it liked.
+    pub message: Duration,
     /// How often a connection that hears nothing looks at the stop flag.
     pub look: Duration,
     /// The wait after the first failure; it doubles up to `longest_wait`.
@@ -43,6 +47,7 @@ impl Default for Timings {
             connect: Duration::from_secs(2),
             hello: Duration::from_secs(5),
             write: Duration::from_secs(5),
+            message: Duration::from_secs(5),
             look: Duration::from_millis(200),
             first_wait: Duration::from_secs(1),
             longest_wait: Duration::from_secs(30),

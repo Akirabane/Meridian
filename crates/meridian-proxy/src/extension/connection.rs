@@ -102,6 +102,7 @@ fn attempt(link: &Arc<Link>) -> End {
     };
     debug_assert_eq!(socket.protocol(), Some(SUBPROTOCOL));
     let _ = socket.stream_mut().set_read_timeout(Some(timings.look));
+    socket.set_message_timeout(Some(timings.message));
 
     let info = match hello(&mut socket, link, &token) {
         Ok(info) => info,
