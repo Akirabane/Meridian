@@ -16,8 +16,10 @@
 //!
 //! What is left out, on purpose: extensions of the protocol (compression, `permessage-deflate`), binary
 //! messages (read and dropped), and TLS: the caller has seen that the other end is on a loopback address.
+mod split;
 mod upgrade;
 
+pub use split::{Half, Reader, Writer};
 use std::io::{self, Read, Write};
 pub use upgrade::{Upgrade, accept_key};
 
@@ -239,13 +241,7 @@ impl<T: Read + Write> Socket<T> {
     /// words, at most 123 bytes of it, cut at a character. The other end is told, and answers with its
     /// own close; the caller then drops the socket.
     pub fn close(&mut self, code: u16, reason: &str) -> io::Result<()> {
-        let mut payload = code.to_be_bytes().to_vec();
-        let mut end = reason.len().min(123);
-        while !reason.is_char_boundary(end) {
-            end -= 1;
-        }
-        payload.extend_from_slice(&reason.as_bytes()[..end]);
-        self.send(0x8, &payload)
+        self.send(0x8, &close_payload(code, reason))
     }
 
     /// A control frame: a client masks it, as RFC 6455 requires, and a server does not.
@@ -265,30 +261,9 @@ impl<T: Read + Write> Socket<T> {
         self.write_frame(0x1, payload)
     }
 
-    /// One whole frame (`fin` set), of any length.
+    /// One whole frame (`fin` set), of any length, written with one `write_all`.
     fn write_frame(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {
-        let masked = self.role == Role::Client;
-        let mask_bit = if masked { 0x80 } else { 0 };
-        let mut frame = vec![0x80 | opcode];
-        match payload.len() {
-            n if n < 126 => frame.push(mask_bit | n as u8),
-            n if n <= 0xffff => {
-                frame.push(mask_bit | 126);
-                frame.extend_from_slice(&(n as u16).to_be_bytes());
-            }
-            n => {
-                frame.push(mask_bit | 127);
-                frame.extend_from_slice(&(n as u64).to_be_bytes());
-            }
-        }
-        if masked {
-            let mut mask = [0u8; 4];
-            getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
-            frame.extend_from_slice(&mask);
-            frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
-        } else {
-            frame.extend_from_slice(payload);
-        }
+        let frame = encode_frame(self.role == Role::Client, opcode, payload)?;
         self.stream.write_all(&frame)?;
         self.stream.flush()
     }
@@ -361,6 +336,43 @@ struct Frame {
     fin: bool,
     opcode: u8,
     payload: Vec<u8>,
+}
+
+/// One whole frame (`fin` set), of any length: masked for a client, not for a server.
+fn encode_frame(masked: bool, opcode: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+    let mask_bit = if masked { 0x80 } else { 0 };
+    let mut frame = vec![0x80 | opcode];
+    match payload.len() {
+        n if n < 126 => frame.push(mask_bit | n as u8),
+        n if n <= 0xffff => {
+            frame.push(mask_bit | 126);
+            frame.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        n => {
+            frame.push(mask_bit | 127);
+            frame.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+    }
+    if masked {
+        let mut mask = [0u8; 4];
+        getrandom::fill(&mut mask).map_err(|e| io::Error::other(e.to_string()))?;
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
+    } else {
+        frame.extend_from_slice(payload);
+    }
+    Ok(frame)
+}
+
+/// The payload of a close frame: the code, then a reason of at most 123 bytes, cut at a character.
+fn close_payload(code: u16, reason: &str) -> Vec<u8> {
+    let mut payload = code.to_be_bytes().to_vec();
+    let mut end = reason.len().min(123);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    payload.extend_from_slice(&reason.as_bytes()[..end]);
+    payload
 }
 
 fn too_long(limit: usize) -> io::Error {

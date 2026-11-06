@@ -392,3 +392,153 @@ fn a_stream_that_ends_without_a_close_has_no_code() {
     assert_eq!(client.read_message().unwrap(), Next::Closed);
     assert_eq!(client.close_code(), None);
 }
+
+// ---------------------------------------------------------------------------------------------
+// A socket in two halves: one thread reads while others send.
+
+#[test]
+fn threads_that_send_while_another_reads_never_mix_their_frames() {
+    use std::collections::BTreeSet;
+    const THREADS: usize = 3;
+    const EACH: usize = 40;
+    const PINGS: usize = 25;
+
+    // A raw server: it pings all the while, and reads every frame the client sends, which are
+    // the three threads' texts and the reader's pongs.
+    let (address, server) = serve(|mut stream| {
+        read_head(&mut stream);
+        stream.write_all(SWITCHING).unwrap();
+        let mut pinger = stream.try_clone().unwrap();
+        let pings = std::thread::spawn(move || {
+            for _ in 0..PINGS {
+                pinger.write_all(&server_frame(0x9, b"ping")).unwrap();
+                std::thread::sleep(Duration::from_millis(3));
+            }
+        });
+        let (mut texts, mut pongs) = (BTreeSet::new(), 0);
+        while texts.len() < THREADS * EACH || pongs < PINGS {
+            let (first, payload) = client_frame(&mut stream);
+            match first {
+                0x81 => {
+                    let text = String::from_utf8(payload).expect("a text is text");
+                    let (head, filler) = text.split_once(':').expect("a head and a filler");
+                    assert!(filler.bytes().all(|b| b == b'z'), "a frame was mixed");
+                    assert_eq!(
+                        filler.len(),
+                        if head.ends_with("m0") || head.ends_with("m10") {
+                            70_000
+                        } else {
+                            50
+                        },
+                        "{head}"
+                    );
+                    assert!(texts.insert(head.to_owned()), "{head} came twice");
+                }
+                0x8A => {
+                    assert_eq!(payload, b"ping");
+                    pongs += 1;
+                }
+                other => panic!("a frame of {other:#x}"),
+            }
+        }
+        pings.join().unwrap();
+        stream.write_all(&server_frame(0x8, &[0x03, 0xe8])).unwrap();
+    });
+
+    let (reader, writer) = connect(address).unwrap().split().unwrap();
+    let mut reader = reader;
+    reader
+        .stream_mut()
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let reading = std::thread::spawn(move || {
+        loop {
+            match reader.read_message().unwrap() {
+                Next::Idle => {}
+                Next::Closed => return reader.close_code(),
+                Next::Text(_) => panic!("no text was sent to the client"),
+            }
+        }
+    });
+    let senders: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let writer = writer.clone();
+            std::thread::spawn(move || {
+                for i in 0..EACH {
+                    let len = if i == 0 || i == 10 { 70_000 } else { 50 };
+                    writer
+                        .send_text(&format!("t{t}-m{i}:{}", "z".repeat(len)))
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    for sender in senders {
+        sender.join().unwrap();
+    }
+    server.join().unwrap();
+    // The server's close reached the reader, which answered it through the writer's lock.
+    assert_eq!(reading.join().unwrap(), Some(1000));
+}
+
+#[test]
+fn the_halves_talk_to_the_crates_server_and_a_close_goes_out_of_the_writer() {
+    use meridian_websocket::close;
+    let (client, mut server) = crate_pair();
+    let (mut reader, writer) = client.split().unwrap();
+    assert_eq!(reader.protocol(), Some("meridian-extension"));
+    server.send_text("from the server").unwrap();
+    assert_eq!(
+        reader.read_message().unwrap(),
+        Next::Text("from the server".into())
+    );
+    writer.send_text("from the writer").unwrap();
+    assert_eq!(
+        server.read_message().unwrap(),
+        Next::Text("from the writer".into())
+    );
+    writer.close(close::POLICY, "wrong proof").unwrap();
+    assert_eq!(server.read_message().unwrap(), Next::Closed);
+    assert_eq!(server.close_code(), Some(close::POLICY));
+    // The server answered the close, which the reader reads.
+    assert_eq!(reader.read_message().unwrap(), Next::Closed);
+    assert_eq!(reader.close_code(), Some(close::POLICY));
+}
+
+#[test]
+fn a_shutdown_from_the_writer_ends_the_connection_for_both_the_reader_and_the_other_end() {
+    let (client, mut server) = crate_pair();
+    let (mut reader, writer) = client.split().unwrap();
+    reader
+        .stream_mut()
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let waiting = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        loop {
+            match reader.read_message() {
+                Ok(Next::Idle) if started.elapsed() < Duration::from_secs(5) => {}
+                other => return (started.elapsed(), other),
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(250));
+    writer.shutdown().unwrap();
+    // The reader is freed at its next read timeout at the latest (Windows does not wake a read that is
+    // already blocked), long before the five seconds it would otherwise wait.
+    let (waited, outcome) = waiting.join().unwrap();
+    assert!(waited < Duration::from_secs(3), "{waited:?}");
+    assert!(matches!(outcome, Ok(Next::Closed) | Err(_)), "{outcome:?}");
+    // The other end sees the stream end, and a send after the shutdown fails.
+    assert_eq!(server.read_message().unwrap(), Next::Closed);
+    assert!(writer.send_text("late").is_err());
+}
+
+#[test]
+fn a_text_over_the_limit_is_refused_by_the_writer_before_it_is_sent() {
+    let (client, _server) = crate_pair();
+    let (_reader, writer) = client.split().unwrap();
+    // The pair's limit is 256 KiB.
+    assert!(writer.send_text(&"x".repeat((256 << 10) + 1)).is_err());
+    assert!(writer.send_text(&"x".repeat(256 << 10)).is_ok());
+}
