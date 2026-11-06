@@ -21,6 +21,9 @@ serde = { version = "1.0.200", features = ["derive"] }
 serde_json = "1"
 # HMAC-SHA256 over every request and every reply.
 sha2 = "0.10"
+# The WebSocket under the management protocol (the code was this crate's own before the proxy
+# and the extensions needed it too).
+meridian-websocket.workspace = true
 
 [dev-dependencies]
 meridian-testkit.workspace = true

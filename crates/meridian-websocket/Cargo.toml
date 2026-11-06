@@ -1,0 +1,20 @@
+[package]
+name = "meridian-websocket"
+description = "The little of WebSocket (RFC 6455) that Meridian's own processes speak to each other: moved out of the sidecar so that the proxy and the extensions can share it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The key of the upgrade and the mask of every frame a client sends are random bytes. Already
+# used by the sidecar and the proxy: nothing new in the lock file.
+getrandom = "0.3"
+
+[dev-dependencies]
+# The frame-reading test feeds the reader mutated copies of valid frames.
+meridian-testkit.workspace = true
+
+[lints]
+workspace = true

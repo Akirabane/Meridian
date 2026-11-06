@@ -9,6 +9,7 @@ members = [
     "crates/meridian-proxy",
     "crates/meridian-rewrite",
     "crates/meridian-sidecar",
+    "crates/meridian-websocket",
     "crates/meridian-panel",
     "crates/meridian-handoff",
 ]
@@ -35,6 +36,7 @@ meridian-handoff = { path = "crates/meridian-handoff" }
 meridian-net = { path = "crates/meridian-net" }
 meridian-rewrite = { path = "crates/meridian-rewrite" }
 meridian-sidecar = { path = "crates/meridian-sidecar" }
+meridian-websocket = { path = "crates/meridian-websocket" }
 meridian-testkit = { path = "crates/meridian-testkit" }
 
 [workspace.lints.rust]

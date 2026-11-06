@@ -570,6 +570,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "meridian-testkit",
+ "meridian-websocket",
  "rustls",
  "serde",
  "serde_json",
@@ -582,6 +583,14 @@ version = "0.1.0"
 dependencies = [
  "horizon-protocol",
  "sha2",
+]
+
+[[package]]
+name = "meridian-websocket"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "meridian-testkit",
 ]
 
 [[package]]
