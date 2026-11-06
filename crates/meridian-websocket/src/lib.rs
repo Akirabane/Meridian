@@ -28,6 +28,16 @@ pub use upgrade::{Upgrade, accept_key};
 /// 256 KiB).
 pub const MAX_MESSAGE: usize = 4 << 20;
 
+/// Close codes (RFC 6455, 7.4.1) a side may end a connection with.
+pub mod close {
+    /// The connection ends as it should.
+    pub const NORMAL: u16 = 1000;
+    /// A message broke a rule of the protocol above (a proof that is wrong, for the extensions').
+    pub const POLICY: u16 = 1008;
+    /// A message was longer than this side takes.
+    pub const TOO_BIG: u16 = 1009;
+}
+
 /// The longest reply to the upgrade read before giving up.
 const MAX_HEAD: usize = 16 << 10;
 
@@ -86,6 +96,8 @@ pub struct Socket<T: Read + Write> {
     message: Option<Option<Vec<u8>>>,
     /// The longest message read or sent; a longer one is an error.
     max_message: usize,
+    /// The code of the close frame the other end sent, once it has.
+    close_code: Option<u16>,
 }
 
 impl<T: Read + Write> Socket<T> {
@@ -145,6 +157,7 @@ impl<T: Read + Write> Socket<T> {
             buf,
             message: None,
             max_message,
+            close_code: None,
         })
     }
 
@@ -177,6 +190,10 @@ impl<T: Read + Write> Socket<T> {
                         }
                     }
                     0x8 => {
+                        self.close_code = match frame.payload[..] {
+                            [high, low, ..] => Some(u16::from_be_bytes([high, low])),
+                            _ => None,
+                        };
                         let _ = self.send(0x8, &frame.payload);
                         return Ok(Next::Closed);
                     }
@@ -210,6 +227,25 @@ impl<T: Read + Write> Socket<T> {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// The code of the close frame the other end sent, once `read_message` has returned
+    /// [`Next::Closed`] on one. A stream that ended with no close frame has none.
+    pub fn close_code(&self) -> Option<u16> {
+        self.close_code
+    }
+
+    /// Ends the connection politely: a close frame with `code` (see [`close`]) and a `reason` of a few
+    /// words, at most 123 bytes of it, cut at a character. The other end is told, and answers with its
+    /// own close; the caller then drops the socket.
+    pub fn close(&mut self, code: u16, reason: &str) -> io::Result<()> {
+        let mut payload = code.to_be_bytes().to_vec();
+        let mut end = reason.len().min(123);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        payload.extend_from_slice(&reason.as_bytes()[..end]);
+        self.send(0x8, &payload)
     }
 
     /// A control frame: a client masks it, as RFC 6455 requires, and a server does not.
@@ -537,6 +573,38 @@ mod tests {
         assert_eq!(unmasked, b"are you there");
         // Then the close, echoing the code.
         assert_eq!(&sent[19..21], &[0x88, 0x80 | 2]);
+    }
+
+    #[test]
+    fn a_close_frame_has_its_code_and_a_reason_cut_at_a_character() {
+        let mut socket = socket(Vec::new());
+        let start = socket.stream.written.len();
+        socket.close(close::POLICY, "wrong proof").unwrap();
+        let (first, payload, _) = unmask(&socket.stream.written, start);
+        assert_eq!(first, 0x88);
+        assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+        assert_eq!(&payload[2..], b"wrong proof");
+
+        // 122 bytes of reason and a two-byte character after them: the 123 bytes that fit would cut
+        // the character in two, so it is left out.
+        let reason = format!("{}\u{e9}\u{e9}", "a".repeat(122));
+        let start = socket.stream.written.len();
+        socket.close(close::NORMAL, &reason).unwrap();
+        let (_, payload, _) = unmask(&socket.stream.written, start);
+        assert!(payload.len() <= 125);
+        assert_eq!(std::str::from_utf8(&payload[2..]).unwrap().len(), 122);
+    }
+
+    #[test]
+    fn the_code_of_the_close_that_was_read_is_kept() {
+        let mut socket = socket(frame(true, 0x8, &[0x03, 0xf0, b'x']));
+        assert_eq!(socket.close_code(), None);
+        assert_eq!(socket.read_message().unwrap(), Next::Closed);
+        assert_eq!(socket.close_code(), Some(1008));
+        // A close with no payload has no code.
+        let mut socket = self::socket(frame(true, 0x8, &[]));
+        assert_eq!(socket.read_message().unwrap(), Next::Closed);
+        assert_eq!(socket.close_code(), None);
     }
 
     #[test]

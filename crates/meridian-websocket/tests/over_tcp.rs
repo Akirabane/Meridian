@@ -341,3 +341,54 @@ fn a_raw_client_sees_unmasked_frames_and_the_server_closes_on_an_unmasked_one() 
     raw.write_all(&server_frame(0x1, b"no mask")).unwrap();
     server.join().unwrap();
 }
+
+/// The crate's server and its checked client, connected over a real socket: `(client, server)`.
+fn crate_pair() -> (Socket<TcpStream>, Socket<TcpStream>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        Socket::accept(stream, 256 << 10, |_| {
+            Ok(Some("meridian-extension".to_owned()))
+        })
+        .unwrap()
+    });
+    let (request, _) = request_for(address, "Sec-WebSocket-Protocol: meridian-extension\r\n");
+    let stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let client = Socket::open_checked(stream, &request, 256 << 10).unwrap();
+    (client, server.join().unwrap())
+}
+
+#[test]
+fn a_close_carries_its_code_to_the_other_end_from_either_side() {
+    use meridian_websocket::close;
+    // The server closes on a wrong proof: the client reads the code, and its echo carries it back.
+    let (mut client, mut server) = crate_pair();
+    assert_eq!(client.close_code(), None);
+    server.close(close::POLICY, "wrong proof").unwrap();
+    assert_eq!(client.read_message().unwrap(), Next::Closed);
+    assert_eq!(client.close_code(), Some(close::POLICY));
+    assert_eq!(server.read_message().unwrap(), Next::Closed);
+    assert_eq!(server.close_code(), Some(close::POLICY));
+
+    // The client closes on a message that is too big: the server reads that code.
+    let (mut client, mut server) = crate_pair();
+    client.close(close::TOO_BIG, "").unwrap();
+    assert_eq!(server.read_message().unwrap(), Next::Closed);
+    assert_eq!(server.close_code(), Some(close::TOO_BIG));
+    assert_eq!(client.read_message().unwrap(), Next::Closed);
+}
+
+#[test]
+fn a_stream_that_ends_without_a_close_has_no_code() {
+    let (mut client, server) = crate_pair();
+    drop(server);
+    assert_eq!(client.read_message().unwrap(), Next::Closed);
+    assert_eq!(client.close_code(), None);
+}

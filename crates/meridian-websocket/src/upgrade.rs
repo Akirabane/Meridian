@@ -229,6 +229,7 @@ impl<T: Read + Write> Socket<T> {
             buf,
             message: None,
             max_message,
+            close_code: None,
         })
     }
 }
