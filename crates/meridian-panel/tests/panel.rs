@@ -19,17 +19,42 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// A port nobody listens on right now, and not one of `taken`. The system can
-/// give the same free port twice in a row, so a bench's ports are kept apart here.
-fn free_port(taken: &mut Vec<u16>) -> u16 {
+/// The ports this test process hands out are `FIRST_PORT + slice * SLICE_SIZE + n`, outside the
+/// range where the system gives ports to outgoing connections (49152 and up on Windows, 32768
+/// and up on Linux). A port got by binding to port 0 and handed over later is a port that
+/// another test process, or the panel's own probe of a port, can be given in the meantime, and
+/// the stand-in then ends with "address in use" while its test waits for it to be online.
+const FIRST_PORT: u16 = 20_000;
+const SLICE_SIZE: u16 = 200;
+const SLICES: u16 = 50;
+/// A slice is this test process's while it holds the port `CLAIM_PORT + slice`, which the system
+/// refuses to anyone else: two test processes running at once never share a slice.
+const CLAIM_PORT: u16 = 19_000;
+
+/// The slice this process claimed, with the listener that holds the claim until it ends.
+fn slice() -> u16 {
+    static CLAIM: std::sync::OnceLock<(u16, TcpListener)> = std::sync::OnceLock::new();
+    CLAIM
+        .get_or_init(|| {
+            (0..SLICES)
+                .find_map(|slice| {
+                    TcpListener::bind(("127.0.0.1", CLAIM_PORT + slice))
+                        .ok()
+                        .map(|claim| (slice, claim))
+                })
+                .expect("a slice of ports is free for this test process")
+        })
+        .0
+}
+
+/// A port nobody listens on right now, from this process's slice, and not the same as one handed
+/// out before until the slice has been gone round.
+fn free_port() -> u16 {
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     loop {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        if !taken.contains(&port) {
-            taken.push(port);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % SLICE_SIZE;
+        let port = FIRST_PORT + slice() * SLICE_SIZE + n;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
     }
@@ -38,8 +63,7 @@ fn free_port(taken: &mut Vec<u16>) -> u16 {
 /// A bench of stand-ins in `dir`: `servers` servers and a proxy, each in its own
 /// folder, with a short stop timeout.
 fn bench(dir: &Path, servers: &[&str], extra_args: &[&str]) -> (Bench, Vec<u16>) {
-    let mut taken = Vec::new();
-    let mut text = format!("panel-port = {}\n", free_port(&mut taken));
+    let mut text = format!("panel-port = {}\n", free_port());
     let mut ports = Vec::new();
     // A name ending in "-sidecar" is a sidecar; the others are servers.
     let kind_of = |name: &str| {
@@ -54,7 +78,7 @@ fn bench(dir: &Path, servers: &[&str], extra_args: &[&str]) -> (Bench, Vec<u16>)
         .map(|s| (*s, kind_of(s)))
         .chain(std::iter::once(("proxy", "proxy")))
     {
-        let port = free_port(&mut taken);
+        let port = free_port();
         ports.push(port);
         std::fs::create_dir_all(dir.join(name)).unwrap();
         let mut args = vec![
@@ -81,7 +105,13 @@ fn accept_in(dir: &Path) {
     std::fs::write(dir.join("eula.txt"), "eula=true\n").unwrap();
 }
 
-fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+fn wait_for(what: &str, done: impl FnMut() -> bool) {
+    wait_for_with(what, done, String::new);
+}
+
+/// As [`wait_for`], and the failure says what the bench looked like: `context` is called when
+/// the wait is over.
+fn wait_for_with(what: &str, mut done: impl FnMut() -> bool, context: impl Fn() -> String) {
     let until = Instant::now() + Duration::from_secs(20);
     while Instant::now() < until {
         if done() {
@@ -89,13 +119,32 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    panic!("timed out waiting for {what}");
+    panic!("timed out waiting for {what}\n{}", context());
+}
+
+/// The state and the log of every process of `supervisor`, for a failure to explain itself.
+fn describe(supervisor: &Supervisor) -> String {
+    let mut text = String::new();
+    for snapshot in supervisor.snapshots() {
+        text.push_str(&format!(
+            "{} port {}: {:?}\n{}\n",
+            snapshot.name,
+            snapshot.port,
+            snapshot.state,
+            log_text(supervisor, &snapshot.name)
+        ));
+    }
+    text
 }
 
 /// Waits until the stand-in `name` is online and both its startup lines are in
 /// its log, so that nothing it prints at startup can arrive during a question.
 fn ready(supervisor: &Supervisor, name: &str) {
-    wait_for("online", || state_of(supervisor, name) == State::Online);
+    wait_for_with(
+        "online",
+        || state_of(supervisor, name) == State::Online,
+        || describe(supervisor),
+    );
     wait_for("the startup lines", || {
         let log = log_text(supervisor, name);
         log.contains("fake process ready") && log.contains("[stderr] fake process warning")
@@ -259,12 +308,16 @@ fn the_whole_bench_starts_servers_sidecars_proxy_and_stops_in_reverse() {
     }
     let supervisor = Supervisor::new(&bench);
     supervisor.start_all();
-    wait_for("all online", || {
-        supervisor
-            .snapshots()
-            .iter()
-            .all(|s| s.state == State::Online)
-    });
+    wait_for_with(
+        "all online",
+        || {
+            supervisor
+                .snapshots()
+                .iter()
+                .all(|s| s.state == State::Online)
+        },
+        || describe(&supervisor),
+    );
     // Each stage started once the one before answered: the longer a process has
     // run, the earlier it started.
     let uptime = |name: &str| {
