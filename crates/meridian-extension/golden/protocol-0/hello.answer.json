@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocol": 0,
+    "extension_nonce": "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+    "proof": "546198eb05cd02f2d5802912b4e6d9a00d173fdff4a1fd1a33434e875571bffd",
+    "name": "perms",
+    "version": "1.2.3",
+    "capabilities": ["decide.command", "commands"],
+    "commands": [
+      {"name": "party", "aliases": ["p"], "usage": "/party <invite|leave> [player]"}
+    ]
+  }
+}

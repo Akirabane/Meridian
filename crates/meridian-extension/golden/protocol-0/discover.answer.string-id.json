@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": "3f2c9d5e-8a41-4b7e-9c10-5d6e7f809a1b",
+  "result": {
+    "methods": [
+      {"name": "meridian:players/list"}
+    ]
+  }
+}

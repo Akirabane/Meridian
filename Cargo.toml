@@ -9,6 +9,7 @@ members = [
     "crates/meridian-proxy",
     "crates/meridian-rewrite",
     "crates/meridian-sidecar",
+    "crates/meridian-extension",
     "crates/meridian-hmac",
     "crates/meridian-websocket",
     "crates/meridian-panel",
@@ -37,6 +38,7 @@ meridian-handoff = { path = "crates/meridian-handoff" }
 meridian-net = { path = "crates/meridian-net" }
 meridian-rewrite = { path = "crates/meridian-rewrite" }
 meridian-sidecar = { path = "crates/meridian-sidecar" }
+meridian-extension = { path = "crates/meridian-extension" }
 meridian-hmac = { path = "crates/meridian-hmac" }
 meridian-websocket = { path = "crates/meridian-websocket" }
 meridian-testkit = { path = "crates/meridian-testkit" }

@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "meridian:hello/confirm",
+  "params": {
+    "proof": "3719587fddecaa8438f006341b2ae8c64e1bd94b1351f929e5da3870f6e1a226"
+  }
+}

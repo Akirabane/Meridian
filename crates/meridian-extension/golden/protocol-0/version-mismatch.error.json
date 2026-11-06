@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32600,
+    "message": "no protocol version in common",
+    "data": {"supported": [1, 2]}
+  }
+}
