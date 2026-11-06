@@ -82,6 +82,10 @@ part of every figure, and each page says them first.
   machine. It says what this proxy cost there on 5 November 2026; it is not the proxy's limit, it
   was not repeated for the reference configuration, and the bots and the proxy shared the machine.
   What the real client saw is in [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md).
+- [docs/MEMORY.md](docs/MEMORY.md): the memory the proxy kept after its players left. A load test
+  of cycles of 150 simulated players on a four-core VPS showed about 6 MiB kept for each cycle and
+  600 file descriptors never given back; the cause was a reference cycle in a session, fixed in
+  #119, and 13 cycles on the fixed build ended each at the same 7 descriptors and 16 to 17 MiB.
 - [docs/BENCH.md](docs/BENCH.md): the older latency benchmark, over the loopback, against a
   stand-in server.
 

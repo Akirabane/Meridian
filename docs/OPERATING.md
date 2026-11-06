@@ -970,6 +970,27 @@ stopping; it does not tell that a server is healthy, which `meridian_backend_sta
 
 The panel (section 9) shows each process's state, processor and memory use.
 
+### 8.2 Memory and file descriptors
+
+A proxy that runs for weeks must give back what a player took when the player leaves. Two readings tell
+whether it does:
+
+- **`meridian_sessions_alive`** (section 8.1) counts the sessions made and not freed yet. When players leave it
+  falls back to `meridian_players`, and with nobody connected it is 0. A figure that stays above
+  `meridian_players` for minutes is a session that nothing frees.
+- **The open file descriptors of the process.** On Linux, `ls /proc/$PID/fd | wc -l`, with the process id from
+  `systemctl show -p MainPID --value meridian`. A proxy at rest holds a handful (7 in the tests), whatever it served
+  before. Read it again after a busy spell: it must be back to what it was.
+
+A leak of the kind that was found shows in both at once: the descriptors rise by 4 for each player who joined and
+are never given back, `meridian_sessions_alive` stays above `meridian_players`, and the memory at rest rises with
+them (about 6 MiB for each 150 players in that test). The proxy then refuses connections with "Too many open files"
+when the descriptors reach the unit's `LimitNOFILE=65536` (section 5.7), long before the machine is out of memory.
+Alert on `meridian_sessions_alive` staying above `meridian_players`, not on the memory.
+
+How it was found, the figures before and after the fix (#119), and what the check did not cover are in
+[MEMORY.md](MEMORY.md).
+
 ## 9. The panel
 
 `meridian-panel` is a local tool. It starts and stops the processes listed in one bench file,
