@@ -1,0 +1,16 @@
+[package]
+name = "meridian-extension"
+description = "The wire of Meridian's extension protocol (protocol 0): the messages the proxy and an extension send each other, shared so that the two cannot drift."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Already used by the config, the panel and the sidecar (serde), and by the proxy (serde_json).
+serde = { version = "1.0.200", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

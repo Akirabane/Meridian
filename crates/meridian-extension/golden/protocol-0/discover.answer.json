@@ -1,0 +1,34 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "openrpc": "1.3.2",
+    "info": {"title": "Meridian extension protocol", "version": "0"},
+    "methods": [
+      {
+        "name": "meridian:hello",
+        "params": [
+          {"name": "protocol", "required": true, "schema": {"type": "array", "items": {"type": "integer"}}},
+          {"name": "proxy", "required": true, "schema": {"type": "string"}},
+          {"name": "proxy_nonce", "required": true, "schema": {"type": "string"}}
+        ]
+      },
+      {
+        "name": "meridian:hello/confirm",
+        "params": [{"name": "proof", "required": true, "schema": {"type": "string"}}]
+      },
+      {
+        "name": "meridian:decide/login",
+        "params": [{"name": "request", "required": true, "schema": {"type": "object"}}]
+      },
+      {
+        "name": "meridian:decide/command",
+        "params": [{"name": "request", "required": true, "schema": {"type": "object"}}]
+      },
+      {
+        "name": "meridian:command/run",
+        "params": [{"name": "request", "required": true, "schema": {"type": "object"}}]
+      }
+    ]
+  }
+}

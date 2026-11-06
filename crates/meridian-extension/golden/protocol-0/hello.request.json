@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "meridian:hello",
+  "params": {
+    "protocol": [0],
+    "proxy": "0.1.0",
+    "proxy_nonce": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+  }
+}
