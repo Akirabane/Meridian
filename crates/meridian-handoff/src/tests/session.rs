@@ -97,6 +97,62 @@ fn the_proxy_answers_its_commands() {
     run.join().unwrap().unwrap();
 }
 
+/// A session whose command hook holds a handle to it, as the proxy's hook does, with the
+/// player's and the backend's ends of its connections.
+fn hooked() -> (Session, SessionHandle, Connection, Connection) {
+    let (proxy_client, player) = pipe();
+    let (proxy_backend, source) = pipe();
+    player.reader.set_read_timeout(Some(WAIT)).unwrap();
+    source.reader.set_read_timeout(Some(WAIT)).unwrap();
+    let (session, handle) = Session::new(
+        ClientSession {
+            profile: profile(),
+            auth: AuthKind::Offline,
+            virtual_host: None,
+            connection: proxy_client,
+        },
+        BackendLink {
+            connection: proxy_backend,
+        },
+        "source",
+    )
+    .unwrap();
+    let hooked = handle.clone();
+    let session = session.with_commands(Arc::new(move |_: &str| {
+        hooked.tell("Hooked.");
+        None
+    }));
+    (session, handle, player, source)
+}
+
+/// Once a session is over and its handles are dropped, nothing of it is left, even when its
+/// command hook holds a handle to it.
+#[test]
+fn a_session_over_is_freed_though_its_hook_holds_a_handle() {
+    let (session, handle, mut player, mut source) = hooked();
+    let left = Arc::downgrade(&handle.0);
+    let run = std::thread::spawn(move || session.run());
+    send(&mut source, cfg::clientbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut player, cfg::clientbound::FINISH_CONFIGURATION).unwrap();
+    send(&mut player, cfg::serverbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut source, cfg::serverbound::FINISH_CONFIGURATION).unwrap();
+    drop(source);
+    run.join().unwrap().unwrap();
+    drop(handle);
+    wait_for(|| left.upgrade().is_none());
+}
+
+/// A session given its hook and never run, as a login refused as a duplicate leaves it, is
+/// freed when it is dropped.
+#[test]
+fn a_session_never_run_is_freed_though_its_hook_holds_a_handle() {
+    let (session, handle, _player, _source) = hooked();
+    let left = Arc::downgrade(&handle.0);
+    drop(session);
+    drop(handle);
+    assert!(left.upgrade().is_none());
+}
+
 /// A message for the player goes to their chat.
 #[test]
 fn the_player_is_told_in_the_chat() {
