@@ -21,6 +21,7 @@ mod upgrade;
 
 pub use split::{Half, Reader, Writer};
 use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 pub use upgrade::{Upgrade, accept_key};
 
 /// The longest message the sidecar takes, which is what [`Socket::open`] uses: a notification
@@ -42,6 +43,11 @@ pub mod close {
 
 /// The longest reply to the upgrade read before giving up.
 const MAX_HEAD: usize = 16 << 10;
+
+/// How long the head of an upgrade may take to arrive in all, when the caller does not say: a read that
+/// times out is counted by the stream, and a peer that sends a byte just before each timeout would hold
+/// the connection for as long as it likes. [`Socket::accept_within`] takes the time as a parameter.
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What [`Socket::read_message`] found.
 #[derive(Debug, PartialEq, Eq)]
@@ -100,6 +106,11 @@ pub struct Socket<T: Read + Write> {
     max_message: usize,
     /// The code of the close frame the other end sent, once it has.
     close_code: Option<u16>,
+    /// The longest a message may take to arrive once its first byte has: `None` waits as long as the
+    /// other end likes, which the stream's own read timeout does not limit (it counts each read).
+    message_timeout: Option<Duration>,
+    /// When the part of a message that is being gathered began to arrive.
+    partial_since: Option<Instant>,
 }
 
 impl<T: Read + Write> Socket<T> {
@@ -137,6 +148,7 @@ impl<T: Read + Write> Socket<T> {
         let end = read_head(
             &mut stream,
             &mut buf,
+            Instant::now() + HEAD_TIMEOUT,
             "the answer to the upgrade is too long",
             "the server closed the connection before it answered",
             "no answer to the upgrade",
@@ -160,7 +172,18 @@ impl<T: Read + Write> Socket<T> {
             message: None,
             max_message,
             close_code: None,
+            message_timeout: None,
+            partial_since: None,
         })
+    }
+
+    /// Limits how long a message may take to arrive, from its first byte to its last: a message that
+    /// is not whole by then is a [`io::ErrorKind::TimedOut`] error from [`Socket::read_message`], and
+    /// the caller ends the connection. The stream's read timeout alone does not do it, since it
+    /// counts each read and a peer that sends a byte before each one never trips it. Nothing is
+    /// limited by default, as the sidecar has always read; a peer that is not trusted needs this.
+    pub fn set_message_timeout(&mut self, timeout: Option<Duration>) {
+        self.message_timeout = timeout;
     }
 
     /// The subprotocol the other end chose, if it named one.
@@ -177,6 +200,7 @@ impl<T: Read + Write> Socket<T> {
     /// when the stream's read timeout passes with no whole message.
     pub fn read_message(&mut self) -> io::Result<Next> {
         loop {
+            self.check_message_time()?;
             if let Some(frame) = self.take_frame()? {
                 match frame.opcode {
                     // Text starts a message, binary starts one that is dropped, and a
@@ -197,6 +221,7 @@ impl<T: Read + Write> Socket<T> {
                             _ => None,
                         };
                         let _ = self.send(0x8, &frame.payload);
+                        self.partial_since = None;
                         return Ok(Next::Closed);
                     }
                     0x9 => self.send(0xA, &frame.payload)?,
@@ -207,6 +232,8 @@ impl<T: Read + Write> Socket<T> {
                     && let Some(Some(text)) = self.message.take()
                 {
                     // A message that is not UTF-8 is not one of this protocol's.
+                    // The next message, if it has begun, is timed from now.
+                    self.partial_since = None;
                     if let Ok(text) = String::from_utf8(text) {
                         return Ok(Next::Text(text));
                     }
@@ -269,6 +296,27 @@ impl<T: Read + Write> Socket<T> {
     }
 
     /// The first whole frame in the buffer, taken out of it.
+    /// Whether part of a message has arrived and the rest has not.
+    fn in_progress(&self) -> bool {
+        !self.buf.is_empty() || self.message.is_some()
+    }
+
+    /// Fails if the message that is arriving has taken longer than the limit.
+    fn check_message_time(&mut self) -> io::Result<()> {
+        if !self.in_progress() {
+            self.partial_since = None;
+            return Ok(());
+        }
+        let since = *self.partial_since.get_or_insert_with(Instant::now);
+        match self.message_timeout {
+            Some(limit) if since.elapsed() > limit => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "a WebSocket message took too long to arrive",
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn take_frame(&mut self) -> io::Result<Option<Frame>> {
         let max = self.max_message;
         let buf = &self.buf;
@@ -392,6 +440,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn read_head<T: Read>(
     stream: &mut T,
     buf: &mut Vec<u8>,
+    deadline: Instant,
     too_long: &str,
     closed: &str,
     failed: &str,
@@ -403,6 +452,10 @@ fn read_head<T: Read>(
         }
         if buf.len() > MAX_HEAD {
             return Err(too_long.into());
+        }
+        // A read that blocks is cut by the stream's timeout; this is the whole head's.
+        if Instant::now() >= deadline {
+            return Err(format!("{failed}: the head took too long to arrive"));
         }
         match stream.read(&mut chunk) {
             Ok(0) => return Err(closed.into()),

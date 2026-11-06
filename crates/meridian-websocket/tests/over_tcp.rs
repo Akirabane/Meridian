@@ -542,3 +542,112 @@ fn a_text_over_the_limit_is_refused_by_the_writer_before_it_is_sent() {
     assert!(writer.send_text(&"x".repeat((256 << 10) + 1)).is_err());
     assert!(writer.send_text(&"x".repeat(256 << 10)).is_ok());
 }
+
+// A peer that sends a byte before the stream's read timeout, again and again, never trips it: it counts
+// each read. The time of a whole message, and of the whole head of an upgrade, is the crate's to limit.
+
+#[test]
+fn a_message_that_drips_in_is_cut_off_at_its_timeout_and_without_one_it_is_waited_for() {
+    use std::time::Instant;
+    for limit in [Some(Duration::from_millis(300)), None] {
+        let (mut client, mut server) = crate_pair();
+        server
+            .stream_mut()
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        server.set_message_timeout(limit);
+        // The client announces a frame of 60000 bytes, then sends one byte every 20 ms.
+        let mut raw = client.stream_mut().try_clone().unwrap();
+        let drip = std::thread::spawn(move || {
+            let mut head = vec![0x81, 0x80 | 126];
+            head.extend_from_slice(&60_000u16.to_be_bytes());
+            head.extend_from_slice(&[0, 0, 0, 0]);
+            raw.write_all(&head).unwrap();
+            for _ in 0..80 {
+                if raw.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let began = Instant::now();
+        let outcome = loop {
+            match server.read_message() {
+                Ok(Next::Idle) if began.elapsed() < Duration::from_millis(1200) => {}
+                other => break other,
+            }
+        };
+        match limit {
+            Some(_) => {
+                let error = outcome.expect_err("the message is cut off");
+                assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+                assert!(
+                    began.elapsed() < Duration::from_millis(900),
+                    "{:?}",
+                    began.elapsed()
+                );
+            }
+            // Without a limit it is still being waited for after more than a second: the defect.
+            None => assert!(matches!(outcome, Ok(Next::Idle)), "still waiting"),
+        }
+        drop(server);
+        drop(client);
+        drip.join().unwrap();
+    }
+}
+
+#[test]
+fn a_message_that_comes_whole_in_time_is_read_and_the_next_is_timed_from_its_own_start() {
+    let (mut client, mut server) = crate_pair();
+    server.set_message_timeout(Some(Duration::from_millis(300)));
+    server
+        .stream_mut()
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .unwrap();
+    // A quiet connection is idle, not cut off: nothing of a message has arrived.
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(matches!(server.read_message(), Ok(Next::Idle)));
+    // Messages with long pauses between them are each read.
+    for text in ["first", "second", "third"] {
+        client.send_text(text).unwrap();
+        let got = loop {
+            match server.read_message().unwrap() {
+                Next::Idle => {}
+                other => break other,
+            }
+        };
+        assert!(matches!(got, Next::Text(t) if t == text));
+        std::thread::sleep(Duration::from_millis(350));
+    }
+}
+
+#[test]
+fn a_head_that_drips_in_is_cut_off_at_the_head_timeout() {
+    use std::time::Instant;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let began = Instant::now();
+        let result =
+            Socket::accept_within(stream, 1 << 20, Duration::from_millis(300), |_| Ok(None));
+        (result.err(), began.elapsed())
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    // One byte every 40 ms, and never the blank line: each read finds a byte before its timeout.
+    for byte in
+        b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    {
+        if client.write_all(&[*byte]).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let (error, took) = server.join().unwrap();
+    let error = error.expect("the head is cut off");
+    assert!(error.contains("took too long"), "{error}");
+    assert!(took < Duration::from_millis(900), "{took:?}");
+}
