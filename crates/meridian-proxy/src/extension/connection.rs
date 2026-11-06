@@ -362,8 +362,33 @@ fn farewell(socket: &mut Socket<TcpStream>, code: u16) {
     }
     let until = Instant::now() + FAREWELL;
     while Instant::now() < until {
-        if !matches!(socket.read_message(), Ok(Next::Idle | Next::Text(_))) {
-            break;
+        match socket.read_message() {
+            Ok(Next::Idle | Next::Text(_)) => {}
+            // A message that was too long was refused from its header: its bytes are still to be read,
+            // and `read_message` would refuse it again.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                discard(socket.stream_mut(), until);
+                break;
+            }
+            _ => break,
+        }
+    }
+}
+
+/// Reads and drops what the other end sends until it closes the connection or `until`, so that the
+/// socket is not closed over unread bytes, which would reset it and could take our close frame away.
+fn discard(stream: &mut impl io::Read, until: Instant) {
+    let mut sink = [0u8; 4096];
+    while Instant::now() < until {
+        match stream.read(&mut sink) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
         }
     }
 }
@@ -383,13 +408,9 @@ fn serve(
             Err(e) => {
                 if e.kind() == io::ErrorKind::InvalidData {
                     let _ = writer.close(close::TOO_BIG, "");
-                    // Wait a moment for the other end's close, as `farewell` does.
-                    let until = Instant::now() + FAREWELL;
-                    while Instant::now() < until {
-                        if !matches!(reader.read_message(), Ok(Next::Idle | Next::Text(_))) {
-                            break;
-                        }
-                    }
+                    // Read what is left of the message, and wait a moment for the other end's close, as
+                    // `farewell` does.
+                    discard(reader.stream_mut(), Instant::now() + FAREWELL);
                 }
                 return Err(format!("cannot read: {e}"));
             }
