@@ -75,7 +75,8 @@ part of every figure, and each page says them first.
   small Debian laptop, across a home network whose link negotiated 100 Mbit/s. The worlds sent
   at each join very probably filled that link, so the login times are the link's. It was one run,
   not repeated, and it lists defects it did not explain (the metrics page missing its deadline
-  during joins, memory not given back).
+  during joins, memory not given back; the memory was a leak, since found and fixed, see
+  [docs/MEMORY.md](docs/MEMORY.md)).
 - [docs/LOAD-VPS-250.md](docs/LOAD-VPS-250.md): 250 bots and a real client on a proxy on a VPS. One
   valid run of 250 bots, in 5 waves of 50, with one real client in the game, on a shared four-core
   VPS in Warsaw where the proxy was held to two cores, against synthetic servers on the same
