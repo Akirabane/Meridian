@@ -1,7 +1,9 @@
 //! A player whose backend is lost without the proxy having wanted it is moved to a
 //! replacement, and is not otherwise.
 use super::*;
+use crate::Notice;
 use horizon_protocol::{packets::configuration::Disconnect, text};
+use horizon_world::nbt::Tag;
 use std::sync::mpsc;
 
 const SAYING: &str = "You were moved";
@@ -18,6 +20,11 @@ struct Moved {
 }
 
 fn moved(fallback: Fallback, joined: bool) -> Moved {
+    moved_noticing(fallback, joined, |_| SAYING.into())
+}
+
+/// As [`moved`], with the notice the replacement gives for a loss.
+fn moved_noticing(fallback: Fallback, joined: bool, notice: fn(&Loss) -> Notice) -> Moved {
     let (proxy_client, mut player) = pipe();
     let (proxy_source, mut source) = pipe();
     let (proxy_second, second) = pipe();
@@ -45,10 +52,10 @@ fn moved(fallback: Fallback, joined: bool) -> Moved {
                 Some(link) => Ok(Replacement {
                     link,
                     backend: "fallback".into(),
-                    notice: Some(SAYING.into()),
+                    notice: Some(notice(loss)),
                     keep: None,
                 }),
-                None => Err("No other server could take you".to_owned()),
+                None => Err("No other server could take you".into()),
             }
         };
         session.run_with(fallback, &mut replace)
@@ -80,6 +87,13 @@ fn kick(source: &mut Connection, reason: &str) {
         reason: text::literal(reason),
     });
     source.send(&packet.encode()).unwrap();
+}
+
+fn decode_disconnect(id: i32, payload: &[u8]) -> Disconnect {
+    match decode(id, payload) {
+        C::Disconnect(d) => d,
+        other => panic!("{other:?}"),
+    }
 }
 
 fn reason_of(id: i32, payload: &[u8]) -> String {
@@ -176,6 +190,101 @@ fn a_kick_moves_the_player_and_is_not_shown_as_a_disconnect() {
         losses.recv().unwrap(),
         Loss::Kicked("You have been kicked".into())
     );
+    drop(second);
+    drop(source);
+    let _ = run.join().unwrap();
+}
+
+/// The reason of a kick that is a translation key reaches the client as a translation, in the
+/// chat line that says why it was moved: the client has the words, the proxy does not.
+#[test]
+fn a_translated_reason_reaches_the_client_to_translate() {
+    let Moved {
+        run,
+        mut player,
+        mut source,
+        mut second,
+        losses,
+        ..
+    } = moved_noticing(BOTH, true, |loss| match loss {
+        Loss::Kicked(reason) => Notice::around(
+            "You were disconnected from source: ",
+            reason,
+            ". You were moved to fallback.",
+        ),
+        Loss::Crashed(_) => SAYING.into(),
+    });
+    let shutdown = "multiplayer.disconnect.server_shutdown";
+    // The server's reason carries a click that would run a command as the player.
+    let reason = Tag::compound([
+        ("translate", text::literal(shutdown)),
+        (
+            "clickEvent",
+            Tag::compound([
+                ("action", text::literal("run_command")),
+                ("value", text::literal("/op Mallory")),
+            ]),
+        ),
+    ]);
+    source
+        .send(&play::Clientbound::Disconnect(Disconnect { reason }).encode())
+        .unwrap();
+    arrive(&mut player, &mut second);
+    let (id, payload) = player.recv().unwrap();
+    let language = text::Language::from([(shutdown.to_owned(), "Server closed".to_owned())]);
+    match decode(id, &payload) {
+        C::SystemChat(chat) => {
+            // The client's own words, not the key.
+            assert_eq!(
+                text::plain(&chat.content, &language),
+                "You were disconnected from source: Server closed. You were moved to fallback."
+            );
+            // The click did not follow the player to the server they were moved to.
+            let keys = crate::reason::keys_of(&chat.content);
+            assert!(!keys.contains("clickEvent"), "{keys:?}");
+            // And a client without the key shows the key, as any client would.
+            assert_eq!(
+                text::plain(&chat.content, &Default::default()),
+                format!(
+                    "You were disconnected from source: {shutdown}. You were moved to fallback."
+                )
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(losses.recv().unwrap(), Loss::Kicked(_)));
+    drop(second);
+    drop(source);
+    let _ = run.join().unwrap();
+}
+
+/// A kick that is held back (the proxy ended the session itself) is shown to the player as the
+/// server sent it, a translation key still a key for the game to translate.
+#[test]
+fn a_kick_held_back_is_shown_as_the_server_sent_it() {
+    use crate::session::{End, Lost};
+    use std::sync::atomic::Ordering;
+    let Moved {
+        handle,
+        run,
+        mut player,
+        source,
+        second,
+        ..
+    } = moved(BOTH, true);
+    handle.0.closing.store(true, Ordering::SeqCst);
+    let shutdown = "multiplayer.disconnect.server_shutdown";
+    let reason = crate::Reason::of(&Disconnect {
+        reason: text::translatable(shutdown, &[]),
+    });
+    let mut never = |_: &Loss| Err(Notice::from("not asked"));
+    let lost = crate::session::lost(&handle.0, End::Kicked(reason), &mut never);
+    assert!(matches!(lost, Lost::Over(End::Closed)));
+    let (id, payload) = player.recv().unwrap();
+    assert_eq!(id, pc::DISCONNECT);
+    let language = text::Language::from([(shutdown.to_owned(), "Server closed".to_owned())]);
+    let Disconnect { reason } = decode_disconnect(id, &payload);
+    assert_eq!(text::plain(&reason, &language), "Server closed");
     drop(second);
     drop(source);
     let _ = run.join().unwrap();

@@ -505,6 +505,7 @@ name = "meridian-handoff"
 version = "0.1.0"
 dependencies = [
  "horizon-protocol",
+ "horizon-world",
  "meridian-ghost",
  "meridian-net",
  "meridian-rewrite",

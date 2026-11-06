@@ -139,6 +139,7 @@
 mod configure;
 mod control;
 mod prepare;
+mod reason;
 mod session;
 mod switch;
 
@@ -147,7 +148,8 @@ pub use control::{
     Arrival, Exported, Imported, Outcome, PlayerControl, Record, record_dimension, record_handover,
     uuid_text,
 };
-pub use session::{Fallback, Loss, Replacement, Session, SessionHandle};
+pub use reason::{Notice, Reason};
+pub use session::{Fallback, Loss, Replacement, Session, SessionHandle, sessions_alive};
 pub use switch::{
     After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,
 };

@@ -359,6 +359,27 @@ mod tests {
     use std::io::Read;
     use std::sync::atomic::AtomicBool;
 
+    /// Whether a read error is how a connection that the other end closed shows. The orderly end is a read of 0
+    /// bytes; a close with data it never read makes the system reset the connection, which a read reports as a
+    /// reset, and, on Windows, as a connection "aborted by the host" (`WSAECONNABORTED`) when the reset
+    /// arrives while the client is still writing: the same event, whichever of them the test is given.
+    fn is_a_close(e: &io::Error) -> bool {
+        matches!(
+            e.kind(),
+            io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+        )
+    }
+
+    /// Whether `read_to_end` on a connection the proxy closed ended as a close does.
+    fn ended_as_a_close(read: &io::Result<usize>) -> bool {
+        match read {
+            Ok(n) => *n == 0,
+            Err(e) => is_a_close(e),
+        }
+    }
+
     fn proxy() -> Arc<Proxy> {
         proxy_with(Config::default())
     }
@@ -439,13 +460,7 @@ mod tests {
             .unwrap();
         let mut rest = Vec::new();
         let closed = second.read_to_end(&mut rest);
-        assert!(
-            matches!(closed, Ok(0))
-                || closed
-                    .as_ref()
-                    .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
-            "{closed:?}"
-        );
+        assert!(ended_as_a_close(&closed), "{closed:?}");
 
         // Both were accepted; the second was closed for opening too many.
         let page = crate::metrics::render(&proxy);
@@ -478,10 +493,7 @@ meridian_connections_throttled_total 1
             .unwrap();
         let mut rest = Vec::new();
         let closed = (&*stream).read_to_end(&mut rest);
-        matches!(closed, Ok(0))
-            || closed
-                .as_ref()
-                .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset)
+        ended_as_a_close(&closed)
     }
 
     /// Whether the proxy keeps `stream` open, waiting for its handshake.
@@ -817,13 +829,7 @@ meridian_connections_throttled_total 1
             let _ = stream.write_all(V1_FROM_203);
             let mut rest = Vec::new();
             let closed = stream.read_to_end(&mut rest);
-            assert!(
-                matches!(closed, Ok(0))
-                    || closed
-                        .as_ref()
-                        .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
-                "{closed:?}"
-            );
+            assert!(ended_as_a_close(&closed), "{closed:?}");
         });
         assert!(seen.lock().unwrap().is_empty());
     }
@@ -856,13 +862,7 @@ meridian_connections_throttled_total 1
                 stream.write_all(bad).unwrap();
                 let mut rest = Vec::new();
                 let closed = stream.read_to_end(&mut rest);
-                assert!(
-                    matches!(closed, Ok(0))
-                        || closed
-                            .as_ref()
-                            .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
-                    "{closed:?}"
-                );
+                assert!(ended_as_a_close(&closed), "{closed:?}");
                 // Nothing is written back to a balancer.
                 assert!(rest.is_empty(), "{rest:?}");
             });
@@ -885,13 +885,7 @@ meridian_connections_throttled_total 1
             let started = Instant::now();
             let mut rest = Vec::new();
             let closed = stream.read_to_end(&mut rest);
-            assert!(
-                matches!(closed, Ok(0))
-                    || closed
-                        .as_ref()
-                        .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset),
-                "{closed:?}"
-            );
+            assert!(ended_as_a_close(&closed), "{closed:?}");
             assert!(started.elapsed() < Duration::from_secs(5));
         });
         assert!(seen.lock().unwrap().is_empty());
@@ -923,7 +917,7 @@ meridian_connections_throttled_total 1
                 let mut byte = [0u8; 1];
                 match stream.read(&mut byte) {
                     Ok(0) => "closed",
-                    Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "closed",
+                    Err(e) if is_a_close(&e) => "closed",
                     Err(e)
                         if matches!(
                             e.kind(),

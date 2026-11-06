@@ -8,7 +8,8 @@ The goal is a proxy that does what proxies such as Velocity or BungeeCord do, bu
 for Horizon only, and that can move a player from one server to another without a
 loading screen. Today Meridian is a working relay with routing, login modes, load
 balancing and a console; the seamless switch is built and tested against fake servers,
-and needs a Horizon build that is not released yet. The tables below say where each part
+and needs a Horizon build that has the transfer module (merged into Horizon's main on
+2026-11-05, not yet run against a real server). The tables below say where each part
 stands. To run it, start with the [operating guide](docs/OPERATING.md).
 
 ## Status
@@ -37,8 +38,8 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Reload | Done | Without a restart; `listen` needs a restart |
 | In-game commands | Done | `/server`, `/hub`, `/lobby`, `/play`; and `/send`, `/glist`, `/alert` for the players who have the permission; moving starts a seamless switch |
 | Load balancing | Done | Servers with a `role` are filled in order, with caps and a drain ([docs/LOAD-BALANCING.md](docs/LOAD-BALANCING.md)). Off by default |
-| Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests, including a scripted player that types `/server east` through the real proxy; no run on real servers is recorded yet ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for the first). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were still open on 2026-11-04 |
-| A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere, but the move has to start BEFORE the stop: `drain <server> --move` or the panel's `[drain-before-stop]`. `[restart] evacuate` runs when the server announces its stop, and a Horizon `stop` drops its players about 78 ms after announcing it (measured on real servers), too soon for a move: the fallback takes over ([docs/RESTART.md](docs/RESTART.md), [docs/VALIDATION.md](docs/VALIDATION.md)). A server that stops without warning, or kicks a player, no longer drops them: they are moved to another server with a loading screen (`[fallback]`, [OPERATING.md](docs/OPERATING.md) section 5.11). Run against three real Horizon servers with scripted players, not with a real client |
+| Moving a player to another server | In progress | The seamless switch works against the fake servers of the tests, including a scripted player that types `/server east` through the real proxy; moves with a real client between three real servers, on one machine, are described in a public comment and were not repeated or recorded with a sheet ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 2); none was run over a real network ([docs/TESTING-FORK.md](docs/TESTING-FORK.md) is the procedure for a recorded run). It needs a sidecar next to each server and Horizon servers with the transfer module, whose pull requests were merged into Horizon's main on 2026-11-05 (the Nightly of that day, `66f3981`, was built before the last four) |
+| A server that stops while players are on it | In progress | A planned restart drains the server and can send its players elsewhere, but the move has to start BEFORE the stop: `drain <server> --move` or the panel's `[drain-before-stop]`. `[restart] evacuate` runs when the server announces its stop, and a Horizon `stop` drops its players about 78 ms after announcing it (measured on real servers), too soon for a move: the fallback takes over ([docs/RESTART.md](docs/RESTART.md), [docs/VALIDATION.md](docs/VALIDATION.md)). A server that stops without warning, or kicks a player, no longer drops them: they are moved to another server with a loading screen (`[fallback]`, [OPERATING.md](docs/OPERATING.md) section 5.11). Run against three real Horizon servers with scripted players, and with a real client over the Internet, once each for a killed server, a kick and a clean stop: the player stayed in the game and saw a brief `Reconfiguring...` screen of 0.25 to 0.35 s ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 3) |
 | Pass-through of a backend's status | Planned | The proxy shows its own |
 | PROXY protocol (version 1 and 2) from a load balancer | Done | `[proxy-protocol]`, read only from the addresses you list; off by default ([docs/CONFIG.md](docs/CONFIG.md)) |
 | Bans and whitelist | Done | By name, unique id, address or range; a file of their own, read at the start and at `reload` ([docs/OPERATING.md](docs/OPERATING.md), section 5.8) |
@@ -51,7 +52,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | --- | --- | --- |
 | Model of what the client holds ("the ghost") | Done | The `meridian-ghost` crate, used by the switch (`meridian-handoff`) |
 | Rewriting of ids between servers | Done | The `meridian-rewrite` crate, used by the switch |
-| Moving the player's state between servers | Built, waiting on Horizon | The proxy and the sidecar ask Horizon's `player-*` requests ([docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md)); Horizon's pull requests for them were open on 2026-11-04 |
+| Moving the player's state between servers | Built, not yet run on a real Horizon | The proxy and the sidecar ask Horizon's `player-*` requests ([docs/STATE-TRANSFER.md](docs/STATE-TRANSFER.md)); Horizon's pull requests for them (#8700, #8709, #8716, #8730, #8735, #8742) were merged into its main on 2026-11-05, and the Nightly of that day (`66f3981`) was built before the last four |
 | The switch itself | Built, tested on fakes | `switch`, `send`, `/server`, `/hub`, `/lobby`. Not yet run on real servers |
 | Proof that there is no loading screen | Planned | Milestones J4 and J5 of the design: two real servers with different maps |
 | Extensions | Specified, not built | A separate program the proxy asks at login, for a proxy command and for the choice of server, over a local socket; Rust SDK only ([docs/EXTENSIONS.md](docs/EXTENSIONS.md)) |
@@ -74,11 +75,18 @@ part of every figure, and each page says them first.
   at each join very probably filled that link, so the login times are the link's. It was one run,
   not repeated, and it lists defects it did not explain (the metrics page missing its deadline
   during joins, memory not given back).
+- [docs/LOAD-VPS-250.md](docs/LOAD-VPS-250.md): 250 bots and a real client on a proxy on a VPS. One
+  valid run of 250 bots, in 5 waves of 50, with one real client in the game, on a shared four-core
+  VPS in Warsaw where the proxy was held to two cores, against synthetic servers on the same
+  machine. It says what this proxy cost there on 5 November 2026; it is not the proxy's limit, it
+  was not repeated for the reference configuration, and the bots and the proxy shared the machine.
+  What the real client saw is in [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md).
 - [docs/BENCH.md](docs/BENCH.md): the older latency benchmark, over the loopback, against a
   stand-in server.
 
-No figure comes from a real Horizon server under load (the run of VALIDATION.md measured delays, not a load), real players, a real client or a network
-beyond those two machines, and none is a comparison with another proxy.
+No figure comes from a real Horizon server under load (the run of VALIDATION.md measured delays,
+not a load) or from several real players, and none is a comparison with another proxy. The figures
+with a real client come from one player ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md)).
 
 ### Not verified on a real Horizon
 
@@ -95,8 +103,10 @@ it, so `[restart] evacuate` cannot move anyone ahead of it, and one defect in th
 Still not verified on a real Horizon:
 
 - the seamless switch (`switch`, `send`, `/server`, `/hub`, `drain --move`) and the state
-  transfer behind it;
-- anything over a real network, with more than two clients, with a Horizon build other than
+  transfer behind it, in a recorded run: a public comment describes moves with a real client on
+  one machine, not repeated ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 2);
+- anything over a real network other than the runs of
+  [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md) (one real client over the Internet), with more than two clients, with a Horizon build other than
   `02f05c1`, or with a release build of the fixed proxy;
 - `[restart] evacuate = false` with a player on the server that stops, and a ban of a name a
   server cannot resolve;
@@ -271,10 +281,12 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 
 - Moving players between servers needs Horizon servers with the transfer module and a
   sidecar for each; without them a move answers which step failed and the player stays.
-  The switch has not been tried on a real network.
+  The seamless switch was run with a real client on one machine only, as a public comment
+  records ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 2), not over a real network.
 - A player whose server stops without warning, or kicks them, is moved to another server as a
-  new arrival, with a loading screen and without what the lost server had not saved; this has not
-  run with a real client. Only a planned restart moves them without a loading screen
+  new arrival, with a loading screen and without what the lost server had not saved; this ran with a real
+  client over the Internet, once each for a killed server, a kick and a clean stop
+  ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 3). Only a planned restart moves them without a loading screen
   ([docs/RESTART.md](docs/RESTART.md)).
 - The console is standard input: there is no remote console. On Unix, SIGTERM stops the
   proxy and SIGHUP reloads it; on Windows only Ctrl+C stops it.
@@ -282,11 +294,12 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   `127.0.0.1` ([docs/OPERATING.md](docs/OPERATING.md), sections 11 and 12).
 - The proxy has been run against a real Horizon server with one scripted player at a
   time, in a debug build ([docs/RUNNING.md](docs/RUNNING.md)). Many players have been
-  tried only against synthetic servers with synthetic bots, on one machine and once across a
-  home network (see Measures). The ban sync, the announcement of a stop and the fallback were
+  tried only against synthetic servers with synthetic bots, on one machine, once across a
+  home network and once on a rented server (see Measures). The ban sync, the announcement of a stop and the fallback were
   run against three real servers with scripted players ([docs/VALIDATION.md](docs/VALIDATION.md)).
-  The seamless movement through the proxy against a real server and long sessions have not been
-  tried.
+  The seamless movement through the proxy against a real server was run with a real client on one
+  machine, as a public comment records, and not repeated
+  ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md)); long sessions have not been tried.
 - The queue holds the login only: the player is told nothing about their place while they
   wait, and the wait is at most 20 seconds, because the client gives up after 30 seconds of
   silence ([docs/OPERATING.md](docs/OPERATING.md), section 5.10).
@@ -318,8 +331,11 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 - [docs/COMPAT.md](docs/COMPAT.md): the Horizon commit Meridian is pinned to, the nightly
   build against Horizon's head, and how to move the pin.
 - [docs/BASELINE.md](docs/BASELINE.md), [docs/LOAD-REMOTE.md](docs/LOAD-REMOTE.md),
-  [docs/LOAD-LAN-250.md](docs/LOAD-LAN-250.md), [docs/BENCH.md](docs/BENCH.md): the load
-  measurements and their limits (see Measures).
+  [docs/LOAD-LAN-250.md](docs/LOAD-LAN-250.md), [docs/LOAD-VPS-250.md](docs/LOAD-VPS-250.md),
+  [docs/BENCH.md](docs/BENCH.md): the load measurements and their limits (see Measures).
+- [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md): the runs made with a real Horizon client:
+  one over the Internet to a proxy on a rented server with 250 bots, the fallback of a player whose
+  server is killed, kicks them or stops, and earlier moves between servers on one machine.
 - [docs/TESTING-FORK.md](docs/TESTING-FORK.md): the procedure for trying the seamless switch
   on real servers with the Horizon fork.
 - [docs/VALIDATION.md](docs/VALIDATION.md): running the ban sync, the evacuation and the stop

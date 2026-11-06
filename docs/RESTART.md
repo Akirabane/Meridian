@@ -54,7 +54,12 @@ nothing (a player on a backend that hangs rather than stops is still on a live c
 - `observe(backend, answered, now)` is called after every round of the poller
   (`restart::observe_round`), which also puts the `[restart]` table in force, so a reload
   applies to the next round. `silent-rounds` rounds without an answer is
-  `Cause::Unreachable`.
+  `Cause::Unreachable`. A round starts every `probe-interval-seconds`, counted from the start
+  of the last one (`status::spawn`), so the backend counts as going down between
+  (`silent-rounds` − 1) and `silent-rounds` intervals after it stops, plus the time the last
+  reading takes to fail: next to nothing on Linux, about 2 s on Windows, where a refused
+  connection is tried again, up to `sidecar-timeout-ms` for a machine that does not answer. A
+  round that lasts longer than the interval is followed at once by the next.
 - A restart ends, and the backend is offered again, when it answers after having gone quiet,
   when `server/started` arrives, or when it answered for a whole `grace-seconds` after the
   notice without ever going quiet (a restart quicker than a round, or a stop that did not

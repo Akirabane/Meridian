@@ -381,6 +381,73 @@ fn the_polling_thread_asks_no_one_while_balancing_is_off() {
     thread.join().unwrap();
 }
 
+/// A round of readings starts every `probe-interval-seconds`, however long the last one took. A
+/// sidecar that takes the connection and never answers holds each round for the whole timeout;
+/// the pause must not come on top of it, or each reading of a dead server comes later than the
+/// interval says, and the detector of restarts decides later.
+#[test]
+fn the_rounds_start_at_the_interval_however_long_a_silent_sidecar_holds_them() {
+    // Connections wait in the listener's backlog, are taken, and are never answered.
+    let silent = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = silent.local_addr().unwrap().to_string();
+    let folder = std::env::temp_dir().join(format!(
+        "meridian-status-silent-{}-{}",
+        std::process::id(),
+        address.replace([':', '.'], "-")
+    ));
+    std::fs::create_dir_all(&folder).unwrap();
+    let secret_file = folder.join("lobby.key");
+    std::fs::write(&secret_file, SECRET).unwrap();
+    let mut config = Config {
+        sidecars: vec![Sidecar {
+            backend: "lobby".into(),
+            address,
+            secret_file,
+            notices: false,
+        }],
+        balanced: vec![BalancedServer {
+            backend: "lobby".into(),
+            role: Role::Lobby,
+            soft_cap: 5,
+            hard_cap: 5,
+        }],
+        sidecar_timeout_ms: 500,
+        ..Config::default()
+    };
+    config.balancing.enabled = true;
+    config.balancing.probe_interval_seconds = 1;
+    config.restart.silent_rounds = 3;
+    // When each round reached the sidecar.
+    let taking = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        let mut at = Vec::new();
+        while at.len() < 4 {
+            held.push(silent.accept().unwrap().0);
+            at.push(Instant::now());
+        }
+        (silent, held, at)
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let proxy = Arc::new(Proxy::new(config, PathBuf::from("meridian.toml"), stop));
+    let thread = spawn(&proxy).unwrap();
+    let (silent, held, at) = taking.join().unwrap();
+    // The first round may have started at any moment; two whole periods from the second on.
+    // Each round lasts 500 ms: rounds a second apart take 2 s, rounds that wait a second after
+    // the last one ended take 3 s.
+    let two_periods = at[3] - at[1];
+    // The third silent round has ended by the fourth start: the detector decided.
+    let decided = proxy.restarts.is_restarting("lobby");
+    proxy.stop();
+    thread.join().unwrap();
+    drop((silent, held));
+    let _ = std::fs::remove_dir_all(&folder);
+    assert!(
+        two_periods < Duration::from_millis(2_500),
+        "two rounds took {two_periods:?}, not about 2 s: the pause comes after each round"
+    );
+    assert!(decided, "three silent rounds make the backend going down");
+}
+
 trait WithCapacity {
     fn with_capacity(self, capacity: u64) -> Self;
 }

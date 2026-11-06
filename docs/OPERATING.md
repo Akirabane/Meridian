@@ -13,24 +13,31 @@ at the end of the page). What the code does not do is said in "Known limits" and
 
 Read this before you plan a deployment.
 
-- **Meridian has not run on a real network yet.** It was run on one Windows machine, with
-  everything on `127.0.0.1`, one scripted player at a time ([RUNNING.md](RUNNING.md)), and
-  with the panel's three-server bench ([TESTING.md](TESTING.md),
-  [TESTING-FORK.md](TESTING-FORK.md)). The only load figures are local ones: simulated players
-  (10 to 1000) against a stand-in server over `127.0.0.1` ([BENCH.md](BENCH.md), which says
-  not to quote them as the proxy's performance in production). Nothing was measured with real
-  servers, a real network or real players.
+- **Meridian has run on a real network only in a few runs, each with its limits.** It was run
+  on one Windows machine, with everything on `127.0.0.1`, one scripted player at a time
+  ([RUNNING.md](RUNNING.md)), and with the panel's three-server bench ([TESTING.md](TESTING.md),
+  [TESTING-FORK.md](TESTING-FORK.md)). Beyond that, 250 simulated players were run against a proxy
+  on a laptop across a home network ([LOAD-LAN-250.md](LOAD-LAN-250.md)), and one real client in
+  France was connected over the Internet to a proxy on a rented server in Warsaw, with 250
+  simulated players on the same machine, for five minutes ([LOAD-VPS-250.md](LOAD-VPS-250.md),
+  [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)), and then in three fallback runs. That is one player,
+  one run of each, a stock Horizon server and a shared machine. The load figures are those of
+  simulated players against stand-in servers ([BENCH.md](BENCH.md) says not to quote them as the
+  proxy's performance in production); none is a production figure.
 - **The relay is the proven part.** Login (online, offline, hybrid), routing, forwarding to
   the servers, the console and the player limits are tested in CI and were run against a real
   Horizon server.
-- **The seamless switch needs a Horizon build that is not released.** Moving a player
+- **The seamless switch needs a Horizon build with the transfer module.** Moving a player
   between servers (`switch`, `send`, `/server <name>`, `/hub`, `drain --move`, the evacuation
   of a restarting server) uses the `player-*` requests of Horizon's control endpoint and the
-  `[transfer]` module of its `server.toml`. On 2026-11-04 the Horizon pull requests that add
-  them (#8700, #8709, #8716, #8730, #8735, #8742) were open, not merged. The switch is built
-  and tested against fake servers; no run on real servers is recorded in the repository yet,
-  and [TESTING-FORK.md](TESTING-FORK.md) is the procedure for the first, with the fork build
-  it names. Check Horizon's releases before relying on it. Without
+  `[transfer]` module of its `server.toml`. The Horizon pull requests that add them (#8700,
+  #8709, #8716, #8730, #8735, #8742) were merged into Horizon's main on 2026-11-05, the last four
+  at 23:47 UTC; the Nightly of that day (`66f3981`) was built before them. The switch is built
+  and tested against fake servers. Moves with a real client between three real servers are
+  described in a public comment ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2), on one
+  machine and not repeated; [TESTING-FORK.md](TESTING-FORK.md) is the procedure for a recorded
+  run, with the fork build it names. Check that your Horizon build has the transfer module before
+  relying on it. Without
   those servers the proxy still relays players; a switch answers which step failed and the
   player stays where they are.
 - **A planned restart needs the panel, an operator typing `drain`, or the server's own announcement.**
@@ -608,6 +615,25 @@ max-attempts = 3
   lost server, whose state is gone, so the player is where the new server puts them. Once they are
   in, a chat line says what happened: `You lost the connection to lobby. You were moved to east.`
   or, for a kick, `You were disconnected from lobby: <the server's reason>. You were moved to east.`
+  A real client over the Internet saw a `Reconfiguring...` screen with a Disconnect button, then
+  `Loading terrain...`, for 0.25 to 0.35 s in three runs, and stayed in the game
+  ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3). The reason was shown as the proxy
+  could read it: after a clean stop of a Horizon server it was its translation key,
+  `multiplayer.disconnect.server_shutdown`, not translated. That is what the change below is for.
+  When the server's reason is plain text (`test kick from the server console`), the line is that
+  text, as above. When it is a translation key, as a clean stop sends
+  (`multiplayer.disconnect.server_shutdown`), the proxy does not copy the key: it sends the line as
+  a chat component that holds the server's reason, and the player's game should translate it:
+  `You were disconnected from lobby: <the game's words for the key>. You were moved to east.` The
+  words would be the game's, in the player's language, not the proxy's, and a game that has no
+  text for the key would show the key, as before. This was tried against stand-ins, with the
+  component read back by the protocol crate's own reader, and not yet with a real client.
+  Only the parts of the server's component that say words are passed on: `text`, `translate` with
+  its `fallback` and arguments, `extra` and `color`. The click and hover events, the insertion, the
+  font, scores, selectors, key bindings and anything unknown are dropped, because the line is shown
+  on the server the player has just reached and the one they left must not be able to put a link or
+  a command to run in their chat. A reason that is empty, over 4 KiB, nested more than 8 levels
+  or made of more than 64 parts is shown as the text the proxy could read from it.
 - **Where to.** The servers a login would try for this player, in the same order and by the same
   rules: the forced host's, or the route's group, or the default server, then the `try` list; the
   servers that are down or failed lately last; and with `[balancing] enabled` the caps, the drain
@@ -617,7 +643,11 @@ max-attempts = 3
   and so does each one that loses the player in turn. A server that keeps the player for a minute
   ends the run and the count starts again. If no server is left, or the count is spent, the player
   is disconnected with a message that says the server was lost and that no other could take them
-  (for a kick, the server's own reason comes first).
+  (for a kick, the server's own reason comes first, passed on the same way: a translation key is
+  left for the game to translate). A kick that arrives when the session is already ending (the
+  proxy ended it, or the player left, or a move is under way) is shown to the player as the server
+  sent it, component included, on the disconnect screen, which runs no click; it is still limited
+  to 4 KiB.
 - **When it does not apply.** The proxy ended the session itself (`kick`, `ban`, a stop of the
   proxy, a second login that replaced this one); the player left; a switch of this player is under
   way (`switch`, `/server`, `drain --move`); the backend's disconnect was already passed on because
@@ -636,8 +666,9 @@ max-attempts = 3
 Limits: the move is a new login, so it needs the servers to take a player who joins like any
 other; it does not use the sidecars and does not wait for a transfer module. A player whose
 server is lost takes the full configuration phase again, which a vanilla client accepts from the
-game as it does when a server reconfigures it, but this was not run with a real client: the tests
-use a stand-in client and servers. A player in the middle of a switch, or at login, is not
+game as it does when a server reconfigures it, and a real Horizon client over the Internet did so three times without leaving the game (a
+killed server, a kick and a clean stop, once each, [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md),
+section 3); the tests use a stand-in client and servers. A player in the middle of a switch, or at login, is not
 saved by it. Their inventory, position and the rest of what was unsaved on the lost server are
 whatever that server had last written.
 
@@ -843,6 +874,7 @@ the gauges are worked out when the page is read.
 | Series | What it is |
 | --- | --- |
 | `meridian_players` | Players connected to the proxy |
+| `meridian_sessions_alive` | Sessions still in memory, over or not. It follows `meridian_players`; staying above it for long is a leak |
 | `meridian_backend_players{backend}` | Players on each server |
 | `meridian_backend_soft_cap{backend}`, `meridian_backend_hard_cap{backend}` | The caps of each server that has a role |
 | `meridian_backend_state{backend,state}` | 1 for the state the balancer sees: `open`, `closed`, `draining` (drained, restarting, or not accepting transfers) or `not_offered` (no recent report) |
@@ -971,16 +1003,26 @@ switch, and keep the proxy's log and both servers' logs.
 
 ## 12. Known limits
 
-- Nothing has run on a real network. The load figures in [BENCH.md](BENCH.md) are local, with a
-  stand-in server; plan your own test with your players' numbers before opening.
-- The seamless switch needs a Horizon build with the transfer module, which was not merged on
-  2026-11-04 (section 0). No run of it on real servers is recorded yet.
-- Movement through the proxy, many players and long sessions were not tried against a real
-  server. The hybrid mode's name lookup and the online mode's account check have not been
+- Few runs were made on a real network: 250 bots against a proxy on a laptop across a home
+  network ([LOAD-LAN-250.md](LOAD-LAN-250.md)), and one real client over the Internet to a proxy
+  on a rented server, with 250 bots on the same machine ([LOAD-VPS-250.md](LOAD-VPS-250.md),
+  [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)). Each is one run with its limits, against stand-in
+  servers; the load figures in [BENCH.md](BENCH.md) are local. Plan your own test with your
+  players' numbers before opening.
+- The seamless switch needs a Horizon build with the transfer module, which was merged into
+  Horizon's main on 2026-11-05 and is not in the Nightly of that day (section 0). No recorded run
+  of it on real servers; a public comment describes moves
+  with a real client on one machine, not repeated ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md),
+  section 2).
+- Movement through the proxy was run with a real client on one machine only (a public comment,
+  [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2). Many players and long sessions were
+  not tried against a real server (the 250 bots of [LOAD-VPS-250.md](LOAD-VPS-250.md) went to
+  stand-in servers). The hybrid mode's name lookup and the online mode's account check have not been
   tried against the real services in a recorded run.
 - A server that stops without warning, or disconnects a player, moves them to another server
   (section 5.11) as a new arrival, with a loading screen, and what was unsaved on the lost server
-  is lost. This has not run with a real client. A planned restart moves its players without a
+  is lost. This ran with a real client over the Internet, once each for a killed server, a kick
+  and a clean stop ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3). A planned restart moves its players without a
   loading screen, with the transfer module (section 6). A player still logging in is not moved.
 - Horizon's `server/stopping` notice and the panel's announcement are the signals for an early
   warning. The first is fed only when the sidecar is given `--management-properties` and the backend
@@ -1027,5 +1069,5 @@ this page, please report it):
 - Log and error messages: the strings in `crates/meridian-proxy/src`, `meridian-net/src`,
   `meridian-handoff/src` and `meridian-sidecar/src`.
 - Horizon's side (`forwarding.secret`, the log line): Horizon's `docs/hosting.md`, "Behind a
-  Velocity proxy". The transfer module: [STATE-TRANSFER.md](STATE-TRANSFER.md) and the open
+  Velocity proxy". The transfer module: [STATE-TRANSFER.md](STATE-TRANSFER.md) and the
   pull requests named in section 0.

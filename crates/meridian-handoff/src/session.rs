@@ -32,6 +32,7 @@
 use crate::{
     configure::{ClientConfiguration, Digest, DigestBuilder, Summary},
     prepare::{Pose, Target},
+    reason::{Notice, Reason},
 };
 use horizon_protocol::{
     buf::{Reader, write_varint},
@@ -50,7 +51,7 @@ use meridian_net::{
 use meridian_rewrite::{Swap, Teleports};
 use std::sync::{
     Arc, Condvar, Mutex, MutexGuard,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -61,6 +62,14 @@ use std::time::{Duration, Instant};
 const ACKNOWLEDGE_WITHIN: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const ACKNOWLEDGE_WITHIN: Duration = Duration::from_millis(400);
+
+/// The sessions made and not freed yet.
+static ALIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// How many sessions are in memory, over or not. More than the players for long is a leak.
+pub fn sessions_alive() -> usize {
+    ALIVE.load(Ordering::Relaxed)
+}
 
 /// What a session does when the backend a player is on is lost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -76,8 +85,8 @@ pub struct Fallback {
 pub enum Loss {
     /// The connection closed or broke, for this reason.
     Crashed(String),
-    /// The backend disconnected the player, with this reason as plain text.
-    Kicked(String),
+    /// The backend disconnected the player, with this reason.
+    Kicked(Reason),
 }
 
 /// A backend to move the player to, already logged in and in its configuration phase.
@@ -86,7 +95,7 @@ pub struct Replacement {
     /// Its name.
     pub backend: String,
     /// Shown to the player in the chat once they are in the replacement's world.
-    pub notice: Option<String>,
+    pub notice: Option<Notice>,
     /// Held until the player is on the replacement, then dropped: a place reserved on it.
     pub keep: Option<Box<dyn std::any::Any + Send>>,
 }
@@ -96,7 +105,7 @@ struct Pending {
     lane: Arc<Lane>,
     reader: ConnReader,
     backend: String,
-    notice: Option<String>,
+    notice: Option<Notice>,
     keep: Option<Box<dyn std::any::Any + Send>>,
 }
 
@@ -107,6 +116,9 @@ pub struct Session {
     shared: Arc<Shared>,
     client_reader: ConnReader,
     first: (Arc<Lane>, ConnReader),
+    /// Kept here and then by the thread that reads the client, never in [`Shared`]: a hook
+    /// may hold a [`SessionHandle`], which would then keep the session alive for good.
+    commands: Option<Arc<CommandHook>>,
 }
 
 /// Switches a session to another backend (`crate::switch`), or ends it, from another
@@ -138,7 +150,6 @@ pub(crate) struct Shared {
     pub(crate) routing: Routing,
     up: Mutex<Up>,
     client_closer: Closer,
-    commands: Mutex<Option<Arc<CommandHook>>>,
     events: Mutex<Option<mpsc::Sender<Event>>>,
     next_lane: AtomicU64,
     /// A switch is under way; it closes what is left when it ends.
@@ -148,7 +159,7 @@ pub(crate) struct Shared {
     /// The session is over: the client is closed.
     pub ended: AtomicBool,
     /// The proxy ended the session ([`SessionHandle::close`], [`SessionHandle::disconnect`]).
-    closing: AtomicBool,
+    pub(crate) closing: AtomicBool,
     /// What to do when the backend is lost, from [`Session::run_with`].
     fallback_kick: AtomicBool,
     fallback_crash: AtomicBool,
@@ -159,6 +170,12 @@ pub(crate) struct Shared {
     /// The backend's disconnect was passed on to the client: the close that follows it is
     /// the end the backend meant, not a loss.
     disconnected: AtomicBool,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        ALIVE.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// What goes to the client.
@@ -190,7 +207,7 @@ pub(crate) struct Down {
     /// threads told the player meanwhile, written after the answer (see [`Answering`]).
     pub answering: Option<(std::thread::ThreadId, Vec<Vec<u8>>)>,
     /// Said in the chat once the next Login arrives: why the player was moved.
-    notice: Option<String>,
+    notice: Option<Notice>,
 }
 
 /// What goes to the backend.
@@ -230,9 +247,9 @@ pub(crate) enum End {
     Broken(horizon_protocol::Error),
     /// The client could not be written to.
     ClientGone,
-    /// The backend disconnected the player in the play phase, for this reason (plain
-    /// text). Its packet was not passed to the client.
-    Kicked(String),
+    /// The backend disconnected the player in the play phase, for this reason. Its packet
+    /// was not passed to the client.
+    Kicked(Reason),
 }
 
 impl Session {
@@ -281,7 +298,6 @@ impl Session {
                 flow: Flow::default(),
             }),
             client_closer,
-            commands: Mutex::new(None),
             events: Mutex::new(None),
             next_lane: AtomicU64::new(1),
             switching: AtomicBool::new(false),
@@ -300,6 +316,7 @@ impl Session {
             delta_gate: Mutex::new(None),
             routing: Routing::default(),
         });
+        ALIVE.fetch_add(1, Ordering::Relaxed);
         let handle = SessionHandle(Arc::clone(&shared));
         *lock(&shared.backend) = name.to_owned();
         Ok((
@@ -307,14 +324,15 @@ impl Session {
                 shared,
                 client_reader,
                 first: (lane, backend_reader),
+                commands: None,
             },
             handle,
         ))
     }
 
     /// Lets `hook` answer the commands the player types in the play phase.
-    pub fn with_commands(self, hook: Arc<CommandHook>) -> Self {
-        *lock(&self.shared.commands) = Some(hook);
+    pub fn with_commands(mut self, hook: Arc<CommandHook>) -> Self {
+        self.commands = Some(hook);
         self
     }
 
@@ -322,7 +340,7 @@ impl Session {
     /// says what it carried. A switch under way when the client leaves finishes
     /// on its own thread (DESIGN.md decision 10).
     pub fn run(self) -> Result<Report> {
-        self.run_with(Fallback::default(), &mut |_| Err(String::new()))
+        self.run_with(Fallback::default(), &mut |_| Err(Notice::from("")))
     }
 
     /// As [`Session::run`], and when the active backend is lost in the way `fallback`
@@ -333,12 +351,13 @@ impl Session {
     pub fn run_with(
         self,
         fallback: Fallback,
-        replace: &mut dyn FnMut(&Loss) -> std::result::Result<Replacement, String>,
+        replace: &mut dyn FnMut(&Loss) -> std::result::Result<Replacement, Notice>,
     ) -> Result<Report> {
         let Session {
             shared,
             client_reader,
             first: (lane, backend_reader),
+            commands,
         } = self;
         shared
             .fallback_kick
@@ -353,7 +372,7 @@ impl Session {
             std::thread::Builder::new()
                 .name("session-to-backend".to_owned())
                 .spawn(move || {
-                    let end = copy_to_backend(client_reader, &shared);
+                    let end = copy_to_backend(client_reader, &shared, commands.as_deref());
                     let _ = events.send(Event::Client(end));
                 })?
         };
@@ -428,7 +447,7 @@ impl Session {
 }
 
 /// What became of a lost backend.
-enum Lost {
+pub(crate) enum Lost {
     /// The session ends, in this way.
     Over(End),
     /// The client was told to go back to the configuration phase, and a replacement waits
@@ -438,10 +457,10 @@ enum Lost {
 
 /// Decides what to do when the active backend's lane ended in `end`: a replacement, or the
 /// end of the session.
-fn lost(
+pub(crate) fn lost(
     shared: &Arc<Shared>,
     end: End,
-    replace: &mut dyn FnMut(&Loss) -> std::result::Result<Replacement, String>,
+    replace: &mut dyn FnMut(&Loss) -> std::result::Result<Replacement, Notice>,
 ) -> Lost {
     let loss = match &end {
         End::Kicked(reason) => Loss::Kicked(reason.clone()),
@@ -462,7 +481,7 @@ fn lost(
     if wanted_end || !play {
         // A kick that was held back is shown now, as the backend sent it.
         if let End::Kicked(reason) = &end {
-            say_goodbye(shared, reason);
+            say_goodbye(shared, reason.disconnect());
         }
         return Lost::Over(match end {
             End::Kicked(_) => End::Closed,
@@ -471,13 +490,13 @@ fn lost(
     }
     match replace(&loss) {
         Err(message) => {
-            say_goodbye(shared, &message);
+            say_goodbye(shared, message.disconnect());
             Lost::Over(End::Closed)
         }
         Ok(replacement) => match begin_moving(shared, replacement) {
             Ok(()) => Lost::Moving,
             Err(e) => {
-                say_goodbye(
+                say_goodbye_text(
                     shared,
                     "The server you were on is gone, and no other could take you.",
                 );
@@ -488,10 +507,12 @@ fn lost(
 }
 
 /// Disconnects the player with `message`, in the phase they are in.
-fn say_goodbye(shared: &Shared, message: &str) {
-    let reason = configuration::Disconnect {
-        reason: text::literal(message),
-    };
+fn say_goodbye_text(shared: &Shared, message: &str) {
+    say_goodbye(shared, Notice::from(message).disconnect());
+}
+
+/// Disconnects the player with `reason`, in the phase they are in.
+fn say_goodbye(shared: &Shared, reason: configuration::Disconnect) {
     let mut down = shared.down();
     let body = match down.phase {
         Phase::Configuration => configuration::Clientbound::Disconnect(reason).encode(),
@@ -506,7 +527,7 @@ fn give_up_moving(shared: &Shared, message: &str) {
     if let Some(pending) = lock(&shared.pending).take() {
         pending.lane.closer.close();
     }
-    say_goodbye(shared, message);
+    say_goodbye_text(shared, message);
 }
 
 /// Sends the client back to the configuration phase and keeps `replacement` for when it
@@ -817,7 +838,7 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
             && !shared.client_gone.load(Ordering::SeqCst)
             && let Ok(play::Clientbound::Disconnect(d)) = play::Clientbound::decode(id, &payload)
         {
-            return End::Kicked(text::plain(&d.reason, &Default::default()));
+            return End::Kicked(Reason::of(&d));
         }
         if id == ids::play::clientbound::DISCONNECT && down.phase == Phase::Play {
             shared.disconnected.store(true, Ordering::SeqCst);
@@ -858,10 +879,7 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
                 if id == ids::play::clientbound::LOGIN
                     && let Some(notice) = down.notice.take()
                 {
-                    let chat = play::Clientbound::SystemChat(play::SystemChat {
-                        content: text::literal(&notice),
-                        overlay: false,
-                    });
+                    let chat = play::Clientbound::SystemChat(notice.chat());
                     let _ = down.writer.send(&chat.encode());
                 }
                 let packet = Packet { id, payload };
@@ -902,8 +920,13 @@ fn follow(down: &mut Down, id: i32, payload: &[u8]) {
     }
 }
 
-/// Copies the client's packets to the active lane until reading or writing fails.
-fn copy_to_backend(mut from: ConnReader, shared: &Arc<Shared>) -> End {
+/// Copies the client's packets to the active lane until reading or writing fails, and lets
+/// `commands` answer the commands the player types.
+fn copy_to_backend(
+    mut from: ConnReader,
+    shared: &Arc<Shared>,
+    commands: Option<&CommandHook>,
+) -> End {
     use ids::{configuration::serverbound as cfg, play::serverbound as s};
     let mut body = Vec::new();
     let mut sending = Phase::Configuration;
@@ -924,7 +947,10 @@ fn copy_to_backend(mut from: ConnReader, shared: &Arc<Shared>) -> End {
             }
             continue;
         }
-        if sending == Phase::Play && answer_command(id, &payload, shared) {
+        if sending == Phase::Play
+            && let Some(hook) = commands
+            && answer_command(id, &payload, shared, hook)
+        {
             continue;
         }
         // While a switch writes the target's world to the client and changes the lane, what the
@@ -985,17 +1011,14 @@ fn rewrite(rewritten: horizon_protocol::Result<Vec<u8>>, original: Vec<u8>) -> V
     rewritten.unwrap_or(original)
 }
 
-/// When the play packet `id` is a command the session's hook answers, sends the
-/// player the answer and returns `true`.
-fn answer_command(id: i32, payload: &[u8], shared: &Shared) -> bool {
+/// When the play packet `id` is a command `hook` answers, sends the player the answer
+/// and returns `true`.
+fn answer_command(id: i32, payload: &[u8], shared: &Shared, hook: &CommandHook) -> bool {
     if id != ids::play::serverbound::CHAT_COMMAND
         && id != ids::play::serverbound::CHAT_COMMAND_SIGNED
     {
         return false;
     }
-    let Some(hook) = lock(&shared.commands).clone() else {
-        return false;
-    };
     let command = match play::Serverbound::decode(id, payload) {
         Ok(play::Serverbound::ChatCommand(c)) => c.command,
         Ok(play::Serverbound::ChatCommandSigned(c)) => c.command,

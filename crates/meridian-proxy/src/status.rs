@@ -204,15 +204,19 @@ const TICK: Duration = Duration::from_millis(100);
 /// Starts the thread that polls the sidecars every `probe-interval-seconds` while
 /// `[balancing] enabled` is on, until the proxy stops. The configuration is read
 /// again for each round, so a reload applies to the next one.
+///
+/// The interval runs from the start of a round, not from its end: a round held by a sidecar
+/// that does not answer would otherwise put its timeout between two readings of every
+/// backend, on top of the interval. A round that lasts longer is followed at once by the next.
 pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>> {
     let proxy = Arc::clone(proxy);
     std::thread::Builder::new()
         .name("backend states".into())
         .spawn(move || {
             while !proxy.stopping() {
+                let round = Instant::now();
                 let config = proxy.config();
                 if config.balancing.enabled {
-                    let round = Instant::now();
                     poll(&config, &ask_sidecar, &proxy.sessions.statuses);
                     crate::restart::observe_round(
                         &config,
@@ -226,7 +230,7 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
                     proxy.sessions.metrics().status_round(round.elapsed());
                 }
                 let wait = Duration::from_secs(config.balancing.probe_interval_seconds);
-                let until = Instant::now() + wait;
+                let until = round + wait;
                 while !proxy.stopping() && Instant::now() < until {
                     std::thread::sleep(TICK);
                 }

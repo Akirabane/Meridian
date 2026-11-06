@@ -15,8 +15,12 @@ this page follows the same steps and only says what differs.
   the panel.
 - **Switching is built**: the console's `switch <player> <server>` (and `send`), and
   the in-game `/server <name>`, `/hub` and `/lobby`. It has been tested against fake
-  servers only; this bench is where it meets real ones for the first time, which is
-  what section E is for.
+  servers and, as a public comment records, with a real client against three real servers on
+  one machine, once and without a record sheet ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md),
+  section 2); this bench is the procedure for a recorded run, which is what section E is for.
+- Horizon's pull requests for the transfer module (#8700, #8709, #8716, #8730, #8735, #8742) were
+  merged into Horizon's main on 2026-11-05. This bench still runs the fork build named below; a
+  build of main from that merge (`e0bd7cd69` or later) has not been tried with it.
 
 ## What it costs
 

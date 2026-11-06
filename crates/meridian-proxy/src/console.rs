@@ -523,6 +523,11 @@ pub fn reload_file(proxy: &Proxy) -> Reply {
     let perm_file = new.permissions.file.clone();
     let perms = permissions::read(perm_file.as_deref())
         .map_err(|e| format!("not reloaded, the permissions are unchanged in use: {e}"))?;
+    let warnings: Vec<String> = new
+        .balancing_warnings()
+        .into_iter()
+        .map(|w| format!("warning: {w}"))
+        .collect();
     let mut lines = apply(proxy, new);
     let mut more = Vec::new();
     if let Some(perms) = perms {
@@ -543,6 +548,7 @@ pub fn reload_file(proxy: &Proxy) -> Reply {
             lines.extend(more);
         }
     }
+    lines.extend(warnings);
     Ok(lines)
 }
 
