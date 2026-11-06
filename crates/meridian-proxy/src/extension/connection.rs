@@ -7,6 +7,7 @@
 
 use super::link::{Info, Link};
 use meridian_extension::handshake::{self, Nonce, Secret};
+use meridian_extension::text;
 use meridian_extension::wire::{
     self, Confirm, Discover, Hello, HelloAnswer, Id, Message, RpcError, SUBPROTOCOL, SUPPORTED,
 };
@@ -243,7 +244,7 @@ fn info_from(settings: &super::link::Settings, answer: HelloAnswer) -> Info {
     let mut granted = Vec::new();
     let mut refused = Vec::new();
     for capability in answer.capabilities.iter().take(32) {
-        let capability = clean(capability, 32);
+        let capability = text::clean(capability, 32);
         if settings.grant.contains(&capability) {
             granted.push(capability);
         } else {
@@ -252,22 +253,12 @@ fn info_from(settings: &super::link::Settings, answer: HelloAnswer) -> Info {
     }
     Info {
         protocol: answer.protocol,
-        name: clean(&answer.name, 64),
-        version: clean(&answer.version, 64),
+        name: text::clean(&answer.name, 64),
+        version: text::clean(&answer.version, 64),
         granted,
         refused,
         commands: answer.commands.into_iter().take(64).collect(),
     }
-}
-
-/// The extension's own words, for a log line: no control character, at most `max` characters.
-fn clean(text: &str, max: usize) -> String {
-    text.chars()
-        .filter(|c| {
-            !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        })
-        .take(max)
-        .collect()
 }
 
 fn send(socket: &mut Socket<TcpStream>, text: &str) -> Result<(), End> {

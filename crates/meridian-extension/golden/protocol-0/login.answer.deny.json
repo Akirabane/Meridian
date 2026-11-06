@@ -1,0 +1,5 @@
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {"decision": "deny", "reason": "The event starts at 20:00."}
+}
