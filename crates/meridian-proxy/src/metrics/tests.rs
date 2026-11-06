@@ -48,6 +48,8 @@ fn value(page: &str, series: &str) -> String {
 fn a_fresh_proxy_shows_zeroes_and_the_backends() {
     let page = render(&proxy());
     assert_eq!(value(&page, "meridian_players"), "0");
+    // Counted for the whole process, which other tests share: only its line is checked.
+    assert!(page.contains("\nmeridian_sessions_alive "), "{page}");
     assert_eq!(
         value(&page, "meridian_backend_players{backend=\"lobby\"}"),
         "0"

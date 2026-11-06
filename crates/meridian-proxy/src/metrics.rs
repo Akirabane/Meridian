@@ -328,6 +328,18 @@ pub fn render(proxy: &Proxy) -> String {
 
     family(
         &mut out,
+        "meridian_sessions_alive",
+        "gauge",
+        "Sessions in memory, over or not: above meridian_players for long, they leak.",
+    );
+    let _ = writeln!(
+        out,
+        "meridian_sessions_alive {}",
+        meridian_handoff::sessions_alive()
+    );
+
+    family(
+        &mut out,
         "meridian_backend_players",
         "gauge",
         "Players on each backend.",

@@ -50,7 +50,7 @@ use meridian_net::{
 use meridian_rewrite::{Swap, Teleports};
 use std::sync::{
     Arc, Condvar, Mutex, MutexGuard,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -61,6 +61,14 @@ use std::time::{Duration, Instant};
 const ACKNOWLEDGE_WITHIN: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const ACKNOWLEDGE_WITHIN: Duration = Duration::from_millis(400);
+
+/// The sessions made and not freed yet.
+static ALIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// How many sessions are in memory, over or not. More than the players for long is a leak.
+pub fn sessions_alive() -> usize {
+    ALIVE.load(Ordering::Relaxed)
+}
 
 /// What a session does when the backend a player is on is lost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,6 +169,12 @@ pub(crate) struct Shared {
     /// The backend's disconnect was passed on to the client: the close that follows it is
     /// the end the backend meant, not a loss.
     disconnected: AtomicBool,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        ALIVE.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// What goes to the client.
@@ -301,6 +315,7 @@ impl Session {
             delta_gate: Mutex::new(None),
             routing: Routing::default(),
         });
+        ALIVE.fetch_add(1, Ordering::Relaxed);
         let handle = SessionHandle(Arc::clone(&shared));
         *lock(&shared.backend) = name.to_owned();
         Ok((
