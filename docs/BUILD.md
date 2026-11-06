@@ -39,7 +39,7 @@ Moving the pin is a deliberate change: `scripts/bump-horizon.sh` updates the `re
 runs the tests and notes the commit here. A nightly build against Horizon's head warns
 when a change of Horizon would break Meridian; [COMPAT.md](COMPAT.md) describes both.
 
-Pinned commit: `f696adc8996d7d4b11e7d50a863f2735a21c8000`.
+Pinned commit: `0d21d5520ec26c49b774bf1533e53ea8af81278d`.
 
 ### What it costs
 

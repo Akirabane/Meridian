@@ -251,7 +251,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 [[package]]
 name = "horizon-core"
 version = "0.1.0"
-source = "git+https://github.com/horizon-rust/horizon?rev=f696adc8996d7d4b11e7d50a863f2735a21c8000#f696adc8996d7d4b11e7d50a863f2735a21c8000"
+source = "git+https://github.com/horizon-rust/horizon?rev=0d21d5520ec26c49b774bf1533e53ea8af81278d#0d21d5520ec26c49b774bf1533e53ea8af81278d"
 dependencies = [
  "libm",
 ]
@@ -259,7 +259,7 @@ dependencies = [
 [[package]]
 name = "horizon-protocol"
 version = "0.1.0"
-source = "git+https://github.com/horizon-rust/horizon?rev=f696adc8996d7d4b11e7d50a863f2735a21c8000#f696adc8996d7d4b11e7d50a863f2735a21c8000"
+source = "git+https://github.com/horizon-rust/horizon?rev=0d21d5520ec26c49b774bf1533e53ea8af81278d#0d21d5520ec26c49b774bf1533e53ea8af81278d"
 dependencies = [
  "aes",
  "flate2",
@@ -267,6 +267,7 @@ dependencies = [
  "horizon-core",
  "horizon-world",
  "ipconfig",
+ "log",
  "serde_json",
  "sha1",
  "sha2",
@@ -275,7 +276,7 @@ dependencies = [
 [[package]]
 name = "horizon-world"
 version = "0.1.0"
-source = "git+https://github.com/horizon-rust/horizon?rev=f696adc8996d7d4b11e7d50a863f2735a21c8000#f696adc8996d7d4b11e7d50a863f2735a21c8000"
+source = "git+https://github.com/horizon-rust/horizon?rev=0d21d5520ec26c49b774bf1533e53ea8af81278d#0d21d5520ec26c49b774bf1533e53ea8af81278d"
 dependencies = [
  "flate2",
  "horizon-core",
