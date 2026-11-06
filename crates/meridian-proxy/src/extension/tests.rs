@@ -1151,3 +1151,91 @@ mod sdk {
         until("the wait", || link.last_wait() == timings().longest_wait);
     }
 }
+
+mod login_with_the_sdk {
+    use super::*;
+    use meridian_extension::decide::{self, Auth, Decision, LoginParams, LoginRequest, Player};
+    use meridian_extension::serve::{Extension as SdkExtension, Running as SdkRunning};
+
+    fn request(name: &str) -> LoginParams {
+        LoginParams {
+            request: LoginRequest {
+                player: Player {
+                    name: name.into(),
+                    uuid: "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c".into(),
+                    auth: Auth::Unverified,
+                },
+                host: Some("play.example.org".into()),
+                address: None,
+                connected: false,
+            },
+        }
+    }
+
+    fn ask(link: &Link, name: &str) -> Result<Decision, CallError> {
+        let params = serde_json::to_value(request(name)).unwrap();
+        link.call(
+            decide::LOGIN,
+            Some(&params),
+            Duration::from_secs(2),
+            decide::parse_login_answer,
+        )
+    }
+
+    fn gate() -> SdkExtension {
+        SdkExtension::new("gate", "1.0.0", Secret::new(TOKEN).unwrap()).on_login(|request| {
+            // The extension is told what the proxy knows of the account.
+            assert_eq!(request.player.auth, Auth::Unverified);
+            match request.player.name.as_str() {
+                "Alex" => Decision::deny("The event starts at 20:00."),
+                "Bob" => Decision::Allow,
+                _ => Decision::Default,
+            }
+        })
+    }
+
+    fn connect_to(running: &SdkRunning, grant: &[&str]) -> (Registry, Arc<Link>, Folder) {
+        let folder = Folder::new();
+        let mut settings = Settings::new(
+            "perms",
+            running.local_addr().to_string(),
+            folder.token(TOKEN),
+        );
+        settings.grant = grant.iter().map(|g| (*g).to_owned()).collect();
+        settings.timings = timings();
+        let registry = Registry::default();
+        let link = registry.start(settings).unwrap();
+        until("the connection", || link.is_connected());
+        (registry, link, folder)
+    }
+
+    #[test]
+    fn the_proxys_connection_asks_the_sdk_for_a_login_and_reads_the_decision() {
+        let running = gate().bind("127.0.0.1:0").unwrap();
+        let (registry, link, _folder) = connect_to(&running, &["decide.login"]);
+        let info = link.info().unwrap();
+        assert_eq!(info.granted, ["decide.login"]);
+        assert!(info.refused.is_empty());
+        assert_eq!(
+            ask(&link, "Alex").unwrap(),
+            Decision::deny("The event starts at 20:00.")
+        );
+        assert_eq!(ask(&link, "Bob").unwrap(), Decision::Allow);
+        assert_eq!(ask(&link, "Somebody").unwrap(), Decision::Default);
+        let mut page = String::new();
+        registry.render(&mut page);
+        assert!(
+            page.contains("meridian_extension_requests_total{extension=\"perms\",method=\"meridian:decide/login\",outcome=\"answered\"} 3"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_capability_the_operator_did_not_grant_is_refused_in_the_hello() {
+        let running = gate().bind("127.0.0.1:0").unwrap();
+        let (_registry, link, _folder) = connect_to(&running, &[]);
+        let info = link.info().unwrap();
+        assert!(info.granted.is_empty());
+        assert_eq!(info.refused, ["decide.login"]);
+    }
+}

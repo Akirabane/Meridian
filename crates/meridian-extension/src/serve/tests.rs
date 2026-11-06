@@ -788,3 +788,152 @@ fn what_the_extension_logs_holds_neither_the_token_nor_a_message_nor_the_proxys_
         "{lines:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The admission at login
+
+mod login {
+    use super::*;
+    use crate::decide::{self, Decision, LoginRequest};
+
+    /// Refuses Alex with the reason of the specification, lets Bob in, and has no opinion of anyone else.
+    fn gate(lines: &Arc<Lines>) -> Extension {
+        let mut extension = Extension::new("gate", "1.0.0", token())
+            .log(Arc::clone(lines) as Arc<dyn Log>)
+            .on_login(
+                |request: &LoginRequest| match request.player.name.as_str() {
+                    "Alex" => Decision::deny("The event starts at 20:00."),
+                    "Bob" => Decision::Allow,
+                    "Long" => Decision::deny(&"x".repeat(1000)),
+                    "Silent" => Decision::Deny(None),
+                    _ => Decision::Default,
+                },
+            );
+        extension.timings.look = Duration::from_millis(10);
+        extension
+    }
+
+    /// The golden request, for the player `name`.
+    fn request_for(name: &str) -> String {
+        let mut request: Value = serde_json::from_str(&golden("login.request.json")).unwrap();
+        request["params"]["request"]["player"]["name"] = json!(name);
+        request.to_string()
+    }
+
+    fn answer(proxy: &mut Proxy, name: &str) -> Value {
+        proxy.send(&request_for(name));
+        let Message::Response { id, outcome } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(id, Some(Id::Number(4)));
+        outcome.unwrap()
+    }
+
+    #[test]
+    fn the_hello_declares_the_capability_and_the_list_has_the_method_as_the_golden_file_has_it() {
+        let running = start(gate(&Arc::default()));
+        let mut proxy = Proxy::connect(running.local_addr());
+        let (hello, _) = proxy.hello(&token());
+        assert_eq!(hello.capabilities, ["decide.login"]);
+        let listed = proxy.call(method::DISCOVER, None).unwrap();
+        let golden: Value = serde_json::from_str(&golden("discover.answer.json")).unwrap();
+        // `meridian:decide/login` is the third method of the golden list, after the two of the hello.
+        assert_eq!(listed["methods"][2], golden["result"]["methods"][2]);
+        assert_eq!(listed["methods"][2]["name"], decide::LOGIN);
+        assert_eq!(listed["methods"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_golden_request_gets_the_golden_answers() {
+        let running = start(gate(&Arc::default()));
+        let mut proxy = Proxy::up(running.local_addr());
+        let golden_result = |name: &str| -> Value {
+            let message: Value = serde_json::from_str(&golden(name)).unwrap();
+            message["result"].clone()
+        };
+        assert_eq!(
+            answer(&mut proxy, "Alex"),
+            golden_result("login.answer.deny.json")
+        );
+        assert_eq!(
+            answer(&mut proxy, "Bob"),
+            golden_result("login.answer.allow.json")
+        );
+        assert_eq!(
+            answer(&mut proxy, "Somebody"),
+            golden_result("login.answer.default.json")
+        );
+        // The request of the golden file itself, unchanged, reaches the handler as written.
+        proxy.send(&golden("login.request.json"));
+        let Message::Response { outcome, .. } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(outcome.unwrap(), golden_result("login.answer.deny.json"));
+    }
+
+    #[test]
+    fn a_reason_is_made_valid_and_a_refusal_may_have_none() {
+        let running = start(gate(&Arc::default()));
+        let mut proxy = Proxy::up(running.local_addr());
+        let cut = answer(&mut proxy, "Long");
+        assert_eq!(cut["decision"], "deny");
+        // What the proxy would refuse is never sent.
+        let reason = cut["reason"].as_str().unwrap();
+        assert_eq!(reason.chars().count(), decide::MAX_REASON_CHARS);
+        assert!(decide::parse_login_answer(&cut).is_ok());
+        assert_eq!(answer(&mut proxy, "Silent"), json!({"decision": "deny"}));
+    }
+
+    #[test]
+    fn params_that_are_not_a_login_request_are_an_error_that_does_not_quote_them() {
+        let lines = Arc::new(Lines::default());
+        let running = start(gate(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        let player =
+            |auth: &str, uuid: Value| json!({"name": "PrivateName", "uuid": uuid, "auth": auth});
+        for params in [
+            None,
+            Some(json!([])),
+            Some(json!({})),
+            Some(json!({"request": "PrivateName"})),
+            Some(json!({"request": {"player": player("verified", json!(1)), "connected": false}})),
+            Some(json!({"request": {"player": player("premium", json!("u")), "connected": false}})),
+            // The request itself, with no `request` around it: the params are named.
+            Some(json!({"player": player("verified", json!("u")), "connected": false})),
+        ] {
+            let error = proxy.call(decide::LOGIN, params.as_ref()).unwrap_err();
+            assert_eq!(error.code, code::INVALID_PARAMS, "{params:?}");
+            assert!(!error.message.contains("PrivateName"), "{}", error.message);
+        }
+        // The connection and the handler are fine after them.
+        assert_eq!(answer(&mut proxy, "Bob"), json!({"decision": "allow"}));
+        assert!(lines.all().iter().all(|l| !l.contains("PrivateName")));
+    }
+
+    #[test]
+    fn nothing_of_the_player_is_in_the_extensions_lines() {
+        let lines = Arc::new(Lines::default());
+        let running = start(gate(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        for name in ["Alex", "Bob", "Somebody"] {
+            answer(&mut proxy, name);
+        }
+        let everything = lines.all().join("\n");
+        for private in [
+            "Alex",
+            "Bob",
+            "Somebody",
+            "203.0.113.7",
+            "0a2ea4ba",
+            "20:00",
+        ] {
+            assert!(!everything.contains(private), "{private}\n{everything}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "registered twice")]
+    fn two_login_handlers_are_a_mistake_of_the_program() {
+        let _ = gate(&Arc::default()).on_login(|_| Decision::Allow);
+    }
+}

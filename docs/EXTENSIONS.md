@@ -394,6 +394,11 @@ whitelist (`:487-498`) and the check for a second login (`:499-521`).
 }
 ```
 
+The one parameter of the call is named `request`, as `rpc.discover` lists it: `params` is
+`{"request": {...}}`, with the object above inside. The bytes are `golden/protocol-0/login.request.json`
+and the three `login.answer.*.json` of `meridian-extension`, which the proxy's tests and the SDK's both
+read; `meridian_extension::decide` has the types.
+
 - `auth`: `verified` (checked with the session service) or `unverified` (offline mode, or the
   unverified players of the hybrid mode). In the second case **the name and the id prove
   nothing**: the extension is told so in the field, as the operator is in
@@ -412,8 +417,11 @@ whitelist (`:487-498`) and the check for a second login (`:499-521`).
 
 `allow` and `default` both let the player go on to the built-in checks that follow. They
 differ only in the metrics and the log, where `allow` records that the extension looked.
-`deny` refuses the login with the reason. With no reason, the player reads `You cannot join
-this server right now.`. The refusal goes through `refuse` (`session.rs:864`), is logged as
+`deny` refuses the login with the reason. With no reason (or an empty one), the player reads `You cannot join
+this server right now.`. A reason is plain text of at most 256 characters with no control character but
+the line break; an answer whose reason is not, or whose `decision` is none of the three words, is
+invalid (section 4.1). `Reason::new` in the SDK cuts and cleans a reason to what the proxy accepts, so
+that an extension that means to refuse is never turned into a failure that the on-error policy lets in. The refusal goes through `refuse` (`session.rs:864`), is logged as
 the bans' refusals are (`session.rs:494`), and counts as
 `meridian_login_failures_total{reason="extension"}`.
 

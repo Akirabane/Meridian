@@ -23,8 +23,9 @@ mod tests;
 
 pub use log::{Log, Stderr};
 
+use crate::decide::{self, Decision, LoginAnswer, LoginParams, LoginRequest};
 use crate::handshake::Secret;
-use crate::wire::{CommandSpec, DiscoverMethod, RpcError};
+use crate::wire::{self, CommandSpec, DiscoverMethod, RpcError, code};
 use serde_json::Value;
 use std::io;
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
@@ -113,13 +114,6 @@ impl Extension {
     }
 
     /// Registers the handler of `method`, which the extension declares with `capability`.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the decision points that register handlers come next"
-        )
-    )]
     pub(crate) fn register(
         mut self,
         method: &str,
@@ -140,6 +134,29 @@ impl Extension {
             },
         ));
         self
+    }
+
+    /// Decides the admission of a player who has logged in to the proxy (docs/EXTENSIONS.md, 4.2). The
+    /// extension declares `decide.login`; the proxy asks only if the operator granted it. The handler
+    /// runs on a thread of its own, with the request, and answers [`Decision::Allow`],
+    /// [`Decision::deny`] (with the reason the player reads) or [`Decision::Default`]. An extension can
+    /// only add refusals: `Allow` and `Default` both let the player go on to the proxy's own checks.
+    /// Registering it twice panics, as registering any method twice does.
+    pub fn on_login(
+        self,
+        handler: impl Fn(&LoginRequest) -> Decision + Send + Sync + 'static,
+    ) -> Self {
+        self.register(
+            decide::LOGIN,
+            "decide.login",
+            DiscoverMethod::with_request(decide::LOGIN, "object"),
+            move |params| {
+                let params: LoginParams = wire::decode(params.as_ref())
+                    .map_err(|why| RpcError::new(code::INVALID_PARAMS, why))?;
+                let answer = LoginAnswer::from(&handler(&params.request));
+                Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
+            },
+        )
     }
 
     /// The capabilities the extension declares: those of its handlers, once each, in the order the
