@@ -23,12 +23,17 @@ pub struct Typist {
     pub uuid: [u8; 16],
     /// The permissions in force when they typed the command.
     pub permissions: Arc<Permissions>,
+    /// The groups they are in because they are an operator of the server they are on
+    /// (`[operators]`); none for a player who is not.
+    pub operator_groups: Vec<String>,
 }
 
 impl Typist {
     /// Whether the player has the permission `node`.
     pub fn has(&self, node: &str) -> bool {
-        self.permissions.allows(&self.name, self.uuid, node)
+        let groups: Vec<&str> = self.operator_groups.iter().map(String::as_str).collect();
+        self.permissions
+            .allows_in(&self.name, self.uuid, node, &groups)
     }
 }
 

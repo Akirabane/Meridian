@@ -11,6 +11,12 @@
 //!
 //! Only what the server changes is followed: a ban the proxy sent is not taken back
 //! ([`super::events::SOURCE`]), and nothing the proxy takes is sent on to the other servers.
+//!
+//! The same rounds read the servers' operators when `[operators] from-servers` is on
+//! (docs/OPERATING.md, section 5.9). They are reflected, not followed: the list of a server
+//! replaces what was known of it, whenever the server is read again (the first answer, a
+//! reconnection, lost notices) and whenever it announces that an operator was added or removed.
+//! A server that cannot be read for `stale-after-seconds` has no operators.
 use super::events::{self, Event};
 use crate::access::{enforce, not_saved};
 use crate::log::{info, warning};
@@ -56,6 +62,38 @@ pub trait Source: Send {
     fn report(&mut self, after: Option<u64>) -> Result<AccessReport, String>;
     /// The lists the server holds now.
     fn state(&mut self) -> Result<State, String>;
+    /// The operators the server holds now, as its `operators` gives them.
+    fn operators(&mut self) -> Result<Value, String> {
+        Ok(Value::Array(Vec::new()))
+    }
+}
+
+/// What a round reads from a server: the bans and the whitelist (`[access.sync] from-servers`),
+/// its operators (`[operators] from-servers`, for a server that counts).
+#[derive(Clone, Copy, Debug)]
+struct Wants {
+    bans: bool,
+    operators: bool,
+}
+
+impl Wants {
+    /// What is not followed when the sidecar cannot be listened to.
+    fn what(self) -> &'static str {
+        match (self.bans, self.operators) {
+            (true, true) => "its bans and its operators are",
+            (true, false) => "its bans are",
+            _ => "its operators are",
+        }
+    }
+
+    /// The setting that asked.
+    fn setting(self) -> &'static str {
+        match (self.bans, self.operators) {
+            (true, true) => "[access.sync] and [operators] from-servers are",
+            (true, false) => "[access.sync] from-servers is",
+            _ => "[operators] from-servers is",
+        }
+    }
 }
 
 /// How a sidecar is reached.
@@ -83,6 +121,12 @@ impl Source for Connection {
             ip_bans: read("ip_bans")?,
             allowlist: read("allowlist")?,
         })
+    }
+
+    fn operators(&mut self) -> Result<Value, String> {
+        self.client
+            .manage("operators", Value::Null)
+            .map_err(|e| format!("operators: {e}"))
     }
 }
 
@@ -119,6 +163,14 @@ struct Slot {
     retry_at: Option<Instant>,
     /// The state that was said last, so that it is said once.
     said: Said,
+    /// Whether the operators of the server were read since the sidecar was last connected to
+    /// it; read again at once when not.
+    ops_read: bool,
+    /// The failures in a row of reading the operators, which set the wait.
+    ops_failures: u32,
+    ops_retry_at: Option<Instant>,
+    /// How many operators were said last, so that a change is said once.
+    ops_said: Option<usize>,
 }
 
 /// The listeners of every sidecar that was asked, by backend.
@@ -159,19 +211,29 @@ pub(super) fn retry_after(failures: u32) -> Duration {
 }
 
 /// One round: every sidecar is asked, all at once, each over its own connection, and what
-/// its server announced is applied to the proxy's lists. Nothing is asked while
-/// `from-servers` is off.
+/// its server announced is applied to the proxy's lists, and its operators are read. Nothing is
+/// asked while both `from-servers` are off.
 pub fn round(config: &Config, open: &Open<'_>, hearers: &Hearers, sessions: &Sessions) {
-    if !config.access.sync.from_servers {
+    let bans = config.access.sync.from_servers;
+    let operators = config.operators.from_servers;
+    sessions.operators.configure(&config.operators);
+    if !bans && !operators {
         hearers.retain(|_| false);
         return;
     }
     hearers.retain(|b| config.sidecars.iter().any(|s| s.backend == b));
     std::thread::scope(|scope| {
         for sidecar in &config.sidecars {
+            let wants = Wants {
+                bans,
+                operators: operators && config.operators.counts(&sidecar.backend),
+            };
+            if !wants.bans && !wants.operators {
+                continue;
+            }
             scope.spawn(move || {
                 let mut slot = hearers.take(&sidecar.backend);
-                ask(sidecar, open, &mut slot, sessions);
+                ask(sidecar, wants, open, &mut slot, sessions);
                 hearers.put(&sidecar.backend, slot);
             });
         }
@@ -199,7 +261,7 @@ fn failed(slot: &mut Slot, said: Said, line: impl FnOnce() -> String) {
 }
 
 /// Asks one sidecar once and applies the answer.
-fn ask(sidecar: &Sidecar, open: &Open<'_>, slot: &mut Slot, sessions: &Sessions) {
+fn ask(sidecar: &Sidecar, wants: Wants, open: &Open<'_>, slot: &mut Slot, sessions: &Sessions) {
     let backend = sidecar.backend.as_str();
     if slot.retry_at.is_some_and(|at| Instant::now() < at) {
         return;
@@ -239,9 +301,11 @@ fn ask(sidecar: &Sidecar, open: &Open<'_>, slot: &mut Slot, sessions: &Sessions)
         slot.retry_at = Some(Instant::now() + NOT_LISTENING_RETRY);
         say(slot, Said::NotListening, || {
             format!(
-                "[access.sync] from-servers is on, but the sidecar of backend \"{backend}\" does \
+                "{} on, but the sidecar of backend \"{backend}\" does \
                  not listen to the server's management protocol (start it with \
-                 --management-properties): its bans are not followed"
+                 --management-properties): {} not followed",
+                wants.setting(),
+                wants.what()
             )
         });
         return;
@@ -251,15 +315,24 @@ fn ask(sidecar: &Sidecar, open: &Open<'_>, slot: &mut Slot, sessions: &Sessions)
         say(slot, Said::NotConnected, || {
             format!(
                 "the sidecar of backend \"{backend}\" is not connected to the server's \
-                 management protocol (it is off on the server, or the server is down): its bans \
-                 are not followed while it is not"
+                 management protocol (it is off on the server, or the server is down): {} not \
+                 followed while it is not",
+                wants.what()
             )
         });
+        slot.ops_read = false;
         return;
+    }
+    // A server heard connected is believed for another while; a read below may replace it.
+    if wants.operators {
+        sessions.operators.heard(backend, Instant::now());
+    } else {
+        slot.ops_read = false;
     }
     let behind_the_server = slot.after.is_none_or(|after| report.last < after);
     let reconnected = slot.connection != Some(report.connection);
-    if behind_the_server || reconnected || report.missed {
+    let resync = behind_the_server || reconnected || report.missed;
+    if wants.bans && resync {
         let state = match source.state() {
             Ok(state) => state,
             Err(why) => {
@@ -280,17 +353,65 @@ fn ask(sidecar: &Sidecar, open: &Open<'_>, slot: &mut Slot, sessions: &Sessions)
                 lines.len()
             );
         }
-        slot.connection = Some(report.connection);
     }
-    for notice in &report.notices {
-        if let Some(event) = events::parse_notice(&notice.line) {
-            apply(sessions, backend, event);
+    if wants.bans {
+        for notice in &report.notices {
+            if let Some(event) = events::parse_notice(&notice.line) {
+                apply(sessions, backend, event);
+            }
         }
     }
+    // An operator added or removed: the list is read again, whatever the notice carried.
+    let operators_changed = wants.operators
+        && report
+            .notices
+            .iter()
+            .any(|notice| events::is_operator_notice(&notice.line));
+    let waiting = slot.ops_retry_at.is_some_and(|at| Instant::now() < at);
+    if wants.operators && (resync || operators_changed || !slot.ops_read) && !waiting {
+        let read = source.operators().and_then(|list| {
+            events::operators(&list).ok_or_else(|| "the answer is not a list".to_owned())
+        });
+        settle_operators(backend, read, slot, sessions);
+    }
+    slot.connection = Some(report.connection);
     slot.after = Some(report.last);
     say(slot, Said::Hearing, || {
         format!("hearing the changes of the lists of backend \"{backend}\"'s server")
     });
+}
+
+/// Puts the operators just read from `backend`'s server in place of what was known. A failure
+/// leaves what was known (it ages), says so once, and is tried again after a wait that grows.
+fn settle_operators(
+    backend: &str,
+    read: Result<Vec<crate::operators::Op>, String>,
+    slot: &mut Slot,
+    sessions: &Sessions,
+) {
+    match read {
+        Ok(ops) => {
+            let count = ops.len();
+            sessions.operators.replace(backend, ops, Instant::now());
+            slot.ops_read = true;
+            slot.ops_failures = 0;
+            slot.ops_retry_at = None;
+            if slot.ops_said != Some(count) {
+                info!("read the operators of backend \"{backend}\"'s server: {count}");
+                slot.ops_said = Some(count);
+            }
+        }
+        Err(why) => {
+            slot.ops_failures = slot.ops_failures.saturating_add(1);
+            slot.ops_retry_at = Some(Instant::now() + retry_after(slot.ops_failures));
+            if slot.ops_failures == 1 {
+                warning!(
+                    "cannot read the operators of backend \"{backend}\"'s server: {why}; trying \
+                     again"
+                );
+            }
+        }
+    }
 }
 
 /// Applies `events` in order, and returns a line for each that changed the proxy's lists.

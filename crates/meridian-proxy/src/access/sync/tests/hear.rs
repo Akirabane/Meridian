@@ -2,11 +2,12 @@
 use super::super::events::{self, Event};
 use super::super::hear::*;
 use super::{config, sidecar};
+use crate::commands::Typist;
 use crate::session::{Open, Player, Sessions, tests::idle_session_on};
 use horizon_protocol::{
     connection::Connection, crypto::offline_uuid, packets::configuration, text,
 };
-use meridian_config::{Access, Config, Target};
+use meridian_config::{Access, AuthKind, Config, OperatorSettings, Permissions, Target, node};
 use meridian_sidecar::lists::AccessReport;
 use meridian_sidecar::request::NoticeHeard;
 use serde_json::{Value, json};
@@ -58,6 +59,9 @@ fn nothing() -> State {
 struct Script {
     reports: Mutex<VecDeque<Result<AccessReport, String>>>,
     states: Mutex<VecDeque<Result<State, String>>>,
+    /// What the operators call answers, in order; an empty list when it runs out.
+    operators: Mutex<VecDeque<Result<Value, String>>>,
+    operators_read: AtomicUsize,
     asked: Mutex<Vec<Option<u64>>>,
     read: AtomicUsize,
     opened: AtomicUsize,
@@ -119,6 +123,16 @@ impl Source for Scripted {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Ok(nothing()))
+    }
+
+    fn operators(&mut self) -> Result<Value, String> {
+        self.0.operators_read.fetch_add(1, Ordering::SeqCst);
+        self.0
+            .operators
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(json!([])))
     }
 }
 
@@ -543,4 +557,270 @@ fn a_backend_a_reload_removed_is_forgotten() {
         &sessions,
     );
     assert_eq!(script.opened.load(Ordering::SeqCst), 3);
+}
+
+// ---- The operators of the servers.
+
+const STEVE_ID: &str = "853c80ef-3c37-49fd-aa49-938b674adae6";
+
+fn operator(id: &str, name: &str, level: u64) -> Value {
+    json!({ "player": { "id": id, "name": name }, "permissionLevel": level, "bypassesPlayerLimit": false })
+}
+
+fn operator_notice(seq: u64, method: &str, entry: Value) -> NoticeHeard {
+    notice(seq, method, entry)
+}
+
+/// `east`, with the operators read and the bans not.
+fn operators_of_east() -> Config {
+    let mut config = config(false, false, &["east"]);
+    config.operators = OperatorSettings {
+        from_servers: true,
+        ..OperatorSettings::default()
+    };
+    config
+}
+
+fn uuid(text: &str) -> [u8; 16] {
+    match target(text) {
+        Target::Uuid(id) => id,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn operator_groups(sessions: &Sessions, backend: &str, name: &str, id: &str) -> Vec<String> {
+    sessions
+        .operators
+        .groups_for(backend, name, uuid(id), AuthKind::Verified)
+}
+
+/// Alex as `commands.rs` sees them when they type a command on `backend`, with the permissions
+/// of a proxy whose operator group may `/send`.
+fn typist(sessions: &Sessions, backend: &str, now: Instant) -> Typist {
+    Typist {
+        auth: AuthKind::Verified,
+        backend: backend.into(),
+        name: "Alex".into(),
+        uuid: uuid(ID),
+        permissions: Arc::new(
+            Permissions::parse("[group.operator]\nallow = [\"meridian.send\"]\n").unwrap(),
+        ),
+        operator_groups: sessions.operators.groups_at(
+            backend,
+            "Alex",
+            uuid(ID),
+            AuthKind::Verified,
+            now,
+        ),
+    }
+}
+
+#[test]
+fn the_operators_of_a_server_are_read_at_the_first_answer() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    script.operators.lock().unwrap().push_back(Ok(json!([
+        operator(ID, "Alex", 4),
+        operator(STEVE_ID, "Steve", 2)
+    ])));
+    run(&operators_of_east(), &script, &hearers, &sessions);
+    assert_eq!(operator_groups(&sessions, "east", "Alex", ID), ["operator"]);
+    // Level 2 is below the minimum of 4.
+    assert!(operator_groups(&sessions, "east", "Steve", STEVE_ID).is_empty());
+    // The bans were not asked for: only the operators were read.
+    assert_eq!(script.reads(), 0);
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 1);
+    assert!(access(&sessions).bans().is_empty());
+}
+
+/// A notice that an operator was removed is a reason to read the list again, and the list read
+/// is what counts: the operator who was removed loses what the group gave, at the next command.
+#[test]
+fn an_operator_removed_on_the_server_loses_the_nodes_of_the_group() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(
+        vec![
+            Ok(report(1, 3, vec![])),
+            // Nothing new: the list is not read again.
+            Ok(report(1, 3, vec![])),
+            Ok(report(
+                1,
+                4,
+                vec![operator_notice(
+                    4,
+                    "operators/removed",
+                    operator(ID, "Alex", 4),
+                )],
+            )),
+        ],
+        vec![],
+    );
+    {
+        let mut answers = script.operators.lock().unwrap();
+        answers.push_back(Ok(json!([operator(ID, "Alex", 4)])));
+        answers.push_back(Ok(json!([])));
+    }
+    let config = operators_of_east();
+    run(&config, &script, &hearers, &sessions);
+    assert!(typist(&sessions, "east", Instant::now()).has(node::SEND));
+    run(&config, &script, &hearers, &sessions);
+    assert!(typist(&sessions, "east", Instant::now()).has(node::SEND));
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 1);
+    // The notice makes the proxy read again, and the list now has nobody.
+    run(&config, &script, &hearers, &sessions);
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 2);
+    assert!(!typist(&sessions, "east", Instant::now()).has(node::SEND));
+}
+
+/// And one added: the notice is the trigger, whatever level it carries.
+#[test]
+fn an_operator_added_on_the_server_is_read_by_the_next_round() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(
+        vec![
+            Ok(report(1, 0, vec![])),
+            Ok(report(
+                1,
+                1,
+                vec![operator_notice(
+                    1,
+                    "operators/added",
+                    json!({ "player": { "id": ID, "name": "Alex" }, "permissionLevel": null }),
+                )],
+            )),
+        ],
+        vec![],
+    );
+    {
+        let mut answers = script.operators.lock().unwrap();
+        answers.push_back(Ok(json!([])));
+        answers.push_back(Ok(json!([operator(ID, "Alex", 4)])));
+    }
+    let config = operators_of_east();
+    run(&config, &script, &hearers, &sessions);
+    assert!(!typist(&sessions, "east", Instant::now()).has(node::SEND));
+    run(&config, &script, &hearers, &sessions);
+    assert!(typist(&sessions, "east", Instant::now()).has(node::SEND));
+}
+
+/// A server that has been out of reach for `stale-after-seconds` has no operators: a deop made
+/// while the proxy could not hear does not last for ever.
+#[test]
+fn a_server_out_of_reach_for_longer_than_stale_after_loses_its_operators() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    script
+        .operators
+        .lock()
+        .unwrap()
+        .push_back(Ok(json!([operator(ID, "Alex", 4)])));
+    let config = operators_of_east();
+    run(&config, &script, &hearers, &sessions);
+    let now = Instant::now();
+    assert!(typist(&sessions, "east", now).has(node::SEND));
+    // The sidecar stops answering: nothing renews what was heard.
+    script
+        .reports
+        .lock()
+        .unwrap()
+        .push_back(Err("refused".into()));
+    run(&config, &script, &hearers, &sessions);
+    let stale = config.operators.stale_after_seconds;
+    assert!(typist(&sessions, "east", now + Duration::from_secs(stale - 5)).has(node::SEND));
+    assert!(!typist(&sessions, "east", now + Duration::from_secs(stale + 5)).has(node::SEND));
+}
+
+/// A failure to read keeps what was known; it is not an answer.
+#[test]
+fn a_failed_read_of_the_operators_keeps_what_was_known() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(
+        vec![Ok(report(1, 0, vec![])), Ok(report(2, 0, vec![]))],
+        vec![],
+    );
+    {
+        let mut answers = script.operators.lock().unwrap();
+        answers.push_back(Ok(json!([operator(ID, "Alex", 4)])));
+        // The server has restarted (another connection) and is not ready: it refuses.
+        answers.push_back(Err(
+            "Method cannot be dispatched pre server initialization".into()
+        ));
+    }
+    let config = operators_of_east();
+    run(&config, &script, &hearers, &sessions);
+    run(&config, &script, &hearers, &sessions);
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 2);
+    assert_eq!(operator_groups(&sessions, "east", "Alex", ID), ["operator"]);
+    // The answer was not a list either: also not an answer.
+    let sessions = Sessions::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    script
+        .operators
+        .lock()
+        .unwrap()
+        .push_back(Ok(json!({ "operators": [] })));
+    run(&config, &script, &Hearers::default(), &sessions);
+    assert!(operator_groups(&sessions, "east", "Alex", ID).is_empty());
+}
+
+/// The two directions share the rounds: one answer from the sidecar, the lists and the
+/// operators read once each.
+#[test]
+fn the_bans_and_the_operators_are_read_in_the_same_round() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    script
+        .operators
+        .lock()
+        .unwrap()
+        .push_back(Ok(json!([operator(ID, "Alex", 4)])));
+    let mut config = only_east();
+    config.operators = operators_of_east().operators;
+    run(&config, &script, &hearers, &sessions);
+    assert_eq!(script.reads(), 1);
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 1);
+    assert_eq!(operator_groups(&sessions, "east", "Alex", ID), ["operator"]);
+    // The sidecar was opened once for both.
+    assert_eq!(script.opened.load(Ordering::SeqCst), 1);
+}
+
+/// Turned off at a reload, the operators stop counting at once, and the bans go on.
+#[test]
+fn turning_the_operators_off_forgets_them_at_the_next_round() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    script
+        .operators
+        .lock()
+        .unwrap()
+        .push_back(Ok(json!([operator(ID, "Alex", 4)])));
+    run(&operators_of_east(), &script, &hearers, &sessions);
+    assert_eq!(operator_groups(&sessions, "east", "Alex", ID), ["operator"]);
+    run(&only_east(), &script, &hearers, &sessions);
+    assert!(operator_groups(&sessions, "east", "Alex", ID).is_empty());
+}
+
+/// A backend left out of `from` is not asked for its operators at all.
+#[test]
+fn a_server_that_does_not_count_is_not_asked_for_its_operators() {
+    let sessions = Sessions::default();
+    let hearers = Hearers::default();
+    let script = Script::with(vec![Ok(report(1, 0, vec![]))], vec![]);
+    let mut config = config(false, false, &["east", "lobby"]);
+    config.operators = OperatorSettings {
+        from_servers: true,
+        from: vec!["lobby".into()],
+        ..OperatorSettings::default()
+    };
+    // Both have a sidecar; only `lobby` counts, so only one is opened.
+    run(&config, &script, &hearers, &sessions);
+    assert_eq!(script.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(script.operators_read.load(Ordering::SeqCst), 1);
 }

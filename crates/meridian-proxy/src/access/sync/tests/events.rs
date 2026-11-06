@@ -195,3 +195,84 @@ fn the_lists_a_server_holds_are_taken_entry_by_entry() {
     // Anything else than a list is an empty one.
     assert!(state(&json!(null), &json!({}), &json!("x")).is_empty());
 }
+
+// ---- The operators.
+
+#[test]
+fn a_notice_that_an_operator_was_added_or_removed_is_a_reason_to_read_the_list_again() {
+    for method in ["operators/added", "operators/removed"] {
+        let line = notice(
+            method,
+            json!({ "player": { "id": ID, "name": "Alex" }, "permissionLevel": 4, "bypassesPlayerLimit": false }),
+        );
+        assert!(is_operator_notice(&line), "{method}");
+        // The proxy does not follow the notice itself.
+        assert_eq!(parse_notice(&line), None, "{method}");
+        let bare = line.replace("minecraft:", "");
+        assert!(is_operator_notice(&bare), "{method} without the prefix");
+    }
+    for other in [
+        "bans/added",
+        "allowlist/added",
+        "gamerules/updated",
+        "server/status",
+    ] {
+        assert!(!is_operator_notice(&notice(other, json!({}))), "{other}");
+    }
+    assert!(!is_operator_notice("not json"));
+    assert!(!is_operator_notice(
+        r#"{"jsonrpc":"2.0","id":1,"result":[]}"#
+    ));
+}
+
+#[test]
+fn the_operators_of_a_server_are_its_listed_players_with_their_level() {
+    let list = json!([
+        { "player": { "id": ID, "name": "Alex" }, "permissionLevel": 4, "bypassesPlayerLimit": true },
+        { "player": { "id": null, "name": "Steve" }, "permissionLevel": 2, "bypassesPlayerLimit": false },
+        { "player": { "name": "Kim" }, "permissionLevel": 0 },
+    ]);
+    let ops = operators(&list).unwrap();
+    assert_eq!(ops.len(), 3);
+    assert_eq!(ops[0].name, "Alex");
+    assert_eq!(ops[0].level, 4);
+    assert_eq!(
+        ops[0].id,
+        match target(ID) {
+            Target::Uuid(id) => Some(id),
+            _ => None,
+        }
+    );
+    // No id when the server gives none (or null).
+    assert_eq!(
+        (ops[1].name.as_str(), ops[1].level, ops[1].id),
+        ("Steve", 2, None)
+    );
+    assert_eq!(
+        (ops[2].name.as_str(), ops[2].level, ops[2].id),
+        ("Kim", 0, None)
+    );
+    assert_eq!(operators(&json!([])).unwrap(), vec![]);
+}
+
+#[test]
+fn an_entry_the_proxy_cannot_name_or_whose_level_it_cannot_read_is_not_taken() {
+    let list = json!([
+        { "player": { "id": ID }, "permissionLevel": 4 },
+        { "player": { "name": "  " }, "permissionLevel": 4 },
+        { "player": { "name": "A" }, "permissionLevel": 5 },
+        { "player": { "name": "B" }, "permissionLevel": -1 },
+        { "player": { "name": "C" }, "permissionLevel": "4" },
+        { "player": { "name": "D" } },
+        { "permissionLevel": 4 },
+        "Alex",
+        { "player": { "name": "Fine" }, "permissionLevel": 3 },
+    ]);
+    let ops = operators(&list).unwrap();
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert_eq!(ops[0].name, "Fine");
+    // An answer that is not a list is not an answer.
+    assert_eq!(operators(&json!({ "operators": [] })), None);
+    assert_eq!(operators(&json!(null)), None);
+    assert_eq!(operators(&json!("none")), None);
+}

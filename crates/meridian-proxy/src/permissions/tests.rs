@@ -223,6 +223,55 @@ fn a_player_online_is_checked_by_name_and_by_unique_id() {
     );
 }
 
+/// A player who is an operator of the server they are on is in the group of `[operators]` for
+/// the console too: `perm check` and `perm list` say so, and nothing is written to the file.
+#[test]
+fn the_console_sees_an_operator_in_the_group_of_the_operators() {
+    use crate::operators::Op;
+    let mut config = config();
+    config.operators = meridian_config::OperatorSettings {
+        from_servers: true,
+        ..meridian_config::OperatorSettings::default()
+    };
+    let proxy = Proxy::new(
+        config,
+        "does-not-exist/meridian.toml".into(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    run(&proxy, "perm group operator create");
+    run(&proxy, "perm group operator allow meridian.send");
+    let id = offline_uuid("Alex").to_be_bytes();
+    proxy.sessions.operators.replace(
+        "east",
+        vec![Op {
+            id: Some(id),
+            name: "Alex".into(),
+            level: 4,
+        }],
+        Instant::now(),
+    );
+    // Not online: nothing is known of where they are, so nothing is theirs.
+    assert!(run(&proxy, "perm check Alex meridian.send")[0].contains("does not have"));
+    // On lobby, not on east: an operator of east has nothing from it.
+    let on_lobby = join(&proxy, "Alex", "lobby");
+    assert!(run(&proxy, "perm check Alex meridian.send")[0].contains("does not have"));
+    assert_eq!(run(&proxy, "perm list Alex").len(), 1);
+    drop(on_lobby);
+    let _on_east = join(&proxy, "Alex", "east");
+    assert!(run(&proxy, "perm check Alex meridian.send")[0].contains("has meridian.send"));
+    let listed = run(&proxy, "perm list Alex");
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed[0].contains("no group"), "{listed:?}");
+    assert!(
+        listed[1].contains("operator")
+            && listed[1].contains("east")
+            && listed[1].contains("level 4"),
+        "{listed:?}"
+    );
+    // The permissions hold no member: the operator is not written anywhere.
+    assert!(proxy.sessions.permissions.snapshot().members().is_empty());
+}
+
 /// A folder with a `meridian.toml` whose permissions are in `permissions.toml`, and a proxy
 /// started from it as `main` starts it.
 fn started(name: &str) -> (std::path::PathBuf, Proxy) {

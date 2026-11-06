@@ -14,6 +14,12 @@
 //! | `notification/allowlist/removed` | `{"id", "name"}`, not applied |
 //!
 //! `bans`, `ip_bans` and `allowlist` give the same elements in a list.
+//!
+//! The operators (docs/OPERATING.md, section 5.9) are read, not followed: a notification that
+//! one was added or removed ([`is_operator_notice`]) only tells the proxy to read the list again,
+//! which is `operators`, a list of `{"player": {"id", "name"}, "permissionLevel",
+//! "bypassesPlayerLimit"}`.
+use crate::operators::Op;
 use meridian_config::Target;
 use serde_json::Value;
 
@@ -76,6 +82,49 @@ pub fn parse_notice(line: &str) -> Option<Event> {
         // proxy's whitelist is not shortened by it.
         _ => None,
     }
+}
+
+/// Whether `line` tells that an operator was added or removed on a server: the proxy then reads
+/// the list of operators again, which is the whole truth, whatever the notice carried.
+pub fn is_operator_notice(line: &str) -> bool {
+    let Ok(message) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return false;
+    };
+    matches!(
+        method.strip_prefix("minecraft:").unwrap_or(method),
+        "notification/operators/added" | "notification/operators/removed"
+    )
+}
+
+/// The operators in the list a server holds (`operators`), or `None` when the answer is not a
+/// list. An entry with no player name, or with a level that is not 0 to 4, is not taken: a
+/// player the proxy cannot name or whose level it cannot read has no standing.
+pub fn operators(list: &Value) -> Option<Vec<Op>> {
+    let entries = list.as_array()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let player = entry.get("player")?;
+                let name = player.get("name")?.as_str()?.trim();
+                let level = u8::try_from(entry.get("permissionLevel")?.as_u64()?)
+                    .ok()
+                    .filter(|level| *level <= meridian_config::MAX_OPERATOR_LEVEL)?;
+                let id = match player.get("id").and_then(Value::as_str).map(Target::parse) {
+                    Some(Ok(Target::Uuid(id))) => Some(id),
+                    _ => None,
+                };
+                (!name.is_empty()).then(|| Op {
+                    id,
+                    name: name.to_owned(),
+                    level,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// A ban of a player (a `UserBanDto`).
