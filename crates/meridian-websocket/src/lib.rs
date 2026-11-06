@@ -1,7 +1,10 @@
-//! The little of WebSocket (RFC 6455) that a client which only listens needs: the
-//! upgrade with a bearer token, text messages (whole or in fragments), and the
-//! control frames. Used to read the notifications of a Horizon server's management
-//! protocol (`management.rs`), which sends them and asks nothing of the client.
+//! The little of WebSocket (RFC 6455) that Meridian's processes speak: the upgrade with a
+//! bearer token, text messages (whole or in fragments), and the control frames.
+//!
+//! This is the code the sidecar had in `websocket.rs`, moved here as it was so that the proxy and the
+//! extensions can share it (docs/EXTENSIONS.md, section 2.5); the sidecar uses it to read the
+//! notifications of a Horizon server's management protocol (`management.rs`) and to send its
+//! requests. What follows describes the code as it is, and was written for that use.
 //!
 //! What is left out, on purpose: the server's `Sec-WebSocket-Accept` is not checked
 //! (it needs SHA-1, which nothing else here uses), and the sidecar reads only a
