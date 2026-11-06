@@ -176,6 +176,7 @@ Every 5 seconds, so a wave of 3 to 5 seconds has one or two readings and a peak 
 - **The memory does not come back.** The cgroup held 150 MiB when run E began (the service had not been restarted since the runs before) and 181 MiB when the 250 bots had
   left, and 124 MiB at the start of run D, 150.5 MiB at its end. The cgroup's memory counts kernel memory too, so it is not the process's resident memory of the LAN page, and
   the number of runs on this service is too small to tell a leak from an allocator that keeps its pages ([LOAD-LAN-250.md](LOAD-LAN-250.md) saw the same).
+  **The cause was found afterwards and fixed (#119):** a leak of sessions that were never freed, not the allocator. These runs were made on a build from before the fix; the investigation, and the same cycles on the fixed build, are in [MEMORY.md](MEMORY.md).
 - **Sockets.** At most 1,019 sockets in the established state at the same time on the machine, which counts both ends of each loopback connection (the bots, the proxy and the
   synthetic servers), plus the real client's: it is not a count of players.
 
@@ -253,4 +254,4 @@ latency is what the bench's two cores allow. What cannot be said: that the proxy
 - A bench on another machine, or on cores of its own, against the same proxy: the way to take the bench's cores out of the proxy's round trips.
 - A real network between the bots and the proxy at this size (the LAN run had one, at 100 Mbit/s).
 - 500 or 1,000 players; many real clients; online mode (the AES cost of [BASELINE.md](BASELINE.md) is not in these figures).
-- The cause of the proxy's memory not coming back, and a long run.
+- The cause of the proxy's memory not coming back, and a long run. **The cause: done**, found and fixed (#119), see [MEMORY.md](MEMORY.md). A long run is still not measured: the check of the fix was 13 cycles, about 16 minutes.
