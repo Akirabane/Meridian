@@ -54,7 +54,7 @@ impl Histogram {
     }
 
     /// The lines of the histogram `name`, with `labels` (`phase="prepare"`).
-    fn render(&self, out: &mut String, name: &str, labels: &str) {
+    pub(crate) fn render(&self, out: &mut String, name: &str, labels: &str) {
         let mut cumulative = 0;
         for (i, bound) in BOUNDS.iter().enumerate() {
             cumulative += self.buckets[i].load(Ordering::Relaxed);
@@ -284,14 +284,14 @@ pub fn step_label(step: Step) -> &'static str {
 }
 
 /// A label value: backslash, quote and line feed escaped, as the format asks.
-fn escaped(value: &str) -> String {
+pub(crate) fn escaped(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
 }
 
-fn family(out: &mut String, name: &str, kind: &str, help: &str) {
+pub(crate) fn family(out: &mut String, name: &str, kind: &str, help: &str) {
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} {kind}");
 }
@@ -623,6 +623,8 @@ pub fn render(proxy: &Proxy) -> String {
         "meridian_status_round_duration_seconds {}",
         get(&m.last_status_round_micros) as f64 / 1_000_000.0
     );
+    // The extensions, if any were started: nothing is added to the page without one.
+    proxy.extensions.render(&mut out);
     out
 }
 

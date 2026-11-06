@@ -5,6 +5,7 @@ mod balance;
 mod commands;
 mod console;
 mod evacuate;
+mod extension;
 mod fallback;
 mod health;
 mod log;
