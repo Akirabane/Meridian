@@ -872,6 +872,7 @@ the gauges are worked out when the page is read.
 | Series | What it is |
 | --- | --- |
 | `meridian_players` | Players connected to the proxy |
+| `meridian_sessions_alive` | Sessions still in memory, over or not. It follows `meridian_players`; staying above it for long is a leak |
 | `meridian_backend_players{backend}` | Players on each server |
 | `meridian_backend_soft_cap{backend}`, `meridian_backend_hard_cap{backend}` | The caps of each server that has a role |
 | `meridian_backend_state{backend,state}` | 1 for the state the balancer sees: `open`, `closed`, `draining` (drained, restarting, or not accepting transfers) or `not_offered` (no recent report) |

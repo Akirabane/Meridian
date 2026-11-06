@@ -51,7 +51,7 @@ use meridian_net::{
 use meridian_rewrite::{Swap, Teleports};
 use std::sync::{
     Arc, Condvar, Mutex, MutexGuard,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -62,6 +62,14 @@ use std::time::{Duration, Instant};
 const ACKNOWLEDGE_WITHIN: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const ACKNOWLEDGE_WITHIN: Duration = Duration::from_millis(400);
+
+/// The sessions made and not freed yet.
+static ALIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// How many sessions are in memory, over or not. More than the players for long is a leak.
+pub fn sessions_alive() -> usize {
+    ALIVE.load(Ordering::Relaxed)
+}
 
 /// What a session does when the backend a player is on is lost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,6 +116,9 @@ pub struct Session {
     shared: Arc<Shared>,
     client_reader: ConnReader,
     first: (Arc<Lane>, ConnReader),
+    /// Kept here and then by the thread that reads the client, never in [`Shared`]: a hook
+    /// may hold a [`SessionHandle`], which would then keep the session alive for good.
+    commands: Option<Arc<CommandHook>>,
 }
 
 /// Switches a session to another backend (`crate::switch`), or ends it, from another
@@ -139,7 +150,6 @@ pub(crate) struct Shared {
     pub(crate) routing: Routing,
     up: Mutex<Up>,
     client_closer: Closer,
-    commands: Mutex<Option<Arc<CommandHook>>>,
     events: Mutex<Option<mpsc::Sender<Event>>>,
     next_lane: AtomicU64,
     /// A switch is under way; it closes what is left when it ends.
@@ -160,6 +170,12 @@ pub(crate) struct Shared {
     /// The backend's disconnect was passed on to the client: the close that follows it is
     /// the end the backend meant, not a loss.
     disconnected: AtomicBool,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        ALIVE.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// What goes to the client.
@@ -282,7 +298,6 @@ impl Session {
                 flow: Flow::default(),
             }),
             client_closer,
-            commands: Mutex::new(None),
             events: Mutex::new(None),
             next_lane: AtomicU64::new(1),
             switching: AtomicBool::new(false),
@@ -301,6 +316,7 @@ impl Session {
             delta_gate: Mutex::new(None),
             routing: Routing::default(),
         });
+        ALIVE.fetch_add(1, Ordering::Relaxed);
         let handle = SessionHandle(Arc::clone(&shared));
         *lock(&shared.backend) = name.to_owned();
         Ok((
@@ -308,14 +324,15 @@ impl Session {
                 shared,
                 client_reader,
                 first: (lane, backend_reader),
+                commands: None,
             },
             handle,
         ))
     }
 
     /// Lets `hook` answer the commands the player types in the play phase.
-    pub fn with_commands(self, hook: Arc<CommandHook>) -> Self {
-        *lock(&self.shared.commands) = Some(hook);
+    pub fn with_commands(mut self, hook: Arc<CommandHook>) -> Self {
+        self.commands = Some(hook);
         self
     }
 
@@ -340,6 +357,7 @@ impl Session {
             shared,
             client_reader,
             first: (lane, backend_reader),
+            commands,
         } = self;
         shared
             .fallback_kick
@@ -354,7 +372,7 @@ impl Session {
             std::thread::Builder::new()
                 .name("session-to-backend".to_owned())
                 .spawn(move || {
-                    let end = copy_to_backend(client_reader, &shared);
+                    let end = copy_to_backend(client_reader, &shared, commands.as_deref());
                     let _ = events.send(Event::Client(end));
                 })?
         };
@@ -902,8 +920,13 @@ fn follow(down: &mut Down, id: i32, payload: &[u8]) {
     }
 }
 
-/// Copies the client's packets to the active lane until reading or writing fails.
-fn copy_to_backend(mut from: ConnReader, shared: &Arc<Shared>) -> End {
+/// Copies the client's packets to the active lane until reading or writing fails, and lets
+/// `commands` answer the commands the player types.
+fn copy_to_backend(
+    mut from: ConnReader,
+    shared: &Arc<Shared>,
+    commands: Option<&CommandHook>,
+) -> End {
     use ids::{configuration::serverbound as cfg, play::serverbound as s};
     let mut body = Vec::new();
     let mut sending = Phase::Configuration;
@@ -924,7 +947,10 @@ fn copy_to_backend(mut from: ConnReader, shared: &Arc<Shared>) -> End {
             }
             continue;
         }
-        if sending == Phase::Play && answer_command(id, &payload, shared) {
+        if sending == Phase::Play
+            && let Some(hook) = commands
+            && answer_command(id, &payload, shared, hook)
+        {
             continue;
         }
         // While a switch writes the target's world to the client and changes the lane, what the
@@ -985,17 +1011,14 @@ fn rewrite(rewritten: horizon_protocol::Result<Vec<u8>>, original: Vec<u8>) -> V
     rewritten.unwrap_or(original)
 }
 
-/// When the play packet `id` is a command the session's hook answers, sends the
-/// player the answer and returns `true`.
-fn answer_command(id: i32, payload: &[u8], shared: &Shared) -> bool {
+/// When the play packet `id` is a command `hook` answers, sends the player the answer
+/// and returns `true`.
+fn answer_command(id: i32, payload: &[u8], shared: &Shared, hook: &CommandHook) -> bool {
     if id != ids::play::serverbound::CHAT_COMMAND
         && id != ids::play::serverbound::CHAT_COMMAND_SIGNED
     {
         return false;
     }
-    let Some(hook) = lock(&shared.commands).clone() else {
-        return false;
-    };
     let command = match play::Serverbound::decode(id, payload) {
         Ok(play::Serverbound::ChatCommand(c)) => c.command,
         Ok(play::Serverbound::ChatCommandSigned(c)) => c.command,
