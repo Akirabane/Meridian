@@ -1,6 +1,6 @@
 [package]
 name = "meridian-extension"
-description = "The wire of Meridian's extension protocol (protocol 0): the messages the proxy and an extension send each other, shared so that the two cannot drift."
+description = "Meridian's extension protocol (protocol 0): the messages the proxy and an extension send each other, shared so that the two cannot drift, and the SDK to write an extension."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
