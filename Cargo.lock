@@ -517,14 +517,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridian-hmac"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "meridian-net"
 version = "0.1.0"
 dependencies = [
  "horizon-protocol",
  "meridian-config",
+ "meridian-hmac",
  "meridian-testkit",
  "serde_json",
- "sha2",
  "ureq",
 ]
 

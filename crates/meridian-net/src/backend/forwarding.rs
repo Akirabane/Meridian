@@ -9,7 +9,7 @@
 //! bool is set).
 use crate::Profile;
 use horizon_protocol::buf::Writer;
-use sha2::{Digest, Sha256};
+use meridian_hmac::hmac_sha256;
 use std::net::IpAddr;
 
 /// The login plugin channel the server asks on.
@@ -45,26 +45,6 @@ fn data(profile: &Profile, address: IpAddr) -> Vec<u8> {
         }
     }
     w.data
-}
-
-/// HMAC-SHA256, as RFC 2104 defines it.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut padded = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        padded[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        padded[..key.len()].copy_from_slice(key);
-    }
-    let inner = Sha256::new()
-        .chain_update(padded.map(|b| b ^ 0x36))
-        .chain_update(data)
-        .finalize();
-    Sha256::new()
-        .chain_update(padded.map(|b| b ^ 0x5c))
-        .chain_update(inner)
-        .finalize()
-        .into()
 }
 
 #[cfg(test)]
