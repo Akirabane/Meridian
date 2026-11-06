@@ -1,0 +1,15 @@
+[package]
+name = "meridian-hmac"
+description = "HMAC-SHA256 and the comparison of two tags in constant time: the one function that the proxy's signatures and the extension protocol's proofs share."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+# SHA-256, which HMAC is built on. Already used by the proxy, the sidecar and the panel.
+sha2 = "0.10"
+
+[lints]
+workspace = true
