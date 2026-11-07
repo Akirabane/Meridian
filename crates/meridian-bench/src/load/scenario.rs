@@ -109,6 +109,9 @@ pub struct Settings {
     /// The bots arrive in this many waves, `wave_gap` apart (a proxy of another machine only).
     pub waves: usize,
     pub wave_gap: Duration,
+    /// The synthetic servers write what falls due in each tick of this length in one write, as a
+    /// game server flushes a player's packets once a tick; `None` writes each packet when it is due.
+    pub write_per_tick: Option<Duration>,
 }
 
 /// A server of the proxy's configuration.
@@ -230,6 +233,7 @@ pub(super) fn start_world(s: &Settings, spec: Spec) -> Result<World, String> {
         },
         traffic: spec.traffic,
         keepalive: s.keepalive,
+        write_per_tick: s.write_per_tick,
         flavour: spec.flavour,
         transfers: spec.transfers,
         bind: s.remote.as_ref().map_or_else(super::world::loopback, |r| {

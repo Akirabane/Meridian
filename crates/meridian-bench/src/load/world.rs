@@ -74,6 +74,10 @@ pub struct Options {
     pub traffic: Traffic,
     /// How often it sends a keep-alive.
     pub keepalive: Duration,
+    /// What falls due in each tick of this length is written in one write, on a clock every
+    /// player shares, as a game server flushes a player's packets once a tick; `None` writes each
+    /// packet when it is due.
+    pub write_per_tick: Option<Duration>,
     /// 1 or 2: which world it sends, so that two servers' chunks and entities differ.
     pub flavour: u8,
     /// The hand-overs of switches, when the proxy moves players between servers.
@@ -98,6 +102,9 @@ pub struct Counters {
     pub up_bytes: AtomicU64,
     pub down_packets: AtomicU64,
     pub down_bytes: AtomicU64,
+    /// The writes the stream to the players took: one a packet, or one a tick with
+    /// `write_per_tick`.
+    pub down_writes: AtomicU64,
     /// Held players placed by a switch.
     pub arrivals: AtomicU64,
 }
@@ -544,20 +551,51 @@ fn stream_to(
     let (mut position, mut column, mut keepalive_id) = ([0.0f64; 3], 0usize, 0u64);
     let columns: Vec<(i32, i32)> = view(shape.view_radius).collect();
     let mut scratch = Vec::new();
+    // With ticks, what falls due is kept here and written at the tick that follows it.
+    let tick = options.write_per_tick;
+    let mut tick_at = tick.map(|t| next_tick(Instant::now(), t));
+    let batch: std::cell::RefCell<Vec<Vec<u8>>> = std::cell::RefCell::new(Vec::new());
     let mut sent = |writer: &Arc<Mutex<ConnWriter>>, id: i32, payload: &[u8]| -> bool {
         scratch.clear();
         write_varint(&mut scratch, id);
         scratch.extend_from_slice(payload);
-        let Ok(mut writer) = writer.lock() else {
-            return false;
-        };
-        if writer.send(&scratch).is_err() {
-            return false;
+        if tick.is_some() {
+            batch.borrow_mut().push(scratch.clone());
+        } else {
+            let Ok(mut writer) = writer.lock() else {
+                return false;
+            };
+            if writer.send(&scratch).is_err() {
+                return false;
+            }
+            counters.down_writes.fetch_add(1, Ordering::Relaxed);
         }
         counters.down_packets.fetch_add(1, Ordering::Relaxed);
         counters
             .down_bytes
             .fetch_add(scratch.len() as u64, Ordering::Relaxed);
+        true
+    };
+    // A tick's packets, framed one after the other into one buffer, in one write.
+    let flush = |writer: &Arc<Mutex<ConnWriter>>| -> bool {
+        let bodies = std::mem::take(&mut *batch.borrow_mut());
+        if bodies.is_empty() {
+            return true;
+        }
+        let Ok(mut writer) = writer.lock() else {
+            return false;
+        };
+        let mut out = Vec::new();
+        for body in &bodies {
+            let Ok(contents) = horizon_protocol::frame::contents(body, writer.threshold) else {
+                return false;
+            };
+            writer.frame_into(&contents, &mut out);
+        }
+        if writer.write_raw(&out).is_err() {
+            return false;
+        }
+        counters.down_writes.fetch_add(1, Ordering::Relaxed);
         true
     };
     while !closed.load(Ordering::Relaxed) {
@@ -567,12 +605,30 @@ fn stream_to(
             .min()
             .unwrap_or(next_keepalive);
         let now = Instant::now();
-        if due > now {
+        // What is due by `limit` is sent now: by now, or with ticks by the tick that has come.
+        let limit = match tick_at {
+            None => now,
+            Some(at) if now < at => {
+                std::thread::sleep((at - now).min(Duration::from_millis(100)));
+                continue;
+            }
+            Some(at) => at,
+        };
+        if due > limit {
+            if let (Some(at), Some(t)) = (tick_at, tick) {
+                // Everything due by this tick is queued: one write, then the next tick (a
+                // tick the thread was too late for is not made up: its packets go in this one).
+                if !flush(writer) {
+                    return;
+                }
+                tick_at = Some(next_tick(now.max(at), t));
+                continue;
+            }
             // Never longer than a beat, so a player who left is noticed.
             std::thread::sleep((due - now).min(Duration::from_millis(100)));
             continue;
         }
-        if next_keepalive <= now {
+        if next_keepalive <= limit {
             keepalive_id += 1;
             if !sent(writer, pc::KEEP_ALIVE, &keepalive_id.to_be_bytes()) {
                 return;
@@ -583,7 +639,7 @@ fn stream_to(
         if let (Some(at), Some(every), Traffic::Active { tracked, .. }) =
             (next_small, small_every, options.traffic)
         {
-            if at <= now {
+            if at <= limit {
                 let ok = if shape.entities > 0 && rng.chance(tracked) {
                     position[0] += 0.1;
                     position[2] -= 0.1;
@@ -613,7 +669,7 @@ fn stream_to(
             }
         }
         if let (Some(at), Some(every)) = (next_chunk, chunk_every)
-            && at <= now
+            && at <= limit
         {
             let (x, z) = columns
                 .get(column % columns.len().max(1))
@@ -629,6 +685,16 @@ fn stream_to(
     }
 }
 
+/// The first tick after `now`, on a clock every player of this program shares: a game server
+/// ticks once for all its players, so their batches leave together.
+fn next_tick(now: Instant, tick: Duration) -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    let tick_nanos = tick.as_nanos().max(1);
+    let ticks = now.saturating_duration_since(epoch).as_nanos() / tick_nanos + 1;
+    epoch + Duration::from_nanos(u64::try_from(ticks * tick_nanos).unwrap_or(u64::MAX))
+}
+
 /// Data of about `size` bytes that compresses as chunks do: for the micro-measures.
 pub fn chunk_like(size: usize) -> Vec<u8> {
     let pool = Pool::new(1);
@@ -636,4 +702,100 @@ pub fn chunk_like(size: usize) -> Vec<u8> {
         .into_iter()
         .min_by_key(|data| data.len().abs_diff(size))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use super::*;
+    use horizon_protocol::connection::Pipe;
+
+    /// The stream of one player at 100 small packets a second for `seconds`, over an in-memory
+    /// pipe: the packets that reached the player, and the writes they took.
+    fn stream(write_per_tick: Option<Duration>, seconds: f64) -> (u64, u64) {
+        let (server, mut client) = Pipe::pair();
+        let (_reader, writer) = Connection::local(server).split();
+        let writer = Arc::new(Mutex::new(writer));
+        let options = Options {
+            name: "tick",
+            compression: None,
+            secret: None,
+            shape: Shape {
+                view_radius: 0,
+                entities: 0,
+                registry_bytes: 0,
+            },
+            traffic: Traffic::Active {
+                packets_per_second: 100,
+                tracked: 0.0,
+                chunks_per_second: 0.0,
+            },
+            keepalive: Duration::from_secs(60),
+            write_per_tick,
+            flavour: 1,
+            transfers: None,
+            bind: loopback(),
+        };
+        let closed = Arc::new(AtomicBool::new(false));
+        let counters = Arc::new(Counters::default());
+        let thread = {
+            let (writer, closed, counters) = (
+                Arc::clone(&writer),
+                Arc::clone(&closed),
+                Arc::clone(&counters),
+            );
+            std::thread::spawn(move || {
+                stream_to(&writer, &closed, &options, &Pool::new(1), 7, &counters)
+            })
+        };
+        std::thread::sleep(Duration::from_secs_f64(seconds));
+        closed.store(true, Ordering::Relaxed);
+        thread.join().unwrap();
+        // Everything written is in the pipe: read it to the end without waiting.
+        client.set_nonblocking(true);
+        let (mut reader, _writer) = Connection::local(client).split();
+        let mut packets = 0;
+        while reader.recv().is_ok() {
+            packets += 1;
+        }
+        (packets, counters.down_writes.load(Ordering::Relaxed))
+    }
+
+    /// With ticks of 50 ms the same stream reaches the player in a twentieth of a second's
+    /// batches, one write each, and the number of packets stays what it was.
+    #[test]
+    fn a_tick_of_packets_is_one_write_and_the_volume_stays() {
+        let (plain, plain_writes) = stream(None, 3.0);
+        let (ticked, ticked_writes) = stream(Some(Duration::from_millis(50)), 3.0);
+        assert_eq!(plain_writes, plain, "one write a packet without ticks");
+        assert!(
+            (270..=310).contains(&plain),
+            "100 a second for 3 s: {plain}"
+        );
+        let apart = (ticked as f64 - plain as f64).abs() / plain as f64;
+        assert!(
+            apart <= 0.05,
+            "{ticked} packets with ticks, {plain} without"
+        );
+        // 20 ticks a second for 3 s, about 5 packets in each.
+        assert!(
+            (50..=62).contains(&ticked_writes),
+            "{ticked_writes} writes for {ticked} packets"
+        );
+    }
+
+    #[test]
+    fn ticks_fall_on_one_clock() {
+        let tick = Duration::from_millis(50);
+        // The clock starts at its first use.
+        let _ = next_tick(Instant::now(), tick);
+        let now = Instant::now();
+        let (a, b) = (
+            next_tick(now, tick),
+            next_tick(now + Duration::from_millis(3), tick),
+        );
+        assert!(a > now && a <= now + tick);
+        // Two players asking a moment apart in the same tick get the same boundary.
+        assert!(b == a || b == a + tick);
+        assert_eq!(next_tick(a, tick), a + tick);
+    }
 }

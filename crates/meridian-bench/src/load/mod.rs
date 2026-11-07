@@ -53,6 +53,9 @@ Options:
   --probe-rate F        measuring packets a second, up (default 2)
   --keepalive-secs N    seconds between keep-alives (default 15)
   --arrival N           new bots a second; 0 starts them all at once (default 0)
+  --write-per-tick MS   the synthetic servers write what falls due in each tick of MS milliseconds
+                        in one write, every player's on the same clock, as a game server flushes
+                        once a tick (Horizon: 50); 0 writes each packet when it is due (default 0)
   --movers-percent N    the share of bots that move in `moves` (default 10)
   --churn-cycles N      most connections of a `churn` step (default 3000)
   --churn-hold-ms N     how long a connection of `churn` stays, on average (default 100)
@@ -154,6 +157,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             windows: Arc::default(),
             waves: 1,
             wave_gap: Duration::from_secs(30),
+            write_per_tick: None,
         },
         write_remote: None,
     };
@@ -244,6 +248,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
                 );
             }
             "--arrival" => o.settings.arrival = number(&value("--arrival")?, "--arrival")? as u32,
+            "--write-per-tick" => {
+                let ms = number(&value("--write-per-tick")?, "--write-per-tick")?;
+                o.settings.write_per_tick = (ms > 0).then_some(Duration::from_millis(ms));
+            }
             "--movers-percent" => {
                 o.settings.movers_percent =
                     (number(&value("--movers-percent")?, "--movers-percent")? as usize)
@@ -504,7 +512,7 @@ fn run(o: &Options) -> bool {
         "# Load run\n\n- Date: {}\n- Machine: {}\n- Machine load before the run: {}\n- Commit: {} ({} build)\n\
          - Processor time: {}\n- Label: {}\n- Command: {}\n\
          - Window: {} s, direct {} s; view radius {}, {} entities; \
-         down {} packets/s, {} chunks/s; up {} packets/s; probes {}/s; keep-alive {} s\n",
+         down {} packets/s, {} chunks/s; up {} packets/s; probes {}/s; keep-alive {} s; servers write per tick: {} ms (0: each packet)\n",
         context.date,
         context.machine,
         context.load,
@@ -522,7 +530,11 @@ fn run(o: &Options) -> bool {
         s.up_rate,
         s.probe_rate,
         s.keepalive.as_secs(),
+        s.write_per_tick.map_or(0, |t| t.as_millis()),
     );
+    // Written in every row: rows of servers that write per tick and of servers that write each
+    // packet must never be read as one series.
+    let tick_ms = s.write_per_tick.map_or(0, |t| t.as_millis()).to_string();
     for name in &o.scenarios {
         let mut table = Table::default();
         if name == "micro" {
@@ -530,6 +542,7 @@ fn run(o: &Options) -> bool {
             table = micro::run(micro::SPAN);
             for row in &mut table.rows {
                 row.0.insert(0, ("label", o.label.clone()));
+                row.0.insert(1, ("write_per_tick_ms", tick_ms.clone()));
             }
             println!(
                 "## micro\n\n{}",
@@ -588,6 +601,7 @@ fn run(o: &Options) -> bool {
                     match result {
                         Ok(mut row) => {
                             row.0.insert(0, ("label", o.label.clone()));
+                            row.0.insert(1, ("write_per_tick_ms", tick_ms.clone()));
                             // A proxy of another machine cannot be seen from here: it counts as
                             // there if the bots all got in.
                             ok &= row.0.iter().any(|(k, v)| {
