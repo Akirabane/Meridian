@@ -50,8 +50,9 @@ A server lost while a player is in the game (`[fallback]`, [OPERATING.md](OPERAT
 
 | The log says | Cause | Action |
 | --- | --- | --- |
-| `INFO <peer>: <player>: lost backend "<a>" (the connection was lost: ...); moved to "<b>"` | The server crashed or the connection broke, and the player was moved | Find why `<a>` went away |
-| `INFO <peer>: <player>: lost backend "<a>" (it disconnected them: <reason>); moved to "<b>"` | The server disconnected the player (a kick, its own shutdown) | Read `<reason>`; it is also in the player's chat |
+| `INFO <peer>: <player>: lost backend "<a>" (the connection was lost: ...); moved to "<b>" in <n> ms (servers tried: <k>; players on "<a>" then: <m>)` | The server crashed or the connection broke, and the player was moved. `<n>` is the time from the loss being heard to `<b>` having taken the login | Find why `<a>` went away. A long `<n>` or a `<k>` above 1 means servers that did not answer: read the `cannot join backend` lines |
+| `INFO <peer>: <player>: lost backend "<a>" (it disconnected them: <reason>); moved to "<b>" in <n> ms (...)` | The server disconnected the player (a kick, its own shutdown) | Read `<reason>`; it is also in the player's chat |
+| `INFO <peer>: <player>: on "<b>" <n> ms after the loss of "<a>": the game followed` | The player's client acknowledged and now plays on `<b>`'s connection. The line follows the one above | None. No such line after a `moved to` means the client never followed (it did not acknowledge in time, or left) |
 | `WARN <peer>: <player>: lost backend "<a>" (...); no other server took them` | Every other server refused or did not answer; the player was disconnected with a message | Read the `cannot join backend` lines just before, and see the next table |
 | `WARN <peer>: <player>: lost backend "<a>" (...); <n> servers were tried for them already, so they are disconnected` | `max-attempts` was reached: servers lost the player one after the other | Look at why they keep failing; raise `max-attempts` only if there are more servers to try |
 | `WARN <peer>: <player>: lost backend "<a>" (...); no other server to send them to` | The player's route has no other server | Add servers to the group or to `try` |
