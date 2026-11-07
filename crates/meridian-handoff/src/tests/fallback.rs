@@ -506,3 +506,176 @@ fn an_acknowledgement_before_the_lost_connection_is_closed_keeps_the_replacement
     drop(second);
     let _ = run.join();
 }
+
+/// A server that stops at once kicks its players while a switch is preparing to move one of
+/// them. The switch gives up before the freeze, and the fallback moves that player as it
+/// moves the others: the kick is not shown and the session goes on.
+#[test]
+fn a_kick_while_a_switch_prepares_moves_the_player_by_the_fallback() {
+    let Moved {
+        handle,
+        run,
+        mut player,
+        source,
+        mut second,
+        losses,
+        ..
+    } = moved(BOTH, true);
+    let log = Log::default();
+    let (address, imported, _target) = target(TargetWorld::default());
+    let source = Arc::new(Mutex::new(source));
+    let kicker = Arc::clone(&source);
+    let shared = Arc::clone(&handle.0);
+    let mut target_control =
+        super::switch::target_control(&log, imported).on("expect", move || {
+            kick(&mut kicker.lock().unwrap(), "Server closed");
+            // The prepare step ends only once the session knows the source let them go.
+            wait_for(|| shared.lost_in_switch.load(Ordering::SeqCst));
+        });
+    let failure = switch(
+        &handle,
+        super::switch::target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control,
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::Prepare, After::Stayed),
+        "{failure}"
+    );
+    // Nothing was frozen: the target was let go before any export.
+    assert_eq!(log.lines(), ["target expect Some(10)", "target drop"]);
+    arrive(&mut player, &mut second);
+    assert_eq!(says(&mut player), SAYING);
+    assert_eq!(losses.recv().unwrap(), Loss::Kicked("Server closed".into()));
+    assert_eq!(handle.backend(), "fallback");
+    drop(second);
+    drop(source);
+    let _ = run.join().unwrap();
+}
+
+/// The player's server kicks them once it has frozen them and given their record: the switch
+/// goes on and hands them over to the target, and the fallback does not move them again.
+#[test]
+fn a_kick_after_the_freeze_lets_the_switch_hand_the_player_over() {
+    let Moved {
+        handle,
+        run,
+        mut player,
+        source,
+        losses,
+        ..
+    } = moved(BOTH, true);
+    let log = Log::default();
+    let (address, imported, _target) = target(TargetWorld::default());
+    let source = Arc::new(Mutex::new(source));
+    let kicker = Arc::clone(&source);
+    let mut source_control = FakeControl::new("source", &log).on("export", move || {
+        kick(&mut kicker.lock().unwrap(), "Server closed");
+    });
+    let mut target_control = super::switch::target_control(&log, imported);
+    switch(
+        &handle,
+        super::switch::target_backend(&address, &options()),
+        &mut source_control,
+        &mut target_control,
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap();
+    assert_eq!(handle.backend(), "target");
+    let ids: Vec<i32> = after_switch(&mut player)
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(!ids.contains(&pc::DISCONNECT), "{ids:?}");
+    assert!(!ids.contains(&pc::START_CONFIGURATION), "{ids:?}");
+    assert_eq!(handle.backend(), "target");
+    drop(player);
+    drop(source);
+    let _ = run.join().unwrap();
+    // The session is over: the fallback was never asked, the player stayed where the switch
+    // put them.
+    assert!(losses.try_recv().is_err());
+}
+
+/// `Switching` clears its mark, then tells the session it ended: a second switch may begin in
+/// between, and the end of the first is read while it runs. A loss held for the second switch
+/// waits for that switch's own end.
+#[test]
+fn the_end_of_an_earlier_switch_does_not_decide_for_the_next() {
+    let Moved {
+        handle,
+        run,
+        mut player,
+        mut source,
+        mut second,
+        losses,
+        ..
+    } = moved(BOTH, true);
+    let shared = Arc::clone(&handle.0);
+    // A switch is under way when the source kicks the player.
+    shared.switching.store(true, Ordering::SeqCst);
+    kick(&mut source, "Server closed");
+    wait_for(|| shared.lost_in_switch.load(Ordering::SeqCst));
+    // The lane's end reaches the session right after the mark; leave it time to be held.
+    std::thread::sleep(Duration::from_millis(100));
+    // The end of the earlier switch, read now.
+    shared.switch_ended();
+    assert!(losses.recv_timeout(Duration::from_millis(300)).is_err());
+    // This switch ends without handing the player over: the fallback moves them.
+    shared.switching.store(false, Ordering::SeqCst);
+    shared.switch_ended();
+    arrive(&mut player, &mut second);
+    assert_eq!(says(&mut player), SAYING);
+    assert_eq!(losses.recv().unwrap(), Loss::Kicked("Server closed".into()));
+    assert_eq!(handle.backend(), "fallback");
+    drop(second);
+    drop(source);
+    let _ = run.join().unwrap();
+}
+
+const NEITHER: Fallback = Fallback {
+    on_kick: false,
+    on_crash: false,
+};
+
+/// Without a fallback, a source lost during a switch ends the session at once, as before the
+/// switch held such losses: the client is not left waiting for the switch to give up.
+#[test]
+fn without_a_fallback_a_source_lost_during_a_switch_ends_the_session_at_once() {
+    let Moved {
+        handle,
+        run,
+        player,
+        source,
+        losses,
+        ..
+    } = moved(NEITHER, true);
+    let log = Log::default();
+    let (address, imported, _target) = target(TargetWorld::default());
+    let mut source = Some(source);
+    let watched = handle.clone();
+    let mut source_control = FakeControl::new("source", &log).on("export", move || {
+        // The source's process dies while the switch asks it for the record.
+        drop(source.take());
+        wait_for(|| watched.is_over());
+    });
+    let mut target_control = super::switch::target_control(&log, imported);
+    let failure = switch(
+        &handle,
+        super::switch::target_backend(&address, &options()),
+        &mut source_control,
+        &mut target_control,
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Left));
+    drop(player);
+    let _ = run.join().unwrap();
+    assert!(losses.try_recv().is_err());
+}
