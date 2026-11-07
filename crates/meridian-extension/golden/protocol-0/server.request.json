@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "meridian:decide/server",
+  "params": {
+    "request": {
+      "player": {"name": "Alex", "uuid": "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c", "auth": "verified"},
+      "reason": "login",
+      "host": "play.example.org",
+      "lost": null,
+      "candidates": [
+        {"name": "lobby", "role": "lobby", "players": 12, "soft_cap": 20, "hard_cap": 30, "state": "open"},
+        {"name": "lobby2", "role": "lobby", "players": 3, "soft_cap": 20, "hard_cap": 30, "state": "draining"},
+        {"name": "build", "role": null, "players": null, "soft_cap": null, "hard_cap": null, "state": null}
+      ]
+    }
+  }
+}

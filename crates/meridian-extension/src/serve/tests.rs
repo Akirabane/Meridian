@@ -1108,3 +1108,155 @@ mod login {
         let _ = gate(&Arc::default()).on_login(|_| Decision::Allow);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The choice of server
+
+mod server {
+    use super::*;
+    use crate::decide::{self, Choice, ServerRequest};
+
+    /// Refuses `Banned`, orders the servers the other way round for `Reverse`, gives the lobby named
+    /// `x` first to `First`, and has no opinion of anyone else.
+    fn chooser(lines: &Arc<Lines>) -> Extension {
+        let mut extension = Extension::new("chooser", "1.0.0", token())
+            .log(Arc::clone(lines) as Arc<dyn Log>)
+            .on_server(
+                |request: &ServerRequest| match request.player.name.as_str() {
+                    "Banned" => Choice::refuse("No game is running."),
+                    "Silent" => Choice::Refuse(None),
+                    "Reverse" => {
+                        Choice::order(request.candidates.iter().rev().map(|c| c.name.clone()))
+                    }
+                    "Alex" => Choice::order(["lobby2", "lobby"]),
+                    _ => Choice::Default,
+                },
+            );
+        extension.timings.look = Duration::from_millis(10);
+        extension
+    }
+
+    fn request_for(name: &str) -> String {
+        let mut request: Value = serde_json::from_str(&golden("server.request.json")).unwrap();
+        request["params"]["request"]["player"]["name"] = json!(name);
+        request.to_string()
+    }
+
+    fn answer(proxy: &mut Proxy, name: &str) -> Value {
+        proxy.send(&request_for(name));
+        let Message::Response { id, outcome } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(id, Some(Id::Number(5)));
+        outcome.unwrap()
+    }
+
+    #[test]
+    fn the_hello_declares_the_capability_and_the_list_names_the_method() {
+        let running = start(chooser(&Arc::default()));
+        let mut proxy = Proxy::connect(running.local_addr());
+        let (hello, _) = proxy.hello(&token());
+        assert_eq!(hello.capabilities, ["decide.server"]);
+        let listed = proxy.call(method::DISCOVER, None).unwrap();
+        assert_eq!(listed["methods"][2]["name"], decide::SERVER);
+        assert_eq!(listed["methods"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_golden_request_gets_the_golden_answers() {
+        let running = start(chooser(&Arc::default()));
+        let mut proxy = Proxy::up(running.local_addr());
+        let golden_result = |name: &str| -> Value {
+            let message: Value = serde_json::from_str(&golden(name)).unwrap();
+            message["result"].clone()
+        };
+        assert_eq!(
+            answer(&mut proxy, "Alex"),
+            golden_result("server.answer.order.json")
+        );
+        assert_eq!(
+            answer(&mut proxy, "Banned"),
+            golden_result("server.answer.refuse.json")
+        );
+        assert_eq!(
+            answer(&mut proxy, "Somebody"),
+            golden_result("server.answer.default.json")
+        );
+        assert_eq!(answer(&mut proxy, "Silent"), json!({"choice": "refuse"}));
+        // The golden request itself reaches the handler as written, candidates and all.
+        proxy.send(&golden("server.request.json"));
+        let Message::Response { outcome, .. } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(outcome.unwrap(), golden_result("server.answer.order.json"));
+    }
+
+    #[test]
+    fn the_handler_reads_the_candidates_and_what_it_answers_passes_the_proxys_check() {
+        let running = start(chooser(&Arc::default()));
+        let mut proxy = Proxy::up(running.local_addr());
+        let result = answer(&mut proxy, "Reverse");
+        assert_eq!(result["servers"], json!(["build", "lobby2", "lobby"]));
+        let offered: Vec<String> = ["lobby", "lobby2", "build"]
+            .iter()
+            .map(|n| (*n).to_owned())
+            .collect();
+        assert_eq!(
+            decide::parse_server_answer(&result, &offered).unwrap(),
+            Choice::order(["build", "lobby2", "lobby"])
+        );
+    }
+
+    #[test]
+    fn params_that_are_not_a_server_request_are_an_error_that_does_not_quote_them() {
+        let lines = Arc::new(Lines::default());
+        let running = start(chooser(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        for params in [
+            None,
+            Some(json!([])),
+            Some(json!({})),
+            Some(json!({"request": "PrivateName"})),
+            // No candidates: not a request.
+            Some(
+                json!({"request": {"player": {"name": "PrivateName", "uuid": "u", "auth": "verified"}, "reason": "login"}}),
+            ),
+        ] {
+            let error = proxy.call(decide::SERVER, params.as_ref()).unwrap_err();
+            assert_eq!(error.code, code::INVALID_PARAMS, "{params:?}");
+            assert!(!error.message.contains("PrivateName"), "{}", error.message);
+        }
+        assert_eq!(answer(&mut proxy, "Somebody"), json!({"choice": "default"}));
+        assert!(lines.all().iter().all(|l| !l.contains("PrivateName")));
+    }
+
+    #[test]
+    fn nothing_of_the_player_or_the_servers_is_in_the_extensions_lines() {
+        let lines = Arc::new(Lines::default());
+        let running = start(chooser(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        for name in ["Alex", "Banned", "Somebody"] {
+            answer(&mut proxy, name);
+        }
+        let everything = lines.all().join("\n");
+        for private in [
+            "Alex", "Banned", "Somebody", "0a2ea4ba", "lobby2", "No game",
+        ] {
+            assert!(!everything.contains(private), "{private}\n{everything}");
+        }
+    }
+
+    #[test]
+    fn a_login_handler_and_a_server_handler_live_in_one_extension() {
+        let extension = Extension::new("both", "1.0.0", token())
+            .on_login(|_| decide::Decision::Default)
+            .on_server(|_| Choice::Default);
+        assert_eq!(extension.capabilities(), ["decide.login", "decide.server"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "registered twice")]
+    fn two_server_handlers_are_a_mistake_of_the_program() {
+        let _ = chooser(&Arc::default()).on_server(|_| Choice::Default);
+    }
+}

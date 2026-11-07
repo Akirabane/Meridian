@@ -1,10 +1,12 @@
-//! The decision points (docs/EXTENSIONS.md, section 4), as both sides read and write them. This is the
-//! admission at login (4.2); the others come with their own pull requests.
+//! The decision points (docs/EXTENSIONS.md, section 4), as both sides read and write them. These are the
+//! admission at login (4.2) and the choice of server (4.4); the permission of a command comes with its
+//! own pull request.
 //!
-//! The proxy asks with [`LoginParams`] and reads the answer with [`parse_login_answer`]; the SDK reads the
-//! params and writes the answer with the same types. What the proxy accepts as a refusal's reason is
-//! decided in one place, [`Reason`], which the SDK also makes its reasons with: an extension cannot send
-//! one the proxy would refuse. The golden files `login.*.json` are the bytes both sides test against.
+//! The proxy asks with [`LoginParams`] and reads the answer with [`parse_login_answer`], or asks with
+//! [`ServerParams`] and reads it with [`parse_server_answer`]; the SDK reads the params and writes the
+//! answer with the same types. What the proxy accepts as a refusal's reason is decided in one place,
+//! [`Reason`], which the SDK also makes its reasons with: an extension cannot send one the proxy would
+//! refuse. The golden files `login.*.json` and `server.*.json` are the bytes both sides test against.
 
 use crate::wire;
 use serde::{Deserialize, Serialize};
@@ -160,16 +162,22 @@ impl LoginAnswer {
         Ok(match self.decision {
             Verdict::Allow => Decision::Allow,
             Verdict::Default => Decision::Default,
-            Verdict::Deny => match self.reason {
-                None | Some(Value::Null) => Decision::Deny(None),
-                Some(Value::String(text)) if text.is_empty() => Decision::Deny(None),
-                Some(Value::String(text)) => {
-                    Reason::check(&text)?;
-                    Decision::Deny(Some(Reason(text)))
-                }
-                Some(_) => return Err("the reason is not text".into()),
-            },
+            Verdict::Deny => Decision::Deny(reason_of(self.reason)?),
         })
+    }
+}
+
+/// The reason of a refusal as it came on the wire: none when it is missing, null or empty, text that
+/// passes [`Reason::check`] otherwise, and an error for anything else.
+fn reason_of(reason: Option<Value>) -> Result<Option<Reason>, String> {
+    match reason {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(Value::String(text)) => {
+            Reason::check(&text)?;
+            Ok(Some(Reason(text)))
+        }
+        Some(_) => Err("the reason is not text".into()),
     }
 }
 
@@ -179,6 +187,185 @@ pub fn parse_login_answer(result: &Value) -> Result<Decision, String> {
     wire::decode::<LoginAnswer>(Some(result))
         .map_err(|why| why.replace("invalid parameters", "invalid answer"))?
         .into_decision()
+}
+
+/// The method of the choice of server.
+pub const SERVER: &str = "meridian:decide/server";
+
+/// Why the proxy is placing the player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placing {
+    /// The player has logged in and the proxy chooses their first server.
+    Login,
+    /// The player's server was lost and the proxy chooses another ([`ServerRequest::lost`] names it).
+    Fallback,
+    /// A reason a later version of the proxy may add. Nothing is promised for it: an extension that
+    /// does not know what it is should answer `default`.
+    #[serde(other)]
+    Other,
+}
+
+/// A server the player may be sent to, as the proxy sees it now. With balancing off, or for a server
+/// that has no role, everything but the name is null: the proxy knows nothing more of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Candidate {
+    pub name: String,
+    /// `lobby`, `sublobby` or `game`.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// The players it counts: those on it, and the places held for players being sent there.
+    #[serde(default)]
+    pub players: Option<u32>,
+    #[serde(default)]
+    pub soft_cap: Option<u32>,
+    #[serde(default)]
+    pub hard_cap: Option<u32>,
+    /// `open`, `closed` (at its soft cap), `draining` (kept from new players on purpose) or
+    /// `not_offered` (no recent report from it). A word a later version adds is to be read as `closed`.
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+/// What the proxy tells the extension when it places a player.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerRequest {
+    pub player: Player,
+    pub reason: Placing,
+    /// The host name the player typed, when the handshake gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// With [`Placing::Fallback`], the server the player lost; null otherwise.
+    #[serde(default)]
+    pub lost: Option<String>,
+    /// What the routes allow, in the order the proxy would try them. Already without the servers that
+    /// lost the player, and without those of the other kind of account.
+    pub candidates: Vec<Candidate>,
+}
+
+/// `params` of [`SERVER`]: the request is the one parameter, named `request`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerParams {
+    pub request: ServerRequest,
+}
+
+/// What an extension decides about the placing of a player.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// The proxy goes on as it would without an extension: the routes, the health order and the balancer.
+    Default,
+    /// The proxy tries these servers in this order, and only these. Each must be a candidate. With
+    /// balancing on, the balancer is not asked, and each server is held a place by the rule of a server
+    /// the player named (the hard cap holds); one that is full or draining is passed over.
+    Order(Vec<String>),
+    /// Refuse the player. Without a reason they read the proxy's own words.
+    Refuse(Option<Reason>),
+}
+
+impl Choice {
+    /// Try these servers, in this order.
+    pub fn order<I, S>(servers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::Order(servers.into_iter().map(Into::into).collect())
+    }
+
+    /// A refusal with `reason`, made valid by [`Reason::new`].
+    pub fn refuse(reason: &str) -> Self {
+        Self::Refuse(Some(Reason::new(reason)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ChoiceWord {
+    Default,
+    Order,
+    Refuse,
+}
+
+/// `result` of [`SERVER`], as it is on the wire. The proxy reads it with [`parse_server_answer`], which
+/// also checks the servers and the reason; the SDK writes it from a [`Choice`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerAnswer {
+    choice: ChoiceWord,
+    /// Any JSON value on the wire: it is read, and must be a list of names, only on `order`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    servers: Option<Value>,
+    /// Any JSON value on the wire: it is read, and must be text, only on `refuse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<Value>,
+}
+
+impl From<&Choice> for ServerAnswer {
+    fn from(choice: &Choice) -> Self {
+        match choice {
+            Choice::Default => Self {
+                choice: ChoiceWord::Default,
+                servers: None,
+                reason: None,
+            },
+            Choice::Order(servers) => Self {
+                choice: ChoiceWord::Order,
+                servers: Some(Value::Array(
+                    servers.iter().cloned().map(Value::String).collect(),
+                )),
+                reason: None,
+            },
+            Choice::Refuse(reason) => Self {
+                choice: ChoiceWord::Refuse,
+                servers: None,
+                reason: reason
+                    .as_ref()
+                    .map(|r| Value::String(r.as_str().to_owned())),
+            },
+        }
+    }
+}
+
+impl ServerAnswer {
+    /// The choice, if the answer is valid: on `order`, a list of at least one name, each one of
+    /// `offered` (a name twice counts once, at its first place); on `refuse`, a reason as for a login's
+    /// `deny`. `servers` on another word, and `reason` on another word, are not read. An error says what
+    /// is wrong and never shows the names the extension sent.
+    pub fn into_choice(self, offered: &[String]) -> Result<Choice, String> {
+        Ok(match self.choice {
+            ChoiceWord::Default => Choice::Default,
+            ChoiceWord::Refuse => Choice::Refuse(reason_of(self.reason)?),
+            ChoiceWord::Order => {
+                let Some(Value::Array(names)) = self.servers else {
+                    return Err("an order needs a list of servers".into());
+                };
+                let mut order: Vec<String> = Vec::with_capacity(names.len().min(offered.len()));
+                for name in names {
+                    let Value::String(name) = name else {
+                        return Err("a server of the order is not text".into());
+                    };
+                    if !offered.contains(&name) {
+                        return Err("the order names a server that was not offered".into());
+                    }
+                    if !order.contains(&name) {
+                        order.push(name);
+                    }
+                }
+                if order.is_empty() {
+                    return Err("the order is empty".into());
+                }
+                Choice::Order(order)
+            }
+        })
+    }
+}
+
+/// Reads the `result` of [`SERVER`] as the proxy must: the shape, then the servers against `offered`
+/// (the names of the candidates it sent), then the reason. An error says what is wrong and never shows
+/// what the extension sent.
+pub fn parse_server_answer(result: &Value, offered: &[String]) -> Result<Choice, String> {
+    wire::decode::<ServerAnswer>(Some(result))
+        .map_err(|why| why.replace("invalid parameters", "invalid answer"))?
+        .into_choice(offered)
 }
 
 #[cfg(test)]
@@ -405,5 +592,221 @@ mod tests {
                 reason: None
             }
         );
+    }
+
+    // ---- the choice of server ------------------------------------------------------------------
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    fn offered() -> Vec<String> {
+        names(&["lobby", "lobby2", "build"])
+    }
+
+    fn server_request() -> ServerRequest {
+        let seen = |name: &str, players, state: &str| Candidate {
+            name: name.into(),
+            role: Some("lobby".into()),
+            players: Some(players),
+            soft_cap: Some(20),
+            hard_cap: Some(30),
+            state: Some(state.into()),
+        };
+        ServerRequest {
+            player: alex().player,
+            reason: Placing::Login,
+            host: Some("play.example.org".into()),
+            lost: None,
+            candidates: vec![
+                seen("lobby", 12, "open"),
+                seen("lobby2", 3, "draining"),
+                Candidate {
+                    name: "build".into(),
+                    role: None,
+                    players: None,
+                    soft_cap: None,
+                    hard_cap: None,
+                    state: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_server_request_is_what_the_golden_file_says() {
+        let Message::Request { id, method, params } =
+            Message::parse(&golden("server.request.json")).unwrap()
+        else {
+            panic!("a request");
+        };
+        assert_eq!((id, method.as_str()), (Some(5.into()), SERVER));
+        let read: ServerParams = wire::decode(params.as_ref()).unwrap();
+        assert_eq!(
+            read,
+            ServerParams {
+                request: server_request()
+            }
+        );
+        let written = wire::request(
+            5,
+            SERVER,
+            Some(&ServerParams {
+                request: server_request(),
+            }),
+        );
+        assert_eq!(value(&written), value(&golden("server.request.json")));
+    }
+
+    #[test]
+    fn the_server_answers_are_what_the_golden_files_say() {
+        for (name, choice) in [
+            ("server.answer.default.json", Choice::Default),
+            (
+                "server.answer.order.json",
+                Choice::order(["lobby2", "lobby"]),
+            ),
+            (
+                "server.answer.refuse.json",
+                Choice::refuse("No game is running."),
+            ),
+        ] {
+            let result = golden_result(name);
+            assert_eq!(
+                parse_server_answer(&result, &offered()).unwrap(),
+                choice,
+                "{name}"
+            );
+            let written = wire::result(&5.into(), &ServerAnswer::from(&choice));
+            assert_eq!(value(&written), value(&golden(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_fallback_names_the_lost_server_and_a_reason_it_does_not_know_is_other() {
+        let mut request = server_request();
+        request.reason = Placing::Fallback;
+        request.lost = Some("lobby".into());
+        request.host = None;
+        let written = serde_json::to_value(&request).unwrap();
+        assert_eq!(written["reason"], json!("fallback"));
+        assert_eq!(written["lost"], json!("lobby"));
+        assert!(written.get("host").is_none());
+        assert_eq!(
+            serde_json::from_value::<ServerRequest>(written).unwrap(),
+            request
+        );
+        // `lost` is null, not left out, when nothing was lost (as the golden file has it).
+        assert_eq!(
+            serde_json::to_value(server_request()).unwrap()["lost"],
+            Value::Null
+        );
+        let mut later = serde_json::to_value(server_request()).unwrap();
+        later["reason"] = json!("evacuation");
+        later["added_later"] = json!(1);
+        later["candidates"][0]["added_later"] = json!(1);
+        assert_eq!(
+            serde_json::from_value::<ServerRequest>(later)
+                .unwrap()
+                .reason,
+            Placing::Other
+        );
+        // A candidate the proxy knows nothing of but the name is still one.
+        let bare: Candidate = serde_json::from_value(json!({"name": "build"})).unwrap();
+        assert_eq!(bare.role, None);
+        assert_eq!(bare.state, None);
+    }
+
+    #[test]
+    fn an_order_names_offered_servers_once_each_in_the_order_given() {
+        let answer = |servers: Value| json!({"choice": "order", "servers": servers});
+        assert_eq!(
+            parse_server_answer(&answer(json!(["build"])), &offered()).unwrap(),
+            Choice::order(["build"])
+        );
+        // A name twice counts once, at its first place.
+        assert_eq!(
+            parse_server_answer(
+                &answer(json!(["lobby2", "lobby", "lobby2", "lobby"])),
+                &offered()
+            )
+            .unwrap(),
+            Choice::order(["lobby2", "lobby"])
+        );
+        // What the proxy offered is the whole of what may be named, and a name is exact.
+        for (bad, expected) in [
+            (answer(json!(["east"])), "was not offered"),
+            (answer(json!(["lobby", "east"])), "was not offered"),
+            (answer(json!(["Lobby"])), "was not offered"),
+            (answer(json!([])), "is empty"),
+            (answer(json!("lobby")), "needs a list"),
+            (answer(json!(null)), "needs a list"),
+            (answer(json!([1])), "is not text"),
+            (answer(json!([["lobby"]])), "is not text"),
+            (json!({"choice": "order"}), "needs a list"),
+        ] {
+            let why = parse_server_answer(&bad, &offered()).unwrap_err();
+            assert!(why.contains(expected), "{bad}: {why}");
+            // The names the extension sent are not quoted back.
+            assert!(!why.contains("east") && !why.contains("Lobby"), "{why}");
+        }
+        // With nothing offered, no order is valid.
+        assert!(parse_server_answer(&answer(json!(["lobby"])), &[]).is_err());
+    }
+
+    #[test]
+    fn a_refusal_of_a_server_is_read_as_a_denial_of_a_login_is() {
+        assert_eq!(
+            parse_server_answer(&json!({"choice": "refuse"}), &offered()).unwrap(),
+            Choice::Refuse(None)
+        );
+        assert_eq!(
+            parse_server_answer(&json!({"choice": "refuse", "reason": ""}), &offered()).unwrap(),
+            Choice::Refuse(None)
+        );
+        assert_eq!(
+            parse_server_answer(&json!({"choice": "refuse", "reason": null}), &offered()).unwrap(),
+            Choice::Refuse(None)
+        );
+        for (bad, expected) in [
+            (
+                json!({"choice": "refuse", "reason": "x".repeat(257)}),
+                "longer than 256",
+            ),
+            (
+                json!({"choice": "refuse", "reason": "a\u{1b}[0m"}),
+                "control character",
+            ),
+            (json!({"choice": "refuse", "reason": 7}), "not text"),
+        ] {
+            let why = parse_server_answer(&bad, &offered()).unwrap_err();
+            assert!(why.contains(expected), "{bad}: {why}");
+        }
+        // The same limits as the SDK's own reasons.
+        assert!(matches!(Choice::refuse("a\u{7}b"), Choice::Refuse(Some(r)) if r.as_str() == "ab"));
+    }
+
+    #[test]
+    fn what_is_not_read_on_a_word_never_makes_an_answer_fail() {
+        for odd in [json!(7), json!(true), json!({"a": 1}), json!(null)] {
+            for word in ["default", "refuse"] {
+                let answer = json!({"choice": word, "servers": odd});
+                assert!(parse_server_answer(&answer, &offered()).is_ok(), "{answer}");
+            }
+            for word in ["default", "order"] {
+                let answer = json!({"choice": word, "servers": ["lobby"], "reason": odd});
+                assert!(parse_server_answer(&answer, &offered()).is_ok(), "{answer}");
+            }
+        }
+        // A word that is not one of the three is not an answer, and the error does not quote it.
+        for bad in [
+            json!({"choice": "maybe"}),
+            json!({}),
+            json!("order"),
+            json!(3),
+        ] {
+            let why = parse_server_answer(&bad, &offered()).unwrap_err();
+            assert!(!why.contains("maybe"), "{why}");
+        }
     }
 }
