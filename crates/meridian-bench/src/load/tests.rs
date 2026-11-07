@@ -94,6 +94,17 @@ fn the_options_are_read_and_a_large_step_is_refused() {
 /// Some bots straight to a synthetic server for five seconds: every bot logs in and joins,
 /// the stream reaches them, and the measuring packets come back.
 #[test]
+fn the_tick_of_the_servers_is_read() {
+    let read = |list: &[&str]| parse(args(list)).unwrap().unwrap().settings.write_per_tick;
+    assert_eq!(read(&["--proxy", "x"]), None);
+    assert_eq!(
+        read(&["--proxy", "x", "--write-per-tick", "50"]),
+        Some(Duration::from_millis(50))
+    );
+    assert_eq!(read(&["--proxy", "x", "--write-per-tick", "0"]), None);
+}
+
+#[test]
 fn some_bots_play_against_a_synthetic_server() {
     let _turn = ONE_PROXY.lock().unwrap_or_else(|e| e.into_inner());
     let s = settings(5);
