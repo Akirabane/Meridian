@@ -397,6 +397,67 @@ fn the_server_answers_over_http_and_ends_with_the_proxy() {
     thread.join().unwrap();
 }
 
+/// The answer is built whole, the headers then the body, and written in one write: written
+/// in pieces, the second waited for the client's acknowledgement of the first.
+#[test]
+fn the_answer_is_one_buffer_of_its_headers_and_its_body() {
+    let ok = Answer {
+        status: 200,
+        content_type: TEXT,
+        body: "ok\n".to_owned(),
+    };
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                   Content-Length: 3\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+    assert_eq!(
+        String::from_utf8(response(&ok, false)).unwrap(),
+        format!("{headers}ok\n")
+    );
+    // HEAD: the same headers, with the length the body would have, and no body.
+    assert_eq!(String::from_utf8(response(&ok, true)).unwrap(), headers);
+    let refused = Answer {
+        status: 405,
+        content_type: TEXT,
+        body: "method not allowed\n".to_owned(),
+    };
+    let text = String::from_utf8(response(&refused, false)).unwrap();
+    assert!(
+        text.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+        "{text}"
+    );
+    assert!(text.contains("\r\nAllow: GET, HEAD\r\n"), "{text}");
+    assert!(text.ends_with("\r\n\r\nmethod not allowed\n"), "{text}");
+}
+
+/// A monitor is answered at once. The page looked for connections every 100 ms, so each
+/// request waited about 50 ms for nothing, whatever the load.
+#[test]
+fn the_health_check_is_answered_without_waiting() {
+    let proxy = proxy();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = serve_in_thread(listener, Arc::clone(&proxy)).unwrap();
+    let mut took: Vec<Duration> = (0..20)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            let health = request(address, "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
+            assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health}");
+            started.elapsed()
+        })
+        .collect();
+    took.sort();
+    eprintln!("health check, median of 20: {:?}", took[10]);
+    // About 10.5 ms here (each request comes as the loop goes back to sleep for its 10 ms);
+    // Windows' default timer rounds a sleep of 10 ms up to about 15.6 ms. The old loop gave
+    // 50 to 90 ms: 30 ms still tells the two apart.
+    assert!(
+        took[10] < Duration::from_millis(30),
+        "median {:?} of {took:?}",
+        took[10]
+    );
+    proxy.stop();
+    thread.join().unwrap();
+}
+
 /// Off by default: nothing listens and nothing is spawned.
 #[test]
 fn nothing_is_served_unless_the_setting_is_on() {
