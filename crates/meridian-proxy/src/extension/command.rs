@@ -43,14 +43,14 @@ pub(crate) fn merge(file: bool, verdict: NodeVerdict) -> bool {
 }
 
 /// What a node gets when there is no usable answer (a timeout, an invalid answer, no connection, an open
-/// breaker, no free place): what the operator chose. **`allow` here gives every node the command checks to
-/// whoever types it**, as the specification says (4.1: "let the command run"): it is for an operator who
-/// would rather have the commands work than be refused when the extension is down.
+/// breaker, no free place): `deny` refuses it, and anything else leaves it to the file. **Never a
+/// permission**: `on-error = "allow"` is refused when the configuration is read (it would give every
+/// command of the proxy to whoever types it while the extension is down), and a policy of that kind that got
+/// here some other way is read as `default`, so that no failure of an extension can grant anything.
 pub(crate) fn policy_verdict(policy: OnError) -> NodeVerdict {
     match policy {
-        OnError::Default => NodeVerdict::Default,
-        OnError::Allow => NodeVerdict::Allow,
         OnError::Deny => NodeVerdict::Deny,
+        OnError::Default | OnError::Allow => NodeVerdict::Default,
     }
 }
 
@@ -183,10 +183,9 @@ impl Gate {
                 );
                 link.stats().decided(
                     POINT,
-                    match policy {
-                        OnError::Default => "policy_default",
-                        OnError::Allow => "policy_allow",
-                        OnError::Deny => "policy_deny",
+                    match policy_verdict(policy) {
+                        NodeVerdict::Deny => "policy_deny",
+                        _ => "policy_default",
                     },
                 );
                 // A failure is never kept: the next command asks again (the breaker spares the wait).
@@ -278,11 +277,13 @@ mod tests {
         }
     }
 
+    /// No failure of the extension grants a node: `allow` cannot be configured, and if it got here it is
+    /// `default`.
     #[test]
-    fn what_a_node_gets_with_no_answer_is_what_the_operator_chose() {
+    fn what_a_node_gets_with_no_answer_is_never_a_permission() {
         assert_eq!(policy_verdict(OnError::Default), NodeVerdict::Default);
-        assert_eq!(policy_verdict(OnError::Allow), NodeVerdict::Allow);
         assert_eq!(policy_verdict(OnError::Deny), NodeVerdict::Deny);
+        assert_eq!(policy_verdict(OnError::Allow), NodeVerdict::Default);
     }
 
     #[test]

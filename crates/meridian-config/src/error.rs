@@ -229,6 +229,9 @@ pub enum ConfigError {
         table: &'static str,
         capability: &'static str,
     },
+    /// `[extension.decide-command] on-error = "allow"`: with no usable answer it would give every command
+    /// of the proxy to whoever types it.
+    ExtensionCommandAllow { extension: String },
     /// A number of an extension that must be more than 0 is 0.
     ZeroExtensionSetting {
         extension: String,
@@ -600,6 +603,10 @@ impl fmt::Display for ConfigError {
             } => write!(
                 f,
                 "extension \"{extension}\": [extension.{table}] is written and grant does not hold \"{capability}\""
+            ),
+            ConfigError::ExtensionCommandAllow { extension } => write!(
+                f,
+                "extension \"{extension}\": [extension.decide-command] on-error = \"allow\" would give every command of the proxy to anyone while the extension is down: use \"default\" or \"deny\""
             ),
             ConfigError::ZeroExtensionSetting { extension, setting } => {
                 write!(

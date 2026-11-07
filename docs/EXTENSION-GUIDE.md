@@ -263,7 +263,7 @@ grant = ["decide.command"]
 
 [extension.decide-command]
 timeout-ms = 250
-on-error = "default"      # default | allow | deny
+on-error = "default"      # default | deny
 cache-seconds-max = 300
 ```
 
@@ -290,9 +290,10 @@ arguments of 256 characters, **not to be trusted**), and the `nodes` the command
   login keeps its own order: the bans and the whitelist come first and no extension bypasses them.
 - **`cache-seconds-max` bounds how long an `allow` or a `deny` is kept**, whatever you ask for. What is kept
   belongs to the player's session, and is dropped at a reload and when your program says hello again.
-- **`on-error = "allow"` gives every node to whoever types the command whenever your program does not
-  answer** (down, too slow, an invalid answer, an open breaker), so `/send` and `/alert` run for everyone.
-  `"default"` (the file decides) and `"deny"` are the safe choices.
+- **`on-error = "allow"` is refused for this point, when the proxy reads its configuration**: it would give
+  every node to whoever types the command whenever your program does not answer (down, too slow, an
+  invalid answer, an open breaker), so `/send` and `/alert` would run for everyone. Use `"default"` (the
+  file decides, the default) or `"deny"`. Nothing that fails ever grants a node.
 
 The player's packets to the server wait while your program answers, so the wait is short (250 ms by
 default) and the proxy asks only for a command it answers, once for all the nodes the command checks, and

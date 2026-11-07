@@ -303,7 +303,8 @@ is dropped and counted.
 usable answer:
 
 - `default`: as if no extension were configured (the built-in modules decide);
-- `allow`: let the player in, or let the command run;
+- `allow`: let the player in, or let the command run (**as built, not for the permission of a command**:
+  `allow` there is refused when the configuration is read, see 4.3);
 - `deny`: refuse the login or the command.
 
 "No usable answer" covers all of these: the deadline passed, the answer is invalid, the
@@ -549,10 +550,14 @@ What the specification above leaves open:
      extension.
   4. **`cache-seconds-max` bounds how long an `allow` or a `deny` is kept**, whatever the extension asks
      for; with 0 nothing is kept and each command asks.
-- **`on-error = "allow"` gives every node of the command to whoever typed it** when there is no usable
-  answer (4.1: "let the command run"), the extension being down included, so `/send` and `/alert` run for
-  everyone. It is for an operator who prefers working commands to refused ones; `"default"` (the file) and
-  `"deny"` are the safe choices.
+- **`on-error = "allow"` is refused for this point, when the configuration is read** (an addition to 4.1,
+  which lets the other two points `allow`). With no usable answer (the extension down, slow or saturated) it
+  would give every node of the command to whoever typed it, `/send` and `/alert` included: a fail-open on
+  the system of rights. The error says so (`would give every command of the proxy to anyone while the
+  extension is down: use "default" or "deny"`). The two values left are `"default"` (the file and the
+  operators decide, which is the default) and `"deny"`. The login and the choice of server keep `allow`: the
+  bans, the whitelist and the caps come before them, and there it only lets the proxy's own policy go on.
+  Nothing that fails ever grants a node: the proxy reads any other policy as `default`.
 - **The request** asks about the nodes the command checks and the proxy has no kept answer for, in one
   call (`nodes_of` lists them: `/server` with no name has one for each server the player may be sent to,
   `/hub` its own and that of the server it leads to). Only the nodes asked are read from the answer, so
@@ -566,8 +571,8 @@ What the specification above leaves open:
   holds it afterwards). A reload and a new hello of the extension drop it. A failure is never kept.
 - The decisions are counted as `meridian_extension_decisions_total{point="command"}` with `allow`, `deny`,
   `default` (what the extension answered for the command: `deny` if it denied any node, else `allow` if
-  it allowed any), `cached` (every node was kept) and, with no usable answer, `policy_default`,
-  `policy_allow` or `policy_deny`.
+  it allowed any), `cached` (every node was kept) and, with no usable answer, `policy_default` or
+  `policy_deny`.
 
 **The extension's own commands.** With the `commands` capability, the extension declares
 commands in its `hello`:

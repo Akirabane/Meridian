@@ -1618,8 +1618,8 @@ groups = ["nobody"]
         for (policy, label, expected_without_file, expected_with_file) in [
             // default: the file.
             (OnError::Default, "policy_default", DENIED_SEND, "done"),
-            // allow: the command runs, as the specification says, whoever typed it.
-            (OnError::Allow, "policy_allow", "done", "done"),
+            // allow cannot be configured; if it got here it is `default`, and never a permission.
+            (OnError::Allow, "policy_default", DENIED_SEND, "done"),
             // deny: refused.
             (OnError::Deny, "policy_deny", DENIED_SEND, DENIED_SEND),
         ] {
@@ -1654,7 +1654,7 @@ groups = ["nobody"]
         let ranker = ranker(|_| NodeAnswers::new());
         for (policy, expected) in [
             (OnError::Default, DENIED_SEND),
-            (OnError::Allow, "done"),
+            (OnError::Allow, DENIED_SEND),
             (OnError::Deny, DENIED_SEND),
         ] {
             let mut extension = ranker.extension(policy, 100, 0);
@@ -1776,10 +1776,11 @@ groups = ["nobody"]
                 NodeAnswers::all(request, NodeVerdict::Deny).cache_seconds(60)
             }
         });
-        let config = config_with(ranker.extension(OnError::Allow, 100, 300));
+        let config = config_with(ranker.extension(OnError::Default, 100, 300));
         let sessions = sessions_for(&config);
-        let (hook, _) = hook_of(&config, &sessions, "");
-        // The first misses its deadline: the policy is `allow`, and nothing is kept.
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        // The first misses its deadline: the policy is `default`, the file gives Alex /send, and nothing
+        // is kept.
         assert_eq!(hook("send all east").as_deref(), Some("done"));
         std::thread::sleep(Duration::from_millis(400));
         // The second is answered `deny` and kept; the third is not asked.
