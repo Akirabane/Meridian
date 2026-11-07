@@ -1853,6 +1853,134 @@ groups = ["nobody"]
         drop(second);
     }
 
+    // ---- what a kept answer is kept for ----------------------------------------------------------
+
+    /// The hook of Alex's session as `hook_of` makes it, with the server Alex is on in a cell the test
+    /// changes, and the gate to look at.
+    fn hook_moving(
+        config: &Config,
+        sessions: &Sessions,
+        file: &str,
+    ) -> (Arc<CommandHook>, Arc<Mutex<String>>, Arc<Gate>) {
+        let backend = Arc::new(Mutex::new("lobby".to_owned()));
+        let permissions = Arc::new(Permissions::parse(file).unwrap());
+        let live = Arc::new(config.clone());
+        let gate = Arc::new(Gate::new(Arc::clone(&sessions.extensions), move || {
+            Arc::clone(&live)
+        }));
+        let hook = {
+            let backend = Arc::clone(&backend);
+            commands::hook_with(
+                Arc::new(config.clone()),
+                move || Typist {
+                    auth: AuthKind::Unverified,
+                    backend: backend.lock().unwrap().clone(),
+                    name: "Alex".into(),
+                    uuid: [1; 16],
+                    permissions: Arc::clone(&permissions),
+                    operator_groups: Vec::new(),
+                },
+                |target: &str| format!("Moving you to {target}..."),
+                |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
+                |_: &Typist, _: Answer| "done".to_owned(),
+                Some(Arc::clone(&gate)),
+            )
+        };
+        (hook, backend, gate)
+    }
+
+    /// The extension decides with the server the player is on, so what it said on one server is not
+    /// reused on another, and the cache is emptied when the player's server changes.
+    #[test]
+    fn an_answer_kept_on_one_server_is_not_used_on_another() {
+        let ranker = ranker(|request| {
+            let verdict = if request.server == "lobby" {
+                NodeVerdict::Allow
+            } else {
+                NodeVerdict::Deny
+            };
+            NodeAnswers::all(request, verdict).cache_seconds(60)
+        });
+        let config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, backend, _) = hook_moving(&config, &sessions, "");
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 1, "kept on the lobby");
+        // The player moves: the extension is asked again, and says no.
+        *backend.lock().unwrap() = "east".into();
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(ranker.asked(), 2);
+        assert_eq!(ranker.seen.lock().unwrap()[1].server, "east");
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(ranker.asked(), 2, "kept on east");
+        // And back: what was kept for the lobby went with the move.
+        *backend.lock().unwrap() = "lobby".into();
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 3);
+    }
+
+    /// The extension decides with the arguments too: `/send Bob lobby` and `/send all east` are two questions,
+    /// and the same command with the same arguments is one.
+    #[test]
+    fn an_answer_kept_for_some_arguments_is_not_used_for_others() {
+        let ranker = ranker(|request| {
+            // Everyone may be sent, but nobody may send everyone.
+            let verdict = if request.args.first().is_some_and(|who| who == "all") {
+                NodeVerdict::Deny
+            } else {
+                NodeVerdict::Allow
+            };
+            NodeAnswers::all(request, verdict).cache_seconds(60)
+        });
+        let config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, _, _) = hook_moving(&config, &sessions, "");
+        assert_eq!(hook("send Bob lobby").as_deref(), Some("done"));
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(ranker.asked(), 2, "two questions, two requests");
+        // The same ones again are kept.
+        assert_eq!(hook("send Bob lobby").as_deref(), Some("done"));
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(hook("send Bob lobby").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 2);
+        // Another word is another question, and so is the same word of another command.
+        assert_eq!(hook("send Bob east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 3);
+        let _ = hook("alert Bob lobby");
+        assert_eq!(ranker.asked(), 4);
+    }
+
+    /// What ran out is not worth a place: the answers whose time is over go before a new one is refused,
+    /// so that a player who types commands for a long time keeps getting their answers kept.
+    #[test]
+    fn the_answers_that_ran_out_are_dropped_before_a_new_one_is_refused() {
+        let ranker =
+            ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60));
+        // Kept for a second at most.
+        let config = config_with(ranker.extension(OnError::Default, 1000, 1));
+        let sessions = sessions_for(&config);
+        let (hook, _, gate) = hook_moving(&config, &sessions, "");
+        // Each message is another question, so each is kept on its own, up to the most there are.
+        for i in 0..512 {
+            let _ = hook(&format!("alert message {i}"));
+        }
+        assert_eq!(gate.kept_len(), 512);
+        // Full: the next ones are asked and not kept.
+        let before = ranker.asked();
+        let _ = hook("alert one more");
+        let _ = hook("alert one more");
+        assert_eq!(ranker.asked(), before + 2);
+        assert_eq!(gate.kept_len(), 512);
+        // A second later they have run out: the first new answer makes room, and is kept.
+        std::thread::sleep(Duration::from_millis(1100));
+        let _ = hook("alert after the wait");
+        assert_eq!(gate.kept_len(), 1);
+        let again = ranker.asked();
+        let _ = hook("alert after the wait");
+        assert_eq!(ranker.asked(), again, "kept");
+    }
+
     #[test]
     fn each_session_keeps_its_own_answers() {
         let ranker =

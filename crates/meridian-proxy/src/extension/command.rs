@@ -21,17 +21,18 @@ use meridian_extension::decide::{
     self, Auth, CommandParams, CommandRequest, MAX_ARG_CHARS, MAX_COMMAND_ARGS, NodeVerdict, Player,
 };
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The label of this point in the metrics.
 const POINT: &str = "command";
 
-/// The most nodes whose answer a player\'s session keeps. A player cannot make nodes up (only the
+/// The most nodes whose answer a player's session keeps. A player cannot make nodes up (only the
 /// servers there are have one), so this is a bound that is never reached, not a limit that is met.
 const MAX_KEPT: usize = 512;
 
-/// Whether the player has a node: the file\'s answer (`permissions.toml` and the operators of the server)
+/// Whether the player has a node: the file's answer (`permissions.toml` and the operators of the server)
 /// `file`, and what the extension said of the node. `Allow` and `Deny` win over the file, and only
 /// `Default` leaves the question to it.
 pub(crate) fn merge(file: bool, verdict: NodeVerdict) -> bool {
@@ -67,20 +68,31 @@ pub(crate) struct Typed<'a> {
     pub line: &'a str,
 }
 
-/// What a session keeps of the extension\'s answers: a verdict for a node, until a time, for the
-/// registry\'s generation and the extension\'s epoch it was given under.
+/// What a session keeps of the extension's answers: a verdict for a node, until a time, for the
+/// registry's generation and the extension's epoch it was given under.
+///
+/// The extension decides with the request it was sent, which holds the server the player is on, the command
+/// and its arguments as well as the node, so a verdict is kept for **that** request and no other: the key is
+/// a digest of the server, the command and the arguments, with the node. `/send Bob lobby` and `/send all
+/// east` are two questions, and a verdict given on one server is not reused on another. The cache is also
+/// emptied when the player's server changes.
 #[derive(Default)]
 struct Kept {
     stamp: (u64, u64),
-    nodes: HashMap<String, (NodeVerdict, Instant)>,
+    /// The server the player was on when the answers were given.
+    server: String,
+    nodes: HashMap<(u64, String), (NodeVerdict, Instant)>,
 }
 
-/// The extension\'s say in the commands of one player\'s session.
+/// The extension's say in the commands of one player's session.
 pub(crate) struct Gate {
     registry: Arc<Registry>,
     /// The configuration in force now: a reload changes which extension is asked, and its deadline.
     config: Box<dyn Fn() -> Arc<Config> + Send + Sync>,
     kept: Mutex<Kept>,
+    /// Keyed at random for each session, so that what a player types cannot be made to collide with a
+    /// digest they did not type.
+    digest: RandomState,
 }
 
 impl Gate {
@@ -92,6 +104,7 @@ impl Gate {
             registry,
             config: Box::new(config),
             kept: Mutex::new(Kept::default()),
+            digest: RandomState::new(),
         }
     }
 
@@ -131,17 +144,20 @@ impl Gate {
 
         // What is kept, and what is left to ask.
         let stamp = (self.registry.generation(), link.epoch());
+        let asked_of = self.digest_of(typed);
         let now = Instant::now();
         let mut known = HashMap::new();
         let mut unknown = Vec::new();
         {
             let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-            if kept.stamp != stamp {
+            // A reload, a new hello or a change of server: what was said before is not said of this.
+            if kept.stamp != stamp || kept.server != typed.server {
                 kept.nodes.clear();
                 kept.stamp = stamp;
+                kept.server = typed.server.to_owned();
             }
             for node in nodes {
-                match kept.nodes.get(node) {
+                match kept.nodes.get(&(asked_of, node.clone())) {
                     Some((verdict, until)) if *until > now => {
                         known.insert(node.clone(), *verdict);
                     }
@@ -173,7 +189,15 @@ impl Gate {
                     known.insert(node.clone(), answers.verdict(node));
                 }
                 link.stats().decided(POINT, label);
-                self.keep(&link, stamp, &unknown, &answers, max_cache);
+                self.keep(
+                    &link,
+                    stamp,
+                    typed.server,
+                    asked_of,
+                    &unknown,
+                    &answers,
+                    max_cache,
+                );
                 known
             }
             Err(why) => {
@@ -197,10 +221,13 @@ impl Gate {
 
     /// Keeps `answers` for `nodes`, as long as the extension said and the configuration allows, if
     /// nothing changed meanwhile (a reload, a new hello).
+    #[allow(clippy::too_many_arguments)]
     fn keep(
         &self,
         link: &Link,
         stamp: (u64, u64),
+        server: &str,
+        asked_of: u64,
         nodes: &[String],
         answers: &decide::NodeAnswers,
         max_cache: u64,
@@ -209,18 +236,47 @@ impl Gate {
         if seconds == 0 {
             return;
         }
-        let until = Instant::now() + Duration::from_secs(seconds);
+        let now = Instant::now();
+        let until = now + Duration::from_secs(seconds);
         let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
         if kept.stamp != stamp
+            || kept.server != server
             || (self.registry.generation(), link.epoch()) != stamp
-            || kept.nodes.len() + nodes.len() > MAX_KEPT
         {
             return;
         }
+        // The answers that ran out are not worth a place: they go before a new one is refused.
+        if kept.nodes.len() + nodes.len() > MAX_KEPT {
+            kept.nodes.retain(|_, (_, until)| *until > now);
+            if kept.nodes.len() + nodes.len() > MAX_KEPT {
+                return;
+            }
+        }
         for node in nodes {
             kept.nodes
-                .insert(node.clone(), (answers.verdict(node), until));
+                .insert((asked_of, node.clone()), (answers.verdict(node), until));
         }
+    }
+
+    /// A digest of what the extension decides on besides the node: the server the player is on, the command
+    /// and its arguments, as it is told them.
+    fn digest_of(&self, typed: &Typed<'_>) -> u64 {
+        let asked = request(typed, &[]);
+        let mut hasher = self.digest.build_hasher();
+        asked.server.hash(&mut hasher);
+        asked.command.hash(&mut hasher);
+        asked.args.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// How many answers are kept (to look at, and for tests).
+    #[cfg(test)]
+    pub(crate) fn kept_len(&self) -> usize {
+        self.kept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .nodes
+            .len()
     }
 }
 

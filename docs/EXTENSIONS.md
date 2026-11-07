@@ -568,7 +568,20 @@ What the specification above leaves open:
   the deadline holds up only their own packets, and five misses in a row open the breaker, after which
   the commands take their policy at once with no request.
 - **What is kept belongs to the player's session** (it goes when they leave, and nothing in the proxy
-  holds it afterwards). A reload and a new hello of the extension drop it. A failure is never kept.
+  holds it afterwards). A reload and a new hello of the extension drop it, and so does a change of the
+  player's server. A failure is never kept.
+- **What a kept answer is kept for.** The extension decides with the whole request, so an answer is kept
+  for that request and no other: the key is the server the player is on, the command and its arguments
+  (as the extension was told them) and the node. `/send Bob lobby` and `/send all east` are two
+  questions; a verdict given on one server is not used on another. So an extension may let the proxy
+  keep a verdict that depends on the server, the command or its arguments; what it must not do is give
+  `cache_seconds` to a verdict that depends on something the request does not carry (the time of day,
+  a rank it changes meanwhile): that verdict is kept as long as it said, and only a reload, a new hello
+  or the end of the session ends it earlier. The proxy keeps at most 512 answers for a session, and drops
+  those that ran out before it refuses a new one.
+- The hook reads the commands' own settings (`[commands]`, the nodes a command checks) as they were when
+  the player logged in, as it did before extensions, and the gate reads the extension's settings
+  (`decide-command`, which extension is granted the point) as they are now.
 - The decisions are counted as `meridian_extension_decisions_total{point="command"}` with `allow`, `deny`,
   `default` (what the extension answered for the command: `deny` if it denied any node, else `allow` if
   it allowed any), `cached` (every node was kept) and, with no usable answer, `policy_default` or

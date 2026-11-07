@@ -277,7 +277,7 @@ arguments of 256 characters, **not to be trusted**), and the `nodes` the command
 | `.allow(node)` | The player has the node, **even if `permissions.toml` or the operators of the server refuse it** |
 | `.deny(node)` | The player has not the node, even if `permissions.toml` gives it |
 | a node left out | `default`: `permissions.toml` and the operators decide, as without an extension |
-| `.cache_seconds(n)` | The proxy keeps these answers for this player for `n` seconds, and no longer than `cache-seconds-max` |
+| `.cache_seconds(n)` | The proxy keeps these answers for this player for `n` seconds, and no longer than `cache-seconds-max`. They are kept for the same command with the same arguments on the same server, and not for another |
 
 **Read this before you grant it:**
 
@@ -289,7 +289,10 @@ arguments of 256 characters, **not to be trusted**), and the `nodes` the command
 - **It concerns the proxy's commands only.** Any other command goes to the server as before, and the
   login keeps its own order: the bans and the whitelist come first and no extension bypasses them.
 - **`cache-seconds-max` bounds how long an `allow` or a `deny` is kept**, whatever you ask for. What is kept
-  belongs to the player's session, and is dropped at a reload and when your program says hello again.
+  belongs to the player's session, and is dropped at a reload, when your program says hello again and when
+  the player changes server. **Only give `cache_seconds` to a verdict that depends on what the request
+  carries** (the server, the command, its arguments, the node): one that depends on the time of day or on
+  a rank you change meanwhile would be kept as long as you said.
 - **`on-error = "allow"` is refused for this point, when the proxy reads its configuration**: it would give
   every node to whoever types the command whenever your program does not answer (down, too slow, an
   invalid answer, an open breaker), so `/send` and `/alert` would run for everyone. Use `"default"` (the
