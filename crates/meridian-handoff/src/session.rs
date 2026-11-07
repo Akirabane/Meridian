@@ -425,6 +425,12 @@ impl Session {
                 // The backend went while a switch moved the player: if the switch handed
                 // them over, the loss is behind them; if not, it is a loss as any other.
                 Event::SwitchEnded => {
+                    // Another switch began before this event was read (the end of the last
+                    // one is not one step): the loss is that switch's to decide, and its own
+                    // end will come.
+                    if shared.switching.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     let Some((id, end)) = held.take() else {
                         continue;
                     };
@@ -439,8 +445,12 @@ impl Session {
                         Lost::Moving => deadline = Some(Instant::now() + ACKNOWLEDGE_WITHIN),
                     }
                 }
+                // Held only when a fallback may follow: without one, the session ends at
+                // once, as it always did, and the switch sees the player gone.
                 Event::Lane(id, end)
-                    if id == shared.down().active && shared.switching.load(Ordering::SeqCst) =>
+                    if id == shared.down().active
+                        && shared.switching.load(Ordering::SeqCst)
+                        && may_fall_back(&shared, &end) =>
                 {
                     held = Some((id, end));
                 }
@@ -489,6 +499,17 @@ pub(crate) enum Lost {
     /// The client was told to go back to the configuration phase, and a replacement waits
     /// for its acknowledgement.
     Moving,
+}
+
+/// Whether the end of the active lane is a loss the fallback may make good, as [`lost`]
+/// sorts them: a kick (caught only with `on_kick`), or a close or a broken connection with
+/// `on_crash`.
+fn may_fall_back(shared: &Shared, end: &End) -> bool {
+    match end {
+        End::Kicked(_) => true,
+        End::Closed | End::Broken(_) => shared.fallback_crash.load(Ordering::SeqCst),
+        End::ClientGone => false,
+    }
 }
 
 /// Decides what to do when the active backend's lane ended in `end`: a replacement, or the
@@ -826,8 +847,9 @@ impl Shared {
     }
 
     /// The switch has ended: the session decides about a backend lost meanwhile.
+    /// `lost_in_switch` is left as it is: the next switch clears it as it begins, and
+    /// clearing it here could wipe what a switch begun meanwhile was told.
     pub(crate) fn switch_ended(&self) {
-        self.lost_in_switch.store(false, Ordering::SeqCst);
         if let Some(events) = lock(&self.events).as_ref() {
             let _ = events.send(Event::SwitchEnded);
         }
