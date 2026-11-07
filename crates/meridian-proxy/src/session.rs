@@ -611,22 +611,63 @@ fn place(
             return;
         }
     };
+    // The extension that decides the choice of server, if there is one, may put the candidates in an
+    // order of its own or refuse the player (docs/EXTENSIONS.md, 4.4). It is asked after the player has a
+    // place, and again if they wait in the queue and are woken.
+    let (candidates, ordered) = match crate::extension::server::choose(
+        &sessions.extensions,
+        config,
+        &sessions.shared(),
+        &crate::extension::server::Who {
+            name: &name,
+            uuid: hyphenated(uuid),
+            verified: session.auth == client::AuthKind::Premium,
+            host: session.virtual_host.as_deref(),
+            lost: None,
+        },
+        &candidates,
+    ) {
+        crate::extension::server::Outcome::Default => (candidates, false),
+        crate::extension::server::Outcome::Order(servers) => (servers, true),
+        crate::extension::server::Outcome::Refuse { by, message } => {
+            info!(
+                "{peer}: {name} ({}) refused by the extension \"{by}\" at the choice of server",
+                hyphenated(uuid)
+            );
+            sessions.metrics().login_failed(LoginFailure::Extension);
+            refuse(session.connection, &message);
+            return;
+        }
+    };
     let options = BackendOptions {
         forwarding_secret: config.forwarding_secret.as_bytes().to_vec(),
         connect_timeout: Duration::from_millis(config.connect_timeout_ms),
         player_address: peer.ip(),
     };
     // With balancing on, the balancer places the player among the lobbies first.
-    // Off, nothing here runs and the candidates are tried as they always were.
-    let mut balanced = crate::placing::login(
-        config,
-        &sessions.shared(),
-        connect,
-        &session.profile,
-        &options,
-        &candidates,
-        session.virtual_host.as_deref(),
-    );
+    // Off, nothing here runs and the candidates are tried as they always were. Servers an extension
+    // ordered are tried in its order, each held a place by the rule of a server the player named.
+    let mut balanced = if ordered {
+        crate::placing::ordered(
+            config,
+            &sessions.shared(),
+            connect,
+            &session.profile,
+            &options,
+            &candidates,
+            &format!("{peer}: {name} ({})", hyphenated(uuid)),
+        )
+    } else {
+        crate::placing::login(
+            config,
+            &sessions.shared(),
+            connect,
+            &session.profile,
+            &options,
+            &candidates,
+            session.virtual_host.as_deref(),
+        )
+    };
     // Each candidate in turn, with the connect timeout for each.
     let mut joined = balanced.joined.take();
     for candidate in &candidates {

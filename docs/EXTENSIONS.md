@@ -612,6 +612,37 @@ server the extension ordered is at its hard cap and the queue is on, the player 
 do today when every lobby is full (`session.rs:628-647`, `queue.rs:175`). When they are woken,
 the extension is asked again.
 
+**As built.** The point is wired at login (`place` in `session.rs`, after the route and the health
+order, before the balancer) and at the fallback (`replace` in `fallback.rs`), through
+`extension/server.rs` in the proxy and `meridian_extension::decide` (`ServerRequest`, `Choice`,
+`parse_server_answer`) for both sides. The golden files are `golden/protocol-0/server.*.json`, and
+the SDK registers it with `Extension::on_server`. What the specification above leaves open:
+
+- `candidates` carries, for a server the balancer knows (it has a `role`), its `role`
+  (`lobby`, `sublobby` or `game`), its `players` (the sessions on it and the places held for
+  players being sent there), its caps as the balancer uses them (a cap the server reports lower is
+  the one given), and its `state`: `open`, `closed` (at its soft cap), `draining` (drained from the
+  console, restarting, or not accepting transfers) or `not_offered` (no recent report from it). For a
+  server with no role, or with balancing off, everything but `name` is null. A state word a later
+  version adds is to be read as `closed`.
+- An `order` must name at least one server, each one of the `candidates` and spelled as it is; a name
+  twice counts once, at its first place. An empty list, a name that is not a candidate, or a name that
+  is not text is an invalid answer: it counts toward the breaker and the on-error policy applies
+  (`default`, or `refuse`). The extension cannot send the proxy to a server it was not offered.
+- The servers of an order are tried in that order, among them those with no role as well (nothing is
+  held for them). A server that is full, drained, not accepting players or not heard from is passed
+  over for the next, and one that does not answer is passed over as in the ordinary loop. When none
+  could take the player for want of room, the player is told the server is full, or waits if the queue
+  is on; when none answered, they are told which could not be reached, and only those the order named
+  are listed.
+- At the fallback the wait for the extension is the smaller of `timeout-ms` and 500 ms. A refusal
+  there disconnects the player with its reason.
+- The decisions are counted as `meridian_extension_decisions_total{point="server"}` with
+  `default`, `order`, `refuse` and, when there was no usable answer, `policy_default` or
+  `policy_refuse`. A refusal at login counts as `meridian_login_failures_total{reason="extension"}`.
+- While the extension is asked, the player holds a place under `max-players`, so a slow extension at
+  1000 ms costs that much of the place of each player who waits on it; `max-in-flight` bounds how many.
+
 ## 5. Orders: the extension asks the proxy
 
 The extension sends JSON-RPC requests on the same connection, once the hello is done. They mirror

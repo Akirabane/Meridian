@@ -614,3 +614,561 @@ fn what_the_extension_did_not_declare_is_not_asked_and_what_is_not_granted_is_no
         assert_eq!(asked(&gate), 0);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The choice of server (docs/EXTENSIONS.md, 4.4)
+
+mod server {
+    use super::*;
+    use crate::balance::{Reservation, Server};
+    use crate::fallback::{Context, replacer};
+    use meridian_config::{
+        AuthKind, BalancedServer, Balancing, Role, ServerDecision, ServerOnError,
+    };
+    use meridian_extension::decide::{Choice, Placing, ServerRequest};
+    use meridian_handoff::{Loss, Notice, Replacement};
+
+    const LOBBY: &str = "127.0.0.1:25601";
+    const EAST: &str = "127.0.0.1:25602";
+    const WEST: &str = "127.0.0.1:25603";
+
+    /// An extension that chooses servers, with what it was asked.
+    struct Chooser {
+        running: Running,
+        folder: Folder,
+        seen: Arc<Mutex<Vec<ServerRequest>>>,
+    }
+
+    fn chooser(decide: impl Fn(&ServerRequest) -> Choice + Send + Sync + 'static) -> Chooser {
+        chooser_after(Duration::ZERO, decide)
+    }
+
+    fn chooser_after(
+        delay: Duration,
+        decide: impl Fn(&ServerRequest) -> Choice + Send + Sync + 'static,
+    ) -> Chooser {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let extension = Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_server({
+                let seen = Arc::clone(&seen);
+                move |request| {
+                    seen.lock().unwrap().push(request.clone());
+                    std::thread::sleep(delay);
+                    decide(request)
+                }
+            });
+        Chooser {
+            running: extension.bind("127.0.0.1:0").unwrap(),
+            folder: Folder::new(),
+            seen,
+        }
+    }
+
+    impl Chooser {
+        fn extension(&self, on_error: ServerOnError, timeout_ms: u64) -> ExtensionConfig {
+            let mut config = extension_config(
+                self.running.local_addr().to_string(),
+                self.folder.token(),
+                &["decide.server"],
+                OnError::Default,
+                1000,
+            );
+            config.decide_server = ServerDecision {
+                timeout_ms,
+                on_error,
+            };
+            config
+        }
+    }
+
+    /// Three backends, `lobby` then `east` and `west`, and the extension.
+    fn config_with(extension: ExtensionConfig) -> Config {
+        Config {
+            extensions: vec![extension],
+            try_backends: vec!["east".into(), "west".into()],
+            ..routed()
+        }
+    }
+
+    /// The same, with balancing on: each backend a lobby with these caps.
+    fn balanced_with(extension: ExtensionConfig, soft: u32, hard: u32) -> Config {
+        let server = |backend: &str| BalancedServer {
+            backend: backend.into(),
+            role: Role::Lobby,
+            soft_cap: soft,
+            hard_cap: hard,
+        };
+        Config {
+            balanced: vec![server("lobby"), server("east"), server("west")],
+            balancing: Balancing {
+                enabled: true,
+                ..Balancing::default()
+            },
+            ..config_with(extension)
+        }
+    }
+
+    /// Keeps a place on `backend`, as a player already there would.
+    fn hold(sessions: &Sessions, config: &Config, backend: &str) -> Reservation {
+        let limits = config.balanced(backend).unwrap();
+        sessions
+            .balancer
+            .reserve_named(
+                Server {
+                    backend,
+                    soft_cap: limits.soft_cap,
+                    hard_cap: limits.hard_cap,
+                    available: true,
+                    ping: None,
+                    reported_players: None,
+                },
+                || sessions.counts(),
+            )
+            .unwrap_or_else(|e| panic!("cannot hold a place on {backend}: {e}"))
+    }
+
+    /// Logs Alex in; `up` says which backends answer. The addresses tried and what the player got.
+    fn login_alex(
+        config: &Config,
+        sessions: &Sessions,
+        up: &[(&str, bool)],
+        host: Option<&str>,
+        script: Vec<Step>,
+    ) -> (Vec<String>, Trace) {
+        let (connect, backends) = reachable(up.to_vec());
+        route_one(
+            config,
+            sessions,
+            &*connect,
+            &backends,
+            logged_in("Alex", client::AuthKind::Offline, host),
+            script,
+        )
+    }
+
+    const ALL_UP: [(&str, bool); 3] = [(LOBBY, true), (EAST, true), (WEST, true)];
+
+    /// Goes in, to the backends `tried`.
+    fn goes_to(config: &Config, sessions: &Sessions, up: &[(&str, bool)], tried: &[&str]) {
+        let (got, _) = login_alex(config, sessions, up, None, vec![Step::ExpectClose]);
+        assert_eq!(got, tried);
+    }
+
+    fn refused_with(
+        config: &Config,
+        sessions: &Sessions,
+        up: &[(&str, bool)],
+        tried: &[&str],
+    ) -> String {
+        let (got, trace) = login_alex(config, sessions, up, None, refused());
+        assert_eq!(got, tried);
+        refusal(&trace)
+    }
+
+    fn decisions(sessions: &Sessions, decision: &'static str) -> u64 {
+        sessions
+            .extensions
+            .link("gate")
+            .unwrap()
+            .stats()
+            .decisions("server", decision)
+    }
+
+    #[test]
+    fn without_a_server_extension_nothing_is_asked() {
+        // An extension that holds only the login does not hold this point.
+        let gate = gate_with(Duration::ZERO, &[], |_| Decision::Default);
+        let config = Gate::config(gate.extension(&["decide.login"], OnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        goes_to(&config, &sessions, &ALL_UP, &[LOBBY]);
+        assert_eq!(decisions(&sessions, "default"), 0);
+        assert_eq!(decisions(&sessions, "order"), 0);
+    }
+
+    #[test]
+    fn default_leaves_the_routes_as_they_are_and_the_extension_is_told_who_and_what() {
+        let chooser = chooser(|_| Choice::Default);
+        let config = config_with(chooser.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        let (tried, _) = login_alex(
+            &config,
+            &sessions,
+            &ALL_UP,
+            Some("play.example.org"),
+            vec![Step::ExpectClose],
+        );
+        assert_eq!(tried, [LOBBY]);
+        assert_eq!(decisions(&sessions, "default"), 1);
+        let seen = chooser.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let request = &seen[0];
+        assert_eq!(request.reason, Placing::Login);
+        assert_eq!(request.lost, None);
+        assert_eq!(request.host.as_deref(), Some("play.example.org"));
+        assert_eq!(request.player.name, "Alex");
+        assert_eq!(request.player.auth, decide::Auth::Unverified);
+        // What the routes allow, in the order the proxy would try them; with balancing off, the proxy
+        // knows nothing more of them than their names.
+        let names: Vec<&str> = request.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["lobby", "east", "west"]);
+        assert!(request.candidates.iter().all(|c| c.role.is_none()
+            && c.players.is_none()
+            && c.soft_cap.is_none()
+            && c.hard_cap.is_none()
+            && c.state.is_none()));
+    }
+
+    #[test]
+    fn an_order_is_tried_in_its_order_and_only_those() {
+        let chooser = chooser(|_| Choice::order(["west", "east"]));
+        let config = config_with(chooser.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        // West first, as asked: not the default backend.
+        goes_to(&config, &sessions, &ALL_UP, &[WEST]);
+        // A server that does not answer is passed over for the next of the order, and the lobby, which
+        // the order leaves out, is not tried however many fail.
+        goes_to(
+            &config,
+            &sessions,
+            &[(LOBBY, true), (EAST, true), (WEST, false)],
+            &[WEST, EAST],
+        );
+        let said = refused_with(
+            &config,
+            &sessions,
+            &[(LOBBY, true), (EAST, false), (WEST, false)],
+            &[WEST, EAST],
+        );
+        assert!(said.starts_with("Cannot reach the servers"), "{said}");
+        assert!(!said.contains("lobby"), "{said}");
+        assert_eq!(decisions(&sessions, "order"), 3);
+        assert_eq!(sessions.metrics().failures_of(LoginFailure::Unreachable), 1);
+    }
+
+    #[test]
+    fn a_refusal_turns_the_player_away_with_its_reason_before_any_backend() {
+        let chooser = chooser(|_| Choice::refuse("No game is running."));
+        let config = config_with(chooser.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        let said = refused_with(&config, &sessions, &ALL_UP, &[]);
+        assert_eq!(said, "No game is running.");
+        assert_eq!(sessions.admitted(), 0, "the place is given back");
+        assert_eq!(sessions.metrics().failures_of(LoginFailure::Extension), 1);
+        assert_eq!(decisions(&sessions, "refuse"), 1);
+    }
+
+    #[test]
+    fn a_refusal_without_a_reason_says_what_the_proxy_says() {
+        let chooser = chooser(|_| Choice::Refuse(None));
+        let config = config_with(chooser.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        assert_eq!(
+            refused_with(&config, &sessions, &ALL_UP, &[]),
+            DEFAULT_REASON
+        );
+    }
+
+    /// A name that was not offered is an invalid answer: it counts against the extension and the
+    /// operator's on-error policy applies, whatever else the answer says.
+    #[test]
+    fn a_server_that_was_not_offered_is_an_invalid_answer_and_takes_the_policy() {
+        let chooser = chooser(|_| Choice::order(["west", "north"]));
+        let config = config_with(chooser.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        // `default`: as if there were no extension.
+        goes_to(&config, &sessions, &ALL_UP, &[LOBBY]);
+        assert_eq!(decisions(&sessions, "policy_default"), 1);
+        assert_eq!(decisions(&sessions, "order"), 0);
+        // The extension serves one proxy at a time: this one lets go of it first.
+        drop(sessions);
+
+        let config = config_with(chooser.extension(ServerOnError::Refuse, 1000));
+        let sessions = sessions_for(&config);
+        assert_eq!(
+            refused_with(&config, &sessions, &ALL_UP, &[]),
+            DEFAULT_REASON
+        );
+        assert_eq!(decisions(&sessions, "policy_refuse"), 1);
+        assert_eq!(sessions.metrics().failures_of(LoginFailure::Extension), 1);
+        let mut page = String::new();
+        sessions.extensions.render(&mut page);
+        assert!(
+            page.contains("outcome=\"invalid\"} 1"),
+            "an invalid answer is counted\n{page}"
+        );
+    }
+
+    #[test]
+    fn an_extension_that_is_too_slow_or_down_takes_the_policy() {
+        let slow = chooser_after(Duration::from_millis(600), |_| Choice::order(["west"]));
+        let config = config_with(slow.extension(ServerOnError::Default, 100));
+        let sessions = sessions_for(&config);
+        goes_to(&config, &sessions, &ALL_UP, &[LOBBY]);
+        assert_eq!(decisions(&sessions, "policy_default"), 1);
+        drop(sessions);
+
+        let config = config_with(slow.extension(ServerOnError::Refuse, 100));
+        let sessions = sessions_for(&config);
+        assert_eq!(
+            refused_with(&config, &sessions, &ALL_UP, &[]),
+            DEFAULT_REASON
+        );
+
+        // No connection at all: an extension that never started.
+        let mut config = config_with(slow.extension(ServerOnError::Refuse, 100));
+        config.extensions[0].address = "127.0.0.1:1".into();
+        let sessions = Sessions::default();
+        assert_eq!(
+            refused_with(&config, &sessions, &ALL_UP, &[]),
+            DEFAULT_REASON
+        );
+    }
+
+    #[test]
+    fn an_extension_granted_the_point_that_did_not_declare_it_is_not_asked() {
+        // It declares `decide.login` only; the operator granted `decide.server` as well.
+        let gate = gate_with(Duration::ZERO, &[], |_| Decision::Default);
+        let mut extension =
+            gate.extension(&["decide.login", "decide.server"], OnError::Default, 1000);
+        extension.decide_server.on_error = ServerOnError::Refuse;
+        let config = Gate::config(extension);
+        let sessions = sessions_for(&config);
+        // Nothing is asked of it at the choice of server, whatever its on-error says.
+        goes_to(&config, &sessions, &ALL_UP, &[LOBBY]);
+        assert_eq!(decisions(&sessions, "policy_refuse"), 0);
+    }
+
+    #[test]
+    fn with_balancing_the_extension_is_told_what_the_balancer_knows_of_each_server() {
+        let chooser = chooser(|_| Choice::Default);
+        let config = balanced_with(chooser.extension(ServerOnError::Default, 1000), 2, 3);
+        let sessions = sessions_for(&config);
+        let _held = hold(&sessions, &config, "lobby");
+        let _more = hold(&sessions, &config, "lobby");
+        sessions.balancer.drain("west");
+        let (tried, _) = login_alex(&config, &sessions, &ALL_UP, None, vec![Step::ExpectClose]);
+        assert_eq!(tried.len(), 1);
+        let seen = chooser.seen.lock().unwrap();
+        let by_name = |name: &str| {
+            seen[0]
+                .candidates
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} was not offered"))
+        };
+        let lobby = by_name("lobby");
+        assert_eq!(lobby.role.as_deref(), Some("lobby"));
+        assert_eq!(
+            (lobby.players, lobby.soft_cap, lobby.hard_cap),
+            (Some(2), Some(2), Some(3))
+        );
+        assert_eq!(by_name("east").players, Some(0));
+        assert_eq!(by_name("east").state.as_deref(), Some("open"));
+        assert_eq!(by_name("west").state.as_deref(), Some("draining"));
+    }
+
+    #[test]
+    fn with_balancing_an_order_overrides_the_balancer_and_the_hard_cap_still_holds() {
+        let chooser = chooser(|_| Choice::order(["west", "lobby"]));
+        let config = balanced_with(chooser.extension(ServerOnError::Default, 1000), 2, 2);
+        let sessions = sessions_for(&config);
+        // The balancer fills the fullest open lobby first, which would be `lobby`; the order says west.
+        let _held = hold(&sessions, &config, "lobby");
+        goes_to(&config, &sessions, &ALL_UP, &[WEST]);
+        // A server at its hard cap is passed over for the next of the order, without a connection.
+        let _w1 = hold(&sessions, &config, "west");
+        let _w2 = hold(&sessions, &config, "west");
+        goes_to(&config, &sessions, &ALL_UP, &[LOBBY]);
+    }
+
+    #[test]
+    fn a_server_that_is_drained_or_full_is_passed_over_and_when_none_can_the_player_is_told_it_is_full()
+     {
+        let chooser = chooser(|_| Choice::order(["east", "west"]));
+        let config = balanced_with(chooser.extension(ServerOnError::Default, 1000), 1, 1);
+        let sessions = sessions_for(&config);
+        sessions.balancer.drain("east");
+        goes_to(&config, &sessions, &ALL_UP, &[WEST]);
+        // West is full now (a place held), east is drained: nowhere to go, and no server was tried.
+        let _held = hold(&sessions, &config, "west");
+        let said = refused_with(&config, &sessions, &ALL_UP, &[]);
+        assert_eq!(said, Full::MESSAGE);
+        assert_eq!(sessions.metrics().failures_of(LoginFailure::Full), 1);
+        // Not the extension's refusal.
+        assert_eq!(sessions.metrics().failures_of(LoginFailure::Extension), 0);
+    }
+
+    /// With the queue on, a player whose ordered servers are all at their hard cap waits as they do when
+    /// every lobby is full, and the extension is asked again when they are woken.
+    #[test]
+    fn with_the_queue_a_player_waits_for_an_ordered_server_and_the_extension_is_asked_again() {
+        let chooser = chooser(|_| Choice::order(["east"]));
+        let mut config = balanced_with(chooser.extension(ServerOnError::Default, 1000), 1, 1);
+        config.queue = meridian_config::QueueSettings {
+            enabled: true,
+            wait_seconds: 5,
+            max_length: 5,
+        };
+        let sessions = sessions_for(&config);
+        let held = hold(&sessions, &config, "east");
+        let started = Instant::now();
+        let (tried, _) = std::thread::scope(|scope| {
+            let sessions = &sessions;
+            scope.spawn(move || {
+                while sessions.queue.len() == 0 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                drop(held);
+            });
+            login_alex(&config, sessions, &ALL_UP, None, vec![Step::ExpectClose])
+        });
+        assert_eq!(tried, [EAST]);
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(sessions.queue.len(), 0);
+        assert_eq!(sessions.admitted(), 0);
+        assert!(
+            chooser.seen.lock().unwrap().len() >= 2,
+            "asked before the wait and again after it"
+        );
+    }
+
+    #[test]
+    fn a_server_without_a_role_is_tried_in_the_order_among_those_that_have_one() {
+        let chooser = chooser(|_| Choice::order(["east", "lobby", "west"]));
+        let mut config = balanced_with(chooser.extension(ServerOnError::Default, 1000), 2, 2);
+        config.balanced.retain(|b| b.backend != "east");
+        let sessions = sessions_for(&config);
+        // East has no role: no place is held for it, and it is tried first, as the order says.
+        goes_to(&config, &sessions, &ALL_UP, &[EAST]);
+        goes_to(
+            &config,
+            &sessions,
+            &[(LOBBY, true), (EAST, false), (WEST, true)],
+            &[EAST, LOBBY],
+        );
+    }
+
+    #[test]
+    fn the_login_and_the_choice_of_server_are_both_asked_of_one_extension() {
+        let asked = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let extension = Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_login({
+                let asked = Arc::clone(&asked);
+                move |_| {
+                    asked.lock().unwrap().push("login");
+                    Decision::Allow
+                }
+            })
+            .on_server({
+                let asked = Arc::clone(&asked);
+                move |_| {
+                    asked.lock().unwrap().push("server");
+                    Choice::order(["east"])
+                }
+            });
+        let running = extension.bind("127.0.0.1:0").unwrap();
+        let folder = Folder::new();
+        let settings = extension_config(
+            running.local_addr().to_string(),
+            folder.token(),
+            &["decide.login", "decide.server"],
+            OnError::Default,
+            1000,
+        );
+        let config = config_with(settings);
+        let sessions = sessions_for(&config);
+        goes_to(&config, &sessions, &ALL_UP, &[EAST]);
+        // The login first, then the choice of server, as the order of the checks says.
+        assert_eq!(*asked.lock().unwrap(), ["login", "server"]);
+    }
+
+    // ---- when a server is lost ------------------------------------------------------------------
+
+    /// The replacer's answer to the loss of `lobby`, and the addresses it tried.
+    fn lose_lobby(
+        config: &Config,
+        sessions: &Sessions,
+        up: &[(&str, bool)],
+    ) -> (Result<Replacement, Notice>, Vec<String>) {
+        let (connect, backends) = reachable(up.to_vec());
+        let (_relay, handle, _player, _server) = idle_session_on("Alex", "lobby");
+        let profile = Profile {
+            name: "Alex".into(),
+            uuid: offline_uuid("Alex").to_be_bytes(),
+            properties: Vec::new(),
+        };
+        let mut replace = replacer(Context {
+            sessions,
+            connect: &*connect,
+            config,
+            handle: &handle,
+            profile: &profile,
+            virtual_host: Some("play.example.org"),
+            auth: AuthKind::Unverified,
+            peer: peer(),
+        });
+        let answer = replace(&Loss::Crashed("the connection closed".into()));
+        let tried = std::mem::take(&mut *backends.tried.lock().unwrap());
+        (answer, tried)
+    }
+
+    #[test]
+    fn at_the_fallback_the_extension_is_told_which_server_was_lost_and_orders_the_others() {
+        let chooser = chooser(|_| Choice::order(["west"]));
+        let config = config_with(chooser.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        assert_eq!(tried, [WEST]);
+        assert_eq!(answer.unwrap().backend, "west");
+        let seen = chooser.seen.lock().unwrap();
+        let request = &seen[0];
+        assert_eq!(request.reason, Placing::Fallback);
+        assert_eq!(request.lost.as_deref(), Some("lobby"));
+        assert_eq!(request.host.as_deref(), Some("play.example.org"));
+        // The server that lost the player is not offered again.
+        let names: Vec<&str> = request.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["east", "west"]);
+    }
+
+    #[test]
+    fn at_the_fallback_default_is_the_normal_choice_and_a_refusal_disconnects_with_its_reason() {
+        let first = chooser(|_| Choice::Default);
+        let config = config_with(first.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        assert_eq!(tried, [EAST]);
+        assert_eq!(answer.unwrap().backend, "east");
+
+        let second = chooser(|_| Choice::refuse("No game is running."));
+        let config = config_with(second.extension(ServerOnError::Default, 1000));
+        let sessions = sessions_for(&config);
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        assert!(tried.is_empty(), "no server was tried: {tried:?}");
+        let notice = answer
+            .err()
+            .expect("the player is disconnected")
+            .to_string();
+        assert!(notice.contains("No game is running."), "{notice}");
+        assert_eq!(decisions(&sessions, "refuse"), 1);
+    }
+
+    /// A player who lost their server is waiting in the configuration phase: the extension has half a
+    /// second at most, whatever `timeout-ms` says.
+    #[test]
+    fn at_the_fallback_the_wait_is_cut_to_half_a_second() {
+        let slow = chooser_after(Duration::from_millis(2500), |_| Choice::order(["west"]));
+        let config = config_with(slow.extension(ServerOnError::Default, 5000));
+        let sessions = sessions_for(&config);
+        let began = Instant::now();
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(2000), "waited {took:?}");
+        // No answer in time: the policy, `default`, so the first of the others.
+        assert_eq!(tried, [EAST]);
+        assert_eq!(answer.unwrap().backend, "east");
+        assert_eq!(decisions(&sessions, "policy_default"), 1);
+    }
+}
