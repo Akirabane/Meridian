@@ -2,8 +2,11 @@
 
 This page specifies how a program of the operator's own can take part in what the proxy
 decides: whether a player may enter, whether they may use a proxy command, and which server
-they go to. Nothing on this page is built yet. It is the plan that the pull requests of
-section 10 follow.
+they go to. Part of it is built, and the pull requests of section 10 follow the rest. Built: the
+admission at login (4.2), the permission of a command (4.3) and the choice of server, at login and at
+the fallback (4.4), with the Rust SDK (`meridian-extension`); the "As built" paragraphs of 4.3 and
+4.4 say what the code does where this page leaves a choice open. Not built: the extension's own
+commands (4.3), the orders the extension gives the proxy (5) and the events the proxy sends it (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
