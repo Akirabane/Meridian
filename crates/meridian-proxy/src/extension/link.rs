@@ -185,6 +185,10 @@ pub struct Link {
     stop: AtomicBool,
     /// The last wait the connection took between two tries, in milliseconds (to look at, and for tests).
     pub(super) last_wait_ms: AtomicU64,
+    /// How many times the extension has said hello: what it answered before a new hello is not what it
+    /// would answer after it (a restarted extension may have new rights to give), so what is kept of its
+    /// answers is dropped when this changes.
+    epoch: AtomicU64,
 }
 
 impl Link {
@@ -198,6 +202,7 @@ impl Link {
             changed: Condvar::new(),
             stop: AtomicBool::new(false),
             last_wait_ms: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
         })
     }
 
@@ -217,6 +222,11 @@ impl Link {
     /// What the extension declared in the hello of the connection that is up.
     pub fn info(&self) -> Option<Info> {
         self.lock().info.clone()
+    }
+
+    /// How many hellos the extension has been through (see the field).
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
     }
 
     /// The wait the connection took before its latest try.
@@ -273,6 +283,7 @@ impl Link {
             state.outbox = Some(outbox);
             state.info = Some(info);
         }
+        self.epoch.fetch_add(1, Ordering::Relaxed);
         self.stats.set_connected(true);
         let change = self.breaker().reset();
         self.breaker_changed(change);

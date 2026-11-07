@@ -10,6 +10,7 @@
 //! is on the metrics page.
 
 mod breaker;
+pub(crate) mod command;
 mod connection;
 mod link;
 pub(crate) mod login;
@@ -23,6 +24,7 @@ pub use link::{Link, Settings};
 #[cfg(test)]
 pub(crate) use stats::Outcome as RequestOutcome;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -36,6 +38,9 @@ pub struct Registry {
     /// Held while the registry follows a configuration, so that two reloads at once do not each
     /// start the same extension.
     following: Mutex<()>,
+    /// How many configurations the registry has followed: what is kept of an extension's answers is
+    /// dropped at a reload, which may change what it is asked, how long it is kept and who is asked.
+    generation: AtomicU64,
 }
 
 impl Registry {
@@ -63,6 +68,7 @@ impl Registry {
     /// disconnected, and take their on-error policy.
     pub fn follow(&self, config: &meridian_config::Config) -> Vec<String> {
         let _following = self.following.lock().unwrap_or_else(|e| e.into_inner());
+        self.generation.fetch_add(1, Ordering::Relaxed);
         let wanted: Vec<Settings> = config.enabled_extensions().map(Settings::from).collect();
         let mut lines = Vec::new();
 
@@ -123,6 +129,11 @@ impl Registry {
             }
         }
         lines
+    }
+
+    /// How many configurations the registry has followed (see the field).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// The link of the extension called `name`, if it is running.

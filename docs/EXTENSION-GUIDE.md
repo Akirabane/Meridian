@@ -1,10 +1,9 @@
 # Writing an extension
 
 An extension is a program of your own that Meridian asks before it acts. Today it can **refuse a
-player at login** and **choose the server a player goes to** (section 5); the other
-decision point (the permission of a command) is specified in [EXTENSIONS.md](EXTENSIONS.md) and not built
-yet. This page takes you from nothing to a working extension in Rust. Protocol 0 is experimental:
-anything in it may change between two releases.
+player at login**, **choose the server a player goes to** (section 5) and **decide who may use the proxy's
+commands** (section 6). This page takes you from nothing to a working extension in Rust. Protocol 0 is
+experimental: anything in it may change between two releases.
 
 ## What happens
 
@@ -229,6 +228,76 @@ is your decision, and the hard cap always holds.
 The decision is asked after the player has a place under `max-players`, and held there while you answer:
 keep the handler quick. With the queue on, a player whose ordered servers are all full waits, and you are
 asked again when they are woken.
+
+## 6. Deciding who may use a command
+
+The third decision point is the permission of the commands the proxy answers itself (`/server`, `/hub`,
+`/play`, `/send`, `/glist`, `/alert`; the commands in `[commands] enabled`). When a player types one, the
+proxy can ask your program which of the **nodes** of permission the command checks (`meridian.send`,
+`meridian.server.east`, ...) the player has. Your program becomes the source of rights for these commands:
+
+```rust
+use meridian_extension::decide::{CommandRequest, NodeAnswers};
+
+fn decide(request: &CommandRequest) -> NodeAnswers {
+    if request.player.name == "Alex" {
+        // Alex may do all of it, whatever permissions.toml says. Keep it for a minute.
+        request.nodes.iter().fold(NodeAnswers::new(), |a, node| a.allow(node)).cache_seconds(60)
+    } else {
+        NodeAnswers::new().cache_seconds(60) // nothing to say: permissions.toml decides
+    }
+}
+
+// Extension::new("ranks", "1.0.0", token).on_command(decide).serve("127.0.0.1:25592")
+```
+
+The whole program, with a list of administrators on its command line, is
+`crates/meridian-extension/examples/command_ranks.rs`.
+
+```toml
+[[extension]]
+name = "ranks"
+address = "127.0.0.1:25592"
+token-file = "extensions/ranks.token"
+grant = ["decide.command"]
+
+[extension.decide-command]
+timeout-ms = 250
+on-error = "default"      # default | allow | deny
+cache-seconds-max = 300
+```
+
+What the handler gets, a `CommandRequest`: the `player` (with `auth`: for an unverified player the name
+proves nothing), the `server` they are on, the `command` and its `args` (what the player typed: at most 32
+arguments of 256 characters, **not to be trusted**), and the `nodes` the command checks. What it answers, a
+`NodeAnswers`:
+
+| Answer | Effect |
+| --- | --- |
+| `.allow(node)` | The player has the node, **even if `permissions.toml` or the operators of the server refuse it** |
+| `.deny(node)` | The player has not the node, even if `permissions.toml` gives it |
+| a node left out | `default`: `permissions.toml` and the operators decide, as without an extension |
+| `.cache_seconds(n)` | The proxy keeps these answers for this player for `n` seconds, and no longer than `cache-seconds-max` |
+
+**Read this before you grant it:**
+
+- **Only an extension you grant `decide.command` to decides.** One that is not granted it, is switched off
+  or did not declare it is never asked.
+- **Your `allow` can give `/send`, `/alert` and the other commands to any player. The token of this
+  program is therefore an administrator's credential for the network: keep its file readable by the proxy
+  and by the program only.** Whoever holds it can make the proxy treat anyone as an administrator.
+- **It concerns the proxy's commands only.** Any other command goes to the server as before, and the
+  login keeps its own order: the bans and the whitelist come first and no extension bypasses them.
+- **`cache-seconds-max` bounds how long an `allow` or a `deny` is kept**, whatever you ask for. What is kept
+  belongs to the player's session, and is dropped at a reload and when your program says hello again.
+- **`on-error = "allow"` gives every node to whoever types the command whenever your program does not
+  answer** (down, too slow, an invalid answer, an open breaker), so `/send` and `/alert` run for everyone.
+  `"default"` (the file decides) and `"deny"` are the safe choices.
+
+The player's packets to the server wait while your program answers, so the wait is short (250 ms by
+default) and the proxy asks only for a command it answers, once for all the nodes the command checks, and
+not at all for what it kept. Five misses in a row open the breaker, and then commands take `on-error` at
+once. Keep the handler quick, and let the proxy keep what does not change.
 
 ## Good to know
 

@@ -526,6 +526,49 @@ extension is down and the policy is `default`. The operator decided it so (decis
 
 **Default without an extension:** `permissions.toml`, unchanged. **Timeout:** 250 ms.
 
+**As built.** The point is wired in the hook that answers the commands a player types
+(`commands::hook_with`), through `extension/command.rs` in the proxy and `meridian_extension::decide`
+(`CommandRequest`, `NodeAnswers`, `parse_command_answer`) for both sides. The golden files are
+`golden/protocol-0/command.*.json`, and the SDK registers it with `Extension::on_command`. The own commands
+of an extension (the `commands` capability and `command/run`) are not built; this is the permission only.
+What the specification above leaves open:
+
+- **The rule is one function, `merge`:** `allow` is a permission **even if `permissions.toml` or the
+  operators of the server refuse it**, `deny` is a refusal even if they give it, and only `default` (or a
+  node the answer leaves out) leaves the question to them.
+- **Guardrails, which the operator must know before granting `decide.command`:**
+  1. **Only an extension the operator granted `decide.command` to (`grant`) decides**, and only one: an
+     extension that is not granted it, is switched off (`enabled = false`) or did not declare it in its
+     hello is never asked, whatever it says.
+  2. **An `allow` of the extension can give `/send`, `/alert` and the other commands to any player.
+     The token of such an extension is therefore an administrator's credential for the network: keep
+     its file readable by the proxy and the extension only, as the token of the console would be.**
+  3. **It concerns the proxy's own commands only** (`/server`, `/hub`, `/play`, `/send`, `/glist`,
+     `/alert`; any other command goes to the server untouched and the extension is not asked). The
+     login stays as 4.2 says: the bans and the whitelist come first and are never bypassed by an
+     extension.
+  4. **`cache-seconds-max` bounds how long an `allow` or a `deny` is kept**, whatever the extension asks
+     for; with 0 nothing is kept and each command asks.
+- **`on-error = "allow"` gives every node of the command to whoever typed it** when there is no usable
+  answer (4.1: "let the command run"), the extension being down included, so `/send` and `/alert` run for
+  everyone. It is for an operator who prefers working commands to refused ones; `"default"` (the file) and
+  `"deny"` are the safe choices.
+- **The request** asks about the nodes the command checks and the proxy has no kept answer for, in one
+  call (`nodes_of` lists them: `/server` with no name has one for each server the player may be sent to,
+  `/hub` its own and that of the server it leads to). Only the nodes asked are read from the answer, so
+  what a session keeps cannot grow with what an extension sends. At most 32 arguments are told, each cut
+  to 256 characters; they are what the player typed and are not to be trusted.
+- **The call waits for the answer on the thread that copies the player's packets**, at most `timeout-ms`
+  (250 ms by default), and only for a command the proxy answers. A player who types commands that miss
+  the deadline holds up only their own packets, and five misses in a row open the breaker, after which
+  the commands take their policy at once with no request.
+- **What is kept belongs to the player's session** (it goes when they leave, and nothing in the proxy
+  holds it afterwards). A reload and a new hello of the extension drop it. A failure is never kept.
+- The decisions are counted as `meridian_extension_decisions_total{point="command"}` with `allow`, `deny`,
+  `default` (what the extension answered for the command: `deny` if it denied any node, else `allow` if
+  it allowed any), `cached` (every node was kept) and, with no usable answer, `policy_default`,
+  `policy_allow` or `policy_deny`.
+
 **The extension's own commands.** With the `commands` capability, the extension declares
 commands in its `hello`:
 
