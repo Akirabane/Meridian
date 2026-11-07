@@ -30,7 +30,10 @@ mod tests;
 
 pub use log::{Log, Stderr};
 
-use crate::decide::{self, Decision, LoginAnswer, LoginParams, LoginRequest};
+use crate::decide::{
+    self, Choice, Decision, LoginAnswer, LoginParams, LoginRequest, ServerAnswer, ServerParams,
+    ServerRequest,
+};
 use crate::handshake::Secret;
 use crate::wire::{self, CommandSpec, DiscoverMethod, RpcError, code};
 use serde_json::Value;
@@ -168,6 +171,32 @@ impl Extension {
                 let params: LoginParams = wire::decode(params.as_ref())
                     .map_err(|why| RpcError::new(code::INVALID_PARAMS, why))?;
                 let answer = LoginAnswer::from(&handler(&params.request));
+                Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
+            },
+        )
+    }
+
+    /// Decides where a player goes when the proxy places them, at login and when their server is lost
+    /// (docs/EXTENSIONS.md, 4.4). The extension declares `decide.server`; the proxy asks only if the
+    /// operator granted it. The handler runs on a thread of its own, with the request, whose
+    /// `candidates` are the servers the player may be sent to, and answers [`Choice::Default`] (the
+    /// proxy goes on as it would without an extension), [`Choice::order`] (try these servers, in this
+    /// order, and only these) or [`Choice::refuse`] (with the reason the player reads). **The names of
+    /// an order must be names of `request.candidates`**: the proxy refuses an answer that names another,
+    /// counts it against the extension's breaker and takes its on-error policy. Registering it twice
+    /// panics, as registering any method twice does.
+    pub fn on_server(
+        self,
+        handler: impl Fn(&ServerRequest) -> Choice + Send + Sync + 'static,
+    ) -> Self {
+        self.register(
+            decide::SERVER,
+            "decide.server",
+            DiscoverMethod::with_request(decide::SERVER, "object"),
+            move |params| {
+                let params: ServerParams = wire::decode(params.as_ref())
+                    .map_err(|why| RpcError::new(code::INVALID_PARAMS, why))?;
+                let answer = ServerAnswer::from(&handler(&params.request));
                 Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
             },
         )

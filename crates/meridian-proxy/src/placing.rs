@@ -159,6 +159,91 @@ pub fn login<'c>(
     }
 }
 
+/// Places a login or a player whose server was lost on the servers an extension ordered
+/// (docs/EXTENSIONS.md, 4.4): each in turn, in that order, and only those. The balancer is not asked
+/// which one is best; each server is held a place by the rule of a server the player named
+/// ([`Balancer::reserve_named`]), so its hard cap holds, and one that is full, drained or not
+/// accepting players is passed over for the next. With balancing off, or for a server with no role,
+/// nothing is reserved and the server is simply tried.
+///
+/// `out.tried` holds every server of `order` that was passed over or failed, so that the ordinary loop
+/// that follows tries none of them again, and `out.full` is whether one was passed over for want of room
+/// (not because it did not answer). `who` names the player in the log lines.
+pub fn ordered<'c>(
+    config: &'c Config,
+    shared: &Shared,
+    connect: &Connect,
+    profile: &Profile,
+    options: &BackendOptions,
+    order: &[String],
+    who: &str,
+) -> Balanced<'c> {
+    let mut out = Balanced {
+        joined: None,
+        tried: Vec::new(),
+        full: false,
+    };
+    let retry = Duration::from_secs(config.backend_retry_seconds);
+    let timing = (retry, Instant::now());
+    if config.balancing.enabled {
+        shared
+            .balancer
+            .retain(|name| config.balanced(name).is_some());
+    }
+    for name in order {
+        let Some(backend) = config.backend(name) else {
+            out.tried.push(name.clone());
+            continue;
+        };
+        let server = config
+            .balancing
+            .enabled
+            .then(|| server_of(config, shared, name, &out.tried, true, timing))
+            .flatten();
+        let Some(server) = server else {
+            // No place to reserve: tried as the ordinary loop would.
+            match connect(&backend.address, profile, options) {
+                Ok(link) => {
+                    shared.health.answered(name);
+                    out.joined = Some((backend, link, None));
+                    return out;
+                }
+                Err(e) => {
+                    shared.health.failed(name, Instant::now());
+                    warning!(
+                        "{who} cannot join backend \"{name}\" at {}: {e}",
+                        backend.address
+                    );
+                    out.tried.push(name.clone());
+                    continue;
+                }
+            }
+        };
+        match shared.balancer.reserve_named(server, || shared.counts()) {
+            Ok(reservation) => {
+                if join(
+                    config,
+                    shared,
+                    connect,
+                    profile,
+                    options,
+                    name,
+                    reservation,
+                    &mut out,
+                ) {
+                    return out;
+                }
+            }
+            Err(refused) => {
+                debug!("ordered by an extension: backend \"{name}\" refused: {refused}");
+                out.tried.push(name.clone());
+                out.full = true;
+            }
+        }
+    }
+    out
+}
+
 /// A place for a player who types `/server <target>`, or whom a forced host leads to
 /// `target`. `Ok(None)` when balancing is off or `target` has no role: nothing is
 /// reserved and the move goes on as it always did. `Err` is the line the player is

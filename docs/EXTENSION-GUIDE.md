@@ -1,9 +1,10 @@
 # Writing an extension
 
 An extension is a program of your own that Meridian asks before it acts. Today it can **refuse a
-player at login**; the other decision points (the permission of a command, the choice of server) are
-specified in [EXTENSIONS.md](EXTENSIONS.md) and not built yet. This page takes you from nothing to a
-working extension in Rust. Protocol 0 is experimental: anything in it may change between two releases.
+player at login** and **choose the server a player goes to** (section 5); the other
+decision point (the permission of a command) is specified in [EXTENSIONS.md](EXTENSIONS.md) and not built
+yet. This page takes you from nothing to a working extension in Rust. Protocol 0 is experimental:
+anything in it may change between two releases.
 
 ## What happens
 
@@ -156,6 +157,78 @@ With `[metrics]` on, the proxy's page has `meridian_extension_connected{extensio
 by how they ended (`answered`, `timeout`, `invalid`, `busy`, `breaker`, `disconnected`), their time, and
 `meridian_extension_decisions_total` by what became of each decision. A refusal counts as
 `meridian_login_failures_total{reason="extension"}`.
+
+## 5. Choosing the server
+
+The second decision point is where a player goes. When the proxy places a player, at login and when
+their server is lost, it can show your program the servers the routes allow and let it put them in an
+order of its own, or refuse the player. Register it next to the login, or alone:
+
+```rust
+use meridian_extension::decide::{Choice, ServerRequest};
+
+fn choose(request: &ServerRequest) -> Choice {
+    // The servers the player may be sent to, in the order the proxy would try them.
+    let open: Vec<&str> = request
+        .candidates
+        .iter()
+        .filter(|c| c.state.as_deref() != Some("draining"))
+        .map(|c| c.name.as_str())
+        .collect();
+    if open.is_empty() {
+        Choice::refuse("No game is running.")
+    } else {
+        Choice::order(open)
+    }
+}
+
+// Extension::new("chooser", "1.0.0", token).on_server(choose).serve("127.0.0.1:25591")
+```
+
+The whole program is `crates/meridian-extension/examples/server_chooser.rs`; it takes the token file and the
+address on its command line.
+
+In `meridian.toml`, grant `decide.server` and, if you want, set its table:
+
+```toml
+[[extension]]
+name = "chooser"
+address = "127.0.0.1:25591"
+token-file = "extensions/chooser.token"
+grant = ["decide.server"]
+
+[extension.decide-server]
+timeout-ms = 1000
+on-error = "default"      # default | refuse
+```
+
+What the handler gets, a `ServerRequest`: the `player` (with `auth`, and the same warning as at login:
+an unverified name proves nothing), `reason` (`Placing::Login` or `Placing::Fallback`), `host`, `lost` (the
+server the player lost, at the fallback), and the `candidates`. Each candidate has a `name`, and, when
+balancing is on and the server has a role, its `role`, `players`, `soft_cap`, `hard_cap` and `state`
+(`open`, `closed`, `draining` or `not_offered`); for the others those are `None`.
+
+What it answers, a `Choice`:
+
+| Answer | Effect |
+| --- | --- |
+| `Choice::Default` | The proxy goes on as it would without you: the routes, the health order and the balancer |
+| `Choice::order([...])` | The proxy tries these servers in this order, and only these. **Each name must be a name of `request.candidates`**, spelled as it is, or the answer is invalid. A server that is full, drained or not heard from is passed over for the next one. The balancer is not asked, but the hard cap of each server holds |
+| `Choice::refuse("text")`, `Choice::Refuse(None)` | The player is refused, with your text (as for a login) or the proxy's own words. At the fallback the player is disconnected with it |
+
+An invalid answer (a name that was not offered, an empty order) counts against your breaker, and the
+proxy takes the `on-error` policy: `default`, or `refuse` with its own words. So do a timeout, a program
+that is not connected and an open breaker. At the fallback the wait is at most 500 ms whatever
+`timeout-ms` says, since the player is waiting in the configuration phase, and **a failure there is
+never a refusal**: the player is already in the game, so they are placed as without you, whatever
+`on-error` says. Only a `Choice::refuse` you send yourself disconnects them.
+
+An order may send a player to a server at its soft cap (`closed`), up to its hard cap: where players go
+is your decision, and the hard cap always holds.
+
+The decision is asked after the player has a place under `max-players`, and held there while you answer:
+keep the handler quick. With the queue on, a player whose ordered servers are all full waits, and you are
+asked again when they are woken.
 
 ## Good to know
 

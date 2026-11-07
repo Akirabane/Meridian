@@ -12,7 +12,7 @@
 use crate::log::{info, warning};
 use crate::placing;
 use crate::route;
-use crate::session::{Connect, Sessions};
+use crate::session::{Connect, Sessions, hyphenated};
 use meridian_config::{AuthKind, Config};
 use meridian_handoff::{Loss, Notice, Replacement, SessionHandle};
 use meridian_net::{Profile, backend::BackendOptions};
@@ -129,16 +129,54 @@ fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, N
         connect_timeout: Duration::from_millis(config.connect_timeout_ms),
         player_address: c.peer.ip(),
     };
-    // With balancing on, the balancer places the player among the lobbies first.
-    let mut balanced = placing::login(
+    // The extension that decides the choice of server, if there is one, may put the candidates in an
+    // order of its own, or refuse to place the player (docs/EXTENSIONS.md, 4.4).
+    let (candidates, ordered) = match crate::extension::server::choose(
+        &c.sessions.extensions,
         &config,
         &c.sessions.shared(),
-        c.connect,
-        c.profile,
-        &options,
+        &crate::extension::server::Who {
+            name,
+            uuid: hyphenated(c.profile.uuid),
+            verified: c.auth == AuthKind::Verified,
+            host: c.virtual_host,
+            lost: Some(&lost),
+        },
         &candidates,
-        c.virtual_host,
-    );
+    ) {
+        crate::extension::server::Outcome::Default => (candidates, false),
+        crate::extension::server::Outcome::Order(servers) => (servers, true),
+        crate::extension::server::Outcome::Refuse { by, message } => {
+            warning!(
+                "{}: {name}: lost backend \"{lost}\" ({what}); the extension \"{by}\" refuses to place them",
+                c.peer
+            );
+            return Err(sorry(&message));
+        }
+    };
+    // With balancing on, the balancer places the player among the lobbies first. Servers an extension
+    // ordered are tried in its order, each held a place by the rule of a server the player named.
+    let mut balanced = if ordered {
+        placing::ordered(
+            &config,
+            &c.sessions.shared(),
+            c.connect,
+            c.profile,
+            &options,
+            &candidates,
+            &format!("{}: {name}", c.peer),
+        )
+    } else {
+        placing::login(
+            &config,
+            &c.sessions.shared(),
+            c.connect,
+            c.profile,
+            &options,
+            &candidates,
+            c.virtual_host,
+        )
+    };
     let mut joined = balanced.joined.take();
     let mut attempts = u32::from(joined.is_some());
     for candidate in &candidates {

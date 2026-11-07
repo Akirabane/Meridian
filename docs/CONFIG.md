@@ -384,8 +384,8 @@ when `grant` holds the capability of the same name.
 | `decide-command` `timeout-ms` | `250` | The same for the permission of a command | More than 0 |
 | `decide-command` `on-error` | `"default"` | The same three | One of the three |
 | `decide-command` `cache-seconds-max` | `300` | The longest an answer is kept, whatever the extension asks | None |
-| `decide-server` `timeout-ms` | `1000` | The same for the choice of server | More than 0 |
-| `decide-server` `on-error` | `"default"` | `"default"` as if there were no extension, or `"refuse"` | One of the two |
+| `decide-server` `timeout-ms` | `1000` | The same for the choice of server. When the player lost their server and the proxy places them again, the wait is the smaller of this and 500 ms | More than 0 |
+| `decide-server` `on-error` | `"default"` | `"default"` as if there were no extension, or `"refuse"`. **At the fallback (a player who lost their server) a failure is always `default`**, whatever this says: only an explicit refusal of the extension disconnects a player who is already in the game | One of the two |
 
 **The time a player waits in silence.** The player's client gives up after 30 seconds without a
 packet, and the proxy sends it nothing while it decides, so the extensions' time counts with the

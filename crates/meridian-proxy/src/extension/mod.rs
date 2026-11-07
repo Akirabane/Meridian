@@ -4,7 +4,8 @@
 //!
 //! A [`Link`] keeps one extension's connection up, with the doubling wait, and offers [`Link::call`],
 //! which the decision points use: it holds the `max-in-flight` places, the breaker, the deadline, the
-//! counters and the log lines. The admission at login ([`login`]) is the one decision point wired so far.
+//! counters and the log lines. The decision points wired so far are the admission at login ([`login`]) and
+//! the choice of server ([`server`]).
 //! Without an extension in the [`Registry`], which is how the proxy starts, nothing here runs and nothing
 //! is on the metrics page.
 
@@ -12,6 +13,7 @@ mod breaker;
 mod connection;
 mod link;
 pub(crate) mod login;
+pub(crate) mod server;
 mod stats;
 
 #[cfg(test)]
