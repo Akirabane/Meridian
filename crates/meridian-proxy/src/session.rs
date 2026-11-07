@@ -843,6 +843,19 @@ fn commands_hook(
 ) -> Arc<meridian_net::relay::CommandHook> {
     let config = Arc::new(config.clone());
     let shared = sessions.shared();
+    // The extension that decides the permission of a command, if there is one, is asked with the
+    // configuration in force when the command is typed. What it keeps of the answers belongs to this
+    // session; the session holds the registry, and the registry holds nothing of the session.
+    let permit = {
+        let (live, login) = (sessions.live.get().cloned(), Arc::clone(&config));
+        Arc::new(crate::extension::command::Gate::new(
+            Arc::clone(&sessions.extensions),
+            move || match &live {
+                Some(live) => Arc::clone(&live.read().unwrap_or_else(|e| e.into_inner())),
+                None => Arc::clone(&login),
+            },
+        ))
+    };
     let typist = {
         let (handle, permissions, operators) = (
             handle.clone(),
@@ -924,7 +937,7 @@ fn commands_hook(
             }
         }
     };
-    commands::hook(config, typist, mover, placer, staff)
+    commands::hook_with(config, typist, mover, placer, staff, Some(permit))
 }
 
 /// What a player is told when none of the backends tried answers.

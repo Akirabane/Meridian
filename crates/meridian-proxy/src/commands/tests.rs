@@ -577,3 +577,99 @@ fn what_the_hook_cannot_decide_goes_to_the_staff_closure() {
         Some("You do not have permission to use /glist.")
     );
 }
+
+// ---- the nodes a command checks, which an extension is asked about ---------------------------------
+
+const EVERY_COMMAND: &str =
+    "[commands]\nenabled = [\"server\", \"hub\", \"play\", \"send\", \"glist\", \"alert\"]";
+
+/// The nodes `command` checks on the way to its answer, when each node answers `answer`.
+fn checked(config: &Config, command: &str, answer: bool) -> Vec<String> {
+    let seen = std::cell::RefCell::new(Vec::new());
+    let typist = alex_on("lobby");
+    let _ = answer_with(config, &typist, command, &|node| {
+        seen.borrow_mut().push(node.to_owned());
+        answer
+    });
+    seen.into_inner()
+}
+
+/// What an extension is asked must cover everything `answer` may check, whatever the nodes answer:
+/// a node that is checked and was not asked would be decided by the file alone, with no say for the
+/// extension. This walks the commands, with arguments that take each path.
+#[test]
+fn the_nodes_asked_cover_every_node_a_command_checks() {
+    let balanced = {
+        let server = |backend: &str, role| meridian_config::BalancedServer {
+            backend: backend.into(),
+            role,
+            soft_cap: 10,
+            hard_cap: 10,
+        };
+        Config {
+            balancing: meridian_config::Balancing {
+                enabled: true,
+                ..Default::default()
+            },
+            balanced: vec![server("lobby", Role::Lobby), server("east", Role::Game)],
+            ..config(EVERY_COMMAND)
+        }
+    };
+    let hub_east = format!("{EVERY_COMMAND}\nhub-backend = \"east\"");
+    let no_list = format!("{EVERY_COMMAND}\nserver-list = false");
+    let configs = [
+        config(EVERY_COMMAND),
+        balanced,
+        config(&hub_east),
+        config(&no_list),
+    ];
+    let commands = [
+        "server",
+        "server east",
+        "server EAST",
+        "server nowhere",
+        "server east extra",
+        "hub",
+        "lobby",
+        "hub now",
+        "play",
+        "play now",
+        "send all east",
+        "send Bob",
+        "glist",
+        "glist east",
+        "alert hello",
+        "alert server:east hello",
+        "tell Bob hi",
+        "",
+    ];
+    for config in &configs {
+        for command in commands {
+            let asked = nodes_of(config, &alex_on("lobby"), command);
+            for answer in [true, false] {
+                for node in checked(config, command, answer) {
+                    assert!(
+                        asked.contains(&node),
+                        "{command:?} checks {node} (nodes answering {answer}), which is not asked: {asked:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_command_the_proxy_does_not_answer_checks_no_node_and_asks_none() {
+    let config = config(EVERY_COMMAND);
+    for command in ["tell Bob hi", "gamemode creative", "", "   ", "servers"] {
+        assert!(
+            nodes_of(&config, &alex_on("lobby"), command).is_empty(),
+            "{command:?}"
+        );
+        assert!(checked(&config, command, true).is_empty(), "{command:?}");
+    }
+    // A command that is turned off is the server\'s.
+    let off = self::config("");
+    assert!(nodes_of(&off, &alex_on("lobby"), "send all east").is_empty());
+    assert!(nodes_of(&off, &alex_on("lobby"), "glist").is_empty());
+}

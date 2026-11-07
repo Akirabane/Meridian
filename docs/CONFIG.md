@@ -381,9 +381,9 @@ when `grant` holds the capability of the same name.
 | --- | --- | --- | --- |
 | `decide-login` `timeout-ms` | `1000` | How long the admission at login waits for the answer | More than 0 |
 | `decide-login` `on-error` | `"default"` | What happens with no usable answer (a timeout, an invalid answer, no connection, an open breaker, no free place): `"default"` as if there were no extension, `"allow"` lets the player go on to the checks that follow, `"deny"` refuses the login | One of the three |
-| `decide-command` `timeout-ms` | `250` | The same for the permission of a command | More than 0 |
-| `decide-command` `on-error` | `"default"` | The same three | One of the three |
-| `decide-command` `cache-seconds-max` | `300` | The longest an answer is kept, whatever the extension asks | None |
+| `decide-command` `timeout-ms` | `250` | The same for the permission of a command, which is asked on the thread that copies the player's packets to the server and holds them up while it waits | More than 0 |
+| `decide-command` `on-error` | `"default"` | What a command takes with no usable answer: `"default"` leaves it to `permissions.toml` and the operators, `"deny"` refuses it. **`"allow"` is refused when the file is read** (it would give every command of the proxy, `/send` and `/alert` included, to anyone while the extension is down); the login and the choice of server may `allow` | `"default"` or `"deny"` |
+| `decide-command` `cache-seconds-max` | `300` | The longest an `allow` or a `deny` is kept for a player, whatever the extension asks; 0 keeps nothing, and each command asks. An answer is kept for the same command, with the same arguments, on the same server; a reload, a new hello of the extension and a change of the player's server drop what is kept | None |
 | `decide-server` `timeout-ms` | `1000` | The same for the choice of server. When the player lost their server and the proxy places them again, the wait is the smaller of this and 500 ms | More than 0 |
 | `decide-server` `on-error` | `"default"` | `"default"` as if there were no extension, or `"refuse"`. **At the fallback (a player who lost their server) a failure is always `default`**, whatever this says: only an explicit refusal of the extension disconnects a player who is already in the game | One of the two |
 

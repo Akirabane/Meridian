@@ -101,6 +101,9 @@ impl Default for LoginDecision {
 pub struct CommandDecision {
     /// Milliseconds the proxy waits for the answer.
     pub timeout_ms: u64,
+    /// What a command takes with no usable answer: `Default` (the file and the operators decide) or
+    /// `Deny`. `Allow` is refused when the configuration is read (it would give every command to anyone
+    /// while the extension is down), and the proxy never grants on it.
     pub on_error: OnError,
     /// The longest an answer may be kept, in seconds, whatever the extension asks.
     pub cache_seconds_max: u64,
@@ -408,6 +411,15 @@ pub(crate) fn validate(extensions: &[Extension]) -> Result<(), ConfigError> {
         zero("decide-login timeout-ms", e.decide_login.timeout_ms)?;
         zero("decide-command timeout-ms", e.decide_command.timeout_ms)?;
         zero("decide-server timeout-ms", e.decide_server.timeout_ms)?;
+        // With no usable answer (the extension down, slow or saturated) `allow` would give every command of
+        // the proxy, `/send` and `/alert` among them, to whoever types it: a fail-open on the system of
+        // rights. The login and the choice of server may `allow`: the bans, the whitelist and the caps
+        // come before them, and there `allow` only lets the proxy's own policy go on.
+        if e.decide_command.on_error == OnError::Allow {
+            return Err(ConfigError::ExtensionCommandAllow {
+                extension: e.name.clone(),
+            });
+        }
         if e.enabled {
             check_token(&e.token_file).map_err(|reason| ConfigError::ExtensionToken {
                 extension: e.name.clone(),

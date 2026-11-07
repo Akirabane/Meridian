@@ -1249,3 +1249,766 @@ mod server {
         assert_eq!(said, Full::MESSAGE);
     }
 }
+// ---------------------------------------------------------------------------------------------
+// The permission of a command (docs/EXTENSIONS.md, 4.3)
+
+mod command {
+    use super::*;
+    use crate::commands::{self, Answer, Typist};
+    use crate::extension::command::Gate;
+    use meridian_config::{
+        AuthKind, CommandDecision, CommandSettings, Permissions, ProxyCommand, Role,
+    };
+    use meridian_extension::decide::{CommandRequest, NodeAnswers, NodeVerdict};
+    use meridian_net::relay::CommandHook;
+
+    /// An extension that decides permissions, with what it was asked.
+    struct Ranker {
+        running: Running,
+        folder: Folder,
+        seen: Arc<Mutex<Vec<CommandRequest>>>,
+    }
+
+    fn ranker(decide: impl Fn(&CommandRequest) -> NodeAnswers + Send + Sync + 'static) -> Ranker {
+        ranker_after(Duration::ZERO, decide)
+    }
+
+    fn ranker_after(
+        delay: Duration,
+        decide: impl Fn(&CommandRequest) -> NodeAnswers + Send + Sync + 'static,
+    ) -> Ranker {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let extension = Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_command({
+                let seen = Arc::clone(&seen);
+                move |request| {
+                    seen.lock().unwrap().push(request.clone());
+                    std::thread::sleep(delay);
+                    decide(request)
+                }
+            });
+        Ranker {
+            running: extension.bind("127.0.0.1:0").unwrap(),
+            folder: Folder::new(),
+            seen,
+        }
+    }
+
+    impl Ranker {
+        fn extension(&self, on_error: OnError, timeout_ms: u64, cache_max: u64) -> ExtensionConfig {
+            let mut config = extension_config(
+                self.running.local_addr().to_string(),
+                self.folder.token(),
+                &["decide.command"],
+                OnError::Default,
+                1000,
+            );
+            config.decide_command = CommandDecision {
+                timeout_ms,
+                on_error,
+                cache_seconds_max: cache_max,
+            };
+            config
+        }
+
+        fn asked(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+    }
+
+    /// All six commands on, and no extension.
+    fn six_commands() -> Config {
+        Config {
+            commands: CommandSettings {
+                enabled: vec![
+                    ProxyCommand::Server,
+                    ProxyCommand::Hub,
+                    ProxyCommand::Play,
+                    ProxyCommand::Send,
+                    ProxyCommand::Glist,
+                    ProxyCommand::Alert,
+                ],
+                ..CommandSettings::default()
+            },
+            ..routed()
+        }
+    }
+
+    /// All six commands on, and the extension.
+    fn config_with(extension: ExtensionConfig) -> Config {
+        Config {
+            extensions: vec![extension],
+            ..six_commands()
+        }
+    }
+
+    /// Gives Alex the staff nodes, and nobody else.
+    const FILE: &str = r#"
+[group.staff]
+allow = ["meridian.send", "meridian.glist", "meridian.alert"]
+[[player]]
+name = "Alex"
+groups = ["staff"]
+"#;
+
+    /// Denies `/server` to everyone, and gives nothing.
+    const FILE_CLOSED: &str = r#"
+[group.nobody]
+deny = ["meridian.server", "meridian.hub"]
+[[player]]
+name = "Alex"
+groups = ["nobody"]
+"#;
+
+    /// The hook of Alex's session, with the extension of `config` in `sessions`; what the staff closure
+    /// was asked is kept.
+    fn hook_of(
+        config: &Config,
+        sessions: &Sessions,
+        file: &str,
+    ) -> (Arc<CommandHook>, Arc<Mutex<Vec<String>>>) {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let permissions = Arc::new(Permissions::parse(file).unwrap());
+        let hook = {
+            let ran = Arc::clone(&ran);
+            let live = Arc::new(config.clone());
+            commands::hook_with(
+                Arc::new(config.clone()),
+                move || Typist {
+                    auth: AuthKind::Unverified,
+                    backend: "lobby".into(),
+                    name: "Alex".into(),
+                    uuid: [1; 16],
+                    permissions: Arc::clone(&permissions),
+                    operator_groups: Vec::new(),
+                },
+                |target: &str| format!("Moving you to {target}..."),
+                |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
+                move |_: &Typist, answer: Answer| {
+                    ran.lock().unwrap().push(format!("{answer:?}"));
+                    "done".to_owned()
+                },
+                Some(Arc::new(Gate::new(
+                    Arc::clone(&sessions.extensions),
+                    move || Arc::clone(&live),
+                ))),
+            )
+        };
+        (hook, ran)
+    }
+
+    fn decisions(sessions: &Sessions, decision: &'static str) -> u64 {
+        sessions
+            .extensions
+            .link("gate")
+            .unwrap()
+            .stats()
+            .decisions("command", decision)
+    }
+
+    const DENIED_SEND: &str = "You do not have permission to use /send.";
+    const DENIED_SERVER: &str = "You do not have permission to use /server.";
+
+    // ---- the rule, and who is asked --------------------------------------------------------------
+
+    #[test]
+    fn with_no_extension_the_file_decides_and_nothing_is_asked() {
+        let config = six_commands();
+        assert!(config.extensions.is_empty());
+        let sessions = Sessions::default();
+        let (hook, ran) = hook_of(&config, &sessions, FILE);
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(ran.lock().unwrap().len(), 1);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert!(sessions.extensions.links().is_empty());
+    }
+
+    #[test]
+    fn an_extension_that_is_disabled_or_not_granted_or_did_not_declare_is_not_asked() {
+        let ranker = ranker(|request| NodeAnswers::all(request, NodeVerdict::Deny));
+        // Switched off.
+        let mut off = ranker.extension(OnError::Deny, 1000, 0);
+        off.enabled = false;
+        let config = config_with(off);
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        // Not granted `decide.command`: it holds another point.
+        let mut other = ranker.extension(OnError::Deny, 1000, 0);
+        other.grant = vec!["decide.login".into()];
+        let config = config_with(other);
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 0);
+        drop(sessions);
+        // Granted, and the extension never declared it (it holds the login only).
+        let gate = gate_with(Duration::ZERO, &[], |_| Decision::Default);
+        let mut undeclared = extension_config(
+            gate.running.local_addr().to_string(),
+            gate.folder.token(),
+            &["decide.login", "decide.command"],
+            OnError::Default,
+            1000,
+        );
+        undeclared.decide_command.on_error = OnError::Deny;
+        let config = config_with(undeclared);
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        assert_eq!(
+            hook("send all east").as_deref(),
+            Some("done"),
+            "nothing is asked of it, whatever its on-error says"
+        );
+    }
+
+    #[test]
+    fn default_leaves_the_question_to_the_file_and_the_operators() {
+        let ranker = ranker(|_| NodeAnswers::new());
+        let config = config_with(ranker.extension(OnError::Default, 1000, 0));
+        let sessions = sessions_for(&config);
+        // The file gives Alex /send, and does not give it to others.
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        let (hook, _) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(decisions(&sessions, "default"), 2);
+    }
+
+    /// U2: the extension is the source of rights. Its `allow` gives a node the file refuses.
+    #[test]
+    fn an_allow_gives_what_the_file_refuses() {
+        let ranker = ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow));
+        let config = config_with(ranker.extension(OnError::Default, 1000, 0));
+        let sessions = sessions_for(&config);
+        // The file gives Alex nothing, and the staff closure is reached all the same.
+        let (hook, ran) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(hook("alert hello there").as_deref(), Some("done"));
+        assert_eq!(ran.lock().unwrap().len(), 2);
+        // Even a /server the file denies to everyone.
+        let (hook, _) = hook_of(&config, &sessions, FILE_CLOSED);
+        assert_eq!(
+            hook("server east").as_deref(),
+            Some("Moving you to east...")
+        );
+        assert_eq!(decisions(&sessions, "allow"), 3);
+    }
+
+    /// U2: its `deny` takes a node the file gives.
+    #[test]
+    fn a_deny_takes_what_the_file_gives() {
+        let ranker = ranker(|request| NodeAnswers::all(request, NodeVerdict::Deny));
+        let config = config_with(ranker.extension(OnError::Default, 1000, 0));
+        let sessions = sessions_for(&config);
+        let (hook, ran) = hook_of(&config, &sessions, FILE);
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert!(ran.lock().unwrap().is_empty(), "the command did not run");
+        // /server is open to everyone until a group denies it: the extension denies it.
+        let (hook, _) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("server east").as_deref(), Some(DENIED_SERVER));
+        assert_eq!(decisions(&sessions, "deny"), 2);
+    }
+
+    #[test]
+    fn a_verdict_is_for_one_node_and_the_others_stay_the_files() {
+        // It takes the way to `east` and says nothing of the rest.
+        let ranker = ranker(|_| NodeAnswers::new().deny("meridian.server.east"));
+        let config = config_with(ranker.extension(OnError::Default, 1000, 0));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        assert_eq!(
+            hook("server east").as_deref(),
+            Some("You do not have permission to go to east.")
+        );
+        assert_eq!(
+            hook("server west").as_deref(),
+            Some("Moving you to west...")
+        );
+        // The list is made of the servers whose node is not denied.
+        assert_eq!(
+            hook("server").as_deref(),
+            Some("Servers: lobby (default), west. You are on lobby.")
+        );
+    }
+
+    #[test]
+    fn a_command_that_checks_several_nodes_is_one_request_that_names_them_all() {
+        let ranker = ranker(|_| NodeAnswers::new());
+        let config = config_with(ranker.extension(OnError::Default, 1000, 0));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        let _ = hook("server");
+        let _ = hook("server east");
+        let _ = hook("hub");
+        let seen = ranker.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "one request for each command");
+        assert_eq!(
+            seen[0].nodes,
+            [
+                "meridian.server",
+                "meridian.server.lobby",
+                "meridian.server.east",
+                "meridian.server.west"
+            ]
+        );
+        assert_eq!(seen[1].nodes, ["meridian.server", "meridian.server.east"]);
+        assert_eq!(seen[2].nodes, ["meridian.hub", "meridian.server.lobby"]);
+        assert_eq!(
+            (seen[1].command.as_str(), seen[1].args.as_slice()),
+            ("server", ["east".to_owned()].as_slice())
+        );
+        assert_eq!(seen[1].server, "lobby");
+        assert_eq!(seen[1].player.name, "Alex");
+        assert_eq!(seen[1].player.auth, decide::Auth::Unverified);
+    }
+
+    #[test]
+    fn a_command_the_proxy_does_not_answer_never_reaches_the_extension() {
+        let ranker = ranker(|request| NodeAnswers::all(request, NodeVerdict::Deny));
+        let config = config_with(ranker.extension(OnError::Deny, 1000, 0));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        for command in [
+            "tell Bob hi",
+            "gamemode creative",
+            "",
+            "   ",
+            "servers",
+            "help",
+        ] {
+            assert_eq!(hook(command), None, "{command:?}");
+        }
+        assert_eq!(ranker.asked(), 0);
+        // A command the proxy answers is turned off: it is the server's, and is not asked either.
+        let mut config = config_with(ranker.extension(OnError::Deny, 1000, 0));
+        config.commands.enabled.retain(|c| *c != ProxyCommand::Send);
+        let sessions = Sessions::default();
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        assert_eq!(hook("send all east"), None);
+    }
+
+    #[test]
+    fn what_the_extension_is_told_of_the_arguments_is_bounded() {
+        let ranker = ranker(|_| NodeAnswers::new());
+        let config = config_with(ranker.extension(OnError::Default, 1000, 0));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        let long = "x".repeat(300);
+        let many = (0..40)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = hook(&format!("alert {long} {many}"));
+        let seen = ranker.seen.lock().unwrap();
+        assert_eq!(seen[0].args.len(), decide::MAX_COMMAND_ARGS);
+        assert_eq!(seen[0].args[0].chars().count(), decide::MAX_ARG_CHARS);
+    }
+
+    // ---- when there is no usable answer ----------------------------------------------------------
+
+    #[test]
+    fn with_no_usable_answer_the_on_error_policy_decides() {
+        // Slow: past the deadline.
+        let slow = ranker_after(Duration::from_millis(600), |request| {
+            NodeAnswers::all(request, NodeVerdict::Deny)
+        });
+        for (policy, label, expected_without_file, expected_with_file) in [
+            // default: the file.
+            (OnError::Default, "policy_default", DENIED_SEND, "done"),
+            // allow cannot be configured; if it got here it is `default`, and never a permission.
+            (OnError::Allow, "policy_default", DENIED_SEND, "done"),
+            // deny: refused.
+            (OnError::Deny, "policy_deny", DENIED_SEND, DENIED_SEND),
+        ] {
+            let config = config_with(slow.extension(policy, 100, 0));
+            let sessions = sessions_for(&config);
+            let (hook, _) = hook_of(&config, &sessions, "");
+            let began = Instant::now();
+            assert_eq!(
+                hook("send all east").as_deref(),
+                Some(expected_without_file),
+                "{label}"
+            );
+            // The player waited the deadline, not the extension's 600 ms.
+            assert!(
+                began.elapsed() < Duration::from_millis(450),
+                "{label}: {:?}",
+                began.elapsed()
+            );
+            let (hook, _) = hook_of(&config, &sessions, FILE);
+            assert_eq!(
+                hook("send all east").as_deref(),
+                Some(expected_with_file),
+                "{label}"
+            );
+            assert_eq!(decisions(&sessions, label), 2, "{label}");
+            drop(sessions);
+        }
+    }
+
+    #[test]
+    fn an_extension_that_is_not_running_takes_the_policy_too() {
+        let ranker = ranker(|_| NodeAnswers::new());
+        for (policy, expected) in [
+            (OnError::Default, DENIED_SEND),
+            (OnError::Allow, DENIED_SEND),
+            (OnError::Deny, DENIED_SEND),
+        ] {
+            let mut extension = ranker.extension(policy, 100, 0);
+            extension.address = "127.0.0.1:1".into();
+            let config = config_with(extension);
+            // The registry never started it.
+            let sessions = Sessions::default();
+            let (hook, _) = hook_of(&config, &sessions, "");
+            assert_eq!(hook("send all east").as_deref(), Some(expected));
+        }
+        assert_eq!(ranker.asked(), 0);
+    }
+
+    #[test]
+    fn an_open_breaker_spares_the_wait_and_takes_the_policy_at_once() {
+        let slow = ranker_after(Duration::from_millis(800), |_| NodeAnswers::new());
+        let mut settings = slow.extension(OnError::Deny, 100, 0);
+        settings.breaker_failures = 2;
+        let config = config_with(settings);
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        // Two commands that miss their deadline open the breaker.
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(slow.asked(), 2);
+        // Then the next ones take the policy at once, with no request and no wait.
+        let began = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        }
+        assert!(
+            began.elapsed() < Duration::from_millis(80),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(
+            slow.asked(),
+            2,
+            "nothing was sent while the breaker is open"
+        );
+        assert_eq!(decisions(&sessions, "policy_deny"), 7);
+    }
+
+    // ---- what is kept ----------------------------------------------------------------------------
+
+    #[test]
+    fn what_the_extension_lets_the_proxy_keep_is_not_asked_again() {
+        let ranker =
+            ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60));
+        let config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        for _ in 0..10 {
+            assert_eq!(hook("send all east").as_deref(), Some("done"));
+        }
+        assert_eq!(ranker.asked(), 1, "ten commands, one request");
+        assert_eq!(decisions(&sessions, "allow"), 1);
+        assert_eq!(decisions(&sessions, "cached"), 9);
+        // Another node is another question; the first stays answered.
+        assert_eq!(hook("alert hi").as_deref(), Some("done"));
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 2);
+        // Only the nodes that were not kept are asked: `/server east` has two, one is kept by now.
+        let _ = hook("server east");
+        let _ = hook("server east");
+        assert_eq!(ranker.asked(), 3);
+        assert_eq!(ranker.seen.lock().unwrap()[2].nodes.len(), 2);
+    }
+
+    #[test]
+    fn nothing_is_kept_unless_the_extension_says_so_and_never_longer_than_the_maximum() {
+        // No `cache_seconds`: asked each time.
+        let none = ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow));
+        let config = config_with(none.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        for _ in 0..3 {
+            let _ = hook("send all east");
+        }
+        assert_eq!(none.asked(), 3);
+        // The hook holds the registry, which holds the connection: both go before the next test of it.
+        drop(hook);
+        drop(sessions);
+        // A maximum of 0: the extension asks for a minute and the operator will not have it.
+        let greedy =
+            ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(3600));
+        let config = config_with(greedy.extension(OnError::Default, 1000, 0));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        for _ in 0..3 {
+            let _ = hook("send all east");
+        }
+        assert_eq!(greedy.asked(), 3);
+        drop(hook);
+        drop(sessions);
+        // A maximum of 1 second: kept for a second, though the extension asked for an hour.
+        let config = config_with(greedy.extension(OnError::Default, 1000, 1));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        let before = greedy.asked();
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(greedy.asked(), before + 1);
+        std::thread::sleep(Duration::from_millis(1100));
+        let _ = hook("send all east");
+        assert_eq!(greedy.asked(), before + 2, "asked again after the maximum");
+    }
+
+    #[test]
+    fn a_failure_is_never_kept_and_a_denial_is_kept_like_an_allow() {
+        // Slow once: the policy, not kept; then it answers and the answer is kept.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ranker = ranker_after(Duration::ZERO, {
+            let calls = Arc::clone(&calls);
+            move |request| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+                NodeAnswers::all(request, NodeVerdict::Deny).cache_seconds(60)
+            }
+        });
+        let config = config_with(ranker.extension(OnError::Default, 100, 300));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        // The first misses its deadline: the policy is `default`, the file gives Alex /send, and nothing
+        // is kept.
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        std::thread::sleep(Duration::from_millis(400));
+        // The second is answered `deny` and kept; the third is not asked.
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(ranker.asked(), 2);
+    }
+
+    #[test]
+    fn what_is_kept_is_dropped_at_a_reload_and_when_the_extension_says_hello_again() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let make = |asked: &Arc<AtomicUsize>| {
+            let asked = Arc::clone(asked);
+            Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+                .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+                .on_command(move |request| {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60)
+                })
+        };
+        let first = make(&asked).bind("127.0.0.1:0").unwrap();
+        let address = first.local_addr();
+        let folder = Folder::new();
+        let mut settings = extension_config(
+            address.to_string(),
+            folder.token(),
+            &["decide.command"],
+            OnError::Default,
+            1000,
+        );
+        settings.decide_command.cache_seconds_max = 300;
+        let config = config_with(settings);
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        // A reload: the registry follows the configuration again.
+        sessions.extensions.follow(&config);
+        let _ = hook("send all east");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "asked again after a reload"
+        );
+        let _ = hook("send all east");
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        // The extension goes and comes back on the same port: a new hello, and what it said before is
+        // not what it says now.
+        let link = sessions.extensions.link("gate").unwrap();
+        let hellos = link.epoch();
+        first.stop();
+        let second = loop {
+            match make(&asked).bind(address) {
+                Ok(running) => break running,
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        let limit = Instant::now() + Duration::from_secs(15);
+        while link.epoch() == hellos || !link.is_connected() {
+            assert!(Instant::now() < limit, "no new hello");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = hook("send all east");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            3,
+            "asked again after a new hello"
+        );
+        drop(second);
+    }
+
+    // ---- what a kept answer is kept for ----------------------------------------------------------
+
+    /// The hook of Alex's session as `hook_of` makes it, with the server Alex is on in a cell the test
+    /// changes, and the gate to look at.
+    fn hook_moving(
+        config: &Config,
+        sessions: &Sessions,
+        file: &str,
+    ) -> (Arc<CommandHook>, Arc<Mutex<String>>, Arc<Gate>) {
+        let backend = Arc::new(Mutex::new("lobby".to_owned()));
+        let permissions = Arc::new(Permissions::parse(file).unwrap());
+        let live = Arc::new(config.clone());
+        let gate = Arc::new(Gate::new(Arc::clone(&sessions.extensions), move || {
+            Arc::clone(&live)
+        }));
+        let hook = {
+            let backend = Arc::clone(&backend);
+            commands::hook_with(
+                Arc::new(config.clone()),
+                move || Typist {
+                    auth: AuthKind::Unverified,
+                    backend: backend.lock().unwrap().clone(),
+                    name: "Alex".into(),
+                    uuid: [1; 16],
+                    permissions: Arc::clone(&permissions),
+                    operator_groups: Vec::new(),
+                },
+                |target: &str| format!("Moving you to {target}..."),
+                |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
+                |_: &Typist, _: Answer| "done".to_owned(),
+                Some(Arc::clone(&gate)),
+            )
+        };
+        (hook, backend, gate)
+    }
+
+    /// The extension decides with the server the player is on, so what it said on one server is not
+    /// reused on another, and the cache is emptied when the player's server changes.
+    #[test]
+    fn an_answer_kept_on_one_server_is_not_used_on_another() {
+        let ranker = ranker(|request| {
+            let verdict = if request.server == "lobby" {
+                NodeVerdict::Allow
+            } else {
+                NodeVerdict::Deny
+            };
+            NodeAnswers::all(request, verdict).cache_seconds(60)
+        });
+        let config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, backend, _) = hook_moving(&config, &sessions, "");
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 1, "kept on the lobby");
+        // The player moves: the extension is asked again, and says no.
+        *backend.lock().unwrap() = "east".into();
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(ranker.asked(), 2);
+        assert_eq!(ranker.seen.lock().unwrap()[1].server, "east");
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(ranker.asked(), 2, "kept on east");
+        // And back: what was kept for the lobby went with the move.
+        *backend.lock().unwrap() = "lobby".into();
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 3);
+    }
+
+    /// The extension decides with the arguments too: `/send Bob lobby` and `/send all east` are two questions,
+    /// and the same command with the same arguments is one.
+    #[test]
+    fn an_answer_kept_for_some_arguments_is_not_used_for_others() {
+        let ranker = ranker(|request| {
+            // Everyone may be sent, but nobody may send everyone.
+            let verdict = if request.args.first().is_some_and(|who| who == "all") {
+                NodeVerdict::Deny
+            } else {
+                NodeVerdict::Allow
+            };
+            NodeAnswers::all(request, verdict).cache_seconds(60)
+        });
+        let config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, _, _) = hook_moving(&config, &sessions, "");
+        assert_eq!(hook("send Bob lobby").as_deref(), Some("done"));
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(ranker.asked(), 2, "two questions, two requests");
+        // The same ones again are kept.
+        assert_eq!(hook("send Bob lobby").as_deref(), Some("done"));
+        assert_eq!(hook("send all east").as_deref(), Some(DENIED_SEND));
+        assert_eq!(hook("send Bob lobby").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 2);
+        // Another word is another question, and so is the same word of another command.
+        assert_eq!(hook("send Bob east").as_deref(), Some("done"));
+        assert_eq!(ranker.asked(), 3);
+        let _ = hook("alert Bob lobby");
+        assert_eq!(ranker.asked(), 4);
+    }
+
+    /// What ran out is not worth a place: the answers whose time is over go before a new one is refused,
+    /// so that a player who types commands for a long time keeps getting their answers kept.
+    #[test]
+    fn the_answers_that_ran_out_are_dropped_before_a_new_one_is_refused() {
+        let ranker =
+            ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60));
+        // Kept for a second at most.
+        let config = config_with(ranker.extension(OnError::Default, 1000, 1));
+        let sessions = sessions_for(&config);
+        let (hook, _, gate) = hook_moving(&config, &sessions, "");
+        // Each message is another question, so each is kept on its own, up to the most there are.
+        for i in 0..512 {
+            let _ = hook(&format!("alert message {i}"));
+        }
+        assert_eq!(gate.kept_len(), 512);
+        // Full: the next ones are asked and not kept.
+        let before = ranker.asked();
+        let _ = hook("alert one more");
+        let _ = hook("alert one more");
+        assert_eq!(ranker.asked(), before + 2);
+        assert_eq!(gate.kept_len(), 512);
+        // A second later they have run out: the first new answer makes room, and is kept.
+        std::thread::sleep(Duration::from_millis(1100));
+        let _ = hook("alert after the wait");
+        assert_eq!(gate.kept_len(), 1);
+        let again = ranker.asked();
+        let _ = hook("alert after the wait");
+        assert_eq!(ranker.asked(), again, "kept");
+    }
+
+    #[test]
+    fn each_session_keeps_its_own_answers() {
+        let ranker =
+            ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60));
+        let config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (first, _) = hook_of(&config, &sessions, "");
+        let (second, _) = hook_of(&config, &sessions, "");
+        let _ = first("send all east");
+        let _ = first("send all east");
+        let _ = second("send all east");
+        assert_eq!(ranker.asked(), 2, "one for each player");
+    }
+
+    // ---- the proxy does not wait for ever --------------------------------------------------------
+
+    #[test]
+    fn a_slow_extension_costs_a_command_its_deadline_and_no_more() {
+        let slow = ranker_after(Duration::from_millis(1500), |_| NodeAnswers::new());
+        let config = config_with(slow.extension(OnError::Default, 150, 0));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, FILE);
+        let began = Instant::now();
+        assert_eq!(hook("glist").as_deref(), Some("done"));
+        let took = began.elapsed();
+        assert!(
+            took >= Duration::from_millis(140) && took < Duration::from_millis(600),
+            "waited {took:?}"
+        );
+    }
+}

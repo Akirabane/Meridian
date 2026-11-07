@@ -73,6 +73,7 @@ pub enum Answer {
 /// The hook the session asks about each command its player types. `typist`
 /// says who they are and where they are now; `mover` starts a move and returns
 /// the line the player sees at once.
+#[cfg(test)]
 pub fn hook(
     config: Arc<Config>,
     typist: impl Fn() -> Typist + Send + Sync + 'static,
@@ -80,9 +81,52 @@ pub fn hook(
     placer: impl Fn(Role, &Typist) -> String + Send + Sync + 'static,
     staff: impl Fn(&Typist, Answer) -> String + Send + Sync + 'static,
 ) -> Arc<CommandHook> {
+    hook_with(config, typist, mover, placer, staff, None)
+}
+
+/// [`hook`], where the extension that holds `decide.command`, if there is one (`permit`), says which
+/// nodes of permission the player has. It is asked only for a command the proxy answers, once for all the
+/// nodes the command checks (`nodes_of`); every other command goes to the server as before.
+pub fn hook_with(
+    config: Arc<Config>,
+    typist: impl Fn() -> Typist + Send + Sync + 'static,
+    mover: impl Fn(&str) -> String + Send + Sync + 'static,
+    placer: impl Fn(Role, &Typist) -> String + Send + Sync + 'static,
+    staff: impl Fn(&Typist, Answer) -> String + Send + Sync + 'static,
+    permit: Option<Arc<crate::extension::command::Gate>>,
+) -> Arc<CommandHook> {
     Arc::new(move |command: &str| {
         let typist = typist();
-        match answer(&config, &typist, command)? {
+        let decided = match &permit {
+            Some(gate) => {
+                let nodes = nodes_of(&config, &typist, command);
+                if nodes.is_empty() {
+                    answer(&config, &typist, command)
+                } else {
+                    let verdicts = gate.verdicts(
+                        &crate::extension::command::Typed {
+                            name: &typist.name,
+                            uuid: crate::session::hyphenated(typist.uuid),
+                            verified: typist.auth == AuthKind::Verified,
+                            server: &typist.backend,
+                            line: command,
+                        },
+                        &nodes,
+                    );
+                    answer_with(&config, &typist, command, &|node| {
+                        crate::extension::command::merge(
+                            typist.has(node),
+                            verdicts
+                                .get(node)
+                                .copied()
+                                .unwrap_or(meridian_extension::decide::NodeVerdict::Default),
+                        )
+                    })
+                }
+            }
+            None => answer(&config, &typist, command),
+        };
+        match decided? {
             Answer::Say(line) => Some(line),
             Answer::Move(target) => Some(mover(&target)),
             Answer::Hub => Some(placer(Role::Lobby, &typist)),
@@ -95,6 +139,67 @@ pub fn hook(
 /// The proxy's answer to `command` (without its slash), or `None` when the
 /// command is the backend's.
 pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer> {
+    answer_with(config, typist, command, &|node| typist.has(node))
+}
+
+/// Every node of permission `command` (without its slash) may check, whatever each one answers: none
+/// when the command is the backend's, which the proxy does not answer. `/server` with no name has one
+/// for each server the player may be sent to.
+pub fn nodes_of(config: &Config, typist: &Typist, command: &str) -> Vec<String> {
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next() else {
+        return Vec::new();
+    };
+    let rest: Vec<&str> = words.collect();
+    let settings = &config.commands;
+    let is = |which: ProxyCommand| settings.is_enabled(which) && which.words().contains(&first);
+    if is(ProxyCommand::Server) {
+        let mut nodes = vec![node::SERVER.to_owned()];
+        match rest.as_slice() {
+            [] if config.commands.server_list => nodes.extend(
+                config
+                    .backends
+                    .iter()
+                    .filter(|b| open_to(config, &b.name, typist))
+                    .map(|b| node::server(&b.name)),
+            ),
+            [name] if open_to(config, name, typist) => nodes.push(node::server(name)),
+            _ => {}
+        }
+        return nodes;
+    }
+    if is(ProxyCommand::Hub) {
+        let mut nodes = vec![node::HUB.to_owned()];
+        // Without the balancer, `/hub` moves the player as `/server <hub>` does, and checks its node.
+        let balanced = config.balancing.enabled
+            && config.commands.hub_backend.is_none()
+            && config.servers_with_role(Role::Lobby).next().is_some();
+        if rest.is_empty() && !balanced && open_to(config, config.hub_backend(), typist) {
+            nodes.push(node::server(config.hub_backend()));
+        }
+        return nodes;
+    }
+    for (which, node) in [
+        (ProxyCommand::Play, node::PLAY),
+        (ProxyCommand::Send, node::SEND),
+        (ProxyCommand::Glist, node::GLIST),
+        (ProxyCommand::Alert, node::ALERT),
+    ] {
+        if is(which) {
+            return vec![node.to_owned()];
+        }
+    }
+    Vec::new()
+}
+
+/// [`answer`], where `has` says whether the player has each node: `typist.has` alone, or what an
+/// extension changes of it ([`crate::extension::command::merge`]).
+pub fn answer_with(
+    config: &Config,
+    typist: &Typist,
+    command: &str,
+    has: &dyn Fn(&str) -> bool,
+) -> Option<Answer> {
     let mut words = command.split_whitespace();
     let first = words.next()?;
     let rest: Vec<&str> = words.collect();
@@ -105,17 +210,17 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
         )))
     };
     if settings.is_enabled(ProxyCommand::Server) && ProxyCommand::Server.words().contains(&first) {
-        if !typist.has(node::SERVER) {
+        if !has(node::SERVER) {
             return denied();
         }
         return Some(match rest.as_slice() {
-            [] => Answer::Say(list(config, typist)),
-            [name] => move_to(config, typist, name),
+            [] => Answer::Say(list(config, typist, has)),
+            [name] => move_to(config, typist, name, has),
             _ => Answer::Say("Usage: /server [name]".to_owned()),
         });
     }
     if settings.is_enabled(ProxyCommand::Hub) && ProxyCommand::Hub.words().contains(&first) {
-        if !typist.has(node::HUB) {
+        if !has(node::HUB) {
             return denied();
         }
         return Some(match rest.as_slice() {
@@ -126,12 +231,12 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
             {
                 Answer::Hub
             }
-            [] => move_to(config, typist, config.hub_backend()),
+            [] => move_to(config, typist, config.hub_backend(), has),
             _ => Answer::Say(format!("Usage: /{first}")),
         });
     }
     if settings.is_enabled(ProxyCommand::Play) && ProxyCommand::Play.words().contains(&first) {
-        if !typist.has(node::PLAY) {
+        if !has(node::PLAY) {
             return denied();
         }
         return Some(match rest.as_slice() {
@@ -146,7 +251,7 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
         });
     }
     if settings.is_enabled(ProxyCommand::Send) && ProxyCommand::Send.words().contains(&first) {
-        if !typist.has(node::SEND) {
+        if !has(node::SEND) {
             return denied();
         }
         return Some(match rest.as_slice() {
@@ -158,7 +263,7 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
         });
     }
     if settings.is_enabled(ProxyCommand::Glist) && ProxyCommand::Glist.words().contains(&first) {
-        if !typist.has(node::GLIST) {
+        if !has(node::GLIST) {
             return denied();
         }
         return Some(match rest.as_slice() {
@@ -168,7 +273,7 @@ pub fn answer(config: &Config, typist: &Typist, command: &str) -> Option<Answer>
         });
     }
     if settings.is_enabled(ProxyCommand::Alert) && ProxyCommand::Alert.words().contains(&first) {
-        if !typist.has(node::ALERT) {
+        if !has(node::ALERT) {
             return denied();
         }
         return Some(alert(&rest));
@@ -212,14 +317,14 @@ pub fn open_to(config: &Config, backend: &str, typist: &Typist) -> bool {
     config.backend(backend).is_some() && !route::serves_other_kind(config, backend, typist.auth)
 }
 
-fn list(config: &Config, typist: &Typist) -> String {
+fn list(config: &Config, typist: &Typist, has: &dyn Fn(&str) -> bool) -> String {
     if !config.commands.server_list {
         return "The list of servers is not available.".to_owned();
     }
     let names: Vec<String> = config
         .backends
         .iter()
-        .filter(|b| open_to(config, &b.name, typist) && typist.has(&node::server(&b.name)))
+        .filter(|b| open_to(config, &b.name, typist) && has(&node::server(&b.name)))
         .map(|b| {
             if b.name == config.default_backend {
                 format!("{} (default)", b.name)
@@ -235,11 +340,11 @@ fn list(config: &Config, typist: &Typist) -> String {
     )
 }
 
-fn move_to(config: &Config, typist: &Typist, target: &str) -> Answer {
+fn move_to(config: &Config, typist: &Typist, target: &str, has: &dyn Fn(&str) -> bool) -> Answer {
     if !open_to(config, target, typist) {
         return Answer::Say(format!("There is no server called {target}."));
     }
-    if !typist.has(&node::server(target)) {
+    if !has(&node::server(target)) {
         return Answer::Say(format!("You do not have permission to go to {target}."));
     }
     if target == typist.backend {

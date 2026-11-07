@@ -303,7 +303,8 @@ is dropped and counted.
 usable answer:
 
 - `default`: as if no extension were configured (the built-in modules decide);
-- `allow`: let the player in, or let the command run;
+- `allow`: let the player in, or let the command run (**as built, not for the permission of a command**:
+  `allow` there is refused when the configuration is read, see 4.3);
 - `deny`: refuse the login or the command.
 
 "No usable answer" covers all of these: the deadline passed, the answer is invalid, the
@@ -525,6 +526,66 @@ extension is down and the policy is `default`. The operator decided it so (decis
 10.3).
 
 **Default without an extension:** `permissions.toml`, unchanged. **Timeout:** 250 ms.
+
+**As built.** The point is wired in the hook that answers the commands a player types
+(`commands::hook_with`), through `extension/command.rs` in the proxy and `meridian_extension::decide`
+(`CommandRequest`, `NodeAnswers`, `parse_command_answer`) for both sides. The golden files are
+`golden/protocol-0/command.*.json`, and the SDK registers it with `Extension::on_command`. The own commands
+of an extension (the `commands` capability and `command/run`) are not built; this is the permission only.
+What the specification above leaves open:
+
+- **The rule is one function, `merge`:** `allow` is a permission **even if `permissions.toml` or the
+  operators of the server refuse it**, `deny` is a refusal even if they give it, and only `default` (or a
+  node the answer leaves out) leaves the question to them.
+- **Guardrails, which the operator must know before granting `decide.command`:**
+  1. **Only an extension the operator granted `decide.command` to (`grant`) decides**, and only one: an
+     extension that is not granted it, is switched off (`enabled = false`) or did not declare it in its
+     hello is never asked, whatever it says.
+  2. **An `allow` of the extension can give `/send`, `/alert` and the other commands to any player.
+     The token of such an extension is therefore an administrator's credential for the network: keep
+     its file readable by the proxy and the extension only, as the token of the console would be.**
+  3. **It concerns the proxy's own commands only** (`/server`, `/hub`, `/play`, `/send`, `/glist`,
+     `/alert`; any other command goes to the server untouched and the extension is not asked). The
+     login stays as 4.2 says: the bans and the whitelist come first and are never bypassed by an
+     extension.
+  4. **`cache-seconds-max` bounds how long an `allow` or a `deny` is kept**, whatever the extension asks
+     for; with 0 nothing is kept and each command asks.
+- **`on-error = "allow"` is refused for this point, when the configuration is read** (an addition to 4.1,
+  which lets the other two points `allow`). With no usable answer (the extension down, slow or saturated) it
+  would give every node of the command to whoever typed it, `/send` and `/alert` included: a fail-open on
+  the system of rights. The error says so (`would give every command of the proxy to anyone while the
+  extension is down: use "default" or "deny"`). The two values left are `"default"` (the file and the
+  operators decide, which is the default) and `"deny"`. The login and the choice of server keep `allow`: the
+  bans, the whitelist and the caps come before them, and there it only lets the proxy's own policy go on.
+  Nothing that fails ever grants a node: the proxy reads any other policy as `default`.
+- **The request** asks about the nodes the command checks and the proxy has no kept answer for, in one
+  call (`nodes_of` lists them: `/server` with no name has one for each server the player may be sent to,
+  `/hub` its own and that of the server it leads to). Only the nodes asked are read from the answer, so
+  what a session keeps cannot grow with what an extension sends. At most 32 arguments are told, each cut
+  to 256 characters; they are what the player typed and are not to be trusted.
+- **The call waits for the answer on the thread that copies the player's packets**, at most `timeout-ms`
+  (250 ms by default), and only for a command the proxy answers. A player who types commands that miss
+  the deadline holds up only their own packets, and five misses in a row open the breaker, after which
+  the commands take their policy at once with no request.
+- **What is kept belongs to the player's session** (it goes when they leave, and nothing in the proxy
+  holds it afterwards). A reload and a new hello of the extension drop it, and so does a change of the
+  player's server. A failure is never kept.
+- **What a kept answer is kept for.** The extension decides with the whole request, so an answer is kept
+  for that request and no other: the key is the server the player is on, the command and its arguments
+  (as the extension was told them) and the node. `/send Bob lobby` and `/send all east` are two
+  questions; a verdict given on one server is not used on another. So an extension may let the proxy
+  keep a verdict that depends on the server, the command or its arguments; what it must not do is give
+  `cache_seconds` to a verdict that depends on something the request does not carry (the time of day,
+  a rank it changes meanwhile): that verdict is kept as long as it said, and only a reload, a new hello
+  or the end of the session ends it earlier. The proxy keeps at most 512 answers for a session, and drops
+  those that ran out before it refuses a new one.
+- The hook reads the commands' own settings (`[commands]`, the nodes a command checks) as they were when
+  the player logged in, as it did before extensions, and the gate reads the extension's settings
+  (`decide-command`, which extension is granted the point) as they are now.
+- The decisions are counted as `meridian_extension_decisions_total{point="command"}` with `allow`, `deny`,
+  `default` (what the extension answered for the command: `deny` if it denied any node, else `allow` if
+  it allowed any), `cached` (every node was kept) and, with no usable answer, `policy_default` or
+  `policy_deny`.
 
 **The extension's own commands.** With the `commands` capability, the extension declares
 commands in its `hello`:

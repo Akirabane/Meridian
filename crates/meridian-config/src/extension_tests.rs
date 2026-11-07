@@ -98,7 +98,7 @@ on-error = "deny"
 
 [extension.decide-command]
 timeout-ms = 100
-on-error = "allow"
+on-error = "deny"
 cache-seconds-max = 60
 
 [extension.decide-server]
@@ -136,7 +136,7 @@ on-error = "refuse"
         e.decide_command,
         CommandDecision {
             timeout_ms: 100,
-            on_error: OnError::Allow,
+            on_error: OnError::Deny,
             cache_seconds_max: 60
         }
     );
@@ -531,4 +531,68 @@ fn the_login_decisions_count_in_the_time_a_client_waits_in_silence() {
         "grant = [\"decide.command\"]\n[extension.decide-command]\ntimeout-ms = 60000",
     );
     assert!(load(&dir, "", &command).is_ok());
+}
+
+/// With no usable answer `allow` would give every command of the proxy to anyone: refused, with the reason,
+/// whether the extension is enabled or not. The login and the choice of server may `allow`.
+#[test]
+fn allow_is_refused_for_the_permission_of_a_command_and_accepted_for_the_others() {
+    let dir = folder("allow-command");
+    let command = |policy: &str, enabled: bool| {
+        extension(
+            "perms",
+            25590,
+            "a.token",
+            &format!(
+                "enabled = {enabled}\ngrant = [\"decide.command\"]\n[extension.decide-command]\non-error = \"{policy}\""
+            ),
+        )
+    };
+    for enabled in [true, false] {
+        let e = load(&dir, "", &command("allow", enabled)).unwrap_err();
+        assert!(
+            matches!(e, ConfigError::ExtensionCommandAllow { .. }),
+            "{e}"
+        );
+        let said = e.to_string();
+        assert!(
+            said.contains(
+                "would give every command of the proxy to anyone while the extension is down: use \"default\" or \"deny\""
+            ),
+            "{said}"
+        );
+        assert!(said.contains("perms"), "{said}");
+    }
+    for policy in ["default", "deny"] {
+        let config = load(&dir, "", &command(policy, true)).unwrap();
+        assert_eq!(
+            config.extensions[0].decide_command.on_error,
+            if policy == "deny" {
+                OnError::Deny
+            } else {
+                OnError::Default
+            }
+        );
+    }
+    // `allow` is fine for the login, and the table of the command has the default when it is not written.
+    let login = extension(
+        "perms",
+        25590,
+        "a.token",
+        "grant = [\"decide.login\"]\n[extension.decide-login]\non-error = \"allow\"",
+    );
+    let config = load(&dir, "", &login).unwrap();
+    assert_eq!(config.extensions[0].decide_login.on_error, OnError::Allow);
+    assert_eq!(
+        config.extensions[0].decide_command.on_error,
+        OnError::Default
+    );
+    // For the choice of server the words are `default` and `refuse`: `allow` is not one.
+    let server = extension(
+        "perms",
+        25590,
+        "a.token",
+        "grant = [\"decide.server\"]\n[extension.decide-server]\non-error = \"allow\"",
+    );
+    assert!(load(&dir, "", &server).is_err());
 }

@@ -1,0 +1,5 @@
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "result": {"nodes": {"meridian.server": "allow", "meridian.server.east": "deny"}, "cache_seconds": 60}
+}
