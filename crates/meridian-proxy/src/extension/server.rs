@@ -6,7 +6,7 @@
 //!
 //! This runs on the thread that is handling the player, once for each placing, and waits at most the
 //! `timeout-ms` of the configuration (at the fallback, at most [`FALLBACK_TIMEOUT`]: the player is waiting
-//! in the configuration phase). With no extension that holds the point, which is the default, nothing is
+//! in the configuration phase, and a failure there is never a refusal). With no extension that holds the point, which is the default, nothing is
 //! asked and nothing is looked up.
 
 use super::login::DEFAULT_REASON;
@@ -62,7 +62,14 @@ pub(crate) fn choose(
     else {
         return Outcome::Default;
     };
-    let policy = extension.decide_server.on_error;
+    // A player who lost their server is already in the game: an extension that is silent, slow or wrong
+    // must not cost them their connection, so there the on-error policy is `default` whatever the
+    // operator wrote. Only an explicit `refuse` of the extension refuses them.
+    let policy = if who.lost.is_some() {
+        ServerOnError::Default
+    } else {
+        extension.decide_server.on_error
+    };
     let mut timeout = Duration::from_millis(extension.decide_server.timeout_ms);
     if who.lost.is_some() {
         timeout = timeout.min(FALLBACK_TIMEOUT);

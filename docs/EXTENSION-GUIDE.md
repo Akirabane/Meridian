@@ -219,7 +219,12 @@ What it answers, a `Choice`:
 An invalid answer (a name that was not offered, an empty order) counts against your breaker, and the
 proxy takes the `on-error` policy: `default`, or `refuse` with its own words. So do a timeout, a program
 that is not connected and an open breaker. At the fallback the wait is at most 500 ms whatever
-`timeout-ms` says, since the player is waiting in the configuration phase.
+`timeout-ms` says, since the player is waiting in the configuration phase, and **a failure there is
+never a refusal**: the player is already in the game, so they are placed as without you, whatever
+`on-error` says. Only a `Choice::refuse` you send yourself disconnects them.
+
+An order may send a player to a server at its soft cap (`closed`), up to its hard cap: where players go
+is your decision, and the hard cap always holds.
 
 The decision is asked after the player has a place under `max-players`, and held there while you answer:
 keep the handler quick. With the queue on, a player whose ordered servers are all full waits, and you are

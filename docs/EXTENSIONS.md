@@ -635,8 +635,15 @@ the SDK registers it with `Extension::on_server`. What the specification above l
   could take the player for want of room, the player is told the server is full, or waits if the queue
   is on; when none answered, they are told which could not be reached, and only those the order named
   are listed.
-- At the fallback the wait for the extension is the smaller of `timeout-ms` and 500 ms. A refusal
-  there disconnects the player with its reason.
+- At the fallback the wait for the extension is the smaller of `timeout-ms` and 500 ms. **There a
+  failure is never a refusal**: the player is already in the game, and a server that is lost while the
+  extension is down is the case where players must not be thrown out. A timeout, an invalid answer, an
+  extension that is not connected or an open breaker take the policy `default` whatever `on-error`
+  says, and the player is placed as without an extension. Only an explicit `refuse` of the extension,
+  which is its decision, disconnects the player, with its reason.
+- An `order` may send a player to a server at its soft cap (state `closed`), up to its hard cap: the
+  extension decides where the players go, and the balancer's soft cap and margin are the balancer's own
+  rule, not its. The hard cap always holds.
 - The decisions are counted as `meridian_extension_decisions_total{point="server"}` with
   `default`, `order`, `refuse` and, when there was no usable answer, `policy_default` or
   `policy_refuse`. A refusal at login counts as `meridian_login_failures_total{reason="extension"}`.

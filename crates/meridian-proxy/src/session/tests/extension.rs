@@ -1165,10 +1165,87 @@ mod server {
         let began = Instant::now();
         let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
         let took = began.elapsed();
-        assert!(took < Duration::from_millis(2000), "waited {took:?}");
+        // Not the 5000 ms of the configuration, nor the 2500 ms the extension takes: 500 ms.
+        assert!(
+            took >= Duration::from_millis(450) && took < Duration::from_millis(1200),
+            "waited {took:?}"
+        );
         // No answer in time: the policy, `default`, so the first of the others.
         assert_eq!(tried, [EAST]);
         assert_eq!(answer.unwrap().backend, "east");
         assert_eq!(decisions(&sessions, "policy_default"), 1);
+    }
+
+    /// At the fallback the player is already in the game: an extension that is silent, slow or wrong,
+    /// with `on-error = "refuse"`, does not disconnect them; they are placed as without it. Only an
+    /// explicit `refuse` of the extension disconnects them.
+    #[test]
+    fn at_the_fallback_a_failure_of_the_extension_never_refuses_but_its_own_refusal_does() {
+        // Slow: past the deadline.
+        let slow = chooser_after(Duration::from_millis(900), |_| Choice::refuse("No."));
+        let config = config_with(slow.extension(ServerOnError::Refuse, 100));
+        let sessions = sessions_for(&config);
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        assert_eq!(tried, [EAST]);
+        assert_eq!(answer.unwrap().backend, "east");
+        assert_eq!(decisions(&sessions, "policy_default"), 1);
+        assert_eq!(decisions(&sessions, "policy_refuse"), 0);
+        drop(sessions);
+
+        // Invalid: a server that was not offered.
+        let wrong = chooser(|_| Choice::order(["north"]));
+        let config = config_with(wrong.extension(ServerOnError::Refuse, 1000));
+        let sessions = sessions_for(&config);
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        assert_eq!(
+            (tried, answer.unwrap().backend),
+            (vec![EAST.to_owned()], "east".to_owned())
+        );
+        drop(sessions);
+
+        // Silent: the extension is not running at all.
+        let mut config = config_with(wrong.extension(ServerOnError::Refuse, 1000));
+        config.extensions[0].address = "127.0.0.1:1".into();
+        let sessions = Sessions::default();
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        assert_eq!(
+            (tried, answer.unwrap().backend),
+            (vec![EAST.to_owned()], "east".to_owned())
+        );
+
+        // An explicit refusal is the extension's decision, and the player is disconnected with it.
+        let says_no = chooser(|_| Choice::refuse("No game is running."));
+        let config = config_with(says_no.extension(ServerOnError::Refuse, 1000));
+        let sessions = sessions_for(&config);
+        let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+        assert!(tried.is_empty());
+        let notice = answer.err().expect("disconnected").to_string();
+        assert!(notice.contains("No game is running."), "{notice}");
+    }
+
+    /// An order may send a player to a server at its soft cap, up to the hard cap: the extension decides
+    /// where the players go, and the balancer's soft cap and margin are its own rule.
+    #[test]
+    fn an_order_may_fill_a_server_past_its_soft_cap_up_to_the_hard_cap() {
+        let chooser = chooser(|_| Choice::order(["east"]));
+        let config = balanced_with(chooser.extension(ServerOnError::Default, 1000), 1, 2);
+        let sessions = sessions_for(&config);
+        // East has one player: at its soft cap, so the balancer would call it closed.
+        let _held = hold(&sessions, &config, "east");
+        goes_to(&config, &sessions, &ALL_UP, &[EAST]);
+        // The extension was told so, and went on.
+        assert_eq!(
+            chooser.seen.lock().unwrap()[0]
+                .candidates
+                .iter()
+                .find(|c| c.name == "east")
+                .and_then(|c| c.state.clone())
+                .as_deref(),
+            Some("closed")
+        );
+        // At the hard cap it is full, whatever the order says.
+        let _second = hold(&sessions, &config, "east");
+        let said = refused_with(&config, &sessions, &ALL_UP, &[]);
+        assert_eq!(said, Full::MESSAGE);
     }
 }
