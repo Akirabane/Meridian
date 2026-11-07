@@ -580,12 +580,6 @@ how the switch is built, and the first two are how Horizon's transfer module is 
    346 to 416 ms in spectator mode, 888 and 873 ms against 398 to 427 ms in survival. In both series it
    was the first two moves that were recentered; later moves to the same place were not. Figures of one
    session on one pair of machines ([REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md), run 6 and section 7).
-6. **The summary of an evacuation can say that a player stays when the fallback has already moved
-   them.** When a server stops before the move of a player has finished, the fallback may place that
-   player on another server first; the console's summary (`real2: N moved, M stayed`, then one line
-   `<name> stays on real2: <why>` for each who stayed) still lists them as staying on the server that
-   was left. The summary is cosmetic: the player is where the fallback put them. Not corrected. Read in
-   the proxy's log of run 7 of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md).
 
 ## 7. Estimate of the work in Horizon
 

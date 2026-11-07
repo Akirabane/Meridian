@@ -388,6 +388,7 @@ fn two_moved_one_stayed() -> Option<Outcome> {
             "Carol".into(),
             "no other server of role lobby has room".into(),
         )],
+        already: Vec::new(),
     })
 }
 

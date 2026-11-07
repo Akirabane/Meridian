@@ -1,6 +1,6 @@
 use super::*;
 use crate::balance::Server;
-use crate::session::Sessions;
+use crate::session::{Sessions, tests::idle_session_on};
 use std::cell::RefCell;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
@@ -94,6 +94,19 @@ fn evacuate(
     players: &[Player],
     failing: &[&str],
 ) -> Recorded {
+    evacuate_with(config, sessions, from, players, failing, &[])
+}
+
+/// The same, with players the fallback has already moved: `gone` names each with the server
+/// it is on now.
+fn evacuate_with(
+    config: &Config,
+    sessions: &Sessions,
+    from: &str,
+    players: &[Player],
+    failing: &[&str],
+    gone: &[(&str, &str)],
+) -> Recorded {
     let shared = sessions.shared();
     let moves = RefCell::new(Vec::new());
     let sleeps = RefCell::new(0usize);
@@ -106,8 +119,10 @@ fn evacuate(
             // The place reserved on the target is held while the move goes on.
             assert!(sessions.balancer.reserved(target) >= 1, "{target}");
             moves.borrow_mut().push((p.name.clone(), target.to_owned()));
-            if failing.contains(&p.name.as_str()) {
-                Err(format!("{} could not move", p.name))
+            if let Some((_, now)) = gone.iter().find(|(name, _)| *name == p.name) {
+                Err(Unmoved::Elsewhere((*now).to_owned()))
+            } else if failing.contains(&p.name.as_str()) {
+                Err(Unmoved::Failed(format!("{} could not move", p.name)))
             } else {
                 Ok(format!("{} moved to {target}", p.name))
             }
@@ -221,6 +236,110 @@ fn a_move_that_fails_leaves_the_player_and_the_others_go_on() {
         ]
     );
     assert_eq!(sessions.balancer.reserved("b"), 0);
+}
+
+/// The server stopped while the evacuation went on: the fallback moved Bob and Carol before
+/// their turn came. They did not stay and nothing failed, so they are counted apart, with the
+/// server they are on, and the counts keep their old words when nobody was moved by it.
+#[test]
+fn players_the_fallback_already_moved_are_counted_apart_and_do_not_stay() {
+    let config = config("");
+    let sessions = Sessions::default();
+    let players = [
+        player("Alice", "a"),
+        player("Bob", "a"),
+        player("Carol", "a"),
+    ];
+    let done = evacuate_with(
+        &config,
+        &sessions,
+        "a",
+        &players,
+        &[],
+        &[("Bob", "b"), ("Carol", "c")],
+    );
+    assert_eq!(done.outcome.moved, 1);
+    assert!(done.outcome.stayed.is_empty());
+    assert_eq!(
+        done.outcome.already,
+        [
+            ("Bob".to_owned(), "b".to_owned()),
+            ("Carol".to_owned(), "c".to_owned()),
+        ]
+    );
+    assert_eq!(
+        done.outcome.counts(),
+        "1 moved, 0 stayed, 2 already moved by the fallback"
+    );
+    assert_eq!(
+        done.outcome.report("a"),
+        [
+            "Alice moved to b",
+            "a: 1 moved, 0 stayed, 2 already moved by the fallback",
+            "  Bob is already on b (moved by the fallback)",
+            "  Carol is already on c (moved by the fallback)",
+        ]
+    );
+    assert_eq!(sessions.balancer.reserved("b"), 0);
+}
+
+/// A failed move and a player the fallback moved are not mixed: the first stays, the second
+/// does not.
+#[test]
+fn a_failed_move_still_stays_next_to_a_player_the_fallback_moved() {
+    let config = config("");
+    let sessions = Sessions::default();
+    let players = [player("Alice", "a"), player("Bob", "a")];
+    let done = evacuate_with(
+        &config,
+        &sessions,
+        "a",
+        &players,
+        &["Alice"],
+        &[("Bob", "b")],
+    );
+    assert_eq!(
+        done.outcome.report("a"),
+        [
+            "Alice could not move",
+            "a: 0 moved, 1 stayed, 1 already moved by the fallback",
+            "  Alice stays on a: the move failed",
+            "  Bob is already on b (moved by the fallback)",
+        ]
+    );
+}
+
+/// The case seen on a real network: the evacuation chose `b` for a player it saw on `a`, but
+/// the fallback had put the player on `b` already. The switch refuses ("already on b"), and
+/// the evacuation knows from the session that the player is elsewhere, not that the move
+/// failed.
+#[test]
+fn a_player_found_on_the_target_by_the_move_is_one_the_fallback_moved() {
+    let config = config("");
+    let sessions = Sessions::default();
+    // The session is on `b` now; the evacuation of `a` saw it on `a`.
+    let (_relay, handle, _player, _server) = idle_session_on("Alice", "b");
+    let _open = sessions.open(player("Alice", "b"), handle).unwrap();
+    assert_eq!(
+        move_one(&sessions, &config, &player("Alice", "a"), "b"),
+        Err(Unmoved::Elsewhere("b".to_owned()))
+    );
+}
+
+/// A move that fails for another reason is still a failed move: the player is where the
+/// evacuation saw them.
+#[test]
+fn a_move_that_fails_for_its_own_reason_is_not_taken_for_the_fallback() {
+    let config = config("");
+    let sessions = Sessions::default();
+    let (_relay, handle, _player, _server) = idle_session_on("Alice", "a");
+    let _open = sessions.open(player("Alice", "a"), handle).unwrap();
+    // The configuration has no sidecar, so the switch refuses before it asks anything.
+    let moved = move_one(&sessions, &config, &player("Alice", "a"), "b");
+    let Err(Unmoved::Failed(why)) = moved else {
+        panic!("the move should have failed");
+    };
+    assert!(why.contains("no sidecar"), "{why}");
 }
 
 #[test]

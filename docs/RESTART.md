@@ -88,6 +88,10 @@ it. The proxy's is `Evacuator`:
 - A player with nowhere to go, or whose move failed, stays on the backend. The log has a line
   for each ("`Carol stays on east: no other server of role lobby has room`") and the count
   of those moved and those who stayed.
+- A player the fallback moved before the evacuation reached them (the server stopped first) is
+  neither moved nor staying: the count says `<k> already moved by the fallback` and the log has a
+  line for each ("`Dave is already on lobby (moved by the fallback)`"). This is how a refused move
+  is told apart: the player is found on another server than the one being left.
 
 ## How the announcement reaches the proxy
 
@@ -156,6 +160,6 @@ What is and is not checked:
 1. The panel: it tells the proxy before a restart, through the same channel, as
    `Cause::Panel`.
 
-With `evacuate = true` and a `stop` typed at the server (B1 of [VALIDATION.md](VALIDATION.md)) the evacuation starts when the announcement is heard, loses the race against the server's own disconnect, and logs `<player> could not move ... the player is already on <x>` and `0 moved, 1 stayed`; the player is then on another server through the fallback (#84), with no cut the client can see. The evacuation of a backend that was drained by the operator before the restart sends its
+With `evacuate = true` and a `stop` typed at the server (B1 of [VALIDATION.md](VALIDATION.md)) the evacuation starts when the announcement is heard, loses the race against the server's own disconnect, and counts the player as `0 moved, 0 stayed, 1 already moved by the fallback` (when B1 was run it logged `<player> could not move ... the player is already on <x>` and `0 moved, 1 stayed`, which was changed afterwards); the player is then on another server through the fallback (#84), with no cut the client can see. The evacuation of a backend that was drained by the operator before the restart sends its
 players away as well, but only with `evacuate = true`; with it off nothing moves them, as
 before.
