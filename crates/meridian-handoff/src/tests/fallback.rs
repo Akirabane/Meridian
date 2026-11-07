@@ -4,6 +4,7 @@ use super::*;
 use crate::Notice;
 use horizon_protocol::{packets::configuration::Disconnect, text};
 use horizon_world::nbt::Tag;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 const SAYING: &str = "You were moved";
@@ -17,6 +18,8 @@ struct Moved {
     source: Connection,
     second: Connection,
     losses: mpsc::Receiver<Loss>,
+    /// How many times the replacement said that the player's game followed.
+    followed: Arc<AtomicUsize>,
 }
 
 fn moved(fallback: Fallback, joined: bool) -> Moved {
@@ -42,6 +45,8 @@ fn moved_noticing(fallback: Fallback, joined: bool, notice: fn(&Loss) -> Notice)
     )
     .unwrap();
     let (tell, losses) = mpsc::channel();
+    let followed = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&followed);
     let run = std::thread::spawn(move || {
         let mut link = Some(BackendLink {
             connection: proxy_second,
@@ -54,6 +59,12 @@ fn moved_noticing(fallback: Fallback, joined: bool, notice: fn(&Loss) -> Notice)
                     backend: "fallback".into(),
                     notice: Some(notice(loss)),
                     keep: None,
+                    on_active: Some(Box::new({
+                        let counted = Arc::clone(&counted);
+                        move || {
+                            counted.fetch_add(1, Ordering::SeqCst);
+                        }
+                    })),
                 }),
                 None => Err("No other server could take you".into()),
             }
@@ -74,6 +85,7 @@ fn moved_noticing(fallback: Fallback, joined: bool, notice: fn(&Loss) -> Notice)
         source,
         second,
         losses,
+        followed,
     }
 }
 
@@ -144,10 +156,14 @@ fn a_crashed_backend_moves_the_player_to_the_replacement() {
         source,
         mut second,
         losses,
+        followed,
     } = moved(BOTH, true);
+    assert_eq!(followed.load(Ordering::SeqCst), 0);
     drop(source);
     arrive(&mut player, &mut second);
     assert_eq!(says(&mut player), SAYING);
+    // The replacement said once that the player's game followed.
+    assert_eq!(followed.load(Ordering::SeqCst), 1);
     assert!(matches!(losses.recv().unwrap(), Loss::Crashed(_)));
     assert_eq!(handle.backend(), "fallback");
     assert_eq!(handle.phase(), meridian_net::relay::Phase::Play);
@@ -422,6 +438,7 @@ fn a_client_that_does_not_acknowledge_is_disconnected() {
         source,
         second,
         losses,
+        followed,
         ..
     } = moved(BOTH, true);
     drop(source);
@@ -431,6 +448,8 @@ fn a_client_that_does_not_acknowledge_is_disconnected() {
     assert_eq!(id, cfg::clientbound::DISCONNECT);
     assert!(player.recv().unwrap_err().is_end_of_stream());
     run.join().unwrap().unwrap();
+    // A game that did not follow is not said to have.
+    assert_eq!(followed.load(Ordering::SeqCst), 0);
     assert!(matches!(losses.recv().unwrap(), Loss::Crashed(_)));
     drop(second);
 }
@@ -448,6 +467,7 @@ fn an_acknowledgement_before_the_lost_connection_is_closed_keeps_the_replacement
         source,
         mut second,
         losses,
+        followed: _,
     } = moved(BOTH, true);
     let (open, waits) = mpsc::channel();
     let (tells, closed) = mpsc::channel();

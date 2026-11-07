@@ -717,7 +717,16 @@ max-attempts = 3
   player who was refused or is waiting in the queue (section 5.10) is not in the game yet, and
   nothing here touches them.
 - **Look at it.** Each loss is one line in the log: `lost backend "lobby" (the connection was
-  lost: ...); moved to "east"`, or `... no other server took them` as a warning. The metrics page
+  lost: ...); moved to "east" in 41 ms (servers tried: 1; players on "lobby" then: 3)`, or
+  `... no other server took them` as a warning. The time is from the loss being heard to the
+  other server having taken the player's login; the servers tried are those the proxy asked,
+  including those that did not answer; the players on the lost server are those still counted
+  on it when this player's loss was handled (one that was moved before is no longer counted, so
+  the first line of a crash shows the most). When the player's game follows, a second line says
+  `on "east" 187 ms after the loss of "lobby": the game followed`: the time from the same start
+  to the client having acknowledged and the other server's connection being the one it plays on.
+  The server's configuration and world still reach the player after that. A game that never
+  follows (the client does not acknowledge in time, or leaves) has no second line. The metrics page
   (section 8.1) has `meridian_fallbacks_total{cause,result}`, with `cause` `kick` or `crash` and
   `result` `moved` or `failed`.
 - **Reload.** A new server list and a new `max-attempts` apply to the next loss, including that of

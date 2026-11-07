@@ -64,6 +64,8 @@ fn a_crash_sends_the_player_to_the_next_server_of_the_list() {
     assert_eq!(tried, [EAST]);
     let replacement = answer.unwrap();
     assert_eq!(replacement.backend, "east");
+    // It says when the player's game has followed, which is not before it has.
+    assert!(replacement.on_active.is_some());
     let notice = replacement.notice.unwrap();
     assert!(
         notice.to_string().contains("lobby") && notice.to_string().contains("east"),

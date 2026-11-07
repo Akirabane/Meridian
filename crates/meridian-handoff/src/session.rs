@@ -98,6 +98,10 @@ pub struct Replacement {
     pub notice: Option<Notice>,
     /// Held until the player is on the replacement, then dropped: a place reserved on it.
     pub keep: Option<Box<dyn std::any::Any + Send>>,
+    /// Called once, on the session's thread, when the client has acknowledged and the
+    /// replacement is the active lane. Never called when the client does not follow or the
+    /// session ends first.
+    pub on_active: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// A replacement waiting for the client to acknowledge.
@@ -107,6 +111,7 @@ struct Pending {
     backend: String,
     notice: Option<Notice>,
     keep: Option<Box<dyn std::any::Any + Send>>,
+    on_active: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// A session ready to be relayed. [`Session::new`] also gives the
@@ -538,6 +543,7 @@ fn begin_moving(shared: &Arc<Shared>, replacement: Replacement) -> std::result::
         backend,
         notice,
         keep,
+        on_active,
     } = replacement;
     let (reader, writer) = link.connection.split();
     let closer = reader
@@ -559,6 +565,7 @@ fn begin_moving(shared: &Arc<Shared>, replacement: Replacement) -> std::result::
         backend,
         notice,
         keep,
+        on_active,
     });
     // Before the packet, so that the client's acknowledgement finds it set.
     shared.reconnecting.store(true, Ordering::SeqCst);
@@ -604,6 +611,7 @@ fn activate(shared: &Arc<Shared>) {
         backend,
         notice,
         keep,
+        on_active,
     } = pending;
     {
         let mut down = shared.down();
@@ -631,6 +639,9 @@ fn activate(shared: &Arc<Shared>) {
         lane.closer.close();
     }
     drop(keep);
+    if let Some(on_active) = on_active {
+        on_active();
+    }
     if let Some(events) = lock(&shared.events).clone() {
         let _ = events.send(Event::Resumed);
     }
