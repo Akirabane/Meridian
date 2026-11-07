@@ -2,7 +2,7 @@ use super::*;
 
 /// The target's control, which tells the fake target's connection of the import
 /// and of the confirmation.
-fn target_control(log: &Log, signal: Signal) -> FakeControl {
+pub(super) fn target_control(log: &Log, signal: Signal) -> FakeControl {
     let confirmed = signal.clone();
     FakeControl::new("target", log)
         .on("import", move || {
@@ -234,7 +234,10 @@ fn the_answer_to_the_targets_world_goes_to_the_target() {
     run.join().unwrap().unwrap();
 }
 
-fn target_backend<'a>(address: &'a str, options: &'a BackendOptions) -> TargetBackend<'a> {
+pub(super) fn target_backend<'a>(
+    address: &'a str,
+    options: &'a BackendOptions,
+) -> TargetBackend<'a> {
     TargetBackend {
         name: "target",
         address,

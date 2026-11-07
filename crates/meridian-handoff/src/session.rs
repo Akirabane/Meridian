@@ -159,6 +159,10 @@ pub(crate) struct Shared {
     next_lane: AtomicU64,
     /// A switch is under way; it closes what is left when it ends.
     pub switching: AtomicBool,
+    /// The active backend was lost while a switch was under way, before it handed the
+    /// player over: the switch gives up if it has not frozen the player yet, and the
+    /// session decides about the loss once the switch has ended.
+    pub(crate) lost_in_switch: AtomicBool,
     /// The client has gone.
     pub client_gone: AtomicBool,
     /// The session is over: the client is closed.
@@ -242,6 +246,8 @@ pub(crate) enum Event {
     Lane(u64, End),
     /// The client acknowledged, and the replacement is the active lane.
     Resumed,
+    /// A switch ended, however it ended.
+    SwitchEnded,
 }
 
 /// How a copy stopped.
@@ -306,6 +312,7 @@ impl Session {
             events: Mutex::new(None),
             next_lane: AtomicU64::new(1),
             switching: AtomicBool::new(false),
+            lost_in_switch: AtomicBool::new(false),
             client_gone: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             closing: AtomicBool::new(false),
@@ -385,6 +392,8 @@ impl Session {
         let mut first = None;
         // When the client must have acknowledged, while a player is being moved.
         let mut deadline: Option<Instant> = None;
+        // The active lane's end while a switch was under way: the switch's to decide first.
+        let mut held: Option<(u64, End)> = None;
         loop {
             let event = match deadline {
                 None => match ended.recv() {
@@ -413,6 +422,28 @@ impl Session {
                     break;
                 }
                 Event::Resumed => deadline = None,
+                // The backend went while a switch moved the player: if the switch handed
+                // them over, the loss is behind them; if not, it is a loss as any other.
+                Event::SwitchEnded => {
+                    let Some((id, end)) = held.take() else {
+                        continue;
+                    };
+                    if id != shared.down().active {
+                        continue;
+                    }
+                    match lost(&shared, end, replace) {
+                        Lost::Over(end) => {
+                            first = Some(end);
+                            break;
+                        }
+                        Lost::Moving => deadline = Some(Instant::now() + ACKNOWLEDGE_WITHIN),
+                    }
+                }
+                Event::Lane(id, end)
+                    if id == shared.down().active && shared.switching.load(Ordering::SeqCst) =>
+                {
+                    held = Some((id, end));
+                }
                 Event::Lane(id, end) if id == shared.down().active => {
                     match lost(&shared, end, replace) {
                         Lost::Over(end) => {
@@ -793,6 +824,14 @@ impl Shared {
     pub fn lane_id(&self) -> u64 {
         self.next_lane.fetch_add(1, Ordering::SeqCst)
     }
+
+    /// The switch has ended: the session decides about a backend lost meanwhile.
+    pub(crate) fn switch_ended(&self) {
+        self.lost_in_switch.store(false, Ordering::SeqCst);
+        if let Some(events) = lock(&self.events).as_ref() {
+            let _ = events.send(Event::SwitchEnded);
+        }
+    }
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -807,6 +846,12 @@ pub(crate) fn spawn_lane(shared: &Arc<Shared>, lane: Arc<Lane>, reader: ConnRead
         .name(format!("session-lane-{}", lane.id))
         .spawn(move || {
             let end = copy_from_backend(reader, &lane, &shared);
+            // The active lane ends while a switch moves the player (their server stopped):
+            // the switch must know before it freezes them. `down` orders this with the
+            // switch's hand-over, which changes the active lane under it.
+            if shared.switching.load(Ordering::SeqCst) && shared.down().active == lane.id {
+                shared.lost_in_switch.store(true, Ordering::SeqCst);
+            }
             if let Some(target) = &lane.target {
                 target.closed(match &end {
                     End::Broken(e) => Some(e),
@@ -840,12 +885,13 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
             continue;
         }
         // The backend disconnects the player: with the fallback on, the player is moved
-        // instead, and is not shown the disconnect.
+        // instead, and is not shown the disconnect. During a switch too: a server that
+        // stops at once kicks a player it is being asked to let go, and the session waits
+        // for the switch before it moves them.
         if down.phase == Phase::Play
             && id == ids::play::clientbound::DISCONNECT
             && shared.fallback_kick.load(Ordering::SeqCst)
             && !shared.closing.load(Ordering::SeqCst)
-            && !shared.switching.load(Ordering::SeqCst)
             && !shared.client_gone.load(Ordering::SeqCst)
             && let Ok(play::Clientbound::Disconnect(d)) = play::Clientbound::decode(id, &payload)
         {

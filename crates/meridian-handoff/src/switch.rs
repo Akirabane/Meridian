@@ -269,6 +269,7 @@ impl Drop for Switching<'_> {
         if self.0.ended.load(Ordering::SeqCst) {
             self.0.up().lane.closer.close();
         }
+        self.0.switch_ended();
     }
 }
 
@@ -581,6 +582,8 @@ pub fn switch(
         return Err(run.fail(Step::Check, "a switch of this player is already under way"));
     }
     let _switching = Switching(shared);
+    // A lane that ended as the last switch did may have marked it after it was cleared.
+    shared.lost_in_switch.store(false, Ordering::SeqCst);
 
     // Check.
     let (client_id, session_digest, session_summary, dimension, secure_chat) = {
@@ -747,6 +750,15 @@ pub fn switch(
     if run.client_gone() {
         run.abandon_target();
         return Err(run.fail(Step::Prepare, "the player left"));
+    }
+    // Their server let them go meanwhile (it stopped and kicked them): nothing is frozen
+    // yet, so the switch gives up and the session moves them as off any lost backend.
+    if shared.lost_in_switch.load(Ordering::SeqCst) {
+        run.abandon_target();
+        return Err(run.fail(
+            Step::Prepare,
+            "the player's server let them go during the switch",
+        ));
     }
     let (chunks, entities) = state.lock().view.counts();
     note(&format!(

@@ -506,3 +506,94 @@ fn an_acknowledgement_before_the_lost_connection_is_closed_keeps_the_replacement
     drop(second);
     let _ = run.join();
 }
+
+/// A server that stops at once kicks its players while a switch is preparing to move one of
+/// them. The switch gives up before the freeze, and the fallback moves that player as it
+/// moves the others: the kick is not shown and the session goes on.
+#[test]
+fn a_kick_while_a_switch_prepares_moves_the_player_by_the_fallback() {
+    let Moved {
+        handle,
+        run,
+        mut player,
+        source,
+        mut second,
+        losses,
+        ..
+    } = moved(BOTH, true);
+    let log = Log::default();
+    let (address, imported, _target) = target(TargetWorld::default());
+    let source = Arc::new(Mutex::new(source));
+    let kicker = Arc::clone(&source);
+    let mut target_control =
+        super::switch::target_control(&log, imported).on("expect", move || {
+            kick(&mut kicker.lock().unwrap(), "Server closed");
+        });
+    let failure = switch(
+        &handle,
+        super::switch::target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control,
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::Prepare, After::Stayed),
+        "{failure}"
+    );
+    // Nothing was frozen: the target was let go before any export.
+    assert_eq!(log.lines(), ["target expect Some(10)", "target drop"]);
+    arrive(&mut player, &mut second);
+    assert_eq!(says(&mut player), SAYING);
+    assert_eq!(losses.recv().unwrap(), Loss::Kicked("Server closed".into()));
+    assert_eq!(handle.backend(), "fallback");
+    drop(second);
+    drop(source);
+    let _ = run.join().unwrap();
+}
+
+/// The player's server kicks them once it has frozen them and given their record: the switch
+/// goes on and hands them over to the target, and the fallback does not move them again.
+#[test]
+fn a_kick_after_the_freeze_lets_the_switch_hand_the_player_over() {
+    let Moved {
+        handle,
+        run,
+        mut player,
+        source,
+        losses,
+        ..
+    } = moved(BOTH, true);
+    let log = Log::default();
+    let (address, imported, _target) = target(TargetWorld::default());
+    let source = Arc::new(Mutex::new(source));
+    let kicker = Arc::clone(&source);
+    let mut source_control = FakeControl::new("source", &log).on("export", move || {
+        kick(&mut kicker.lock().unwrap(), "Server closed");
+    });
+    let mut target_control = super::switch::target_control(&log, imported);
+    switch(
+        &handle,
+        super::switch::target_backend(&address, &options()),
+        &mut source_control,
+        &mut target_control,
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap();
+    assert_eq!(handle.backend(), "target");
+    let ids: Vec<i32> = after_switch(&mut player)
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(!ids.contains(&pc::DISCONNECT), "{ids:?}");
+    assert!(!ids.contains(&pc::START_CONFIGURATION), "{ids:?}");
+    // The fallback was never asked: the player is where the switch put them.
+    assert!(losses.try_recv().is_err());
+    assert_eq!(handle.backend(), "target");
+    drop(player);
+    drop(source);
+    let _ = run.join().unwrap();
+}
