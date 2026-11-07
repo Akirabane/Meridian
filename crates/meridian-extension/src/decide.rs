@@ -1,12 +1,12 @@
-//! The decision points (docs/EXTENSIONS.md, section 4), as both sides read and write them. These are the
-//! admission at login (4.2) and the choice of server (4.4); the permission of a command comes with its
-//! own pull request.
+//! The decision points (docs/EXTENSIONS.md, section 4), as both sides read and write them: the admission at
+//! login (4.2), the choice of server (4.4) and the permission of a command (4.3).
 //!
-//! The proxy asks with [`LoginParams`] and reads the answer with [`parse_login_answer`], or asks with
-//! [`ServerParams`] and reads it with [`parse_server_answer`]; the SDK reads the params and writes the
-//! answer with the same types. What the proxy accepts as a refusal's reason is decided in one place,
-//! [`Reason`], which the SDK also makes its reasons with: an extension cannot send one the proxy would
-//! refuse. The golden files `login.*.json` and `server.*.json` are the bytes both sides test against.
+//! The proxy asks with [`LoginParams`] and reads the answer with [`parse_login_answer`], with
+//! [`ServerParams`] and [`parse_server_answer`], or with [`CommandParams`] and [`parse_command_answer`];
+//! the SDK reads the params and writes the answer with the same types. What the proxy accepts as a
+//! refusal's reason is decided in one place, [`Reason`], which the SDK also makes its reasons with: an
+//! extension cannot send one the proxy would refuse. The golden files `login.*.json`, `server.*.json` and
+//! `command.*.json` are the bytes both sides test against.
 
 use crate::wire;
 use serde::{Deserialize, Serialize};
@@ -366,6 +366,155 @@ pub fn parse_server_answer(result: &Value, offered: &[String]) -> Result<Choice,
     wire::decode::<ServerAnswer>(Some(result))
         .map_err(|why| why.replace("invalid parameters", "invalid answer"))?
         .into_choice(offered)
+}
+
+/// The method of the permission of a command.
+pub const COMMAND: &str = "meridian:decide/command";
+
+/// The most arguments of a command the proxy tells the extension; the rest are left out.
+pub const MAX_COMMAND_ARGS: usize = 32;
+
+/// The most characters of an argument the proxy tells the extension; the rest of it is cut.
+pub const MAX_ARG_CHARS: usize = 256;
+
+/// What the proxy tells the extension when a player types a command the proxy answers itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandRequest {
+    pub player: Player,
+    /// The server the player is on.
+    pub server: String,
+    /// The command as typed, without its slash.
+    pub command: String,
+    /// What follows it, in words: at most [`MAX_COMMAND_ARGS`] of them, each cut to [`MAX_ARG_CHARS`].
+    pub args: Vec<String>,
+    /// Every node the command checks, which the answer may speak of.
+    pub nodes: Vec<String>,
+}
+
+/// `params` of [`COMMAND`]: the request is the one parameter, named `request`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandParams {
+    pub request: CommandRequest,
+}
+
+/// What an extension says of one node of permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeVerdict {
+    /// The player has the node, **even if `permissions.toml` or the operators of the server refuse it**:
+    /// the extension is the source of rights for the proxy's commands (docs/EXTENSIONS.md, 4.3).
+    Allow,
+    /// The player has not the node, even if `permissions.toml` gives it.
+    Deny,
+    /// Left to `permissions.toml` and the operators of the server, as without an extension.
+    Default,
+}
+
+/// What an extension answers about the permission of a command: a verdict for each node it speaks of
+/// (a node left out is [`NodeVerdict::Default`]), and how long the proxy may keep them for this player.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct NodeAnswers {
+    nodes: std::collections::BTreeMap<String, NodeVerdict>,
+    #[serde(skip_serializing_if = "is_zero")]
+    cache_seconds: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl NodeAnswers {
+    /// No opinion on any node: all of them are `default`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The player has `node`, whatever the file says.
+    pub fn allow(mut self, node: &str) -> Self {
+        self.nodes.insert(node.to_owned(), NodeVerdict::Allow);
+        self
+    }
+
+    /// The player has not `node`, whatever the file says.
+    pub fn deny(mut self, node: &str) -> Self {
+        self.nodes.insert(node.to_owned(), NodeVerdict::Deny);
+        self
+    }
+
+    /// Every node of `request` gets `verdict`.
+    pub fn all(request: &CommandRequest, verdict: NodeVerdict) -> Self {
+        Self {
+            nodes: request.nodes.iter().map(|n| (n.clone(), verdict)).collect(),
+            cache_seconds: 0,
+        }
+    }
+
+    /// Lets the proxy keep these answers for this player for `seconds` (0, the default, keeps none). The
+    /// proxy keeps them no longer than its own `cache-seconds-max`.
+    pub fn cache_seconds(mut self, seconds: u64) -> Self {
+        self.cache_seconds = seconds;
+        self
+    }
+
+    /// What was said of `node`; [`NodeVerdict::Default`] when nothing was.
+    pub fn verdict(&self, node: &str) -> NodeVerdict {
+        self.nodes
+            .get(node)
+            .copied()
+            .unwrap_or(NodeVerdict::Default)
+    }
+
+    /// How long the proxy may keep the answers, in seconds.
+    pub fn seconds(&self) -> u64 {
+        self.cache_seconds
+    }
+}
+
+/// Reads the `result` of [`COMMAND`] as the proxy must. Only the nodes in `asked` are read, and each
+/// must be `allow`, `deny` or `default`; a node that was not asked is left out whatever it says (so an
+/// answer cannot grow what the proxy keeps), and so is a field nobody knows. `nodes` may be missing, and
+/// then every node is `default`. `cache_seconds` must be a whole number of seconds, or missing. An error
+/// says what is wrong and never shows what the extension sent.
+pub fn parse_command_answer(result: &Value, asked: &[String]) -> Result<NodeAnswers, String> {
+    #[derive(Deserialize)]
+    struct Wire {
+        #[serde(default)]
+        nodes: Option<Value>,
+        #[serde(default)]
+        cache_seconds: Option<Value>,
+    }
+    let wire: Wire = wire::decode(Some(result))
+        .map_err(|why| why.replace("invalid parameters", "invalid answer"))?;
+    let mut answers = NodeAnswers::new();
+    match wire.nodes {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(nodes)) => {
+            for node in asked {
+                let Some(word) = nodes.get(node) else {
+                    continue;
+                };
+                let verdict = match word.as_str() {
+                    Some("allow") => NodeVerdict::Allow,
+                    Some("deny") => NodeVerdict::Deny,
+                    Some("default") => NodeVerdict::Default,
+                    _ => {
+                        return Err(
+                            "a node has an answer that is not allow, deny or default".into()
+                        );
+                    }
+                };
+                answers.nodes.insert(node.clone(), verdict);
+            }
+        }
+        Some(_) => return Err("nodes is not an object".into()),
+    }
+    answers.cache_seconds = match wire.cache_seconds {
+        None | Some(Value::Null) => 0,
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| "cache_seconds is not a whole number of seconds".to_owned())?,
+    };
+    Ok(answers)
 }
 
 #[cfg(test)]
@@ -808,5 +957,143 @@ mod tests {
             let why = parse_server_answer(&bad, &offered()).unwrap_err();
             assert!(!why.contains("maybe"), "{why}");
         }
+    }
+
+    // ---- the permission of a command ------------------------------------------------------------
+
+    fn command_request() -> CommandRequest {
+        CommandRequest {
+            player: alex().player,
+            server: "lobby".into(),
+            command: "server".into(),
+            args: vec!["east".into()],
+            nodes: vec!["meridian.server".into(), "meridian.server.east".into()],
+        }
+    }
+
+    #[test]
+    fn the_command_request_is_what_the_golden_file_says() {
+        let Message::Request { id, method, params } =
+            Message::parse(&golden("command.request.json")).unwrap()
+        else {
+            panic!("a request");
+        };
+        assert_eq!((id, method.as_str()), (Some(6.into()), COMMAND));
+        let read: CommandParams = wire::decode(params.as_ref()).unwrap();
+        assert_eq!(
+            read,
+            CommandParams {
+                request: command_request()
+            }
+        );
+        let written = wire::request(
+            6,
+            COMMAND,
+            Some(&CommandParams {
+                request: command_request(),
+            }),
+        );
+        assert_eq!(value(&written), value(&golden("command.request.json")));
+    }
+
+    #[test]
+    fn the_command_answers_are_what_the_golden_files_say() {
+        let asked = command_request().nodes;
+        for (name, answers) in [
+            (
+                "command.answer.json",
+                NodeAnswers::new()
+                    .allow("meridian.server")
+                    .deny("meridian.server.east")
+                    .cache_seconds(60),
+            ),
+            ("command.answer.default.json", NodeAnswers::new()),
+        ] {
+            let result = golden_result(name);
+            assert_eq!(
+                parse_command_answer(&result, &asked).unwrap(),
+                answers,
+                "{name}"
+            );
+            let written = wire::result(&6.into(), &answers);
+            assert_eq!(value(&written), value(&golden(name)), "{name}");
+        }
+        let answers = parse_command_answer(&golden_result("command.answer.json"), &asked).unwrap();
+        assert_eq!(answers.verdict("meridian.server"), NodeVerdict::Allow);
+        assert_eq!(answers.verdict("meridian.server.east"), NodeVerdict::Deny);
+        assert_eq!(answers.verdict("meridian.hub"), NodeVerdict::Default);
+        assert_eq!(answers.seconds(), 60);
+    }
+
+    #[test]
+    fn only_the_nodes_that_were_asked_are_read_and_a_missing_field_is_default() {
+        let asked = vec!["meridian.hub".to_owned()];
+        // A node that was not asked is left out, whatever it says, even something that is no verdict.
+        let answers = parse_command_answer(
+            &json!({"nodes": {"meridian.hub": "deny", "meridian.alert": "allow", "x": 7}, "later": 1}),
+            &asked,
+        )
+        .unwrap();
+        assert_eq!(answers, NodeAnswers::new().deny("meridian.hub"));
+        for empty in [json!({}), json!({"nodes": null}), json!({"nodes": {}})] {
+            assert_eq!(
+                parse_command_answer(&empty, &asked).unwrap(),
+                NodeAnswers::new()
+            );
+        }
+        // Many nodes sent, a few asked: what is kept is bounded by what was asked.
+        let many: serde_json::Map<String, Value> = (0..5000)
+            .map(|i| (format!("n{i}"), json!("allow")))
+            .collect();
+        let kept = parse_command_answer(&json!({ "nodes": many }), &asked).unwrap();
+        assert_eq!(kept, NodeAnswers::new());
+    }
+
+    #[test]
+    fn an_answer_that_is_not_one_is_refused_without_quoting_it() {
+        let asked = vec!["meridian.hub".to_owned()];
+        for (bad, expected) in [
+            (
+                json!({"nodes": {"meridian.hub": "maybe"}}),
+                "not allow, deny or default",
+            ),
+            (
+                json!({"nodes": {"meridian.hub": true}}),
+                "not allow, deny or default",
+            ),
+            (
+                json!({"nodes": {"meridian.hub": null}}),
+                "not allow, deny or default",
+            ),
+            (json!({"nodes": ["meridian.hub"]}), "not an object"),
+            (json!({"nodes": "allow"}), "not an object"),
+            (json!({"cache_seconds": -1}), "whole number"),
+            (json!({"cache_seconds": 1.5}), "whole number"),
+            (json!({"cache_seconds": "60"}), "whole number"),
+            (json!("allow"), "invalid"),
+            (json!(null), "invalid"),
+        ] {
+            let why = parse_command_answer(&bad, &asked).unwrap_err();
+            assert!(why.contains(expected), "{bad}: {why}");
+            assert!(!why.contains("maybe"), "{why}");
+        }
+        // A huge number is a number of seconds: the proxy bounds it with its own maximum.
+        let huge = parse_command_answer(&json!({"cache_seconds": u64::MAX}), &asked).unwrap();
+        assert_eq!(huge.seconds(), u64::MAX);
+    }
+
+    #[test]
+    fn a_handler_can_give_one_verdict_to_every_node_of_a_request() {
+        let all = NodeAnswers::all(&command_request(), NodeVerdict::Deny);
+        assert_eq!(all.verdict("meridian.server"), NodeVerdict::Deny);
+        assert_eq!(all.verdict("meridian.server.east"), NodeVerdict::Deny);
+        assert_eq!(all.verdict("meridian.hub"), NodeVerdict::Default);
+        // Nothing to keep: no `cache_seconds` on the wire.
+        assert!(
+            serde_json::to_value(&all)
+                .unwrap()
+                .get("cache_seconds")
+                .is_none()
+        );
     }
 }

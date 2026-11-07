@@ -1260,3 +1260,131 @@ mod server {
         let _ = chooser(&Arc::default()).on_server(|_| Choice::Default);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The permission of a command
+
+mod command {
+    use super::*;
+    use crate::decide::{self, CommandRequest, NodeAnswers, NodeVerdict};
+
+    /// Gives Alex `/alert` and takes `/send` from everyone, for a minute; says nothing of the rest.
+    fn ranks(lines: &Arc<Lines>) -> Extension {
+        let mut extension = Extension::new("ranks", "1.0.0", token())
+            .log(Arc::clone(lines) as Arc<dyn Log>)
+            .on_command(|request: &CommandRequest| {
+                let mut answers = NodeAnswers::new().cache_seconds(60);
+                for node in &request.nodes {
+                    if node == "meridian.send" {
+                        answers = answers.deny(node);
+                    } else if node == "meridian.alert" && request.player.name == "Alex" {
+                        answers = answers.allow(node);
+                    }
+                }
+                answers
+            });
+        extension.timings.look = Duration::from_millis(10);
+        extension
+    }
+
+    fn request_for(name: &str, nodes: &[&str]) -> String {
+        let mut request: Value = serde_json::from_str(&golden("command.request.json")).unwrap();
+        request["params"]["request"]["player"]["name"] = json!(name);
+        request["params"]["request"]["nodes"] = json!(nodes);
+        request.to_string()
+    }
+
+    fn answer(proxy: &mut Proxy, name: &str, nodes: &[&str]) -> Value {
+        proxy.send(&request_for(name, nodes));
+        let Message::Response { id, outcome } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(id, Some(Id::Number(6)));
+        outcome.unwrap()
+    }
+
+    #[test]
+    fn the_hello_declares_the_capability_and_the_list_names_the_method() {
+        let running = start(ranks(&Arc::default()));
+        let mut proxy = Proxy::connect(running.local_addr());
+        let (hello, _) = proxy.hello(&token());
+        assert_eq!(hello.capabilities, ["decide.command"]);
+        let listed = proxy.call(method::DISCOVER, None).unwrap();
+        assert_eq!(listed["methods"][2]["name"], decide::COMMAND);
+        // The method as the golden list has it.
+        let golden: Value = serde_json::from_str(&golden("discover.answer.json")).unwrap();
+        assert_eq!(listed["methods"][2], golden["result"]["methods"][3]);
+    }
+
+    #[test]
+    fn the_handler_answers_with_what_it_gives_and_takes_and_it_passes_the_proxys_check() {
+        let running = start(ranks(&Arc::default()));
+        let mut proxy = Proxy::up(running.local_addr());
+        let nodes = ["meridian.alert", "meridian.send", "meridian.hub"];
+        let result = answer(&mut proxy, "Alex", &nodes);
+        assert_eq!(
+            result,
+            json!({"nodes": {"meridian.alert": "allow", "meridian.send": "deny"}, "cache_seconds": 60})
+        );
+        let asked: Vec<String> = nodes.iter().map(|n| (*n).to_owned()).collect();
+        let parsed = decide::parse_command_answer(&result, &asked).unwrap();
+        assert_eq!(parsed.verdict("meridian.alert"), NodeVerdict::Allow);
+        assert_eq!(parsed.verdict("meridian.send"), NodeVerdict::Deny);
+        assert_eq!(parsed.verdict("meridian.hub"), NodeVerdict::Default);
+        // Bob is not given /alert.
+        let bob = answer(&mut proxy, "Bob", &["meridian.alert"]);
+        assert_eq!(bob, json!({"nodes": {}, "cache_seconds": 60}));
+        // The golden request itself reaches the handler as written.
+        proxy.send(&golden("command.request.json"));
+        let Message::Response { outcome, .. } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(outcome.unwrap(), json!({"nodes": {}, "cache_seconds": 60}));
+    }
+
+    #[test]
+    fn params_that_are_not_a_command_request_are_an_error_that_does_not_quote_them() {
+        let lines = Arc::new(Lines::default());
+        let running = start(ranks(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        for params in [
+            None,
+            Some(json!([])),
+            Some(json!({})),
+            Some(json!({"request": "PrivateName"})),
+            // No nodes: not a request.
+            Some(
+                json!({"request": {"player": {"name": "PrivateName", "uuid": "u", "auth": "verified"}, "server": "lobby", "command": "hub", "args": []}}),
+            ),
+        ] {
+            let error = proxy.call(decide::COMMAND, params.as_ref()).unwrap_err();
+            assert_eq!(error.code, code::INVALID_PARAMS, "{params:?}");
+            assert!(!error.message.contains("PrivateName"), "{}", error.message);
+        }
+        assert_eq!(
+            answer(&mut proxy, "Bob", &["meridian.hub"]),
+            json!({"nodes": {}, "cache_seconds": 60})
+        );
+        assert!(lines.all().iter().all(|l| !l.contains("PrivateName")));
+    }
+
+    #[test]
+    fn nothing_of_the_player_or_the_command_is_in_the_extensions_lines() {
+        let lines = Arc::new(Lines::default());
+        let running = start(ranks(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        for name in ["Alex", "Bob"] {
+            answer(&mut proxy, name, &["meridian.alert", "meridian.send"]);
+        }
+        let everything = lines.all().join("\n");
+        for private in ["Alex", "Bob", "0a2ea4ba", "meridian.alert", "meridian.send"] {
+            assert!(!everything.contains(private), "{private}\n{everything}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "registered twice")]
+    fn two_command_handlers_are_a_mistake_of_the_program() {
+        let _ = ranks(&Arc::default()).on_command(|_| NodeAnswers::new());
+    }
+}

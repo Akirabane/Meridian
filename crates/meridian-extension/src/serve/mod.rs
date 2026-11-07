@@ -31,8 +31,8 @@ mod tests;
 pub use log::{Log, Stderr};
 
 use crate::decide::{
-    self, Choice, Decision, LoginAnswer, LoginParams, LoginRequest, ServerAnswer, ServerParams,
-    ServerRequest,
+    self, Choice, CommandParams, CommandRequest, Decision, LoginAnswer, LoginParams, LoginRequest,
+    NodeAnswers, ServerAnswer, ServerParams, ServerRequest,
 };
 use crate::handshake::Secret;
 use crate::wire::{self, CommandSpec, DiscoverMethod, RpcError, code};
@@ -197,6 +197,33 @@ impl Extension {
                 let params: ServerParams = wire::decode(params.as_ref())
                     .map_err(|why| RpcError::new(code::INVALID_PARAMS, why))?;
                 let answer = ServerAnswer::from(&handler(&params.request));
+                Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
+            },
+        )
+    }
+
+    /// Decides what a player may do with the commands the proxy answers itself (`/server`, `/hub`,
+    /// `/play`, `/send`, `/glist`, `/alert`; docs/EXTENSIONS.md, 4.3). The extension declares
+    /// `decide.command`; the proxy asks only if the operator granted it. The handler runs on a thread of
+    /// its own, with the request (the command, its arguments and every `node` of permission it checks),
+    /// and answers a [`NodeAnswers`]: a verdict for each node it speaks of, and how long the proxy may
+    /// keep them for this player. **The extension is the source of rights for these commands**:
+    /// [`NodeAnswers::allow`] gives a node even if `permissions.toml` and the operators of the server
+    /// refuse it, [`NodeAnswers::deny`] takes it even if they give it, and a node left out is the file's.
+    /// The player waits for the answer, so keep it quick and let the proxy keep what does not change.
+    /// Registering it twice panics, as registering any method twice does.
+    pub fn on_command(
+        self,
+        handler: impl Fn(&CommandRequest) -> NodeAnswers + Send + Sync + 'static,
+    ) -> Self {
+        self.register(
+            decide::COMMAND,
+            "decide.command",
+            DiscoverMethod::with_request(decide::COMMAND, "object"),
+            move |params| {
+                let params: CommandParams = wire::decode(params.as_ref())
+                    .map_err(|why| RpcError::new(code::INVALID_PARAMS, why))?;
+                let answer = handler(&params.request);
                 Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
             },
         )
