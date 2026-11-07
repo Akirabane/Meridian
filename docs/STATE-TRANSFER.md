@@ -445,7 +445,7 @@ concerns:
 Both default to `true`, as on Velocity and BungeeCord, where changing server is a departure
 and an arrival for the others. A release says nothing on its own (the server's default is
 quiet), so the proxy sends the field every time and the keys decide. A reload applies them
-to the next move. A move given up announces nothing: an aborted release never carries
+to the moves the console starts and to the sessions opened after it (6.6, item 4). A move given up announces nothing: an aborted release never carries
 `announce`, and a held player is not announced until the target places it. When the player
 leaves the proxy in the middle of a move, the target keeps their record, and the departure
 is announced on the source as `switch-announce-departure` says.
@@ -540,6 +540,46 @@ For a first test of the switch, the source can be read with
 ordinary commands (`tp`, `item replace`, `effect`, `xp`, `gamemode`). It is slow,
 lossy and announces the player like any join, so it can show the idea but not a
 seamless switch. It is not a basis for J3.
+
+### 6.6 Known limits of the seamless switch
+
+What the switch does not do today, each with where it was seen. None of them is a setting to turn: they are
+how the switch is built, and the first two are how Horizon's transfer module is built too.
+
+1. **A player who dies on the source after the target has taken them has their objects twice.** While
+   frozen the player is invulnerable but the void and `/kill` still kill (Horizon's `docs/server.md`, "A proxy
+   moving a player between two servers"). If that happens after the target has validated the arrival (the
+   confirm) and before the release, the target already holds the record, with the inventory, and the source's
+   player dies and drops theirs: the objects exist in both places. The release is then refused ("the player
+   died while frozen"), the proxy keeps the client on the target, closes the source's connection and tells
+   the operator (6.2.1). The Horizon team documents this as a limit; undoing the arrival on the target is a
+   possible follow-up, not done. A death *before* the target has validated is not this case: the move is
+   given up and the target drops the arrival.
+2. **A hard kill loses what the server had not saved.** When a server dies without a word, the fallback
+   (OPERATING.md, section 5.11) moves the player to another server but moves no state: the new server
+   has the player's last saved state, and what they did since the last save is lost. A fallback is not a
+   transfer. It was seen in run 5 of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md).
+3. **The difficulty and the settings of the servers are not carried.** Only the player's record goes
+   (section 3). The difficulty, the game rules, the time, the weather, the world and its blocks belong to
+   each server, and a player who arrives takes those of the target. In the real-network runs one server
+   was in peaceful and the other in easy, and the player's food and saturation differed in a way that
+   probably came from that; it was not checked directly (REAL-NETWORK-RUN.md, section 5). Servers that are
+   meant to be switched between should be set alike.
+4. **A reload of the switch settings reaches the moves started from the console and the sessions opened
+   after it, not the sessions already open.** A player's session keeps the configuration of its login for
+   the moves the player starts in game (`/server`, `/hub`, `/play`, `/send`). The moves the console starts
+   (`switch`, `send`, `drain --move`) and the evacuation of a server read the configuration in force. So
+   after a `reload` that changes `switch-carry-position`, `switch-announce-arrival`,
+   `switch-announce-departure`, `switch-freeze-limit-ms` or `switch-commit-margin-ms`, a player who
+   was already connected still moves with the old values when they type `/server`, until they log in
+   again. Seen in run 6 of REAL-NETWORK-RUN.md (10 moves of 10 without the position after a reload), and
+   the log said `settings changed for the next logins`.
+5. **A move that carries the position can take longer to hand over.** When the arrival is recentered (the
+   log says `recentered: true`: the target sends the chunks around the new place before it takes the
+   player), the hand-over step lasted 2.1 to 3.5 times longer than without: 1011 and 1213 ms against
+   346 to 416 ms in spectator mode, 888 and 873 ms against 398 to 427 ms in survival. In both series it
+   was the first two moves that were recentered; later moves to the same place were not. Figures of one
+   session on one pair of machines ([REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md), run 6 and section 7).
 
 ## 7. Estimate of the work in Horizon
 

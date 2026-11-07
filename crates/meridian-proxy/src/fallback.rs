@@ -219,10 +219,30 @@ fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, N
         }));
     };
     run.since = Some(Instant::now());
+    // Players still counted on the lost server: each session is handled in turn, and one that
+    // was moved before this one is no longer on it.
+    let on_it = c.sessions.counts().get(&lost).copied().unwrap_or(0);
     info!(
-        "{}: {name}: lost backend \"{lost}\" ({what}); moved to \"{}\"",
-        c.peer, backend.name
+        "{}",
+        moved_line(
+            c.peer,
+            &Moved {
+                name,
+                lost: &lost,
+                what: &what,
+                to: &backend.name,
+            },
+            now.elapsed(),
+            attempts,
+            on_it,
+        )
     );
+    let on_active = {
+        let (peer, name, lost, to) = (c.peer, name.clone(), lost.clone(), backend.name.clone());
+        Box::new(move || {
+            info!("{}", followed_line(peer, &name, &lost, &to, now.elapsed()));
+        }) as Box<dyn FnOnce() + Send>
+    };
     let notice = match loss {
         Loss::Kicked(reason) => Notice::around(
             &format!("You were disconnected from {lost}: "),
@@ -240,7 +260,49 @@ fn replace(c: &Context<'_>, run: &mut Run, loss: &Loss) -> Result<Replacement, N
         backend: backend.name.clone(),
         notice: Some(notice),
         keep: reservation.map(|r| Box::new(r) as Box<dyn std::any::Any + Send>),
+        on_active: Some(on_active),
     })
+}
+
+/// Who was moved from where, for the two lines of the log that tell it.
+struct Moved<'a> {
+    name: &'a str,
+    lost: &'a str,
+    what: &'a str,
+    to: &'a str,
+}
+
+/// The line of a player the proxy found another server for. `took` is the time from the loss
+/// being heard to the other server having taken the player's login, `attempts` the servers
+/// tried, and `on_it` the players counted on the lost server when this loss was handled.
+fn moved_line(
+    peer: SocketAddr,
+    moved: &Moved<'_>,
+    took: Duration,
+    attempts: u32,
+    on_it: usize,
+) -> String {
+    let Moved {
+        name,
+        lost,
+        what,
+        to,
+    } = moved;
+    format!(
+        "{peer}: {name}: lost backend \"{lost}\" ({what}); moved to \"{to}\" in {} ms \
+         (servers tried: {attempts}; players on \"{lost}\" then: {on_it})",
+        took.as_millis()
+    )
+}
+
+/// The line that follows it, when the player's game has followed: the time since the loss was
+/// heard, until the client acknowledged and the other server's connection became the one it
+/// plays on. Its configuration and its world still reach the player after that.
+fn followed_line(peer: SocketAddr, name: &str, lost: &str, to: &str, since: Duration) -> String {
+    format!(
+        "{peer}: {name}: on \"{to}\" {} ms after the loss of \"{lost}\": the game followed",
+        since.as_millis()
+    )
 }
 
 #[cfg(test)]
@@ -268,5 +330,41 @@ mod tests {
         };
         run.settle(start + SETTLED * 10);
         assert_eq!(run.tried, 1);
+    }
+
+    /// The first line keeps its start, so that what looked for it still finds it, and adds the
+    /// time, the servers tried and the players on the lost server.
+    #[test]
+    fn the_line_of_a_move_says_how_long_it_took() {
+        let peer: SocketAddr = "198.51.100.7:50123".parse().unwrap();
+        let line = moved_line(
+            peer,
+            &Moved {
+                name: "Alex",
+                lost: "lobby",
+                what: "the connection was lost: the connection closed",
+                to: "east",
+            },
+            Duration::from_micros(41_900),
+            2,
+            3,
+        );
+        assert_eq!(
+            line,
+            "198.51.100.7:50123: Alex: lost backend \"lobby\" (the connection was lost: the \
+             connection closed); moved to \"east\" in 41 ms (servers tried: 2; players on \
+             \"lobby\" then: 3)"
+        );
+        assert!(line.contains("moved to \"east\""));
+    }
+
+    #[test]
+    fn the_line_of_a_game_that_followed_says_when() {
+        let peer: SocketAddr = "198.51.100.7:50123".parse().unwrap();
+        assert_eq!(
+            followed_line(peer, "Alex", "lobby", "east", Duration::from_millis(187)),
+            "198.51.100.7:50123: Alex: on \"east\" 187 ms after the loss of \"lobby\": the \
+             game followed"
+        );
     }
 }
