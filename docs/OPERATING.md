@@ -17,11 +17,14 @@ Read this before you plan a deployment.
   on one Windows machine, with everything on `127.0.0.1`, one scripted player at a time
   ([RUNNING.md](RUNNING.md)), and with the panel's three-server bench ([TESTING.md](TESTING.md),
   [TESTING-FORK.md](TESTING-FORK.md)). Beyond that, 250 simulated players were run against a proxy
-  on a laptop across a home network ([LOAD-LAN-250.md](LOAD-LAN-250.md)), and one real client in
-  France was connected over the Internet to a proxy on a rented server in Warsaw, with 250
+  on a laptop across a home network ([LOAD-LAN-250.md](LOAD-LAN-250.md)), and one real client
+  was connected over the Internet to a proxy on a rented VPS, with 250
   simulated players on the same machine, for five minutes ([LOAD-VPS-250.md](LOAD-VPS-250.md),
-  [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)), and then in three fallback runs. That is one player,
-  one run of each, a stock Horizon server and a shared machine. The load figures are those of
+  [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)), and then in three fallback runs. Those are one player,
+  one run of each, a stock Horizon server and a shared machine. Then, on 6 and 7 November, real
+  clients were moved between two real Horizon servers over a real network, and a server was stopped
+  with players on it ([REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)): one session each, three clients on the same PC as
+  the second server. The load figures are those of
   simulated players against stand-in servers ([BENCH.md](BENCH.md) says not to quote them as the
   proxy's performance in production); none is a production figure.
 - **The relay is the proven part.** Login (online, offline, hybrid), routing, forwarding to
@@ -33,9 +36,12 @@ Read this before you plan a deployment.
   `[transfer]` module of its `server.toml`. The Horizon pull requests that add them (#8700,
   #8709, #8716, #8730, #8735, #8742) were merged into Horizon's main on 2026-11-05, the last four
   at 23:47 UTC; the Nightly of that day (`66f3981`) was built before them. The switch is built
-  and tested against fake servers. Moves with a real client between three real servers are
-  described in a public comment ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2), on one
-  machine and not repeated; [TESTING-FORK.md](TESTING-FORK.md) is the procedure for a recorded
+  and tested against fake servers, and it was run with real clients between two real Horizon servers
+  over a real network on 6 November 2026, with its limits ([REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)): one session, three
+  clients on the same PC as the second server, no failure injected during a move, no long run.
+  Earlier moves with a real client between three real servers on one machine are described only in a
+  public comment ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2).
+  [TESTING-FORK.md](TESTING-FORK.md) is the procedure for a recorded
   run, with the fork build it names. Check that your Horizon build has the transfer module before
   relying on it. Without
   those servers the proxy still relays players; a switch answers which step failed and the
@@ -1098,17 +1104,20 @@ switch, and keep the proxy's log and both servers' logs.
 ## 12. Known limits
 
 - Few runs were made on a real network: 250 bots against a proxy on a laptop across a home
-  network ([LOAD-LAN-250.md](LOAD-LAN-250.md)), and one real client over the Internet to a proxy
+  network ([LOAD-LAN-250.md](LOAD-LAN-250.md)), one real client over the Internet to a proxy
   on a rented server, with 250 bots on the same machine ([LOAD-VPS-250.md](LOAD-VPS-250.md),
-  [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)). Each is one run with its limits, against stand-in
-  servers; the load figures in [BENCH.md](BENCH.md) are local. Plan your own test with your
-  players' numbers before opening.
+  [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md)), and the moves and the stops of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)
+  (6 and 7 November: three real clients on one PC, real Horizon servers). Each is one run or one
+  session with its limits; the load runs went to stand-in servers; the load figures in
+  [BENCH.md](BENCH.md) are local. Plan your own test with your players' numbers before opening.
 - The seamless switch needs a Horizon build with the transfer module, which was merged into
-  Horizon's main on 2026-11-05 and is not in the Nightly of that day (section 0). No recorded run
-  of it on real servers; a public comment describes moves
-  with a real client on one machine, not repeated ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md),
-  section 2).
-- Movement through the proxy was run with a real client on one machine only (a public comment,
+  Horizon's main on 2026-11-05 and is not in the Nightly of that day (section 0). It was run on
+  real servers with real clients over a real network on 6 November 2026, in one session with the
+  three clients on the same PC as the second server (section 6 of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)
+  lists what was not done); a public comment describes earlier moves with a real client on one
+  machine, not repeated ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2).
+- Movement through the proxy was run with real clients over a real network in one session
+  ([REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)), and before that with a real client on one machine (a public comment,
   [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2). Many players and long sessions were
   not tried against a real server (the 250 bots of [LOAD-VPS-250.md](LOAD-VPS-250.md) went to
   stand-in servers). The hybrid mode's name lookup and the online mode's account check have not been
@@ -1117,7 +1126,8 @@ switch, and keep the proxy's log and both servers' logs.
   (section 5.11) as a new arrival, with a loading screen, and what was unsaved on the lost server
   is lost. This ran with a real client over the Internet, once each for a killed server, a kick
   and a clean stop ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3). A planned restart moves its players without a
-  loading screen, with the transfer module (section 6). A player still logging in is not moved.
+  loading screen, with the transfer module (section 6), and so did a stop that waits for the
+  evacuation, which needs Horizon's pull request #11713, not merged (run 7 of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)). A player still logging in is not moved.
 - Horizon's `server/stopping` notice and the panel's announcement are the signals for an early
   warning. The first is fed only when the sidecar is given `--management-properties` and the backend
   has `sidecar-notices = true`; the sidecar reads the management protocol on its own machine and

@@ -15,7 +15,7 @@ What the player felt is not in this page; it is in [REAL-CLIENT-RUNS.md](REAL-CL
 
 | | |
 | --- | --- |
-| The VPS | An OVH VPS in Warsaw, 4 vCores (Intel Core, Haswell generation, no TSX, as the system names it), 7.6 GiB of memory, Ubuntu 26.04, a public link of 1 Gbit/s. Other customers share the host |
+| The VPS | A rented VPS, 4 vCores (Intel Core, Haswell generation, no TSX, as the system names it), 7.6 GiB of memory, Ubuntu 26.04, a public link of 1 Gbit/s. Other customers share the host |
 | The proxy | `meridian` from commit `e1e2a0e6` of `main`, built by the CI (Linux, release), a systemd service held to **cores 0-1** (`AllowedCPUs`), 3 GB of memory, no connection limit, offline mode, compression threshold 256 on both sides |
 | The bots and the synthetic servers | `meridian-bench`, the same archive, started by `systemd-run` on **cores 2-3**, in the loopback: the bots connect to `127.0.0.1:25565`, the synthetic server listens on `127.0.0.1:25701`. No world of the bots crosses the VPS's network card |
 | The real server | `horizon-server` of the Horizon Nightly `66f3981`, a service on cores 2-3 with a high processor weight (`CPUWeight=500`), loopback port 25566, offline, the forwarding secret of the proxy |

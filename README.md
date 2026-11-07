@@ -80,7 +80,7 @@ part of every figure, and each page says them first.
   [docs/MEMORY.md](docs/MEMORY.md)).
 - [docs/LOAD-VPS-250.md](docs/LOAD-VPS-250.md): 250 bots and a real client on a proxy on a VPS. One
   valid run of 250 bots, in 5 waves of 50, with one real client in the game, on a shared four-core
-  VPS in Warsaw where the proxy was held to two cores, against synthetic servers on the same
+  rented VPS where the proxy was held to two cores, against synthetic servers on the same
   machine. It says what this proxy cost there on 5 November 2026; it is not the proxy's limit, it
   was not repeated for the reference configuration, and the bots and the proxy shared the machine.
   What the real client saw is in [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md).
