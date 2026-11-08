@@ -832,12 +832,18 @@ capability, and a request without it is answered `-32601`, as if the method did 
   own requests their answers, and a slow order must not hold them. The reader takes a place among the
   extension's `max-running` and one token of its budget, and starts the order on a thread of its own,
   which writes the answer and gives its place back **before** it writes, so that an extension that
-  sends its next order when it reads the answer finds the place free. A handler that panics is
+  sends its next order when it reads the answer finds the place free. A write that blocks (an extension
+  that does not read its answers) holds its thread, not a place, for the write timeout: the threads
+  that are alive, running or waiting to write, are bounded to twice `max-running`, and an order that
+  would make one more is answered `-32002` like one that finds no place. A handler that panics is
   answered `-32603 the order failed`, and the connection goes on.
 - **Errors.** `-32602` for parameters that are not what the order takes (the message says what is
   wrong in a few words and never quotes what was sent); `-32001 over the budget of orders` when the
   budget is spent; `-32002 too many orders running` when `max-running` are running. The last two are in
-  the range JSON-RPC keeps for the errors of a server. Neither ran, and asking again later is fine. The
+  the range JSON-RPC keeps for the errors of a server. Neither ran, and asking again later is fine.
+  **A refused `permissions/invalidate` did not forget anything**: an extension that has just lowered
+  someone's rights must ask again until it is answered `{"ok": true}`, because the permission it
+  meant to take back is kept for at most `cache-seconds-max` otherwise. The
   budget is a token bucket per extension, kept while the proxy runs (a new connection does not refill
   it); `rate-per-second` tokens come back each second, up to `burst`.
 - **`rpc.discover`** of the proxy lists the orders the connection was granted the capability of, and
