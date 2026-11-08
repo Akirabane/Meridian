@@ -480,6 +480,28 @@ program whether a name is online (`tell` answers 1 or 0) and which server names 
 or an end of the connection (`may_have_run()`) the line may have been shown already: ask again only if showing it twice
 does no harm.
 
+### Moving players
+
+With `orders.move` (ask for it with `.wants("orders.move")`, and the operator grants it) your program can send players to
+another server, as the staff's `/send` does:
+
+```rust
+let started = proxy.send_player("Alex", "east")?;       // 1, or 0 if Alex is not online or is on `east` already
+let started = proxy.send_server("lobby", "east")?;      // the players of `lobby`
+let started = proxy.send_all("east")?;                  // every player
+```
+
+**The answer comes when the moves start**, with how many players the proxy started to move (those who were not on that
+server yet). They go on one after the other, each player is told, and how each one ended is in the proxy's log: until
+there are events (version 1.1), ask `proxy.find_player(...)` where a player is. A server the proxy does not have is refused
+(`OrderError::Refused`, `-32602`). **The order costs the proxy's budget the number of players it moves, at most the
+burst** (charged all at once): a `send_all` on a large network uses the whole burst, and one that the budget cannot pay is
+refused (`retry_later()`) and moves nobody. **A program sends one lot at a time**: while the players of one are being moved,
+another `send_*` is refused with `-32002` (`retry_later()`) and costs a token, so wait for the moves to end (ask `find_player`
+where they are). A server that takes no players now (drained, silent, or off transfers) is refused with `-32602`. Asking again after a timeout or an end of the connection only moves those who
+are not on the server yet, but look where the players are first. Like `orders.message`, `orders.move` also tells your
+program whether a name is online and which server names exist.
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told

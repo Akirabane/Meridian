@@ -1132,3 +1132,92 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
     let _ = east_thread.join();
     lobby_thread.join().unwrap().unwrap();
 }
+
+/// An extension sends a player with the plan the proxy makes for it, **for real**: the same switch as the console's `switch` and
+/// the staff's `/send` (here against a stand-in server and sidecars). A plan of a player to the server they are on moves nobody;
+/// two plans of the same player started one after the other make a single real move; and once the player is on `east` a plan
+/// finds nobody to move.
+#[test]
+fn an_extension_sends_a_player_for_real_with_the_plan_of_the_proxy_and_one_move_is_made() {
+    use crate::extension::actions::ProxyActions;
+    use crate::extension::{Actions, Paid, SendLot};
+    use meridian_extension::orders::{Target, Who};
+    let World {
+        proxy,
+        log,
+        mut player,
+        _source,
+        relay,
+        target,
+    } = world(Sidecars::default());
+    let actions = ProxyActions::new(&proxy.sessions, &proxy.config);
+    let alex = || Target::Player(Who::Name("Alex".into()));
+    // From and to the same server: nobody to move.
+    assert_eq!(actions.plan_send(&alex(), "lobby").unwrap().count(), 0);
+    // Two plans of the same player, made before either starts: each counts one.
+    let first = actions.plan_send(&alex(), "east").unwrap();
+    let second = actions.plan_send(&alex(), "east").unwrap();
+    assert_eq!((first.count(), second.count()), (1, 1));
+    // They start one right after the other: the answer of each is that a move started, and only one of them can be made.
+    // The place for a send is held by the thread that moves them: still held when `start` returns, let go when it is done.
+    let (lot, held) = SendLot::watched();
+    assert_eq!(first.start(Paid::for_tests(), lot), Ok(1));
+    assert!(
+        held.load(std::sync::atomic::Ordering::SeqCst),
+        "let go before the move was made"
+    );
+    assert_eq!(second.start(Paid::for_tests(), SendLot::free()), Ok(1));
+    // Alex ends on east.
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    while proxy
+        .sessions
+        .players()
+        .iter()
+        .any(|p| p.name == "Alex" && p.backend != "east")
+    {
+        assert!(
+            std::time::Instant::now() < until,
+            "Alex never reached east: {:?} {}",
+            log.lines(),
+            ended_report()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // What the player read: that they are on east, once, and that the other move could not be made (a switch of this player was already
+    // under way), if its thread got as far as telling them, in whichever order the two threads told it.
+    let (chat, live) = client_after_switch(&mut player);
+    assert_eq!(
+        chat.iter()
+            .filter(|line| *line == "You are now on east.")
+            .count(),
+        1,
+        "{chat:?}"
+    );
+    assert!(
+        chat.iter()
+            .filter(|line| *line != "You are now on east.")
+            .all(|line| line.starts_with("Could not move you to east.")),
+        "{chat:?}"
+    );
+    assert_eq!(live, effect(CLIENT_ID));
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    while held.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < until,
+            "the place for a send was never let go"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // One real move, not two: the source exported the player once.
+    let exports = log
+        .lines()
+        .iter()
+        .filter(|l| l.as_str() == "lobby export")
+        .count();
+    assert_eq!(exports, 1, "{:?}", log.lines());
+    // On east already: a plan finds nobody.
+    assert_eq!(actions.plan_send(&alex(), "east").unwrap().count(), 0);
+    attack(&mut player, TARGET_ID);
+    assert_eq!(target.join().unwrap().unwrap().attacked, CLIENT_ID);
+    relay.join().unwrap().unwrap();
+}

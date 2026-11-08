@@ -20,6 +20,8 @@ pub const COMMANDS: &str = "commands";
 pub const ORDERS_READ: &str = "orders.read";
 /// The capability of the orders that message: tell a player, or show a line to many (docs/EXTENSIONS.md, section 5).
 pub const ORDERS_MESSAGE: &str = "orders.message";
+/// The capability of the order that moves players to a server (docs/EXTENSIONS.md, section 5).
+pub const ORDERS_MOVE: &str = "orders.move";
 /// The capability that gives the players' addresses in what an extension is told (docs/EXTENSIONS.md, section 7).
 pub const ADDRESSES: &str = "addresses";
 

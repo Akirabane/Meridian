@@ -20,7 +20,7 @@ pub type Probe = dyn Fn(&str, Duration) -> Result<Duration, String> + Send + Syn
 pub struct Proxy {
     /// Shared with the evacuation of a backend that is going down, which runs on a
     /// thread of its own and reads the configuration in force when it starts.
-    config: Arc<RwLock<Arc<Config>>>,
+    pub(crate) config: Arc<RwLock<Arc<Config>>>,
     /// The file the configuration was read from, for `reload`.
     pub config_path: PathBuf,
     pub sessions: Arc<Sessions>,

@@ -2318,4 +2318,90 @@ mod orders {
         assert_eq!(late, OrderError::Timeout);
         assert!(late.may_have_run() && !late.retry_later());
     }
+
+    // ---- the order that moves ---------------------------------------------------------------------------
+
+    #[test]
+    fn players_are_sent_one_all_or_those_of_a_server_and_the_answer_is_how_many_started() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.send_player("Steve", "east"))
+        };
+        let (method, params) = serve_one(&mut proxy, |_, _| Ok(json!({"started": 1})));
+        assert_eq!(method, shapes::PLAYERS_SEND);
+        assert_eq!(params.unwrap(), json!({"to": "east", "player": "Steve"}));
+        assert_eq!(asked.join().unwrap(), Ok(1));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.send_all("east"))
+        };
+        let (_, params) = serve_one(&mut proxy, |_, _| Ok(json!({"started": 40})));
+        assert_eq!(params.unwrap(), json!({"to": "east", "all": true}));
+        assert_eq!(asked.join().unwrap(), Ok(40));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.send_server("lobby", "east"))
+        };
+        let (_, params) = serve_one(&mut proxy, |_, _| Ok(json!({"started": 0})));
+        assert_eq!(params.unwrap(), json!({"to": "east", "from": "lobby"}));
+        assert_eq!(asked.join().unwrap(), Ok(0));
+    }
+
+    #[test]
+    fn a_server_that_is_not_a_name_and_a_player_that_is_not_one_are_refused_before_anything_is_sent()
+     {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        assert!(matches!(handle.send_all(""), Err(OrderError::Invalid(_))));
+        assert!(matches!(
+            handle.send_all("bad\nname"),
+            Err(OrderError::Invalid(_))
+        ));
+        assert!(matches!(
+            handle.send_server("", "east"),
+            Err(OrderError::Invalid(_))
+        ));
+        assert!(matches!(
+            handle.send_player("", "east"),
+            Err(OrderError::Invalid(_))
+        ));
+        // Nothing was written: the next thing the stand-in proxy reads is the answer to its own request.
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 4}))).unwrap(),
+            json!({"k": 4})
+        );
+    }
+
+    #[test]
+    fn a_send_the_budget_cannot_pay_is_refused_and_can_be_asked_again() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.send_all("east"))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(
+                code::OVER_BUDGET,
+                "over the budget of orders",
+            ))
+        });
+        let refused = asked.join().unwrap().unwrap_err();
+        assert!(
+            refused.retry_later() && !refused.may_have_run(),
+            "{refused}"
+        );
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.send_server("nowhere", "east"))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(
+                code::INVALID_PARAMS,
+                "\"from\" is not a server of the proxy",
+            ))
+        });
+        assert!(
+            matches!(asked.join().unwrap(), Err(OrderError::Refused(e)) if e.code == code::INVALID_PARAMS)
+        );
+    }
 }

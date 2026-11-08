@@ -431,6 +431,96 @@ pub fn clean_text(text: &str) -> String {
         .collect()
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The order that moves (capability `orders.move`)
+
+/// The method that moves players to a server: one player, every player, or those of a server.
+pub const PLAYERS_SEND: &str = "meridian:players/send";
+
+/// `params` of [`PLAYERS_SEND`]: the server to send them to (`to`), and **exactly one** of who: `player` (a name in any
+/// case or a unique id), `all` (`true`: every player) or `from` (a server: those on it).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendParams {
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+}
+
+/// Whom [`PLAYERS_SEND`] moves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// One player.
+    Player(Who),
+    /// Every player online.
+    All,
+    /// The players on this server.
+    Server(String),
+}
+
+/// `result` of [`PLAYERS_SEND`]: how many players the proxy **started** to move, which are those who were not on the server
+/// already. The moves go on after the answer, one after the other; how each ended is in the proxy's log (and, in
+/// version 1.1, an event). `0` is not an error: nobody was there to move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Started {
+    pub started: usize,
+}
+
+/// A name of a server, as [`parse_send`] and [`parse_broadcast`] take it: 1 to [`MAX_SERVER`] characters, no control
+/// character. Whether the proxy has it is for the proxy to say.
+fn server_name(name: &str) -> bool {
+    let chars = name.chars().count();
+    chars > 0 && chars <= MAX_SERVER && !name.chars().any(char::is_control)
+}
+
+/// Reads the `params` of [`PLAYERS_SEND`]: whom to move, and where to. The error never quotes what was sent.
+pub fn parse_send(params: Option<&Value>) -> Result<(Target, String), String> {
+    const SHAPE: &str =
+        "params must be an object with \"to\" and one of \"player\", \"all\" (true) and \"from\"";
+    let params = params.ok_or("params are missing")?;
+    if !params.is_object() {
+        return Err(SHAPE.into());
+    }
+    let params: SendParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
+    if !server_name(&params.to) {
+        return Err("\"to\" is not a name of a server".into());
+    }
+    let target = match (params.player, params.all, params.from) {
+        (Some(player), None, None) => Target::Player(who_of(player)?),
+        (None, Some(true), None) => Target::All,
+        (None, Some(false), None) => return Err("\"all\" can only be true".into()),
+        (None, None, Some(from)) => {
+            if !server_name(&from) {
+                return Err("\"from\" is not a name of a server".into());
+            }
+            Target::Server(from)
+        }
+        (None, None, None) => return Err("give one of \"player\", \"all\" and \"from\"".into()),
+        _ => return Err("give only one of \"player\", \"all\" and \"from\"".into()),
+    };
+    Ok((target, params.to))
+}
+
+/// How `rpc.discover` of the proxy describes the order that moves.
+pub fn move_methods() -> Vec<(&'static str, DiscoverMethod)> {
+    vec![(
+        PLAYERS_SEND,
+        DiscoverMethod::with_params(
+            PLAYERS_SEND,
+            &[
+                ("to", true, json!({ "type": "string" })),
+                ("player", false, json!({ "type": "string" })),
+                ("all", false, json!({ "type": "boolean" })),
+                ("from", false, json!({ "type": "string" })),
+            ],
+        ),
+    )]
+}
+
 /// The longest name of a server [`parse_broadcast`] takes.
 pub const MAX_SERVER: usize = 64;
 
@@ -444,11 +534,12 @@ pub fn parse_broadcast(params: Option<&Value>) -> Result<(Option<String>, String
         return Err(SHAPE.into());
     }
     let params: BroadcastParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
-    if let Some(server) = &params.server {
-        let chars = server.chars().count();
-        if chars == 0 || chars > MAX_SERVER || server.chars().any(char::is_control) {
-            return Err("\"server\" is not a name of a server".into());
-        }
+    if params
+        .server
+        .as_deref()
+        .is_some_and(|server| !server_name(server))
+    {
+        return Err("\"server\" is not a name of a server".into());
     }
     check_text(&params.text)?;
     Ok((params.server, params.text))
@@ -1128,5 +1219,76 @@ mod tests {
         let methods = message_methods();
         let names: Vec<_> = methods.iter().map(|(_, m)| m.name.as_str()).collect();
         assert_eq!(names, [PLAYERS_TELL, BROADCAST]);
+    }
+
+    // ---- the order that moves ------------------------------------------------------------------------
+
+    #[test]
+    fn whom_to_send_and_where_are_read_with_exactly_one_of_player_all_and_from() {
+        let send = |v: Value| parse_send(Some(&v));
+        assert_eq!(
+            send(json!({"to": "east", "player": "Steve"})),
+            Ok((Target::Player(Who::Name("Steve".into())), "east".into()))
+        );
+        assert_eq!(
+            send(json!({"to": "east", "player": ALEX.to_ascii_uppercase()})),
+            Ok((Target::Player(Who::Id(ALEX.into())), "east".into()))
+        );
+        assert_eq!(
+            send(json!({"to": "east", "all": true})),
+            Ok((Target::All, "east".into()))
+        );
+        assert_eq!(
+            send(json!({"to": "east", "from": "lobby"})),
+            Ok((Target::Server("lobby".into()), "east".into()))
+        );
+        let secret = "ZZZ-must-not-come-back";
+        for bad in [
+            json!({}),
+            json!({"to": "east"}),
+            json!({"player": "Steve"}),
+            json!({"to": "east", "all": false}),
+            json!({"to": "east", "player": "Steve", "all": true}),
+            json!({"to": "east", "player": "Steve", "from": "lobby"}),
+            json!({"to": "east", "all": true, "from": "lobby"}),
+            json!({"to": "", "all": true}),
+            json!({"to": "x".repeat(MAX_SERVER + 1), "all": true}),
+            json!({"to": format!("{secret}\n"), "all": true}),
+            json!({"to": "east", "from": format!("{secret}\n")}),
+            json!({"to": "east", "from": ""}),
+            json!({"to": "east", "player": ""}),
+            json!({"to": "east", "player": format!("{secret}\n")}),
+            json!({"to": "east", "all": "yes"}),
+            json!({"to": 7, "all": true}),
+            json!({"to": "east", "all": true, "more": 1}),
+            json!(["east", "all"]),
+            json!("all"),
+            json!(null),
+        ] {
+            let why = send(bad.clone()).unwrap_err();
+            assert!(!why.contains("ZZZ") && !why.is_empty(), "{bad}: {why}");
+        }
+        assert!(parse_send(None).is_err());
+    }
+
+    #[test]
+    fn what_the_sdk_writes_for_the_order_that_moves_is_what_the_proxy_reads() {
+        let written = serde_json::to_value(SendParams {
+            to: "east".into(),
+            player: Some("Steve".into()),
+            ..SendParams::default()
+        })
+        .unwrap();
+        // The keys that are not given are left out, not written as null.
+        assert_eq!(written, json!({"to": "east", "player": "Steve"}));
+        assert!(parse_send(Some(&written)).is_ok());
+        assert_eq!(
+            serde_json::to_value(Started { started: 4 }).unwrap(),
+            json!({"started": 4})
+        );
+        let methods = move_methods();
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].0, PLAYERS_SEND);
+        assert!(methods[0].1.params[0].required && !methods[0].1.params[1].required);
     }
 }

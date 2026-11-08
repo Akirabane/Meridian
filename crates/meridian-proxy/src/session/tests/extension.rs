@@ -3185,9 +3185,9 @@ mod reading {
 
     // ---- the orders that message ----------------------------------------------------------------------
 
-    use crate::extension::Actions;
     use crate::extension::actions::ProxyActions;
-    use meridian_extension::orders::Who;
+    use crate::extension::{Actions, Paid, Refusal, SendLot};
+    use meridian_extension::orders::{Target, Who};
 
     fn actions_of(sessions: &Arc<Sessions>, config: &Config) -> ProxyActions {
         ProxyActions::new(sessions, &Arc::new(RwLock::new(Arc::new(config.clone()))))
@@ -3288,5 +3288,161 @@ mod reading {
             proxy.tell("Alex", "two\nlines"),
             Err(meridian_extension::serve::OrderError::Invalid(_))
         ));
+    }
+
+    // ---- the order that moves ---------------------------------------------------------------------------
+
+    #[test]
+    fn the_actions_of_the_proxy_plan_a_move_of_those_who_are_not_on_the_server_yet() {
+        let sessions = Arc::new(Sessions::default());
+        // No server of the balancer: a server the balancer knows only takes players it has a recent report of.
+        let config = routed();
+        let actions = actions_of(&sessions, &config);
+        // No one online: a plan with nobody, which starts nothing.
+        let plan = actions.plan_send(&Target::All, "east").unwrap();
+        assert_eq!(plan.count(), 0);
+        assert_eq!(plan.start(Paid::for_tests(), SendLot::free()), Ok(0));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let _notch = connected(
+            &sessions,
+            "Notch",
+            Identity::Verified(offline_uuid("Notch").to_be_bytes()),
+        );
+        // Both are on `lobby`: all of them would move to `east`, none to `lobby`.
+        assert_eq!(actions.plan_send(&Target::All, "east").unwrap().count(), 2);
+        assert_eq!(actions.plan_send(&Target::All, "lobby").unwrap().count(), 0);
+        assert_eq!(
+            actions
+                .plan_send(&Target::Server("lobby".into()), "east")
+                .unwrap()
+                .count(),
+            2
+        );
+        assert_eq!(
+            actions
+                .plan_send(&Target::Server("west".into()), "east")
+                .unwrap()
+                .count(),
+            0
+        );
+        // One player, by name in any case or by id; one who is not there is nobody.
+        assert_eq!(
+            actions
+                .plan_send(&Target::Player(Who::Name("ALEX".into())), "east")
+                .unwrap()
+                .count(),
+            1
+        );
+        let notch = hyphenated(offline_uuid("Notch").to_be_bytes()).to_ascii_lowercase();
+        assert_eq!(
+            actions
+                .plan_send(&Target::Player(Who::Id(notch)), "east")
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            actions
+                .plan_send(&Target::Player(Who::Name("Nobody".into())), "east")
+                .unwrap()
+                .count(),
+            0
+        );
+        // A server the proxy does not have, as destination or as source, is refused.
+        assert_eq!(
+            actions.plan_send(&Target::All, "nowhere").err(),
+            Some(Refusal::UnknownDestination)
+        );
+        assert_eq!(
+            actions
+                .plan_send(&Target::Server("nowhere".into()), "east")
+                .err(),
+            Some(Refusal::UnknownSource)
+        );
+    }
+
+    #[test]
+    fn an_sdk_asks_for_a_move_over_the_real_connection_and_is_refused_a_server_the_proxy_does_not_have()
+     {
+        let folder = Folder::new();
+        let running = Sdk::new("mover", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .wants("orders.move")
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let config = Config {
+            extensions: vec![extension_config(
+                running.local_addr().to_string(),
+                folder.token(),
+                &["orders.move"],
+                OnError::Default,
+                1000,
+            )],
+            ..routed()
+        };
+        let sessions = Arc::new(sessions_for(&config));
+        sessions
+            .extensions
+            .serve_actions(Arc::new(actions_of(&sessions, &config)));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let proxy = running.proxy();
+        // Nobody to move (Alex is on `lobby` already, and nobody is called Nobody): `0`, and no move is started.
+        assert_eq!(proxy.send_all("lobby"), Ok(0));
+        assert_eq!(proxy.send_player("Nobody", "east"), Ok(0));
+        assert_eq!(proxy.send_server("west", "east"), Ok(0));
+        for refused in [
+            proxy.send_all("nowhere"),
+            proxy.send_server("nowhere", "east"),
+        ] {
+            let refused = refused.unwrap_err();
+            assert!(
+                matches!(&refused, meridian_extension::serve::OrderError::Refused(e) if e.code == -32602),
+                "{refused}"
+            );
+        }
+    }
+
+    /// A server the balancer drained takes no players: a plan to it is refused, whoever is to be moved.
+    #[test]
+    fn a_plan_to_a_server_that_takes_no_players_is_refused() {
+        let sessions = Arc::new(Sessions::default());
+        let config = Config {
+            balanced: vec![
+                BalancedServer {
+                    backend: "lobby".into(),
+                    role: Role::Lobby,
+                    soft_cap: 40,
+                    hard_cap: 50,
+                },
+                BalancedServer {
+                    backend: "east".into(),
+                    role: Role::Game,
+                    soft_cap: 20,
+                    hard_cap: 24,
+                },
+            ],
+            balancing: Balancing {
+                enabled: true,
+                ..Balancing::default()
+            },
+            ..routed()
+        };
+        let actions = actions_of(&sessions, &config);
+        // `east` is offered while nothing says otherwise (a server that never reported is not one that stopped reporting)...
+        assert!(actions.plan_send(&Target::All, "east").is_ok());
+        // ...and drained, it takes no player.
+        assert!(sessions.balancer.drain("east"));
+        assert_eq!(
+            actions
+                .plan_send(&Target::Player(Who::Name("Alex".into())), "east")
+                .err(),
+            Some(Refusal::DestinationNotTakingPlayers)
+        );
+        // A server that has no role is not the balancer's: it is taken, and so is the one whose destination is unknown refused first.
+        assert!(actions.plan_send(&Target::All, "west").is_ok());
+        assert_eq!(
+            actions.plan_send(&Target::All, "nowhere").err(),
+            Some(Refusal::UnknownDestination)
+        );
     }
 }

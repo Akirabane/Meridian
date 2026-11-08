@@ -13,13 +13,13 @@
 //! Counted in `meridian_extension_orders_total{extension,method,outcome}`; a method that is not in the table
 //! is counted as `unknown`, never under the name the extension gave (a label an extension could make up).
 
-use super::link::{Link, OrderPlace};
+use super::link::{Link, OrderPlace, SendLot};
 use crate::log::debug;
-use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_READ};
-use meridian_extension::orders::Told;
+use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MOVE, ORDERS_READ};
 use meridian_extension::orders::{
     self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
 };
+use meridian_extension::orders::{Started, Target, Told};
 use meridian_extension::wire::{self, Discover, DiscoverMethod, Id, RpcError, code};
 use meridian_websocket::Writer;
 use serde_json::Value;
@@ -53,6 +53,47 @@ pub trait Actions: Send + Sync {
     fn audience(&self, server: Option<&str>) -> Result<usize, String>;
     /// Shows `text` to them, as `/alert` does, and tells how many were told.
     fn broadcast(&self, server: Option<&str>, text: &str) -> Result<usize, String>;
+    /// Plans sending `target` to the server `to`: nobody is moved until the plan is started.
+    fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal>;
+}
+
+/// Why a move could not be planned or started. The words the extension reads for each are fixed (they never quote what it
+/// sent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The server to send the players to is not one of the proxy's.
+    UnknownDestination,
+    /// The server whose players are to be sent is not one of the proxy's.
+    UnknownSource,
+    /// The proxy could not start the moves (no thread).
+    CannotStart,
+    /// The server to send the players to takes no players now: it is draining, it has not reported lately, or it does not accept
+    /// transfers. Sending them would tell each player that they could not be moved.
+    DestinationNotTakingPlayers,
+}
+
+/// The proof that the budget paid for an order: only [`Ctx::charge`] makes one, and [`MovePlan::start`] asks for it, so that a
+/// plan cannot be started without having been paid.
+#[derive(Debug)]
+pub struct Paid(());
+
+#[cfg(test)]
+impl Paid {
+    /// A payment for the tests of a plan that is started on its own.
+    pub(crate) fn for_tests() -> Self {
+        Self(())
+    }
+}
+
+/// Players to be moved, planned and not started: how many there are tells the order what it costs, and it is started only
+/// once the budget has paid.
+pub trait MovePlan: Send {
+    /// How many players would be moved: those who are not on the destination already.
+    fn count(&self) -> usize;
+    /// Starts moving them, one after the other, on a thread of its own, and returns at once with how many it started. It asks
+    /// for the proof that the budget paid ([`Paid`]) and for the extension's place for a send (`lot`), which the thread holds
+    /// until it has moved them all.
+    fn start(self: Box<Self>, paid: Paid, lot: SendLot) -> Result<usize, Refusal>;
 }
 
 /// What the orders share with the rest of the proxy.
@@ -108,11 +149,11 @@ impl Ctx<'_> {
     /// fail. An order that reaches more than the burst holds costs the whole burst, so that it can run at all; one that the
     /// budget cannot pay is refused here with the code of a spent budget (and costs one token), **before anyone is
     /// reached**.
-    fn charge(&self, reached: usize) -> Result<(), RpcError> {
+    fn charge(&self, reached: usize) -> Result<Paid, RpcError> {
         let burst = self.link.settings.order_burst.max(1);
         let total = u32::try_from(reached).unwrap_or(u32::MAX).clamp(1, burst);
         if self.link.charge_order(total) {
-            Ok(())
+            Ok(Paid(()))
         } else {
             Err(RpcError::new(
                 code::OVER_BUDGET,
@@ -208,6 +249,14 @@ const BROADCAST: Order = Order {
     counted: true,
 };
 
+const PLAYERS_SEND: Order = Order {
+    method: orders::PLAYERS_SEND,
+    capability: ORDERS_MOVE,
+    run: players_send,
+    describe: || orders::move_methods().swap_remove(0).1,
+    counted: true,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
 pub(super) const ORDERS: &[Order] = &[
@@ -218,6 +267,7 @@ pub(super) const ORDERS: &[Order] = &[
     QUEUE_LIST,
     PLAYERS_TELL,
     BROADCAST,
+    PLAYERS_SEND,
 ];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
@@ -231,6 +281,7 @@ pub(super) const ORDERS: &[Order] = &[
     QUEUE_LIST,
     PLAYERS_TELL,
     BROADCAST,
+    PLAYERS_SEND,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -430,6 +481,37 @@ fn broadcast(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     done(serde_json::to_value(Told { told }))
 }
 
+/// `players/send`: moves one player, every player or those of a server to a server. It answers when the moves **start**, with
+/// how many; they go on one after the other on a thread of their own. It costs the budget the number of players it moves, and
+/// at most the burst, and it is refused for want of budget before anyone is moved.
+fn players_send(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let (target, to) = orders::parse_send(params).map_err(invalid)?;
+    // One send at a time for an extension: while a lot is being moved, another is refused, and costs one token.
+    let Some(lot) = ctx.link.send_lot() else {
+        let _ = ctx.link.charge_order(1);
+        return Err(RpcError::new(
+            code::TOO_MANY_RUNNING,
+            "a send is already running",
+        ));
+    };
+    let refusal = |why: Refusal| match why {
+        Refusal::DestinationNotTakingPlayers => {
+            invalid("\"to\" is a server that takes no players now".into())
+        }
+        Refusal::UnknownDestination => invalid("\"to\" is not a server of the proxy".into()),
+        Refusal::UnknownSource => invalid("\"from\" is not a server of the proxy".into()),
+        Refusal::CannotStart => RpcError::new(code::INTERNAL_ERROR, "cannot move the players now"),
+    };
+    let plan = ctx.actions()?.plan_send(&target, &to).map_err(refusal)?;
+    let paid = ctx.charge(plan.count())?;
+    let started = plan.start(paid, lot).map_err(refusal)?;
+    crate::log::info!(
+        "extension \"{}\" sends {started} player(s) to {to}",
+        ctx.link.name()
+    );
+    done(serde_json::to_value(Started { started }))
+}
+
 /// `queue/list`: whether the queue is on, and who waits.
 fn queue_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     orders::parse_no_params(params).map_err(invalid)?;
@@ -548,6 +630,8 @@ fn run(
                 code::INVALID_PARAMS => Outcome::Invalid,
                 // An order that costs by the players it reaches can find the budget too low once it knows how many.
                 code::OVER_BUDGET => Outcome::OverBudget,
+                // An order of which only one runs at a time, and another was running.
+                code::TOO_MANY_RUNNING => Outcome::Busy,
                 _ => Outcome::Failed,
             };
             (outcome, wire::error(Some(id), &error))
