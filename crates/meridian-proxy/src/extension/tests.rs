@@ -2345,8 +2345,9 @@ mod the_orders {
 
     // ---- the orders that message ----------------------------------------------------------------------
 
+    use crate::extension::link::SendLot;
     use crate::extension::orders::Actions;
-    use crate::extension::orders::{MovePlan, Refusal};
+    use crate::extension::orders::{MovePlan, Paid, Refusal};
     use meridian_extension::orders::{Started, Target, Told, Who};
     use std::sync::Mutex as StdMutex;
 
@@ -2359,6 +2360,10 @@ mod the_orders {
         started: StdMutex<Vec<(Target, String)>>,
         /// Who was kicked, and the reason they were given.
         kicked: StdMutex<Vec<(Who, String)>>,
+        /// Whether the plans that are started keep their place for a send, as a thread that is still moving players does.
+        hold_lots: AtomicBool,
+        /// The places for a send that the started plans hold.
+        lots: StdMutex<Vec<SendLot>>,
         everyone: AtomicUsize,
     }
 
@@ -2374,8 +2379,11 @@ mod the_orders {
             self.count
         }
 
-        fn start(self: Box<Self>) -> Result<usize, Refusal> {
+        fn start(self: Box<Self>, _paid: Paid, lot: SendLot) -> Result<usize, Refusal> {
             self.log.started.lock().unwrap().push(self.entry.clone());
+            if self.log.hold_lots.load(Ordering::SeqCst) {
+                self.log.lots.lock().unwrap().push(lot);
+            }
             Ok(self.count)
         }
     }
@@ -2397,12 +2405,19 @@ mod the_orders {
                 cast: StdMutex::new(Vec::new()),
                 started: StdMutex::new(Vec::new()),
                 kicked: StdMutex::new(Vec::new()),
+                hold_lots: AtomicBool::new(false),
+                lots: StdMutex::new(Vec::new()),
                 everyone: AtomicUsize::new(everyone),
             })
         }
 
         fn kicked(&self) -> Vec<(Who, String)> {
             self.kicked.lock().unwrap().clone()
+        }
+
+        /// The moves end: the places for a send are let go.
+        fn finish_the_moves(&self) {
+            self.lots.lock().unwrap().clear();
         }
 
         fn started(&self) -> Vec<(Target, String)> {
@@ -2436,6 +2451,9 @@ mod the_orders {
         fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal> {
             if to == "nowhere" {
                 return Err(Refusal::UnknownDestination);
+            }
+            if to == "drained" {
+                return Err(Refusal::DestinationNotTakingPlayers);
             }
             let count = match target {
                 Target::Server(from) if from == "nowhere" => return Err(Refusal::UnknownSource),
@@ -3128,5 +3146,65 @@ mod the_orders {
             (-32603, Some("not available"))
         );
         assert_eq!(link.stats().orders(shapes::PLAYERS_KICK, Ended::Failed), 1);
+    }
+
+    /// An extension sends one lot at a time: while the players of one are being moved, another is refused with -32002 and a fixed
+    /// text, and costs one token; when the moves end, the next is taken.
+    #[test]
+    fn a_second_send_while_one_is_running_is_refused_and_costs_a_token_and_the_next_one_is_taken_when_it_ends()
+     {
+        let acting = Acting::new(1);
+        acting.hold_lots.store(true, Ordering::SeqCst);
+        let (fake, _registry, link, _folder) = acting_with(&["orders.move"], &acting, |settings| {
+            settings.order_burst = 3;
+            settings.order_rate = 1;
+        });
+        let send = r#"{"to":"east","player":"Alex"}"#;
+        order(&fake, &json!(8600), shapes::PLAYERS_SEND, send);
+        assert_eq!(started_of(&answer(&fake, &json!(8600))), 1);
+        // The moves of the first are still going: the second is refused, in fixed words.
+        order(&fake, &json!(8601), shapes::PLAYERS_SEND, send);
+        let busy = answer(&fake, &json!(8601));
+        assert_eq!(code_of(&busy), -32002, "{busy}");
+        assert_eq!(busy["error"]["message"], "a send is already running");
+        assert_eq!(link.stats().orders(shapes::PLAYERS_SEND, Ended::Busy), 1);
+        assert_eq!(acting.started().len(), 1, "the refused one moved nobody");
+        // The moves end. The third is taken (the one that was refused cost a token: 3 - 1 - 1 = 1 is left, and it is enough).
+        acting.finish_the_moves();
+        order(&fake, &json!(8602), shapes::PLAYERS_SEND, send);
+        assert_eq!(started_of(&answer(&fake, &json!(8602))), 1);
+        // The budget is spent: one for each of the three. The next order finds none at the door.
+        order(&fake, &json!(8603), shapes::PLAYERS_SEND, send);
+        assert_eq!(code_of(&answer(&fake, &json!(8603))), -32001);
+    }
+
+    /// A server that takes no players now is refused when the send is planned, with its own words: a `send all` to it would tell
+    /// each player that they could not be moved.
+    #[test]
+    fn a_server_that_takes_no_players_is_refused_at_once_with_fixed_words() {
+        let acting = Acting::new(5);
+        let (fake, _registry, link, _folder) = acting_with(&["orders.move"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(8700),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"drained","all":true}"#,
+        );
+        let reply = answer(&fake, &json!(8700));
+        assert_eq!(code_of(&reply), -32602, "{reply}");
+        assert_eq!(
+            reply["error"]["message"],
+            "\"to\" is a server that takes no players now"
+        );
+        assert!(acting.started().is_empty());
+        assert_eq!(link.stats().orders(shapes::PLAYERS_SEND, Ended::Invalid), 1);
+        // And the place for a send was not kept by the refusal: the next send, to a server that takes them, is taken.
+        order(
+            &fake,
+            &json!(8701),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","all":true}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8701))), 5);
     }
 }

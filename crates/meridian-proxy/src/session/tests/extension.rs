@@ -3186,7 +3186,7 @@ mod reading {
     // ---- the orders that message ----------------------------------------------------------------------
 
     use crate::extension::actions::ProxyActions;
-    use crate::extension::{Actions, Refusal};
+    use crate::extension::{Actions, Paid, Refusal, SendLot};
     use meridian_extension::orders::{Target, Who};
 
     fn actions_of(sessions: &Arc<Sessions>, config: &Config) -> ProxyActions {
@@ -3295,12 +3295,13 @@ mod reading {
     #[test]
     fn the_actions_of_the_proxy_plan_a_move_of_those_who_are_not_on_the_server_yet() {
         let sessions = Arc::new(Sessions::default());
-        let config = balanced();
+        // No server of the balancer: a server the balancer knows only takes players it has a recent report of.
+        let config = routed();
         let actions = actions_of(&sessions, &config);
         // No one online: a plan with nobody, which starts nothing.
         let plan = actions.plan_send(&Target::All, "east").unwrap();
         assert_eq!(plan.count(), 0);
-        assert_eq!(plan.start(), Ok(0));
+        assert_eq!(plan.start(Paid::for_tests(), SendLot::free()), Ok(0));
         let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
         let _notch = connected(
             &sessions,
@@ -3467,5 +3468,49 @@ mod reading {
             proxy.kick("Alex", Some("two\nlines")),
             Err(meridian_extension::serve::OrderError::Invalid(_))
         ));
+    }
+
+    /// A server the balancer drained takes no players: a plan to it is refused, whoever is to be moved.
+    #[test]
+    fn a_plan_to_a_server_that_takes_no_players_is_refused() {
+        let sessions = Arc::new(Sessions::default());
+        let config = Config {
+            balanced: vec![
+                BalancedServer {
+                    backend: "lobby".into(),
+                    role: Role::Lobby,
+                    soft_cap: 40,
+                    hard_cap: 50,
+                },
+                BalancedServer {
+                    backend: "east".into(),
+                    role: Role::Game,
+                    soft_cap: 20,
+                    hard_cap: 24,
+                },
+            ],
+            balancing: Balancing {
+                enabled: true,
+                ..Balancing::default()
+            },
+            ..routed()
+        };
+        let actions = actions_of(&sessions, &config);
+        // `east` is offered while nothing says otherwise (a server that never reported is not one that stopped reporting)...
+        assert!(actions.plan_send(&Target::All, "east").is_ok());
+        // ...and drained, it takes no player.
+        assert!(sessions.balancer.drain("east"));
+        assert_eq!(
+            actions
+                .plan_send(&Target::Player(Who::Name("Alex".into())), "east")
+                .err(),
+            Some(Refusal::DestinationNotTakingPlayers)
+        );
+        // A server that has no role is not the balancer's: it is taken, and so is the one whose destination is unknown refused first.
+        assert!(actions.plan_send(&Target::All, "west").is_ok());
+        assert_eq!(
+            actions.plan_send(&Target::All, "nowhere").err(),
+            Some(Refusal::UnknownDestination)
+        );
     }
 }
