@@ -60,21 +60,31 @@ pub(crate) struct Claim {
     pub command: String,
 }
 
-/// The words the extensions hold, resolved once for each hello and not for each command a player types
-/// (`Registry::claim`).
+/// The words the extensions hold, resolved when something they depend on changes and not for each command a
+/// player types (`Registry::claim`).
 pub(crate) struct Resolved {
     /// What it was resolved for: the extensions that are enabled and granted `commands`, in the order of
-    /// the configuration, with how many hellos each has been through (`None` for one that is not running),
-    /// and which of the proxy's commands are enabled.
-    stamp: (Vec<(String, Option<u64>)>, u8),
+    /// the configuration, each with **the link it was resolved with** and how many hellos that link has been
+    /// through (`None` for one that is not running), and which of the proxy's commands are enabled. The link
+    /// itself, not only its count of hellos: a reload that changes an extension's connection settings
+    /// replaces its link with a new one whose count starts again, and a count alone would take the new
+    /// link's first hello for the old link's. The stamp holds the link, so that none can be freed and its
+    /// address given to another.
+    stamp: (Vec<Seen>, u8),
     words: HashMap<String, Claim>,
 }
 
+/// An extension the words were resolved for: its name, and its link with the number of hellos it had been
+/// through, if it was running.
+type Seen = (String, Option<(Arc<Link>, u64)>);
+
 impl Registry {
-    /// The command `word` stands for, if it is an extension's (see the module). The words are resolved when
-    /// an extension says hello, or when the configuration changes which extensions have commands or which
-    /// commands of the proxy are enabled, and are only looked up for the commands a player types after
-    /// that: most of them are the server's, and cost nothing but the comparison of what was resolved for.
+    /// The command `word` stands for, if it is an extension's (see the module). The words are resolved again
+    /// when an extension says hello, when a reload replaces its link (its connection settings changed), when
+    /// the order of the extensions or which of them have `commands` changes, and when the proxy's commands
+    /// that are enabled change; for every command a player types after that they are only looked up: most
+    /// are the server's, and cost the comparison of what the words were resolved for. The cache is the
+    /// registry's, and its lock is taken for each command typed: briefly, and on purpose.
     pub(crate) fn claim(&self, config: &Config, word: &str) -> Option<Claim> {
         let granted = || config.enabled_extensions().filter(|e| e.grants(COMMANDS));
         granted().next()?;
@@ -84,8 +94,15 @@ impl Registry {
             let (names, built_in) = &resolved.stamp;
             *built_in == mask
                 && names.len() == granted().count()
-                && granted().zip(names).all(|(e, (name, epoch))| {
-                    e.name == *name && self.link(&e.name).map(|l| l.epoch()) == *epoch
+                && granted().zip(names).all(|(e, (name, was))| {
+                    e.name == *name
+                        && match (self.link(&e.name), was) {
+                            (Some(link), Some((then, epoch))) => {
+                                Arc::ptr_eq(&link, then) && link.epoch() == *epoch
+                            }
+                            (None, None) => true,
+                            _ => false,
+                        }
                 })
         });
         if !current {
@@ -102,7 +119,7 @@ impl Registry {
             let link = self.link(&extension.name);
             names.push((
                 extension.name.clone(),
-                link.as_ref().map(|link| link.epoch()),
+                link.as_ref().map(|link| (Arc::clone(link), link.epoch())),
             ));
             let Some(link) = link else {
                 continue;

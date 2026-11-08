@@ -237,6 +237,8 @@ pub enum ConfigError {
         extension: String,
         setting: &'static str,
     },
+    /// An extension granted `commands` has too few places for its commands and its decisions.
+    CommandsNeedPlaces { extension: String },
     /// A number of an extension is above the most it may be.
     ExtensionSettingAbove {
         extension: String,
@@ -623,6 +625,10 @@ impl fmt::Display for ConfigError {
                     "extension \"{extension}\": {setting} must be more than 0"
                 )
             }
+            ConfigError::CommandsNeedPlaces { extension } => write!(
+                f,
+                "extension \"{extension}\": max-in-flight must be at least 2 when \"commands\" is granted: its commands use at most half of its places, so that its decisions keep one"
+            ),
             ConfigError::ExtensionSettingAbove {
                 extension,
                 setting,

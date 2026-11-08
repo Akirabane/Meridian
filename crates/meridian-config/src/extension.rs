@@ -449,6 +449,13 @@ pub(crate) fn validate(extensions: &[Extension]) -> Result<(), ConfigError> {
         zero("decide-command timeout-ms", e.decide_command.timeout_ms)?;
         zero("decide-server timeout-ms", e.decide_server.timeout_ms)?;
         zero("commands timeout-ms", e.own_commands.timeout_ms)?;
+        // The commands of an extension use at most half of its places (`max-in-flight`): with one place the
+        // commands would take it and every decision would find none.
+        if e.grants(COMMANDS) && e.max_in_flight < 2 {
+            return Err(ConfigError::CommandsNeedPlaces {
+                extension: e.name.clone(),
+            });
+        }
         if e.own_commands.timeout_ms > MAX_OWN_COMMANDS_TIMEOUT_MS {
             return Err(ConfigError::ExtensionSettingAbove {
                 extension: e.name.clone(),

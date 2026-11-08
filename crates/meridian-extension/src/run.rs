@@ -92,20 +92,34 @@ impl Lines {
 
 /// Whether a character may not be in a line: a control character; `§`, which the client reads as a
 /// formatting code (colour, bold, flicker) in any text; the marks that set or change the direction of the
-/// text (U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) and the separators of lines and paragraphs
-/// (U+2028, U+2029), which could make a line read differently than it is; and the characters of no width
-/// (U+200B to U+200D, U+2060 to U+2064, U+FEFF), which hide text. **This is a prudent default**: an extension
-/// that is meant to colour its lines would need a field of its own, added later, that the operator allows.
+/// text (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069, U+206A to U+206F) and the separators of
+/// lines and paragraphs (U+2028, U+2029), which could make a line read differently than it is; and the
+/// characters that show nothing or change nothing a reader sees, which hide text or stand in for a space:
+/// the soft hyphen (U+00AD), the combining grapheme joiner (U+034F), the Hangul fillers (U+115F, U+1160,
+/// U+3164, U+FFA0), the characters of no width (U+200B to U+200D, U+2060 to U+2064, U+FEFF), the variation
+/// selectors (U+FE00 to U+FE0F), the interlinear annotation marks (U+FFF9 to U+FFFB) and the tag characters
+/// (U+E0000 to U+E007F). **This is a prudent default**: an extension that is meant to colour its lines, or
+/// to write an emoji that a variation selector turns into its picture, would need a field of its own, added
+/// later, that the operator allows.
 pub fn is_refused(c: char) -> bool {
     c.is_control()
         || c == '\u{a7}'
         || matches!(
             c,
-            '\u{200b}'..='\u{200f}'
+            '\u{ad}'
+                | '\u{34f}'
+                | '\u{61c}'
+                | '\u{115f}'
+                | '\u{1160}'
+                | '\u{200b}'..='\u{200f}'
                 | '\u{2028}'..='\u{202e}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
                 | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{e0000}'..='\u{e007f}'
         )
 }
 
@@ -246,6 +260,8 @@ mod tests {
             "\u{a7}4Server\u{a7}r says \u{a7}kxx",
             "x\u{202e}evil\u{2066}y\u{200f}z",
             "a\u{200b}b\u{200c}c\u{200d}d\u{2060}e\u{feff}f\u{2028}g\u{2029}h",
+            "a\u{ad}b\u{34f}c\u{61c}d\u{115f}e\u{1160}f\u{3164}g\u{ffa0}h",
+            "a\u{206a}b\u{206f}c\u{fe0f}d\u{fe00}e\u{fff9}f\u{fffb}g\u{e0041}h\u{e007f}i",
             "caf\u{e9} \u{2014} \u{65e5}\u{672c}",
         ]);
         assert_eq!(
@@ -254,6 +270,8 @@ mod tests {
                 "4Serverr says kxx",
                 "xevilyz",
                 "abcdefgh",
+                "abcdefgh",
+                "abcdefghi",
                 "caf\u{e9} \u{2014} \u{65e5}\u{672c}"
             ]
         );
@@ -270,6 +288,22 @@ mod tests {
             "x\u{feff}y",
             "x\u{2028}y",
             "x\u{85}y",
+            "x\u{ad}y",
+            "x\u{34f}y",
+            "x\u{61c}y",
+            "x\u{115f}y",
+            "x\u{1160}y",
+            "x\u{3164}y",
+            "x\u{ffa0}y",
+            "x\u{206a}y",
+            "x\u{206f}y",
+            "x\u{fe0f}y",
+            "x\u{fe00}y",
+            "x\u{fff9}y",
+            "x\u{fffb}y",
+            "x\u{e0041}y",
+            "x\u{e0000}y",
+            "x\u{e007f}y",
             "x\u{7f}y",
         ] {
             assert!(check_line(bad).is_err(), "{bad:?} was shown");

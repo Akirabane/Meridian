@@ -319,8 +319,11 @@ token-file = "extensions/parties.token"
 grant = ["commands"]
 
 [extension.commands]
-timeout-ms = 2000        # how long the lines may take
+timeout-ms = 2000        # how long the lines may take, 1 to 10000
 ```
+
+An extension granted `commands` needs `max-in-flight` of at least 2: its commands use at most half of its
+places, so that its login and permission decisions keep one.
 
 ```rust
 let extension = Extension::new("parties", env!("CARGO_PKG_VERSION"), token)
@@ -345,8 +348,9 @@ let extension = Extension::new("parties", env!("CARGO_PKG_VERSION"), token)
 - **The answer** is at most 10 lines of 256 characters, plain text: `Lines::new` cuts and cleans what the
   proxy would refuse. It is never read as a text component, so a line cannot hold a click event. **A line has
   no `§` (the client reads it as a colour or a flicker), no control character, and no mark that reverses or
-  hides text (direction marks, characters of no width): `Lines::new` drops them, and the proxy refuses an
-  answer that has one.** This is a prudent default: colours would need a field of their own, that the
+  hides text (direction marks, characters of no width, invisible fillers, variation selectors, tag
+  characters; `run::is_refused` lists them): `Lines::new` drops them, and the proxy refuses an answer that
+  has one.** This is a prudent default: colours would need a field of their own, that the
   operator allows, added later. A command with nothing to say answers `Lines::none()`.
 - **The permission** is the node `ext.<extension>.<command>` (the extension's name in the configuration, in
   lower case), **open to everyone** unless `permissions.toml` closes it (`deny = ["ext.parties.party"]`).

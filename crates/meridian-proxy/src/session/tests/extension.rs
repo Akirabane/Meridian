@@ -2585,4 +2585,157 @@ groups = ["staff"]
         assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
         assert_eq!(told_by_now(&told, 2), ["4Serverr says hi", "xevily"]);
     }
+
+    /// The extension that holds `word` in `config`, from the words the registry resolved.
+    fn holder(
+        registry: &crate::extension::Registry,
+        config: &Config,
+        word: &str,
+    ) -> Option<String> {
+        registry.claim(config, word).map(|claim| claim.extension)
+    }
+
+    #[test]
+    fn the_words_are_resolved_again_when_what_they_depend_on_changes() {
+        let first = parties("gate", Duration::ZERO, &[("party", &["p"])]);
+        let second = parties("other", Duration::ZERO, &[("duel", &[]), ("party", &[])]);
+        let third = parties("third", Duration::ZERO, &[("send", &[])]);
+        let ext = |name: &'static str, grant: &[&str]| match name {
+            "gate" => first.extension("gate", grant, 2000),
+            "other" => second.extension("other", grant, 2000),
+            _ => third.extension("third", grant, 2000),
+        };
+        let config = config_of(
+            vec![
+                ext("gate", &["commands"]),
+                ext("other", &["commands"]),
+                ext("third", &["commands"]),
+            ],
+            &[],
+        );
+        let sessions = sessions_for(&config);
+        let registry = &sessions.extensions;
+        let who = |config: &Config, word: &str| holder(registry, config, word);
+        let some = |name: &str| Some(name.to_owned());
+        assert_eq!(who(&config, "party"), some("gate"));
+        assert_eq!(who(&config, "p"), some("gate"));
+        assert_eq!(who(&config, "duel"), some("other"));
+        // `send` is the proxy's, enabled: refused. Not enabled, it is the third's: the commands of the proxy
+        // that are enabled are part of what the words were resolved for.
+        assert_eq!(who(&config, "send"), None);
+        let without_send = config_of(
+            vec![
+                ext("gate", &["commands"]),
+                ext("other", &["commands"]),
+                ext("third", &["commands"]),
+            ],
+            &[ProxyCommand::Send],
+        );
+        assert_eq!(who(&without_send, "send"), some("third"));
+        assert_eq!(who(&config, "send"), None);
+        // The order of the extensions: the first keeps `party`.
+        let swapped = config_of(
+            vec![
+                ext("other", &["commands"]),
+                ext("gate", &["commands"]),
+                ext("third", &["commands"]),
+            ],
+            &[],
+        );
+        assert_eq!(who(&swapped, "party"), some("other"));
+        // A name that is refused refuses its command: the first extension's `party` loses its alias `p` too.
+        assert_eq!(who(&swapped, "p"), None);
+        assert_eq!(who(&config, "party"), some("gate"));
+        // The grant of `commands`: taken from the first, its words go, and the second has `party`.
+        let ungranted = config_of(
+            vec![
+                ext("gate", &["decide.login"]),
+                ext("other", &["commands"]),
+                ext("third", &["commands"]),
+            ],
+            &[],
+        );
+        assert_eq!(who(&ungranted, "party"), some("other"));
+        assert_eq!(who(&ungranted, "p"), None);
+        assert_eq!(who(&config, "p"), some("gate"));
+        // Switched off, it is as if it was not there.
+        let mut off = ext("gate", &["commands"]);
+        off.enabled = false;
+        let disabled = config_of(vec![off, ext("other", &["commands"])], &[]);
+        assert_eq!(who(&disabled, "party"), some("other"));
+        assert_eq!(who(&disabled, "p"), None);
+        // No extension has commands: nothing is resolved, and nothing is held.
+        let none = config_of(Vec::new(), &[]);
+        assert_eq!(who(&none, "party"), None);
+        assert_eq!(who(&config, "party"), some("gate"));
+    }
+
+    #[test]
+    fn a_new_hello_with_other_commands_is_read_and_the_old_words_are_let_go() {
+        let first = parties("gate", Duration::ZERO, &[("party", &["p"])]);
+        let config = config_of(vec![first.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let registry = &sessions.extensions;
+        let link = registry.link("gate").unwrap();
+        assert_eq!(holder(registry, &config, "party"), Some("gate".to_owned()));
+        let hellos = link.epoch();
+        // The extension is restarted with other commands, on the same address.
+        let address = first.running.local_addr();
+        let Parties { running, .. } = first;
+        drop(running);
+        let mut second = None;
+        let limit = Instant::now() + Duration::from_secs(10);
+        while second.is_none() {
+            assert!(Instant::now() < limit, "the address never came back");
+            second = Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+                .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+                .command(spec("duel", &[]), |_: &RunRequest| Said::one("a duel"))
+                .bind(address)
+                .ok();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let limit = Instant::now() + Duration::from_secs(20);
+        while !(link.is_connected() && link.epoch() > hellos) {
+            assert!(Instant::now() < limit, "the proxy never said hello again");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // What the new hello declares is what is read: `duel` is the extension's, `party` goes to the server.
+        assert_eq!(holder(registry, &config, "duel"), Some("gate".to_owned()));
+        assert_eq!(holder(registry, &config, "party"), None);
+        assert_eq!(holder(registry, &config, "p"), None);
+        drop(second);
+    }
+
+    #[test]
+    fn a_link_that_a_reload_replaces_is_not_the_one_the_words_were_resolved_with() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let before = sessions.extensions.link("gate").unwrap();
+        let claim = sessions.extensions.claim(&config, "party").unwrap();
+        assert!(Arc::ptr_eq(&claim.link, &before));
+        // A reload that changes a setting of the connection replaces the link by a new one, whose first
+        // hello makes it as many hellos old as the old one was: the count alone would not tell them apart.
+        let mut changed = party.extension("gate", &["commands"], 2000);
+        changed.max_in_flight = 32;
+        let reloaded = config_of(vec![changed], &[]);
+        sessions.extensions.follow(&reloaded);
+        let after = sessions.extensions.link("gate").unwrap();
+        assert!(!Arc::ptr_eq(&before, &after), "the link was replaced");
+        let limit = Instant::now() + Duration::from_secs(20);
+        while !(after.is_connected() && after.epoch() >= 1) {
+            assert!(Instant::now() < limit, "the new link never connected");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(after.epoch(), before.epoch(), "as many hellos as before");
+        let claim = sessions.extensions.claim(&reloaded, "party").unwrap();
+        assert!(
+            Arc::ptr_eq(&claim.link, &after),
+            "the new link, not the old"
+        );
+        // And the command goes through it.
+        let (hook, told) = hook_of(&reloaded, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), ["gate ran party"]);
+    }
 }

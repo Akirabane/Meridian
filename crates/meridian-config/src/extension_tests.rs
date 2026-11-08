@@ -420,6 +420,37 @@ fn a_capability_exists_and_is_granted_once() {
 }
 
 #[test]
+fn the_commands_of_an_extension_need_two_places_so_that_its_decisions_keep_one() {
+    let dir = folder("places");
+    let with = |grant: &str, places: u32| {
+        extension(
+            "x",
+            25590,
+            "a.token",
+            &format!(
+                "grant = [\"{grant}\"]
+max-in-flight = {places}"
+            ),
+        )
+    };
+    // One place: the commands would take it, and every decision would find none.
+    let e = load(&dir, "", &with("commands", 1)).unwrap_err();
+    assert!(matches!(e, ConfigError::CommandsNeedPlaces { .. }), "{e}");
+    assert!(
+        e.to_string().contains("max-in-flight must be at least 2"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("\"x\""), "{e}");
+    assert!(load(&dir, "", &with("commands", 2)).is_ok());
+    assert!(load(&dir, "", &with("commands", 64)).is_ok());
+    // Without the capability one place is as it was.
+    assert!(load(&dir, "", &with("decide.login", 1)).is_ok());
+    // Zero is still told as zero.
+    let e = load(&dir, "", &with("commands", 0)).unwrap_err();
+    assert!(matches!(e, ConfigError::ZeroExtensionSetting { .. }), "{e}");
+}
+
+#[test]
 fn a_decide_table_needs_its_capability() {
     let dir = folder("tables");
     for (table, capability) in [

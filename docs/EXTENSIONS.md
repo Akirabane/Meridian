@@ -632,7 +632,8 @@ In the proxy, `extension/own.rs` takes the commands, in the hook of the player's
 before the proxy's own are looked at:
 
 - **Which words are an extension's.** The declarations of the extensions that are enabled and granted
-  `commands` are read in the **order of the configuration**, not of the hellos (`Registry::claim`). A word that is
+  `commands` are read in the **order of the configuration**, not of the hellos (`Registry::claim`), and again
+  whenever one of them, or the commands of the proxy that are enabled, change (see the bounds of a hello). A word that is
   not valid, that is a command of the proxy enabled in `[commands]` (`ProxyCommand::words`: `/lobby` counts), or
   that an extension before has, is refused and logged once for each hello. A name that is refused refuses its
   command; an alias that is refused is dropped. A word is matched as typed, as the proxy's own are. A command
@@ -664,9 +665,18 @@ before the proxy's own are looked at:
   reverses or hides text (direction marks, characters of no width): `Lines::new` drops them and the proxy
   refuses an answer that has one (`run::is_refused`). **This is a prudent default**: colours would need a field
   of its own, allowed by the operator, added later.
+- **The characters of a line.** `run::is_refused` lists them: control characters, `§`, direction marks and
+  separators, the soft hyphen, the combining grapheme joiner, the Hangul fillers, the characters of no width, the
+  variation selectors (an emoji that one turns into a picture shows as its plain form), the interlinear annotation
+  marks and the tag characters.
+- **The places for commands.** An extension granted `commands` needs `max-in-flight` of at least 2 (its commands use at
+  most half of its places, so that its decisions keep one); a configuration with 1 is refused when it is read.
 - **The bounds of a hello.** At most 64 commands, 8 aliases for each and a `usage` of at most 256 characters; the
-  words are resolved once for each hello (and again when the configuration changes which extensions have
-  commands or which of the proxy's are enabled), not for every command a player types.
+  words are resolved again when an extension says hello, when a reload replaces its connection (a change of its
+  address, token file, grant, `max-in-flight` or breaker settings gives it a new link), when the order of the
+  extensions or which of them are granted `commands` changes, and when the commands of the proxy that are
+  enabled change, and not for every command a player types: the proxy compares what the words were resolved
+  for (the extensions, each with its link and how many hellos it has been through) and looks the word up.
 - **The deadline** `[extension.commands] timeout-ms` is 1 to 10000 ms.
 - **Not built:** the commands are not offered to the client's completion, and the metrics have no label by command
   (`meridian_extension_requests_total{method="meridian:command/run"}` counts the runs and their outcomes).
