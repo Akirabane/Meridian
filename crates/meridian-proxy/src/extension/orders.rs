@@ -258,9 +258,10 @@ impl Ctx<'_> {
         }
     }
 
-    /// What a reload costs: half the burst (rounded up), charged at once, as a reload reads, checks and applies the whole
-    /// configuration. The order `reload` and a console line `reload` pay the same, so one is not a way round the other.
-    fn charge_reload(&self) -> Result<Paid, RpcError> {
+    /// Half the burst (rounded up), charged at once: what a reload costs, as it reads, checks and applies the whole configuration,
+    /// and what **every line of the console** costs. The budget limits how often, not what: the order `reload` and a `reload`
+    /// line pay the same, once.
+    fn charge_half_burst(&self) -> Result<Paid, RpcError> {
         let burst = self.link.settings.order_burst.max(1);
         self.charge(usize::try_from(burst.div_ceil(2)).unwrap_or(usize::MAX))
     }
@@ -397,7 +398,7 @@ const CONSOLE_EXECUTE: Order = Order {
     capability: ORDERS_CONSOLE,
     run: console_execute,
     describe: || orders::console_methods().swap_remove(0).1,
-    counted: false,
+    counted: true,
 };
 
 /// The orders the proxy serves.
@@ -782,7 +783,7 @@ fn reload(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     };
     // A reload reads, checks and applies the whole configuration: it costs half the burst, charged at once, so that a program
     // cannot ask for it over and over. A reload the budget cannot pay is refused here, before anything is read.
-    ctx.charge_reload()?;
+    ctx.charge_half_burst()?;
     crate::log::info!("extension \"{}\" asked for a reload", ctx.link.name());
     ctx.after_reply(move || {
         let _lot = lot;
@@ -807,7 +808,8 @@ fn summary(said: &orders::Executed) -> String {
 
 /// `console/execute`: runs one line **as the operator's console does** (the same table of commands, `Commands::execute`): this is
 /// the operator's shell, which is why `orders.console` is granted by its name only. The line is written in the log **before** it
-/// runs, and what it said in one line after. One line at a time for an extension (`-32002`); it runs on a thread of its own, and if
+/// runs, and what it said in one line after. **Every line costs half the burst**, charged at once (the budget limits how often,
+/// not what). One line at a time for an extension (`-32002`); it runs on a thread of its own, and if
 /// it has not ended after the wait of the link the answer is `-32603 did not finish`: **the line goes on running** and the place
 /// stays held until it ends. A `reload` (the whole line) answers first and applies after, as the order `reload` does.
 fn console_execute(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
@@ -819,23 +821,31 @@ fn console_execute(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcEr
         .next()
         .is_some_and(|word| word.eq_ignore_ascii_case("reload"))
         && words.next().is_none();
+    // The places first (a refusal for a place costs one token), then the price: half the burst for any line, charged at once, so
+    // that a line the budget cannot pay is refused here and nothing is journaled or run. A `reload` line pays this price once.
     let Some(lot) = ctx.link.console_lot() else {
+        let _ = ctx.link.charge_order(1);
         return Err(RpcError::new(
             code::TOO_MANY_RUNNING,
             "a command is already running",
         ));
     };
-    if reloading {
-        // The reload of the configuration can change this extension's entry and close the connection the answer goes on: it is
-        // done after the answer, and holds the extension's place for a reload as the order `reload` does.
+    let reload_lot = if reloading {
         let Some(reload_lot) = ctx.link.reload_lot() else {
+            let _ = ctx.link.charge_order(1);
             return Err(RpcError::new(
                 code::TOO_MANY_RUNNING,
                 "a reload is already running",
             ));
         };
-        // It costs what the order `reload` costs, on top of the token of the line: a reload is not cheaper through the console.
-        ctx.charge_reload()?;
+        Some(reload_lot)
+    } else {
+        None
+    };
+    ctx.charge_half_burst()?;
+    if let Some(reload_lot) = reload_lot {
+        // The reload of the configuration can change this extension's entry and close the connection the answer goes on: it is
+        // done after the answer, and holds the extension's place for a reload as the order `reload` does.
         console.journal(&format!("extension \"{name}\" runs: {line}"));
         ctx.after_reply(move || {
             let (_lot, _reload_lot) = (lot, reload_lot);
@@ -860,13 +870,16 @@ fn console_execute(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcEr
         std::thread::Builder::new()
             .name(format!("extension-{name}-console"))
             .spawn(move || {
-                // The place is held until the line has ended, whatever the order answered, and let go however it ends.
-                let _lot = lot;
+                // The place is held until the line has ended, whatever the order answered, and let go however it ends: a panic of
+                // the line drops it too. It is let go **before** the answer goes out, so that an extension that sends its next line
+                // when it reads the answer finds it free.
+                let lot = lot;
                 let said = orders::console_output(&console.execute(&line));
                 console.journal(&format!(
                     "extension \"{name}\" ran: {line}: {}",
                     summary(&said)
                 ));
+                drop(lot);
                 let _ = sender.send(said);
             })
     };

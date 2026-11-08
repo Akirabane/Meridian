@@ -1056,6 +1056,10 @@ the same calls, so what an operator can do at the console an extension granted `
 > **Granting `orders.console` is giving the operator's console.** The extension can run any line the operator can type: ban and
 > pardon, change permissions and the whitelist, kick (the `meridian.kick.exempt` node does not apply to the console), drain,
 > send, reload, and `end`, which stops the proxy. Grant it only to a program you would give the keyboard of the proxy to.
+>
+> **It also reads more than the read orders do:** `list` prints every player's address and `servers` every server's address (and
+> `servers` opens a probe connection to each server at each call), **with or without `addresses`**. The most dangerous lines are `end`,
+> `perm`, `ban` and `whitelist`, `kick` (which the `meridian.kick.exempt` node does not protect), `drain --move` and `send all`.
 
 - **Params and answer**: `{"line": "<a console line>"}` answers `{"lines": ["..."], "truncated": false}`: what the console said,
   one string for each line. The line is one line of 1 to 1024 characters with no control, formatting (`§`) or invisible character
@@ -1073,8 +1077,13 @@ the same calls, so what an operator can do at the console an extension granted `
 - **Logged before, and after.** The proxy writes `extension "<name>" runs: <line>` in its log **before** it runs the line (the whole
   line: it cannot hold a line break or a control character), and, when it has ended, `extension "<name>" ran: <line>: said: <the
   first line> (and N more lines)` or `no output`. A line that never ends is in the log as `runs` only.
-- **It costs one order, and one runs at a time.** While one line runs, another from the same extension is `-32002 a command is
-  already running` (and costs its token). The line runs on a thread of its own; if it has not ended after **four seconds** (less than
+- **Every line costs half the burst, and one runs at a time.** Whatever the line says, it costs **half the burst** (rounded up),
+  charged at once as the order `reload` is: `send all`, `alert` and `drain --move` are not cheaper through the console than through the
+  orders that do the same. A line that the budget cannot pay is `-32001` (and costs one token) and **nothing is journaled or run**. **The
+  budget limits how often, not what: `orders.console` is not bounded by it.** While one line runs, another from the same extension is
+  `-32002 a command is already running` (and costs its token). The line runs on a thread of its own, **the only one the proxy
+  starts for an extension's lines** (there is no other bound than that one); the extension's place for a send of players (`players/send`,
+  `servers/drain` with `move`) is a different one, so a lot of moves and a console line can run at the same time. The line runs on that thread; if it has not ended after **four seconds** (less than
   the five an SDK waits by default) the answer is `-32603 did not finish`: **the line goes on running**, the place for a line stays held
   until it ends, and the log says `ran` when it does. A program reads that as "it may have run" (`may_have_run()`) and looks before it
   asks again.
@@ -1085,8 +1094,8 @@ the same calls, so what an operator can do at the console an extension granted `
   `stopping`, the proxy then closes the connections as it stops, and the answer is usually, not always, written before that. `reload`
   (the whole line, in any case) is answered **first**, as the order `reload` is (decision Q6): the answer says `reload asked: the proxy
   applies it after this answer; its log says what it did`, and the proxy reads its file once it is written, because a reload can change
-  or remove this very extension's entry and close the connection. It holds the extension's place for a reload and costs half the burst on top
-  of the token of the line, like the order `reload`. A `reload` with words after it is the console's usage refusal, and runs at once.
+  or remove this very extension's entry and close the connection. It holds the extension's place for a reload and pays
+  the price of a line (half the burst) **once**, which is the price of the order `reload`: it does not pay twice. A `reload` with words after it is the console's usage refusal, and runs at once.
 - Until the proxy has given the registry its console it answers `-32603 not available`.
 
 **As built, for the order that expels** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):

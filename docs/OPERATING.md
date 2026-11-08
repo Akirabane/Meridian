@@ -303,9 +303,11 @@ by a reload. A server removed from the file keeps its players until they leave.
 An extension that you grant `orders.console` (`grant = ["orders.console"]`, by that name only: no pattern gives it, and no other
 capability does) can run **any line of the table above**, with your rights, over its connection: the same commands, no more and no less
 (`ban`, `perm`, `whitelist`, `kick`, `drain`, `send`, `reload`, `end`...). **Granting it is giving the console of the proxy**: do it
-only for a program you would give the keyboard to. It is off by default. Each line is written in the log **before** it runs, as
-`extension "<name>" runs: <line>`, and what it said after, as `ran: <line>: ...`. One line runs at a time for an extension and
-the proxy answers `did not finish` after four seconds (the line goes on). `end` stops the proxy; `reload` is applied after the
+only for a program you would give the keyboard to. **It reads more than the read orders do**: `list` prints every player's address and
+`servers` every server's address (and probes each server at each call), with or without `addresses`; and `end`, `perm`, `ban`, `whitelist`,
+`kick` (not protected by `meridian.kick.exempt`), `drain --move` and `send all` are the most dangerous lines. It is off by default. Each line is written in the log **before** it runs, as
+`extension "<name>" runs: <line>`, and what it said after, as `ran: <line>: ...`. **Every line costs half the burst of the extension's orders** (the budget limits how often, not what), and one line runs at a time for an
+extension (a lot of moves started by `send` or `drain --move` can run in parallel). The proxy answers `did not finish` after four seconds (the line goes on). `end` stops the proxy; `reload` is applied after the
 answer is written, because it can change the extension's own entry. See docs/EXTENSIONS.md, section 5.
 
 ### 5.6 Behind a load balancer

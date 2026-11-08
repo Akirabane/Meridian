@@ -569,13 +569,18 @@ You can run **exactly the lines the operator can type at the proxy's console**, 
 not know comes back as the console's own `unknown command` line). The proxy writes your line in its log **before** it runs it, and what
 it said after.
 
+- **It reads more than the read orders do**: `list` gives every player's address and `servers` every server's address, with or without
+  `addresses` (and `servers` probes each server at each call). Most dangerous: `end`, `perm`, `ban`, `whitelist`, `kick` (not protected
+  by `meridian.kick.exempt`), `drain --move`, `send all`.
+- **Every line costs half the proxy's burst**, whatever it says (over the budget: `-32001`, `retry_later()`, nothing run): the budget limits
+  how often, not what.
 - **One plain line**, 1 to 1024 characters, with no line break, no `§` and no control or invisible character, or the call is
   `OrderError::Invalid` and nothing is sent.
 - **One line at a time** (`-32002`, `retry_later()`); a line that has not ended after four seconds is answered `-32603 did not
   finish` (`may_have_run()`): **it goes on running**, and the next line waits for it. Look before you ask again.
 - **The output is plain text and bounded**: at most 8192 characters, then `[output truncated]` and `truncated: true`.
 - **`end` stops the proxy** (your connection closes with it; the answer, `stopping`, usually gets out first). **`reload` answers
-  first and applies after**, as `proxy.reload()` does, and costs the same: half the budget's burst. A reload can remove your own
+  first and applies after**, as `proxy.reload()` does, and costs the same half burst, paid once. A reload can remove your own
   `[[extension]]` entry, and then your program reconnects, or not, as the file says.
 
 ## Good to know

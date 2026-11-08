@@ -507,7 +507,9 @@ impl Proxy {
     /// character, or the call is [`OrderError::Invalid`] and nothing is sent. The proxy logs it before it runs it. One line at a
     /// time for an extension: another is refused with `-32002` ([`OrderError::retry_later`]). A line that does not end within
     /// four seconds is answered `-32603 did not finish` ([`OrderError::may_have_run`]): **it goes on running**, and the next one
-    /// waits for it. `reload` is answered first and applied after, as [`Proxy::reload`] does, with a line that says so.
+    /// waits for it. **Every line costs half the proxy's burst** whatever it says: the budget limits how often, not what, and a line
+    /// it cannot pay is `-32001` ([`OrderError::retry_later`]). The console also gives every player's address (`list`) and every
+    /// server's (`servers`), with or without `addresses`. `reload` is answered first and applied after, as [`Proxy::reload`] does, with a line that says so.
     pub fn console(&self, line: &str) -> Result<Executed, OrderError> {
         let params = orders::ExecuteParams {
             line: line.to_owned(),

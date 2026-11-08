@@ -4000,7 +4000,13 @@ mod the_orders {
         consoled: &Arc<Consoled>,
         change: impl FnOnce(&mut Settings),
     ) -> (Fake, Registry, Arc<Link>, Folder) {
-        let (fake, registry, link, folder) = orderly(grant, change);
+        // A line costs half the burst: a burst of two makes a line cost one token, refilled fast, so that the tests that are not about
+        // the price are about what they test.
+        let (fake, registry, link, folder) = orderly(grant, |settings| {
+            settings.order_burst = 2;
+            settings.order_rate = 1_000;
+            change(settings);
+        });
         registry.serve_console(Arc::new(ConsoledArc(Arc::clone(consoled))) as Arc<dyn Console>);
         (fake, registry, link, folder)
     }
@@ -4250,20 +4256,28 @@ mod the_orders {
         assert_eq!(consoled.ended.load(Ordering::SeqCst), 2);
     }
 
-    /// A line costs one order, like any: a budget that is spent refuses it.
+    /// Every line costs half the burst, whatever it says (the budget limits how often, not what): two close lines are too many for a
+    /// burst of three, the second is refused for budget and nothing is journaled or run for it.
     #[test]
-    fn a_line_costs_one_order_and_a_spent_budget_refuses_it() {
+    fn every_line_costs_half_the_burst_and_a_second_close_one_is_refused_for_budget() {
         let consoled = Consoled::new();
-        let (fake, _registry, _link, _folder) =
+        let (fake, _registry, link, _folder) =
             consoling_with(&["orders.console"], &consoled, |settings| {
-                settings.order_burst = 2;
+                settings.order_burst = 3;
                 settings.order_rate = 1;
             });
-        for n in 0..2 {
-            assert!(run_line(&fake, 11_800 + n, "list").get("result").is_some());
-        }
-        assert_eq!(code_of(&run_line(&fake, 11_810, "list")), -32001);
-        assert_eq!(consoled.executed().len(), 2, "the refused one ran nothing");
+        assert!(run_line(&fake, 11_800, "list").get("result").is_some());
+        until("the place to be let go", || link.console_lot().is_some());
+        // Whatever the line: `send all` is not cheaper than `list`.
+        let refused = run_line(&fake, 11_801, "send all east");
+        assert_eq!(code_of(&refused), -32001, "{refused}");
+        assert_eq!(consoled.executed(), ["list"], "the refused one ran nothing");
+        assert_eq!(
+            consoled.events().len(),
+            3,
+            "and was not even journaled: {:?}",
+            consoled.events()
+        );
     }
 
     #[test]
@@ -4276,13 +4290,13 @@ mod the_orders {
         );
     }
 
-    /// A `reload` line costs what the order `reload` costs, on top of the token of the line: it is not cheaper through the console.
+    /// A `reload` line pays the price of a line once, which is the price of the order `reload`: it does not pay twice.
     #[test]
-    fn a_reload_line_costs_half_the_burst_on_top_of_its_token() {
+    fn a_reload_line_pays_the_half_burst_once_and_not_twice() {
         let consoled = Consoled::new();
-        let (fake, _registry, _link, _folder) =
+        let (fake, _registry, link, _folder) =
             consoling_with(&["orders.console"], &consoled, |settings| {
-                settings.order_burst = 3;
+                settings.order_burst = 4;
                 settings.order_rate = 1;
             });
         let reply = run_line(&fake, 11_950, "reload");
@@ -4293,15 +4307,12 @@ mod the_orders {
         until("the reload to end", || {
             consoled.ended.load(Ordering::SeqCst) == 1
         });
-        // One token for the line and two (half the burst of three, rounded up) for the reload: nothing is left, whatever comes next.
-        let mut n = 0;
-        let mut code = 0;
-        until("the places to be let go", || {
-            n += 1;
-            code = code_of(&run_line(&fake, 11_960 + n, "list"));
-            code != -32002
-        });
-        assert_eq!(code, -32001);
-        assert_eq!(consoled.executed(), ["reload"]);
+        until("the places to be let go", || link.console_lot().is_some());
+        // Two of the four went to the reload line (half the burst): two are left, which pay for exactly one more line. Had the
+        // reload paid twice, this one would be refused.
+        assert!(run_line(&fake, 11_960, "list").get("result").is_some());
+        until("the place to be let go", || link.console_lot().is_some());
+        assert_eq!(code_of(&run_line(&fake, 11_961, "list")), -32001);
+        assert_eq!(consoled.executed(), ["reload", "list"]);
     }
 }
