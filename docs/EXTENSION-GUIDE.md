@@ -350,7 +350,10 @@ let extension = Extension::new("parties", env!("CARGO_PKG_VERSION"), token)
   no `§` (the client reads it as a colour or a flicker), no control character, and no mark that reverses or
   hides text (direction marks, characters of no width, invisible fillers, variation selectors, tag
   characters; `run::is_refused` lists them): `Lines::new` drops them, and the proxy refuses an answer that
-  has one.** This is a prudent default: colours would need a field of their own, that the
+  has one.** **Known limit:** dropping the zero-width non-joiner and joiner (U+200C, U+200D) breaks the
+  separation of letters in Persian and some Indic scripts, and dropping the direction marks (U+200E, U+200F)
+  can change how Arabic or Hebrew mixed with Latin text reads: such text needs the field that would relax this
+  rule, which does not exist yet. This is a prudent default: colours would need a field of their own, that the
   operator allows, added later. A command with nothing to say answers `Lines::none()`.
 - **The permission** is the node `ext.<extension>.<command>` (the extension's name in the configuration, in
   lower case), **open to everyone** unless `permissions.toml` closes it (`deny = ["ext.parties.party"]`).
