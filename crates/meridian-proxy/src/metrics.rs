@@ -676,8 +676,10 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(4);
 /// The most of a request that is read: the line and the headers.
 const MAX_REQUEST: usize = 8 * 1024;
-/// How often the stop flag is looked at while no one connects.
-const POLL: Duration = Duration::from_millis(100);
+/// How often the listener is looked at while no one connects, and the stop flag with it. A
+/// connection waits up to this long to be taken: at 100 ms, every request of a monitor waited
+/// about 50 ms whatever the load.
+const POLL: Duration = Duration::from_millis(10);
 
 /// Listens on the `[metrics] bind` address while it is on and serves the page until the
 /// proxy stops. `None` when the setting is off.
@@ -778,6 +780,16 @@ fn answer(mut stream: TcpStream, proxy: &Proxy) -> io::Result<()> {
     } else {
         respond(proxy, method, path)
     };
+    // The whole answer in one write, sent at once: in pieces, the second waited for the
+    // client's acknowledgement of the first (Nagle and a delayed acknowledgement).
+    stream.set_nodelay(true)?;
+    stream.write_all(&response(&answer, method == "HEAD"))?;
+    stream.flush()
+}
+
+/// The bytes of the HTTP answer: the status line, the headers and, unless `head_only`, the
+/// body, in one buffer.
+pub fn response(answer: &Answer, head_only: bool) -> Vec<u8> {
     let reason = match answer.status {
         200 => "OK",
         400 => "Bad Request",
@@ -791,17 +803,17 @@ fn answer(mut stream: TcpStream, proxy: &Proxy) -> io::Result<()> {
     } else {
         ""
     };
-    write!(
-        stream,
+    let mut out = format!(
         "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{allow}Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         answer.status,
         answer.content_type,
         answer.body.len()
-    )?;
-    if method != "HEAD" {
-        stream.write_all(answer.body.as_bytes())?;
+    )
+    .into_bytes();
+    if !head_only {
+        out.extend_from_slice(answer.body.as_bytes());
     }
-    stream.flush()
+    out
 }
 
 #[cfg(test)]
