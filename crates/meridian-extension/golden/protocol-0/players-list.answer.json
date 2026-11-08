@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "result": {
+    "players": [
+      {"name": "Bob", "uuid": "1b3fb5cb-cdfe-4ae3-91f2-2be62b1fa36d", "auth": "verified", "server": "lobby", "seconds": 3725},
+      {"name": "Carol", "uuid": "2c40c6dc-dea0-4bf4-a203-3cf73c20b47e", "auth": "unverified", "server": "east", "seconds": 12, "address": "203.0.113.7"}
+    ],
+    "total": 5,
+    "next": "2c40c6dc-dea0-4bf4-a203-3cf73c20b47e"
+  }
+}

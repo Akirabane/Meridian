@@ -9,7 +9,7 @@
 //! on-error policy.
 
 use super::breaker::{Breaker, Change, Permit};
-use super::orders::Budget;
+use super::orders::{Budget, Facts, Services};
 use super::stats::{Outcome, Stats};
 use meridian_extension::wire::{self, CommandSpec, Id, RpcError};
 use meridian_websocket::Writer;
@@ -275,10 +275,12 @@ pub struct Link {
     /// What is left of its budget of orders.
     budget: Mutex<Budget>,
     forgotten: Mutex<Forgotten>,
+    /// What the orders need of the rest of the proxy.
+    services: Arc<Services>,
 }
 
 impl Link {
-    pub(super) fn new(settings: Settings) -> Arc<Self> {
+    pub(super) fn new(settings: Settings, services: Arc<Services>) -> Arc<Self> {
         let breaker = Breaker::new(settings.breaker_failures, settings.breaker_open);
         let budget = Budget::new(settings.order_rate, settings.order_burst, Instant::now());
         Arc::new(Self {
@@ -295,6 +297,7 @@ impl Link {
             order_threads: AtomicUsize::new(0),
             budget: Mutex::new(budget),
             forgotten: Mutex::new(Forgotten::default()),
+            services,
         })
     }
 
@@ -334,6 +337,11 @@ impl Link {
     pub(super) fn order_place(self: &Arc<Self>) -> Option<OrderPlace> {
         acquire(&self.orders_running, self.settings.orders_running)
             .then(|| OrderPlace(Arc::clone(self)))
+    }
+
+    /// The facts the orders that read tell, if the proxy has given them.
+    pub(super) fn facts(&self) -> Option<Arc<dyn Facts>> {
+        self.services.facts()
     }
 
     /// How many threads of orders are alive, running or waiting to write (for the tests).

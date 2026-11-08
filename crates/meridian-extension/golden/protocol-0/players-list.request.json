@@ -1,0 +1,6 @@
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "meridian:players/list",
+  "params": {"limit": 2, "cursor": "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c"}
+}

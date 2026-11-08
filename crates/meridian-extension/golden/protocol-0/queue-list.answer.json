@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 23,
+  "result": {
+    "enabled": true,
+    "total": 2,
+    "waiting": [
+      {"position": 1, "name": "Dave", "seconds": 41},
+      {"position": 2, "name": "Erin", "seconds": 9}
+    ]
+  }
+}

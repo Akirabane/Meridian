@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "result": {
+    "servers": [
+      {"name": "lobby", "default": true, "players": 31, "role": "lobby", "soft_cap": 40, "hard_cap": 50, "state": "open", "ping_ms": 4},
+      {"name": "east", "default": false, "players": 12, "role": "game", "soft_cap": 20, "hard_cap": 24, "state": "draining"},
+      {"name": "tools", "default": false, "players": 0}
+    ]
+  }
+}

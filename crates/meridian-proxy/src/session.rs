@@ -340,6 +340,22 @@ impl Sessions {
         players
     }
 
+    /// The players being relayed, in the order they joined, each with whether the session service confirmed their account.
+    pub fn listing(&self) -> Vec<(Player, bool)> {
+        let mut players: Vec<(Player, bool)> = self
+            .lock()
+            .values()
+            .map(|e| {
+                (
+                    e.player(),
+                    matches!(e.identity, Some(Identity::Verified(_))),
+                )
+            })
+            .collect();
+        players.sort_by_key(|(p, _)| p.joined);
+        players
+    }
+
     /// How many players are on each backend now; a switch moves a player to the
     /// backend they are on after it. A backend with none is absent.
     #[cfg_attr(not(test), allow(dead_code))]

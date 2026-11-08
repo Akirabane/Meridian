@@ -14,6 +14,7 @@
 mod breaker;
 pub(crate) mod command;
 mod connection;
+pub(crate) mod facts;
 mod link;
 pub(crate) mod login;
 mod orders;
@@ -25,6 +26,7 @@ mod stats;
 mod tests;
 
 pub use link::{Link, Settings};
+pub use orders::{Facts, Services};
 #[cfg(test)]
 pub(crate) use stats::Outcome as RequestOutcome;
 
@@ -48,12 +50,14 @@ pub struct Registry {
     /// The words the extensions hold for their own commands, resolved for the hellos they have been through
     /// (`own.rs`).
     resolved: Mutex<Option<Arc<own::Resolved>>>,
+    /// What the orders need of the rest of the proxy (`orders.rs`), shared with every link.
+    services: Arc<Services>,
 }
 
 impl Registry {
     /// Starts keeping a connection to the extension of `settings` up.
     pub fn start(&self, settings: Settings) -> std::io::Result<Arc<Link>> {
-        let link = Link::new(settings);
+        let link = Link::new(settings, Arc::clone(&self.services));
         let thread = {
             let link = Arc::clone(&link);
             std::thread::Builder::new()
@@ -138,6 +142,12 @@ impl Registry {
         // What was resolved holds links: those this reload stopped are let go with it.
         self.forget_words();
         lines
+    }
+
+    /// Gives the orders that read the facts they tell (the players, the servers, the queue). Until it is called they
+    /// answer that they are not available.
+    pub fn serve_facts(&self, facts: Arc<dyn Facts>) {
+        self.services.set_facts(facts);
     }
 
     /// How many configurations the registry has followed (see the field).
