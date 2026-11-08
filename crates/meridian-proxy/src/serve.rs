@@ -950,4 +950,108 @@ meridian_connections_throttled_total 1
         drop(b);
         assert_eq!(count.load(Ordering::Relaxed), 0);
     }
+
+    /// Sends the handshake of a player another server sent here, and their hello when `name` is
+    /// given. A refusal is read without a hello sent: a socket closed with bytes it did not read
+    /// is reset, and the reset can throw away the refusal before the client reads it.
+    fn transferred(address: SocketAddr, name: Option<&str>) -> Connection {
+        use horizon_protocol::packets::{handshake, login};
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut player = Connection::from_stream(stream).unwrap();
+        let intention = handshake::Serverbound::Intention(handshake::Intention {
+            protocol: horizon_protocol::PROTOCOL_VERSION,
+            host: "survival.example.com".into(),
+            port: 25565,
+            intent: handshake::TRANSFER,
+        });
+        player.send(&intention.encode()).unwrap();
+        if let Some(name) = name {
+            let hello = login::Serverbound::Hello(login::ServerHello {
+                name: name.into(),
+                uuid: 0,
+            });
+            player.send(&hello.encode()).unwrap();
+        }
+        player
+    }
+
+    /// `accept-transfers` is read again at a reload, and holds for the connections that start
+    /// after it, as every setting of a login does.
+    #[test]
+    fn accept_transfers_holds_for_the_connections_after_a_reload() {
+        use horizon_protocol::packets::login;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let offline = Config {
+            auth_mode: meridian_config::AuthMode::Offline,
+            online_mode: false,
+            compression_threshold: -1,
+            connections_per_minute: 0,
+            ..Config::default()
+        };
+        let proxy = proxy_with(offline.clone());
+        let server = {
+            let proxy = Arc::clone(&proxy);
+            thread::spawn(move || serve(listener, &proxy))
+        };
+        // Off: refused, as before; twice, so that the outcomes' counts differ below.
+        let mut once = transferred(address, None);
+        let (id, payload) = once.recv().unwrap();
+        assert!(matches!(
+            login::Clientbound::decode(id, &payload).unwrap(),
+            login::Clientbound::Disconnect(_)
+        ));
+        let mut refused = transferred(address, None);
+        let (id, payload) = refused.recv().unwrap();
+        let login::Clientbound::Disconnect(disconnect) =
+            login::Clientbound::decode(id, &payload).unwrap()
+        else {
+            panic!("expected the refusal");
+        };
+        assert!(
+            disconnect
+                .reason_json
+                .contains("multiplayer.disconnect.transfers_disabled")
+        );
+        // On, by a reload: the next transferred player logs in.
+        let mut reloaded = (*proxy.config()).clone();
+        reloaded.accept_transfers = true;
+        proxy.set_config(reloaded);
+        let mut taken = transferred(address, Some("Alex"));
+        let (id, payload) = taken.recv().unwrap();
+        assert!(
+            matches!(
+                login::Clientbound::decode(id, &payload).unwrap(),
+                login::Clientbound::LoginFinished(_)
+            ),
+            "the transferred player is let in after the reload"
+        );
+        // Each outcome under its own label: no other test of this crate makes a transfer, so the
+        // page says exactly what the counters hold.
+        let counted = meridian_net::client::transfers();
+        let page = crate::metrics::render(&proxy);
+        assert!(
+            counted.refused >= 2 && counted.refused != counted.failed,
+            "{counted:?}"
+        );
+        for (outcome, n) in [
+            ("refused", counted.refused),
+            ("logged_in", counted.logged_in),
+            ("failed", counted.failed),
+        ] {
+            assert!(
+                page.contains(&format!(
+                    "meridian_transfers_total{{outcome=\"{outcome}\"}} {n}
+"
+                )),
+                "{page}"
+            );
+        }
+        drop((once, refused, taken));
+        proxy.stop();
+        server.join().unwrap().unwrap();
+    }
 }

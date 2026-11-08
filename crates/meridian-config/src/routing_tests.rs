@@ -501,6 +501,7 @@ fn core_settings_have_their_defaults() {
     assert_eq!(config.connections_per_minute, 20);
     assert_eq!(config.max_pending_logins, 2048);
     assert_eq!(config.max_pending_logins_per_address, 0);
+    assert!(!config.accept_transfers);
     assert_eq!(config.backend_retry_seconds, 10);
     assert_eq!(config.status_sample, 12);
 }
@@ -518,6 +519,13 @@ fn core_settings_are_read() {
     assert_eq!(config.max_pending_logins_per_address, 4);
     assert_eq!(config.backend_retry_seconds, 0);
     assert_eq!(config.status_sample, 0);
+}
+
+#[test]
+fn accept_transfers_is_read_and_must_be_a_boolean() {
+    assert!(load("accept-transfers = true").accept_transfers);
+    assert!(!load("accept-transfers = false").accept_transfers);
+    refused("accept-transfers = \"yes\"");
 }
 
 #[test]

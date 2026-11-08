@@ -41,6 +41,10 @@ max-pending-logins = 2048
 # share one address (a school, a LAN behind one router).
 max-pending-logins-per-address = 0
 
+# Players another server sends here with a vanilla transfer (`/transfer`): taken, they log
+# in as any player, placed by the host they were sent to. Off by default, as vanilla.
+# accept-transfers = false
+
 # How players log in. Backends never check accounts themselves: they trust the
 # proxy.
 #   "online"   checks every player's account with the session service. A client
