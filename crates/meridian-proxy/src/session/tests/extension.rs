@@ -130,6 +130,7 @@ fn extension_config(
         },
         decide_command: Default::default(),
         decide_server: Default::default(),
+        own_commands: Default::default(),
     }
 }
 
@@ -1393,6 +1394,7 @@ groups = ["nobody"]
                     Arc::clone(&sessions.extensions),
                     move || Arc::clone(&live),
                 ))),
+                None,
             )
         };
         (hook, ran)
@@ -1884,6 +1886,7 @@ groups = ["nobody"]
                 |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
                 |_: &Typist, _: Answer| "done".to_owned(),
                 Some(Arc::clone(&gate)),
+                None,
             )
         };
         (hook, backend, gate)
@@ -2010,5 +2013,493 @@ groups = ["nobody"]
             took >= Duration::from_millis(140) && took < Duration::from_millis(600),
             "waited {took:?}"
         );
+    }
+}
+
+/// The commands an extension declares of its own (docs/EXTENSIONS.md, 4.3): taken from the player, run by the
+/// extension, their lines told when they come.
+mod own {
+    use super::*;
+    use crate::commands::{self, Answer, Typist};
+    use crate::extension::command::Gate;
+    use crate::extension::own::{BUSY, NO_ANSWER, Own};
+    use meridian_config::{AuthKind, CommandSettings, Permissions, ProxyCommand, Role};
+    use meridian_extension::decide::{CommandRequest, NodeAnswers, NodeVerdict};
+    use meridian_extension::run::{self, Lines as Said, RunRequest};
+    use meridian_extension::wire::CommandSpec;
+    use meridian_net::relay::{CommandHook, TAKEN};
+
+    /// An extension that declares commands and answers each with a line of its own, and what it was asked.
+    struct Parties {
+        running: Running,
+        folder: Folder,
+        seen: Arc<Mutex<Vec<RunRequest>>>,
+    }
+
+    fn spec(name: &str, aliases: &[&str]) -> CommandSpec {
+        CommandSpec {
+            name: name.into(),
+            aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+            usage: String::new(),
+        }
+    }
+
+    /// `commands`: the declared names with their aliases. Each answers `<tag> ran <name>` after `delay`.
+    fn parties(tag: &str, delay: Duration, commands: &[(&str, &[&str])]) -> Parties {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut extension = Sdk::new(tag, "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>);
+        for (name, aliases) in commands {
+            let (seen, tag) = (Arc::clone(&seen), tag.to_owned());
+            extension = extension.command(spec(name, aliases), move |request: &RunRequest| {
+                seen.lock().unwrap().push(request.clone());
+                std::thread::sleep(delay);
+                Said::one(&format!("{tag} ran {}", request.command))
+            });
+        }
+        Parties {
+            running: extension.bind("127.0.0.1:0").unwrap(),
+            folder: Folder::new(),
+            seen,
+        }
+    }
+
+    fn party() -> Parties {
+        parties("gate", Duration::ZERO, &[("party", &["p"])])
+    }
+
+    impl Parties {
+        /// The `[[extension]]` called `name`, granted `grant`, whose commands wait `timeout_ms`.
+        fn extension(&self, name: &str, grant: &[&str], timeout_ms: u64) -> ExtensionConfig {
+            let mut config = extension_config(
+                self.running.local_addr().to_string(),
+                self.folder.token(),
+                grant,
+                OnError::Default,
+                1000,
+            );
+            config.name = name.into();
+            config.own_commands.timeout_ms = timeout_ms;
+            config
+        }
+
+        fn asked(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+    }
+
+    /// The six commands of the proxy, minus `without`, and the extensions.
+    fn config_of(extensions: Vec<ExtensionConfig>, without: &[ProxyCommand]) -> Config {
+        let enabled = [
+            ProxyCommand::Server,
+            ProxyCommand::Hub,
+            ProxyCommand::Play,
+            ProxyCommand::Send,
+            ProxyCommand::Glist,
+            ProxyCommand::Alert,
+        ]
+        .into_iter()
+        .filter(|c| !without.contains(c))
+        .collect();
+        Config {
+            extensions,
+            commands: CommandSettings {
+                enabled,
+                ..CommandSettings::default()
+            },
+            ..routed()
+        }
+    }
+
+    /// Alex's hook, and the lines told to Alex.
+    fn hook_of(
+        config: &Config,
+        sessions: &Sessions,
+        file: &str,
+    ) -> (Arc<CommandHook>, Arc<Mutex<Vec<String>>>) {
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let permissions = Arc::new(Permissions::parse(file).unwrap());
+        let live = Arc::new(config.clone());
+        let current = move || Arc::clone(&live);
+        let hook = commands::hook_with(
+            Arc::new(config.clone()),
+            move || Typist {
+                auth: AuthKind::Unverified,
+                backend: "lobby".into(),
+                name: "Alex".into(),
+                uuid: [1; 16],
+                permissions: Arc::clone(&permissions),
+                operator_groups: Vec::new(),
+            },
+            |target: &str| format!("Moving you to {target}..."),
+            |_: Role, _: &Typist| "Moving you to the lobby...".to_owned(),
+            |_: &Typist, _: Answer| "done".to_owned(),
+            Some(Arc::new(Gate::new(
+                Arc::clone(&sessions.extensions),
+                current.clone(),
+            ))),
+            Some(Arc::new(Own::new(
+                Arc::clone(&sessions.extensions),
+                current,
+                {
+                    let told = Arc::clone(&told);
+                    move |line: &str| told.lock().unwrap().push(line.to_owned())
+                },
+            ))),
+        );
+        (hook, told)
+    }
+
+    /// Waits until `count` lines have been told, and gives them.
+    fn told_by_now(told: &Arc<Mutex<Vec<String>>>, count: usize) -> Vec<String> {
+        let limit = Instant::now() + Duration::from_secs(5);
+        while told.lock().unwrap().len() < count {
+            assert!(Instant::now() < limit, "told {:?}", told.lock().unwrap());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        told.lock().unwrap().clone()
+    }
+
+    const TAKEN_AT_ONCE: Option<&str> = Some(TAKEN);
+
+    #[test]
+    fn without_an_extension_every_word_goes_to_the_server() {
+        let config = config_of(Vec::new(), &[]);
+        let sessions = Sessions::default();
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("party invite Bob"), None);
+        assert_eq!(hook("tp Bob"), None);
+        // The proxy's own commands answer as ever: `/send` is closed to a player nothing opens it for.
+        assert_eq!(
+            hook("send all east").as_deref(),
+            Some("You do not have permission to use /send.")
+        );
+        assert!(told.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_declared_command_is_taken_its_lines_come_later_and_the_extension_is_told_who_and_what() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        // Taken at once: the hook says nothing now, and the command goes nowhere else.
+        assert_eq!(hook("party invite Bob").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), ["gate ran party"]);
+        let seen = party.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].player.name, "Alex");
+        assert_eq!(seen[0].player.uuid, "01010101-0101-0101-0101-010101010101");
+        assert_eq!(
+            seen[0].player.auth,
+            meridian_extension::decide::Auth::Unverified
+        );
+        assert_eq!(seen[0].server, "lobby");
+        assert_eq!(seen[0].command, "party");
+        assert_eq!(seen[0].args, ["invite", "Bob"]);
+        // A word that is not the extension's is not taken.
+        assert_eq!(hook("tp Bob"), None);
+        assert_eq!(party.asked(), 1);
+        let link = sessions.extensions.link("gate").unwrap();
+        assert_eq!(link.stats().count(run::RUN, RequestOutcome::Answered), 1);
+    }
+
+    #[test]
+    fn an_alias_runs_the_command_it_stands_for_and_the_proxys_own_commands_are_not_touched() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, FILE_STAFF);
+        assert_eq!(hook("p").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), ["gate ran party"]);
+        assert_eq!(party.seen.lock().unwrap()[0].command, "party");
+        // The proxy's own commands answer as ever, and the extension is not asked about them.
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(
+            hook("hub").as_deref(),
+            Some("You are already on lobby."),
+            "hub"
+        );
+        assert_eq!(party.asked(), 1);
+    }
+
+    /// Gives Alex `/send`, and closes the extension's `party` to everyone but the group `vip`.
+    const FILE_STAFF: &str = r#"
+[group.staff]
+allow = ["meridian.send"]
+[[player]]
+name = "Alex"
+groups = ["staff"]
+"#;
+
+    #[test]
+    fn the_node_of_the_command_decides_before_the_extension_is_asked() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        // Open to everyone when nothing is written.
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        told_by_now(&told, 1);
+        // Closed by the file: said at once, for the alias too, and the extension is not asked.
+        let (hook, told) = hook_of(
+            &config,
+            &sessions,
+            "[group.default]\ndeny = [\"ext.gate.party\"]\n",
+        );
+        let asked = party.asked();
+        assert_eq!(
+            hook("party").as_deref(),
+            Some("You do not have permission to use /party.")
+        );
+        assert_eq!(
+            hook("p").as_deref(),
+            Some("You do not have permission to use /p.")
+        );
+        assert_eq!(party.asked(), asked);
+        assert!(told.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_the_extension_that_owns_a_command_is_asked_for_its_node() {
+        // One extension rules the permissions of the proxy's commands (`decide.command`), another has the
+        // command `party`: the first is not told what Alex typed after it.
+        let ranks = Sdk::new("ranks", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_command(|request: &CommandRequest| NodeAnswers::all(request, NodeVerdict::Deny));
+        let ranks = Parties {
+            running: ranks.bind("127.0.0.1:0").unwrap(),
+            folder: Folder::new(),
+            seen: Arc::default(),
+        };
+        let owner = parties("parties", Duration::ZERO, &[("party", &[])]);
+        let config = config_of(
+            vec![
+                ranks.extension("ranks", &["decide.command"], 1000),
+                owner.extension("parties", &["commands"], 2000),
+            ],
+            &[],
+        );
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        // The rank system denies every node it is asked about; it is not asked about this one.
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), ["parties ran party"]);
+        // The rank system is asked about the proxy's own commands, as ever.
+        assert_eq!(
+            hook("send all east").as_deref(),
+            Some("You do not have permission to use /send.")
+        );
+        // The same extension, holding both points, rules its own command's node.
+        let both = Sdk::new("both", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_command(|request: &CommandRequest| NodeAnswers::all(request, NodeVerdict::Deny))
+            .command(spec("party", &[]), |_: &RunRequest| Said::one("ran"));
+        let both = Parties {
+            running: both.bind("127.0.0.1:0").unwrap(),
+            folder: Folder::new(),
+            seen: Arc::default(),
+        };
+        let config = config_of(
+            vec![both.extension("both", &["decide.command", "commands"], 1000)],
+            &[],
+        );
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        assert_eq!(
+            hook("party").as_deref(),
+            Some("You do not have permission to use /party.")
+        );
+    }
+
+    #[test]
+    fn a_command_that_does_not_answer_in_time_says_so_and_a_late_answer_is_dropped() {
+        let slow = parties("gate", Duration::from_millis(500), &[("party", &[])]);
+        let config = config_of(vec![slow.extension("gate", &["commands"], 100)], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), [NO_ANSWER]);
+        let link = sessions.extensions.link("gate").unwrap();
+        assert_eq!(link.stats().count(run::RUN, RequestOutcome::Timeout), 1);
+        // The answer comes after the deadline: dropped and counted, and the player reads nothing more.
+        let limit = Instant::now() + Duration::from_secs(5);
+        while link.stats().late() == 0 {
+            assert!(Instant::now() < limit, "the late answer never came");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(told.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_word_stays_the_extensions_while_it_is_down() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        told_by_now(&told, 1);
+        let Parties { running, .. } = party;
+        drop(running);
+        let link = sessions.extensions.link("gate").unwrap();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while link.is_connected() {
+            assert!(Instant::now() < limit, "the connection never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Provisional (the user has yet to decide): not the server's, and told so.
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 2)[1], NO_ANSWER);
+        assert_eq!(
+            link.stats().count(run::RUN, RequestOutcome::Disconnected),
+            1
+        );
+    }
+
+    #[test]
+    fn a_player_has_one_command_running_at_a_time() {
+        let slow = parties("gate", Duration::from_millis(300), &[("party", &[])]);
+        let config = config_of(vec![slow.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(hook("party").as_deref(), Some(BUSY));
+        assert!(slow.asked() <= 1, "the second was not sent");
+        assert_eq!(told_by_now(&told, 1), ["gate ran party"]);
+        // Done, the player may run another.
+        let limit = Instant::now() + Duration::from_secs(5);
+        while hook("party").as_deref() == Some(BUSY) {
+            assert!(Instant::now() < limit, "still busy");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(told_by_now(&told, 2).len(), 2);
+    }
+
+    #[test]
+    fn a_command_that_fails_never_opens_the_breaker_of_the_extension() {
+        let slow = parties("gate", Duration::from_millis(300), &[("party", &[])]);
+        let mut extension = slow.extension("gate", &["commands"], 30);
+        extension.breaker_failures = 2;
+        let config = config_of(vec![extension], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        for round in 1..=4 {
+            // The player waits for the one before: they have one running at a time.
+            let limit = Instant::now() + Duration::from_secs(5);
+            while hook("party").as_deref() == Some(BUSY) {
+                assert!(Instant::now() < limit, "still busy");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(told_by_now(&told, round).last().unwrap(), NO_ANSWER);
+        }
+        let link = sessions.extensions.link("gate").unwrap();
+        assert_eq!(link.stats().count(run::RUN, RequestOutcome::Timeout), 4);
+        // Four failures in a row, with two enough for a decision: the breaker is closed.
+        let mut page = String::new();
+        sessions.extensions.render(&mut page);
+        assert!(
+            page.contains("meridian_extension_breaker_open{extension=\"gate\"} 0"),
+            "{page}"
+        );
+        assert_eq!(link.stats().count(run::RUN, RequestOutcome::Breaker), 0);
+    }
+
+    #[test]
+    fn the_words_of_the_proxy_and_of_an_earlier_extension_are_not_taken() {
+        // Declares `send` (the proxy's, enabled), `p` as an alias of its own, and `party`.
+        let first = parties("first", Duration::ZERO, &[("send", &[]), ("party", &["p"])]);
+        let second = parties(
+            "second",
+            Duration::ZERO,
+            &[("party", &[]), ("other", &["p"])],
+        );
+        let config = config_of(
+            vec![
+                first.extension("first", &["commands"], 2000),
+                second.extension("second", &["commands"], 2000),
+            ],
+            &[],
+        );
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, FILE_STAFF);
+        // `send` is still the proxy's.
+        assert_eq!(hook("send all east").as_deref(), Some("done"));
+        assert_eq!(first.asked() + second.asked(), 0);
+        // `party` is the first extension's, in the order of the configuration.
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), ["first ran party"]);
+        // `p` is the first's alias, so the second's `other` goes without it, and still has its name.
+        assert_eq!(hook("p").as_deref(), TAKEN_AT_ONCE);
+        let limit = Instant::now() + Duration::from_secs(5);
+        while told.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < limit);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(told.lock().unwrap()[1], "first ran party");
+        let limit = Instant::now() + Duration::from_secs(5);
+        while hook("other").as_deref() == Some(BUSY) {
+            assert!(Instant::now() < limit);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(told_by_now(&told, 3)[2], "second ran other");
+        // The same extensions in the other order: the other one has `party`.
+        let swapped = config_of(
+            vec![
+                second.extension("second", &["commands"], 2000),
+                first.extension("first", &["commands"], 2000),
+            ],
+            &[],
+        );
+        let (hook, told) = hook_of(&swapped, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), ["second ran party"]);
+    }
+
+    #[test]
+    fn a_word_of_the_proxy_that_is_not_enabled_may_be_the_extensions() {
+        let party = parties("gate", Duration::ZERO, &[("send", &[])]);
+        let config = config_of(
+            vec![party.extension("gate", &["commands"], 2000)],
+            &[ProxyCommand::Send],
+        );
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("send all east").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 1), ["gate ran send"]);
+    }
+
+    #[test]
+    fn a_command_is_the_extensions_only_if_it_is_enabled_and_granted() {
+        let party = party();
+        let hooked = |extension: ExtensionConfig| {
+            let config = config_of(vec![extension], &[]);
+            let sessions = sessions_for(&config);
+            let (hook, _) = hook_of(&config, &sessions, "");
+            (hook("party"), sessions)
+        };
+        // Granted another point: the declaration is not used.
+        let (said, _) = hooked(party.extension("gate", &["decide.login"], 2000));
+        assert_eq!(said, None);
+        // Switched off.
+        let mut off = party.extension("gate", &["commands"], 2000);
+        off.enabled = false;
+        let (said, sessions) = hooked(off);
+        assert_eq!(said, None);
+        assert!(sessions.extensions.links().is_empty());
+        assert_eq!(party.asked(), 0);
+    }
+
+    #[test]
+    fn what_the_player_typed_is_bounded_before_the_extension_reads_it() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        let line = format!("party {}", vec!["x".repeat(300); 40].join(" "));
+        assert_eq!(hook(&line).as_deref(), TAKEN_AT_ONCE);
+        told_by_now(&told, 1);
+        let seen = party.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].args.len(), 32);
+        assert!(seen[0].args.iter().all(|a| a.chars().count() == 256));
     }
 }

@@ -374,8 +374,10 @@ grant = ["decide.login"]
 | `breaker-seconds` | `30` | How long the breaker stays open | More than 0 |
 
 A decision point has a table of its own, `[extension.decide-login]`, `[extension.decide-command]` or
-`[extension.decide-server]`, written under the `[[extension]]` it belongs to. It is accepted only
-when `grant` holds the capability of the same name.
+`[extension.decide-server]`, written under the `[[extension]]` it belongs to, and so have the extension's
+own commands, `[extension.commands]`. It is accepted only when `grant` holds the capability of the same
+name. **Two names that differ only in case are one name**: the permission node of a command of an
+extension, `ext.<name>.<command>`, is lower case.
 
 | Table and key | Default | What it does | Checks |
 | --- | --- | --- | --- |
@@ -386,6 +388,7 @@ when `grant` holds the capability of the same name.
 | `decide-command` `cache-seconds-max` | `300` | The longest an `allow` or a `deny` is kept for a player, whatever the extension asks; 0 keeps nothing, and each command asks. An answer is kept for the same command, with the same arguments, on the same server; a reload, a new hello of the extension and a change of the player's server drop what is kept | None |
 | `decide-server` `timeout-ms` | `1000` | The same for the choice of server. When the player lost their server and the proxy places them again, the wait is the smaller of this and 500 ms | More than 0 |
 | `decide-server` `on-error` | `"default"` | `"default"` as if there were no extension, or `"refuse"`. **At the fallback (a player who lost their server) a failure is always `default`**, whatever this says: only an explicit refusal of the extension disconnects a player who is already in the game | One of the two |
+| `commands` `timeout-ms` | `2000` | How long the proxy waits for the lines a command of the extension's own answers. It waits on a thread of its own, not on the one that copies the player's packets; after this the player reads `That command did not answer.` | More than 0 |
 
 **The time a player waits in silence.** The player's client gives up after 30 seconds without a
 packet, and the proxy sends it nothing while it decides, so the extensions' time counts with the

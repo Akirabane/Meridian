@@ -115,6 +115,18 @@ impl Gate {
         typed: &Typed<'_>,
         nodes: &[String],
     ) -> HashMap<String, NodeVerdict> {
+        self.verdicts_of(typed, nodes, None)
+    }
+
+    /// [`Gate::verdicts`], asked only if the extension that holds the point is `only`: the node of an
+    /// extension's own command is for that extension to say, and what a player typed after it is not told to
+    /// another one (docs/EXTENSIONS.md, 4.3).
+    pub(crate) fn verdicts_of(
+        &self,
+        typed: &Typed<'_>,
+        nodes: &[String],
+        only: Option<&str>,
+    ) -> HashMap<String, NodeVerdict> {
         let config = (self.config)();
         let Some(extension) = config
             .enabled_extensions()
@@ -122,6 +134,9 @@ impl Gate {
         else {
             return HashMap::new();
         };
+        if only.is_some_and(|name| name != extension.name) {
+            return HashMap::new();
+        }
         let (policy, max_cache) = (
             extension.decide_command.on_error,
             extension.decide_command.cache_seconds_max,
@@ -287,26 +302,38 @@ fn all(nodes: &[String], verdict: NodeVerdict) -> HashMap<String, NodeVerdict> {
 /// The request for `typed`, asking about `nodes`. The command and its arguments are what the player
 /// typed: at most [`MAX_COMMAND_ARGS`] arguments, each cut to [`MAX_ARG_CHARS`] characters.
 fn request(typed: &Typed<'_>, nodes: &[String]) -> CommandRequest {
-    let mut words = typed.line.split_whitespace();
-    let command = words.next().unwrap_or_default();
+    let command = typed.line.split_whitespace().next().unwrap_or_default();
     CommandRequest {
-        player: Player {
-            name: typed.name.to_owned(),
-            uuid: typed.uuid.clone(),
-            auth: if typed.verified {
-                Auth::Verified
-            } else {
-                Auth::Unverified
-            },
-        },
+        player: player_of(typed),
         server: typed.server.to_owned(),
         command: command.chars().take(MAX_ARG_CHARS).collect(),
-        args: words
-            .take(MAX_COMMAND_ARGS)
-            .map(|w| w.chars().take(MAX_ARG_CHARS).collect())
-            .collect(),
+        args: args_of(typed),
         nodes: nodes.to_vec(),
     }
+}
+
+/// Who typed the command, as the extension is told.
+pub(super) fn player_of(typed: &Typed<'_>) -> Player {
+    Player {
+        name: typed.name.to_owned(),
+        uuid: typed.uuid.clone(),
+        auth: if typed.verified {
+            Auth::Verified
+        } else {
+            Auth::Unverified
+        },
+    }
+}
+
+/// What follows the command, in words: at most [`MAX_COMMAND_ARGS`] of them, each cut to [`MAX_ARG_CHARS`].
+pub(super) fn args_of(typed: &Typed<'_>) -> Vec<String> {
+    typed
+        .line
+        .split_whitespace()
+        .skip(1)
+        .take(MAX_COMMAND_ARGS)
+        .map(|w| w.chars().take(MAX_ARG_CHARS).collect())
+        .collect()
 }
 
 #[cfg(test)]

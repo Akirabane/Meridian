@@ -1,8 +1,9 @@
 # Writing an extension
 
 An extension is a program of your own that Meridian asks before it acts. Today it can **refuse a
-player at login**, **choose the server a player goes to** (section 5) and **decide who may use the proxy's
-commands** (section 6). This page takes you from nothing to a working extension in Rust. Protocol 0 is
+player at login**, **choose the server a player goes to** (section 5), **decide who may use the proxy's
+commands** (section 6) and **answer commands of its own** (section 7). This page takes you from nothing to a
+working extension in Rust. Protocol 0 is
 experimental: anything in it may change between two releases.
 
 ## What happens
@@ -302,6 +303,60 @@ The player's packets to the server wait while your program answers, so the wait 
 default) and the proxy asks only for a command it answers, once for all the nodes the command checks, and
 not at all for what it kept. Five misses in a row open the breaker, and then commands take `on-error` at
 once. Keep the handler quick, and let the proxy keep what does not change.
+
+## 7. Commands of your own
+
+Your program can have commands that the proxy takes from the player and **never passes to the server**, as
+it does for `/server` and `/hub`. The player types `/party invite Bob`, the proxy asks your program, and
+the lines it answers appear in the player's chat when they come (`crates/meridian-extension/examples/command_party.rs`
+is a small one). It needs the `commands` capability:
+
+```toml
+[[extension]]
+name = "parties"
+address = "127.0.0.1:25593"
+token-file = "extensions/parties.token"
+grant = ["commands"]
+
+[extension.commands]
+timeout-ms = 2000        # how long the lines may take
+```
+
+```rust
+let extension = Extension::new("parties", env!("CARGO_PKG_VERSION"), token)
+    .command(
+        CommandSpec { name: "party".into(), aliases: vec!["p".into()], usage: "/party <invite|leave>".into() },
+        |request| match request.args.as_slice() {
+            [word, who] if word == "invite" => Lines::one(&format!("{who} is invited to your party.")),
+            _ => Lines::one("Usage: /party <invite|leave> [player]"),
+        },
+    );
+```
+
+- **The words.** A command and its aliases are 1 to 32 characters among `a-z`, `0-9`, `-` and `_`. The SDK
+  panics on one that is not valid or is declared twice. A word that is a command of the proxy that is
+  enabled in `[commands]` (`/lobby` is a word of `/hub`) is refused and logged, as is a word that an
+  extension earlier in the configuration has: the first keeps it. The proxy reads your declaration at each
+  hello, so a new command needs your program to start again.
+- **The request** has the command's declared name (not the alias the player typed), the arguments **as the
+  player typed them: do not trust them**, who the player is (`auth` says whether the account was checked), and
+  the server they are on. At most 32 arguments, each cut to 256 characters.
+- **The answer** is at most 10 lines of 256 characters, plain text: `Lines::new` cuts and cleans what the
+  proxy would refuse. It is never read as a text component, so a line cannot hold a click event. A command
+  with nothing to say answers `Lines::none()`.
+- **The permission** is the node `ext.<extension>.<command>` (the extension's name in the configuration, in
+  lower case), **open to everyone** unless `permissions.toml` closes it (`deny = ["ext.parties.party"]`).
+  The extension that holds `decide.command` is asked about it only if it is **the extension that owns the
+  command**: another one is not told what a player typed after your command.
+- **One command at a time for a player.** A second one typed while the first still runs reads `Still
+  working on your last command.` So a player cannot hold the places your login and permission decisions need.
+- **When it fails** (your program is down, slower than `timeout-ms`, or answers something invalid) the
+  player reads `That command did not answer.`. A failure of a command **does not count toward the
+  breaker** (one slow command does not turn every login to its on-error policy), but a breaker that is open
+  for another reason still stops the call. **For now** a command stays yours while your program is down
+  (the player reads that line, and the server never sees the word); this may change.
+- **The token of an extension granted `commands` can say anything to any player**, in the chat, as the
+  proxy: keep its file readable by the proxy and your program only.
 
 ## Good to know
 

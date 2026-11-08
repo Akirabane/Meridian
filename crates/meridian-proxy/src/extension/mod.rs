@@ -4,8 +4,9 @@
 //!
 //! A [`Link`] keeps one extension's connection up, with the doubling wait, and offers [`Link::call`],
 //! which the decision points use: it holds the `max-in-flight` places, the breaker, the deadline, the
-//! counters and the log lines. The decision points wired so far are the admission at login ([`login`]) and
-//! the choice of server ([`server`]).
+//! counters and the log lines. The decision points wired so far are the admission at login ([`login`]), the
+//! choice of server ([`server`]) and the permission of a command ([`command`]); [`own`] takes the commands
+//! of an extension's own.
 //! Without an extension in the [`Registry`], which is how the proxy starts, nothing here runs and nothing
 //! is on the metrics page.
 
@@ -14,6 +15,7 @@ pub(crate) mod command;
 mod connection;
 mod link;
 pub(crate) mod login;
+pub(crate) mod own;
 pub(crate) mod server;
 mod stats;
 
@@ -41,6 +43,9 @@ pub struct Registry {
     /// How many configurations the registry has followed: what is kept of an extension's answers is
     /// dropped at a reload, which may change what it is asked, how long it is kept and who is asked.
     generation: AtomicU64,
+    /// The refusals of declared commands that were logged, for each hello, so that a word a player types
+    /// again and again is told once (`own.rs`).
+    refused: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Registry {

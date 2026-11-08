@@ -173,6 +173,10 @@ pub(super) struct State {
     next_id: u64,
     waiting: HashMap<u64, mpsc::Sender<Reply>>,
     pub info: Option<Info>,
+    /// The commands of its own the extension declared in its latest hello, **kept when the connection
+    /// ends**: a command that an extension that is down declared is still the extension's, and a player who
+    /// types it reads that it did not answer (docs/EXTENSIONS.md, 4.3). Only a hello changes it.
+    pub declared: Vec<CommandSpec>,
 }
 
 /// One extension, as the proxy sees it.
@@ -222,6 +226,11 @@ impl Link {
     /// What the extension declared in the hello of the connection that is up.
     pub fn info(&self) -> Option<Info> {
         self.lock().info.clone()
+    }
+
+    /// The commands it declared in its latest hello, whether it is connected now or not (see the field).
+    pub fn declared(&self) -> Vec<CommandSpec> {
+        self.lock().declared.clone()
     }
 
     /// How many hellos the extension has been through (see the field).
@@ -281,6 +290,12 @@ impl Link {
             let mut state = self.lock();
             state.writer = Some(writer);
             state.outbox = Some(outbox);
+            // Only an extension that asked for `commands` and is granted it has commands.
+            state.declared = if info.granted.iter().any(|c| c == meridian_config::COMMANDS) {
+                info.commands.clone()
+            } else {
+                Vec::new()
+            };
             state.info = Some(info);
         }
         self.epoch.fetch_add(1, Ordering::Relaxed);
@@ -361,6 +376,22 @@ impl Link {
         timeout: Duration,
         parse: impl FnOnce(&Value) -> Result<T, String>,
     ) -> Result<T, CallError> {
+        self.call_counting(method, params, timeout, parse, true)
+    }
+
+    /// [`Link::call`], where `counts` says whether a failure (a deadline that passed, an invalid answer)
+    /// counts toward the breaker. A command of the extension's own does not: one command that is slow must
+    /// not make every login and every permission take its on-error policy. An open breaker still stops the
+    /// call, an answer still counts as one, and a failure counts when it is the trial of a breaker that was
+    /// open (a trial with no verdict would leave the breaker waiting for it).
+    pub fn call_counting<T>(
+        &self,
+        method: &'static str,
+        params: Option<&Value>,
+        timeout: Duration,
+        parse: impl FnOnce(&Value) -> Result<T, String>,
+        counts: bool,
+    ) -> Result<T, CallError> {
         // A place, and an id.
         let (id, writer, outbox, replies) = {
             let mut state = self.lock();
@@ -439,7 +470,8 @@ impl Link {
         self.end(method, outcome, Some(took));
         let change = match outcome {
             Outcome::Answered => self.breaker().success(trial),
-            _ => self.breaker().failure(Instant::now(), trial),
+            _ if counts || trial => self.breaker().failure(Instant::now(), trial),
+            _ => None,
         };
         self.breaker_changed(change);
         result

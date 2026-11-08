@@ -14,12 +14,14 @@ pub const DECIDE_LOGIN: &str = "decide.login";
 pub const DECIDE_COMMAND: &str = "decide.command";
 /// The capability of the choice of server.
 pub const DECIDE_SERVER: &str = "decide.server";
+/// The capability of the commands of the extension's own (docs/EXTENSIONS.md, 4.3).
+pub const COMMANDS: &str = "commands";
 
 /// Every capability an operator may grant (docs/EXTENSIONS.md, 2.3).
 pub const CAPABILITIES: [&str; 12] = [
     DECIDE_LOGIN,
     DECIDE_COMMAND,
-    "commands",
+    COMMANDS,
     DECIDE_SERVER,
     "orders.read",
     "orders.message",
@@ -119,6 +121,20 @@ impl Default for CommandDecision {
     }
 }
 
+/// `[extension.commands]`: the commands of the extension's own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnCommands {
+    /// Milliseconds the proxy waits for the lines a command answers; after that the player reads that
+    /// the command did not answer.
+    pub timeout_ms: u64,
+}
+
+impl Default for OwnCommands {
+    fn default() -> Self {
+        Self { timeout_ms: 2_000 }
+    }
+}
+
 /// `[extension.decide-server]`: the choice of server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerDecision {
@@ -158,6 +174,7 @@ pub struct Extension {
     pub decide_login: LoginDecision,
     pub decide_command: CommandDecision,
     pub decide_server: ServerDecision,
+    pub own_commands: OwnCommands,
 }
 
 impl Extension {
@@ -183,6 +200,13 @@ pub(crate) struct FileExtension {
     decide_login: Option<FileLoginDecision>,
     decide_command: Option<FileCommandDecision>,
     decide_server: Option<FileServerDecision>,
+    commands: Option<FileOwnCommands>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct FileOwnCommands {
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -227,6 +251,8 @@ impl FileExtension {
             DECIDE_COMMAND,
         )?;
         table(self.decide_server.is_some(), "decide-server", DECIDE_SERVER)?;
+        table(self.commands.is_some(), "commands", COMMANDS)?;
+        let own = self.commands.and_then(|c| c.timeout_ms);
         let login = self.decide_login.unwrap_or(FileLoginDecision {
             timeout_ms: None,
             on_error: None,
@@ -268,6 +294,9 @@ impl FileExtension {
             decide_server: ServerDecision {
                 timeout_ms: server.timeout_ms.unwrap_or(server_default.timeout_ms),
                 on_error: server.on_error.unwrap_or(server_default.on_error),
+            },
+            own_commands: OwnCommands {
+                timeout_ms: own.unwrap_or(OwnCommands::default().timeout_ms),
             },
         })
     }
@@ -357,7 +386,12 @@ pub(crate) fn validate(extensions: &[Extension]) -> Result<(), ConfigError> {
             name: e.name.clone(),
             reason,
         })?;
-        if extensions[..i].iter().any(|o| o.name == e.name) {
+        // The case does not tell two names apart: the permission nodes of an extension's commands
+        // (`ext.<name>.<command>`) are lower case, so `Perms` and `perms` would share them.
+        if extensions[..i]
+            .iter()
+            .any(|o| o.name.eq_ignore_ascii_case(&e.name))
+        {
             return Err(ConfigError::DuplicateExtension(e.name.clone()));
         }
         check_loopback(&e.address).map_err(|reason| ConfigError::InvalidExtensionAddress {
@@ -411,6 +445,7 @@ pub(crate) fn validate(extensions: &[Extension]) -> Result<(), ConfigError> {
         zero("decide-login timeout-ms", e.decide_login.timeout_ms)?;
         zero("decide-command timeout-ms", e.decide_command.timeout_ms)?;
         zero("decide-server timeout-ms", e.decide_server.timeout_ms)?;
+        zero("commands timeout-ms", e.own_commands.timeout_ms)?;
         // With no usable answer (the extension down, slow or saturated) `allow` would give every command of
         // the proxy, `/send` and `/alert` among them, to whoever types it: a fail-open on the system of
         // rights. The login and the choice of server may `allow`: the bans, the whitelist and the caps

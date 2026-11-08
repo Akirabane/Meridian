@@ -1156,6 +1156,7 @@ fn configured(
         decide_login: Default::default(),
         decide_command: Default::default(),
         decide_server: Default::default(),
+        own_commands: Default::default(),
     };
     change(&mut extension);
     meridian_config::Config {
@@ -1179,6 +1180,7 @@ fn the_defaults_of_the_configuration_are_the_defaults_of_the_connection() {
         decide_login: Default::default(),
         decide_command: Default::default(),
         decide_server: Default::default(),
+        own_commands: Default::default(),
     });
     assert_eq!(configured, defaults);
     // The shortest token the configuration accepts is the shortest the handshake accepts.
