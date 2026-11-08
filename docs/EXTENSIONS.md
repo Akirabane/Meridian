@@ -3,10 +3,10 @@
 This page specifies how a program of the operator's own can take part in what the proxy
 decides: whether a player may enter, whether they may use a proxy command, and which server
 they go to. Part of it is built, and the pull requests of section 10 follow the rest. Built: the
-admission at login (4.2), the permission of a command (4.3) and the choice of server, at login and at
-the fallback (4.4), with the Rust SDK (`meridian-extension`); the "As built" paragraphs of 4.3 and
-4.4 say what the code does where this page leaves a choice open. Not built: the extension's own
-commands (4.3), the orders the extension gives the proxy (5) and the events the proxy sends it (6).
+admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
+choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`); the
+"As built" paragraphs of 4.3 and 4.4 say what the code does where this page leaves a choice open. Not
+built: the orders the extension gives the proxy (5) and the events the proxy sends it (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -651,9 +651,23 @@ before the proxy's own are looked at:
   time**: a second reads `Still working on your last command.` An answer that does not pass `parse_run_answer`
   (more than 10 lines, a line over 256 characters or with a control character), a deadline that passes, a call that
   finds no connection, a full `max-in-flight` or an open breaker all end the same way: `That command did not answer.`
-- **The breaker.** A failure of a command does **not** count toward the extension's breaker (`Link::call_counting`),
-  so that one slow command does not turn every login and permission to its on-error policy; an answer still counts
-  as one, an open breaker still stops the call, and a failure counts when it is the trial of a breaker that was open.
+- **The breaker.** A command counts **neither for nor against** the extension's breaker (`Link::call_counting`): a
+  failure does not count, so that one slow command does not turn every login and permission to its on-error
+  policy, and an answer does not reset the count of failures in a row, so that an extension whose logins time out
+  and whose commands answer still opens its breaker. A command is only refused while the breaker is open (no
+  request goes), and is never the trial of one: the next decision is.
+- **The places.** The commands of an extension share its `max-in-flight` places with its decisions: at most half
+  of them run commands (`Link::run_place`), so that players who type a slow command cannot leave a login or a
+  permission without a place. One that finds none is told `That command did not answer.` at once, and counted as
+  `busy`.
+- **What the player reads.** A line holds no formatting code (`§`), no control character, and no mark that
+  reverses or hides text (direction marks, characters of no width): `Lines::new` drops them and the proxy
+  refuses an answer that has one (`run::is_refused`). **This is a prudent default**: colours would need a field
+  of its own, allowed by the operator, added later.
+- **The bounds of a hello.** At most 64 commands, 8 aliases for each and a `usage` of at most 256 characters; the
+  words are resolved once for each hello (and again when the configuration changes which extensions have
+  commands or which of the proxy's are enabled), not for every command a player types.
+- **The deadline** `[extension.commands] timeout-ms` is 1 to 10000 ms.
 - **Not built:** the commands are not offered to the client's completion, and the metrics have no label by command
   (`meridian_extension_requests_total{method="meridian:command/run"}` counts the runs and their outcomes).
 - The names of two extensions that differ only in case are refused when the configuration is read (the node is lower case).
@@ -824,8 +838,12 @@ same machine without the token can open the port but learns nothing (section 2.2
 - names, unique ids and how they were checked (`auth`);
 - the server each player is on, the servers, their roles, caps, counts and states;
 - the host name a player typed;
-- the commands of the proxy players type, with their arguments (only with `decide.command` or
-  `commands`, and only the proxy's own commands, never what goes to a server);
+- the commands players type that the proxy answers, with their arguments: the proxy's own ones, with
+  `decide.command`, and, with `commands`, the extension's own. **The extension's own can be a word that is
+  a command of the servers** (`/msg`, `/tell`...): the proxy takes it and never passes it on, so an extension
+  granted `commands` sees what a player typed after it. The proxy keeps no list of words from an extension
+  (the operator decides whom to grant `commands`, and its token is an administrator's credential). Of
+  what goes to a server, an extension sees nothing but that;
 - players' addresses, **only** with the `addresses` capability (decision U7, section 10.3).
 
 **What it never sees:** the forwarding secret (`crates/meridian-config/src/lib.rs:162`), any

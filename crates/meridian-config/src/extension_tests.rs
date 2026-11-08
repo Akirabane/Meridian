@@ -256,10 +256,12 @@ fn a_name_is_plain_and_unique() {
         extension("Perms", 25590, "a.token", ""),
         extension("perms", 25591, "b.token", "")
     );
-    assert!(matches!(
-        load(&dir, "", &cases).unwrap_err(),
-        ConfigError::DuplicateExtension(name) if name == "perms"
-    ));
+    let e = load(&dir, "", &cases).unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::DuplicateExtension(name) if name == "perms"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("without regard to case"), "{e}");
 }
 
 #[test]
@@ -301,6 +303,35 @@ fn the_commands_of_an_extension_wait_two_seconds_unless_told_and_need_their_capa
             &granted("[extension.commands]\non-error = \"deny\"")
         )
         .is_err()
+    );
+    // Ten seconds at most: a thread of the proxy waits that long for the lines of one command.
+    let config = load(
+        &dir,
+        "",
+        &granted(
+            "[extension.commands]
+timeout-ms = 10000",
+        ),
+    )
+    .unwrap();
+    assert_eq!(config.extensions[0].own_commands.timeout_ms, 10_000);
+    let e = load(
+        &dir,
+        "",
+        &granted(
+            "[extension.commands]
+timeout-ms = 10001",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, ConfigError::ExtensionSettingAbove { most: 10_000, .. }),
+        "{e}"
+    );
+    assert!(
+        e.to_string()
+            .contains("commands timeout-ms must be at most 10000"),
+        "{e}"
     );
 }
 

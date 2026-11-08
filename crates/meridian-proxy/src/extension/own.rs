@@ -6,8 +6,9 @@
 //! The call is not made on the thread that copies the player's packets: that thread takes the command
 //! and goes on, and a thread of its own waits for the lines, at most the `timeout-ms` of
 //! `[extension.commands]` (2000 ms by default), and tells them through the session's handle. A player has
-//! one command running at a time, so that one player cannot hold the places of an extension that its
-//! login and permission decisions need. A failure of a command never counts toward the extension's
+//! one command running at a time, and an extension has at most half of its `max-in-flight` places running
+//! commands (`Link::run_place`), so that neither one player nor many can hold the places that its login and
+//! permission decisions need. A failure of a command never counts toward the extension's
 //! breaker (an open one still stops the call): one slow command must not turn every login to the
 //! on-error policy.
 //!
@@ -28,6 +29,7 @@ use meridian_extension::run::{self, RunParams, RunRequest};
 use meridian_extension::text;
 use meridian_net::relay::TAKEN;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -49,6 +51,7 @@ const BUILT_IN: [ProxyCommand; 6] = [
 ];
 
 /// An extension's command that a typed word stands for.
+#[derive(Clone)]
 pub(crate) struct Claim {
     pub link: Arc<Link>,
     /// The extension's name in the configuration.
@@ -57,20 +60,59 @@ pub(crate) struct Claim {
     pub command: String,
 }
 
+/// The words the extensions hold, resolved once for each hello and not for each command a player types
+/// (`Registry::claim`).
+pub(crate) struct Resolved {
+    /// What it was resolved for: the extensions that are enabled and granted `commands`, in the order of
+    /// the configuration, with how many hellos each has been through (`None` for one that is not running),
+    /// and which of the proxy's commands are enabled.
+    stamp: (Vec<(String, Option<u64>)>, u8),
+    words: HashMap<String, Claim>,
+}
+
 impl Registry {
-    /// The command `word` stands for, if it is an extension's (see the module). A refusal is logged once for
-    /// each hello, however often a player types the word.
+    /// The command `word` stands for, if it is an extension's (see the module). The words are resolved when
+    /// an extension says hello, or when the configuration changes which extensions have commands or which
+    /// commands of the proxy are enabled, and are only looked up for the commands a player types after
+    /// that: most of them are the server's, and cost nothing but the comparison of what was resolved for.
     pub(crate) fn claim(&self, config: &Config, word: &str) -> Option<Claim> {
-        let mut taken: Vec<String> = Vec::new();
+        let granted = || config.enabled_extensions().filter(|e| e.grants(COMMANDS));
+        granted().next()?;
+        let mask = built_in_mask(config);
+        let mut cache = self.resolved.lock().unwrap_or_else(|e| e.into_inner());
+        let current = cache.as_ref().is_some_and(|resolved| {
+            let (names, built_in) = &resolved.stamp;
+            *built_in == mask
+                && names.len() == granted().count()
+                && granted().zip(names).all(|(e, (name, epoch))| {
+                    e.name == *name && self.link(&e.name).map(|l| l.epoch()) == *epoch
+                })
+        });
+        if !current {
+            *cache = Some(Arc::new(self.resolve(config, mask)));
+        }
+        cache.as_ref()?.words.get(word).cloned()
+    }
+
+    /// Reads the declarations of the extensions in the order of the configuration, and logs what it refuses.
+    fn resolve(&self, config: &Config, built_in: u8) -> Resolved {
+        let mut words: HashMap<String, Claim> = HashMap::new();
+        let mut names = Vec::new();
         for extension in config.enabled_extensions().filter(|e| e.grants(COMMANDS)) {
-            let Some(link) = self.link(&extension.name) else {
+            let link = self.link(&extension.name);
+            names.push((
+                extension.name.clone(),
+                link.as_ref().map(|link| link.epoch()),
+            ));
+            let Some(link) = link else {
                 continue;
             };
             for spec in link.declared() {
                 let refuse = |what: &str, why: &str| {
-                    self.refused(
-                        &link,
-                        &format!("the command word \"{}\" {why}", text::clean(what, 32)),
+                    warning!(
+                        "extension \"{}\": the command word \"{}\" {why}",
+                        link.name(),
+                        text::clean(what, meridian_extension::wire::MAX_COMMAND_WORD)
                     );
                 };
                 if let Err(why) = spec.check() {
@@ -83,8 +125,8 @@ impl Registry {
                         .any(|b| config.commands.is_enabled(*b) && b.words().contains(&w))
                     {
                         Some("is a command of the proxy")
-                    } else if taken.iter().any(|t| t == w) {
-                        Some("is another extension's, or this one's, already")
+                    } else if words.contains_key(w) {
+                        Some("is another command's, already")
                     } else {
                         None
                     }
@@ -93,38 +135,39 @@ impl Registry {
                     refuse(&spec.name, &format!("is refused: it {why}"));
                     continue;
                 }
-                let mut words = vec![spec.name.clone()];
+                let mut mine = vec![spec.name.clone()];
                 for alias in &spec.aliases {
                     match clash(alias) {
                         Some(why) => refuse(alias, &format!("is refused: it {why}")),
-                        None => words.push(alias.clone()),
+                        None => mine.push(alias.clone()),
                     }
                 }
-                let found = words.iter().any(|w| w == word);
-                taken.extend(words);
-                if found {
-                    return Some(Claim {
-                        link: Arc::clone(&link),
-                        extension: extension.name.clone(),
-                        command: spec.name,
-                    });
+                for word in mine {
+                    words.insert(
+                        word,
+                        Claim {
+                            link: Arc::clone(&link),
+                            extension: extension.name.clone(),
+                            command: spec.name.clone(),
+                        },
+                    );
                 }
             }
         }
-        None
+        Resolved {
+            stamp: (names, built_in),
+            words,
+        }
     }
+}
 
-    /// Logs `what` as a refusal of `link`'s declaration, once for each of its hellos.
-    fn refused(&self, link: &Link, what: &str) {
-        let key = format!("{}:{}:{what}", link.name(), link.epoch());
-        let mut seen = self.refused.lock().unwrap_or_else(|e| e.into_inner());
-        if seen.len() >= 1024 {
-            seen.clear();
-        }
-        if seen.insert(key) {
-            warning!("extension \"{}\": {what}", link.name());
-        }
-    }
+/// Which of the proxy's commands are enabled, one bit each.
+fn built_in_mask(config: &Config) -> u8 {
+    BUILT_IN
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| config.commands.is_enabled(**b))
+        .fold(0, |mask, (i, _)| mask | 1 << i)
 }
 
 /// A player's end of the extensions' commands: which of the commands they type are an extension's, and
@@ -174,6 +217,11 @@ impl Own {
         let first = line.split_whitespace().next()?;
         let config = (self.config)();
         let claim = self.registry.claim(&config, first)?;
+        // Before the permission, which may ask the extension: a player who types the command again while it
+        // runs costs it nothing.
+        if self.running.load(Ordering::SeqCst) {
+            return Some(BUSY.to_owned());
+        }
         let node = node::extension(&claim.extension, &claim.command);
         let typed = Typed {
             name: &typist.name,
@@ -196,6 +244,14 @@ impl Own {
             return Some(BUSY.to_owned());
         }
         let running = Running(Arc::clone(&self.running));
+        // The extension's places are shared with its decisions: half of them at most are for commands.
+        let Some(place) = claim.link.run_place() else {
+            claim
+                .link
+                .stats()
+                .request(run::RUN, super::stats::Outcome::Busy, None);
+            return Some(NO_ANSWER.to_owned());
+        };
         let timeout = config
             .extensions
             .iter()
@@ -218,7 +274,7 @@ impl Own {
         let spawned = std::thread::Builder::new()
             .name(format!("extension-{name}-run"))
             .spawn(move || {
-                let _running = running;
+                let (_running, _place) = (running, place);
                 match link.call_counting(
                     run::RUN,
                     Some(&params),
@@ -241,5 +297,37 @@ impl Own {
                 Some(NO_ANSWER.to_owned())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flag that says a command is running is freed when the guard goes, whatever ended the thread
+    /// that held it (a panic, or a thread that could not start and whose closure was dropped).
+    #[test]
+    fn the_flag_of_a_running_command_is_freed_when_its_guard_goes() {
+        let flag = Arc::new(AtomicBool::new(true));
+        drop(Running(Arc::clone(&flag)));
+        assert!(!flag.load(Ordering::SeqCst));
+        // A closure that is never run frees it too, as a thread that did not start does.
+        flag.store(true, Ordering::SeqCst);
+        let guard = Running(Arc::clone(&flag));
+        let never_run = move || {
+            let _guard = guard;
+        };
+        drop(never_run);
+        assert!(!flag.load(Ordering::SeqCst));
+        // And a panic in the thread.
+        flag.store(true, Ordering::SeqCst);
+        let guard = Running(Arc::clone(&flag));
+        let joined = std::thread::spawn(move || {
+            let _guard = guard;
+            panic!("the command's thread failed");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert!(!flag.load(Ordering::SeqCst));
     }
 }

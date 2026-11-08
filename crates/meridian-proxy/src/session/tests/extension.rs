@@ -2358,8 +2358,9 @@ groups = ["staff"]
 
     #[test]
     fn a_player_has_one_command_running_at_a_time() {
-        let slow = parties("gate", Duration::from_millis(300), &[("party", &[])]);
-        let config = config_of(vec![slow.extension("gate", &["commands"], 2000)], &[]);
+        // Long enough that a loaded machine types the second command while the first still runs.
+        let slow = parties("gate", Duration::from_millis(1500), &[("party", &[])]);
+        let config = config_of(vec![slow.extension("gate", &["commands"], 5000)], &[]);
         let sessions = sessions_for(&config);
         let (hook, told) = hook_of(&config, &sessions, "");
         assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
@@ -2501,5 +2502,87 @@ groups = ["staff"]
         let seen = party.seen.lock().unwrap().clone();
         assert_eq!(seen[0].args.len(), 32);
         assert!(seen[0].args.iter().all(|a| a.chars().count() == 256));
+    }
+
+    #[test]
+    fn an_extension_has_at_most_half_of_its_places_running_commands() {
+        let slow = parties("gate", Duration::from_millis(1500), &[("party", &[])]);
+        let mut extension = slow.extension("gate", &["commands"], 5000);
+        // Four places: two for commands, two left for the extension's decisions.
+        extension.max_in_flight = 4;
+        let config = config_of(vec![extension], &[]);
+        let sessions = sessions_for(&config);
+        let players: Vec<_> = (0..3).map(|_| hook_of(&config, &sessions, "")).collect();
+        assert_eq!(players[0].0("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(players[1].0("party").as_deref(), TAKEN_AT_ONCE);
+        // The third finds half the places taken: told at once, and the extension is not asked.
+        assert_eq!(players[2].0("party").as_deref(), Some(NO_ANSWER));
+        let link = sessions.extensions.link("gate").unwrap();
+        assert_eq!(link.stats().count(run::RUN, RequestOutcome::Busy), 1);
+        // The first two are answered, and the places are free again for the third.
+        told_by_now(&players[0].1, 1);
+        told_by_now(&players[1].1, 1);
+        let limit = Instant::now() + Duration::from_secs(5);
+        while players[2].0("party").as_deref() != TAKEN_AT_ONCE {
+            assert!(Instant::now() < limit, "the places never came back");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(told_by_now(&players[2].1, 1), ["gate ran party"]);
+    }
+
+    #[test]
+    fn typing_again_while_a_command_runs_does_not_ask_the_extension_for_the_permission() {
+        let permissions = Arc::new(AtomicUsize::new(0));
+        let both = Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_command({
+                let permissions = Arc::clone(&permissions);
+                move |_: &CommandRequest| {
+                    permissions.fetch_add(1, Ordering::SeqCst);
+                    NodeAnswers::new()
+                }
+            })
+            .command(spec("party", &[]), |_: &RunRequest| {
+                std::thread::sleep(Duration::from_millis(1500));
+                Said::one("ran")
+            });
+        let both = Parties {
+            running: both.bind("127.0.0.1:0").unwrap(),
+            folder: Folder::new(),
+            seen: Arc::default(),
+        };
+        let config = config_of(
+            vec![both.extension("gate", &["decide.command", "commands"], 5000)],
+            &[],
+        );
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(permissions.load(Ordering::SeqCst), 1);
+        // Typed again while it runs: told at once, and the extension is not asked about the node again.
+        for _ in 0..5 {
+            assert_eq!(hook("party").as_deref(), Some(BUSY));
+        }
+        assert_eq!(permissions.load(Ordering::SeqCst), 1);
+        assert_eq!(told_by_now(&told, 1), ["ran"]);
+    }
+
+    #[test]
+    fn what_a_command_says_never_holds_a_formatting_code_or_a_reversing_mark() {
+        let extension = Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .command(spec("party", &[]), |_: &RunRequest| {
+                Said::new(["\u{a7}4Server\u{a7}r says hi", "x\u{202e}evil\u{200b}y"])
+            });
+        let party = Parties {
+            running: extension.bind("127.0.0.1:0").unwrap(),
+            folder: Folder::new(),
+            seen: Arc::default(),
+        };
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let (hook, told) = hook_of(&config, &sessions, "");
+        assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
+        assert_eq!(told_by_now(&told, 2), ["4Serverr says hi", "xevily"]);
     }
 }

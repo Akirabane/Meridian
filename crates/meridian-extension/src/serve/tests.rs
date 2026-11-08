@@ -1584,4 +1584,14 @@ mod own_commands {
     fn a_word_the_proxy_would_refuse_is_a_mistake_of_the_program() {
         let _ = Extension::new("x", "1", token()).command(declared("Party", &[]), |_| Said::none());
     }
+
+    #[test]
+    #[should_panic(expected = "at most 64 commands")]
+    fn a_sixty_fifth_command_is_a_mistake_of_the_program() {
+        let mut extension = Extension::new("x", "1", token());
+        for i in 0..=wire::MAX_COMMANDS {
+            extension = extension.command(declared(&format!("c{i}"), &[]), |_| Said::none());
+        }
+        drop(extension);
+    }
 }

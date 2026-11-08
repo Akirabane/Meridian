@@ -33,6 +33,9 @@ pub const CAPABILITIES: [&str; 12] = [
     "addresses",
 ];
 
+/// The longest `[extension.commands] timeout-ms`: a thread waits that long for the lines of a command.
+pub const MAX_OWN_COMMANDS_TIMEOUT_MS: u64 = 10_000;
+
 /// The longest name of an extension, in characters.
 pub const MAX_EXTENSION_NAME: usize = 32;
 
@@ -446,6 +449,13 @@ pub(crate) fn validate(extensions: &[Extension]) -> Result<(), ConfigError> {
         zero("decide-command timeout-ms", e.decide_command.timeout_ms)?;
         zero("decide-server timeout-ms", e.decide_server.timeout_ms)?;
         zero("commands timeout-ms", e.own_commands.timeout_ms)?;
+        if e.own_commands.timeout_ms > MAX_OWN_COMMANDS_TIMEOUT_MS {
+            return Err(ConfigError::ExtensionSettingAbove {
+                extension: e.name.clone(),
+                setting: "commands timeout-ms",
+                most: MAX_OWN_COMMANDS_TIMEOUT_MS,
+            });
+        }
         // With no usable answer (the extension down, slow or saturated) `allow` would give every command of
         // the proxy, `/send` and `/alert` among them, to whoever types it: a fail-open on the system of
         // rights. The login and the choice of server may `allow`: the bans, the whitelist and the caps

@@ -720,6 +720,88 @@ fn the_breaker_opens_after_failures_in_a_row_sends_nothing_while_open_and_closes
     assert_eq!(fake.seen(|s| s.requests.len()), 4);
 }
 
+/// A call of the kind a command of the extension's own makes: it counts for nothing.
+fn uncounted(link: &Link, timeout: Duration) -> Result<Value, CallError> {
+    link.call_counting(
+        METHOD,
+        Some(&json!({ "n": 1 })),
+        timeout,
+        |result| {
+            result
+                .get("pong")
+                .cloned()
+                .ok_or_else(|| "no pong in the result".to_owned())
+        },
+        false,
+    )
+}
+
+#[test]
+fn an_answer_to_a_call_that_counts_for_nothing_does_not_hide_the_failures_of_the_others() {
+    let fake = Fake::start(Script::default());
+    let (_registry, link, _folder) = connect_with(&fake, |settings| {
+        settings.breaker_failures = 4;
+        settings.breaker_open = Duration::from_secs(30);
+    });
+    until("the connection", || link.is_connected());
+    // Four decisions that time out, and between them commands that answer: the answers do not reset the
+    // count of failures in a row, so the fourth opens the breaker (an extension whose logins time out and
+    // whose commands answer must not keep its breaker closed for ever).
+    for round in 0..4 {
+        fake.answer_with(Answer::Silent);
+        assert_eq!(
+            ping(&link, Duration::from_millis(30)),
+            Err(CallError::Timeout),
+            "decision {round}"
+        );
+        if round < 3 {
+            fake.answer_with(Answer::Echo);
+            assert!(uncounted(&link, Duration::from_secs(2)).is_ok());
+        }
+    }
+    let asked = fake.seen(|s| s.requests.len());
+    assert_eq!(
+        ping(&link, Duration::from_secs(1)),
+        Err(CallError::BreakerOpen)
+    );
+    // Open, it refuses a command too, with no request; and never takes its turn as the trial.
+    assert_eq!(
+        uncounted(&link, Duration::from_secs(1)),
+        Err(CallError::BreakerOpen)
+    );
+    assert_eq!(fake.seen(|s| s.requests.len()), asked);
+    assert_eq!(link.stats().count(METHOD, Outcome::Breaker), 2);
+}
+
+#[test]
+fn the_failures_of_a_call_that_counts_for_nothing_are_not_the_breakers() {
+    let fake = Fake::start(Script::default());
+    let (_registry, link, _folder) = connect_with(&fake, |settings| settings.breaker_failures = 2);
+    until("the connection", || link.is_connected());
+    // Deadlines that pass, then answers that are not what the method defines (a command's lines that are
+    // too many or hold a control character are such answers): more than the breaker allows.
+    fake.answer_with(Answer::Silent);
+    for _ in 0..3 {
+        assert_eq!(
+            uncounted(&link, Duration::from_millis(30)),
+            Err(CallError::Timeout)
+        );
+    }
+    fake.answer_with(Answer::Garbage);
+    for _ in 0..3 {
+        assert!(matches!(
+            uncounted(&link, Duration::from_secs(2)),
+            Err(CallError::Invalid(_))
+        ));
+    }
+    // The breaker is closed: a decision goes, and is answered.
+    fake.answer_with(Answer::Echo);
+    assert!(ping(&link, Duration::from_secs(2)).is_ok());
+    assert_eq!(link.stats().count(METHOD, Outcome::Timeout), 3);
+    assert_eq!(link.stats().count(METHOD, Outcome::Invalid), 3);
+    assert_eq!(link.stats().count(METHOD, Outcome::Breaker), 0);
+}
+
 #[test]
 fn a_broken_connection_ends_the_call_that_waits_opens_the_breaker_and_the_next_hello_closes_it() {
     let fake = Fake::start(Script::default());

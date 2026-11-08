@@ -237,6 +237,12 @@ pub enum ConfigError {
         extension: String,
         setting: &'static str,
     },
+    /// A number of an extension is above the most it may be.
+    ExtensionSettingAbove {
+        extension: String,
+        setting: &'static str,
+        most: u64,
+    },
     /// With the queue off, the extensions' login decisions and the connection to a backend take
     /// longer than a client waits in silence.
     ExtensionBudget {
@@ -544,7 +550,10 @@ impl fmt::Display for ConfigError {
                 write!(f, "[[extension]] name \"{name}\": {reason}")
             }
             ConfigError::DuplicateExtension(name) => {
-                write!(f, "[[extension]] \"{name}\" is written twice")
+                write!(
+                    f,
+                    "[[extension]] \"{name}\" is written twice (names are compared without regard to case: \"Perms\" and \"perms\" are the same)"
+                )
             }
             ConfigError::InvalidExtensionAddress {
                 extension,
@@ -614,6 +623,14 @@ impl fmt::Display for ConfigError {
                     "extension \"{extension}\": {setting} must be more than 0"
                 )
             }
+            ConfigError::ExtensionSettingAbove {
+                extension,
+                setting,
+                most,
+            } => write!(
+                f,
+                "extension \"{extension}\": {setting} must be at most {most}"
+            ),
             ConfigError::ExtensionBudget {
                 extension_ms,
                 connect_timeout_ms,

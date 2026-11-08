@@ -245,9 +245,9 @@ impl Extension {
     /// player is), and answers the [`Lines`] the player reads. They are plain text: [`Lines::new`] cuts and
     /// cleans what the proxy would refuse. The player waits for the answer, so keep it quick.
     ///
-    /// A command is declared once with all its words (`spec.name` and `spec.aliases`), and may be given
-    /// any number of commands. A word that is not valid (`CommandSpec::check`) or is declared twice is a
-    /// mistake of the program, and panics, as registering any method twice does. Whether a word is also a
+    /// A command is declared once with all its words (`spec.name` and `spec.aliases`), and an extension has
+    /// at most [`wire::MAX_COMMANDS`] of them. A word that is not valid (`CommandSpec::check`), is declared
+    /// twice or is one too many is a mistake of the program, and panics, as registering any method twice does. Whether a word is also a
     /// command of the proxy or of another extension is for the proxy to say, when it reads the hello.
     pub fn command(
         mut self,
@@ -257,6 +257,11 @@ impl Extension {
         if let Err(why) = spec.check() {
             panic!("the command is not valid: {why}");
         }
+        assert!(
+            self.commands.len() < wire::MAX_COMMANDS,
+            "an extension declares at most {} commands",
+            wire::MAX_COMMANDS
+        );
         for word in spec.words() {
             assert!(
                 !self.commands.iter().any(|c| c.words().any(|w| w == word)),

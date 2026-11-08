@@ -43,9 +43,9 @@ pub struct Registry {
     /// How many configurations the registry has followed: what is kept of an extension's answers is
     /// dropped at a reload, which may change what it is asked, how long it is kept and who is asked.
     generation: AtomicU64,
-    /// The refusals of declared commands that were logged, for each hello, so that a word a player types
-    /// again and again is told once (`own.rs`).
-    refused: Mutex<std::collections::HashSet<String>>,
+    /// The words the extensions hold for their own commands, resolved for the hellos they have been through
+    /// (`own.rs`).
+    resolved: Mutex<Option<Arc<own::Resolved>>>,
 }
 
 impl Registry {
