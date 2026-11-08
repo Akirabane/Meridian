@@ -15,11 +15,13 @@
 
 use super::link::{Link, OrderPlace, SendLot};
 use crate::log::debug;
-use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MOVE, ORDERS_READ};
+use meridian_config::{
+    ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE, ORDERS_READ,
+};
 use meridian_extension::orders::{
     self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
 };
-use meridian_extension::orders::{Started, Target, Told};
+use meridian_extension::orders::{Kicked, Started, Target, Told};
 use meridian_extension::wire::{self, Discover, DiscoverMethod, Id, RpcError, code};
 use meridian_websocket::Writer;
 use serde_json::Value;
@@ -53,8 +55,22 @@ pub trait Actions: Send + Sync {
     fn audience(&self, server: Option<&str>) -> Result<usize, String>;
     /// Shows `text` to them, as `/alert` does, and tells how many were told.
     fn broadcast(&self, server: Option<&str>, text: &str) -> Result<usize, String>;
+    /// Ends the session of the player `who` is, telling them `reason`: the name of the player kicked, or `None` if nobody
+    /// online is that. **Never the first of several** (a name that two accounts have, by case), and never a player who has
+    /// `meridian.kick.exempt`: those are refused ([`KickRefusal`]) and nobody is kicked.
+    fn kick(&self, who: &Who, reason: &str) -> Result<Option<String>, KickRefusal>;
     /// Plans sending `target` to the server `to`: nobody is moved until the plan is started.
     fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal>;
+}
+
+/// Why nobody was kicked though a player of that name is online. The words the extension reads for each are fixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KickRefusal {
+    /// Two accounts have that name (they differ only by the case): kicking one of them at random is refused, the unique id
+    /// names one.
+    Several,
+    /// The player has the permission `meridian.kick.exempt`.
+    Exempt,
 }
 
 /// Why a move could not be planned or started. The words the extension reads for each are fixed (they never quote what it
@@ -257,6 +273,14 @@ const PLAYERS_SEND: Order = Order {
     counted: true,
 };
 
+const PLAYERS_KICK: Order = Order {
+    method: orders::PLAYERS_KICK,
+    capability: ORDERS_MODERATE,
+    run: players_kick,
+    describe: || orders::moderate_methods().swap_remove(0).1,
+    counted: false,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
 pub(super) const ORDERS: &[Order] = &[
@@ -268,6 +292,7 @@ pub(super) const ORDERS: &[Order] = &[
     PLAYERS_TELL,
     BROADCAST,
     PLAYERS_SEND,
+    PLAYERS_KICK,
 ];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
@@ -282,6 +307,7 @@ pub(super) const ORDERS: &[Order] = &[
     PLAYERS_TELL,
     BROADCAST,
     PLAYERS_SEND,
+    PLAYERS_KICK,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -510,6 +536,41 @@ fn players_send(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError
         ctx.link.name()
     );
     done(serde_json::to_value(Started { started }))
+}
+
+/// `players/kick`: ends one player's session, telling them the reason as a literal. A player who is not online is not an
+/// error: `{"kicked": 0}`. It costs one order, and is logged with the player and the reason.
+fn players_kick(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let (who, reason) = orders::parse_kick(params).map_err(invalid)?;
+    let actions = ctx.actions()?;
+    // The place among the kicks of the minute is taken first and given back when nobody was kicked: only a session that ended
+    // counts, so a program cannot spend the limit by asking after players who are not there.
+    let slot = ctx
+        .link
+        .reserve_kick(std::time::Instant::now())
+        .ok_or_else(|| RpcError::new(code::TOO_MANY_RUNNING, "too many kicks"))?;
+    let kicked = match actions.kick(&who, &reason) {
+        Ok(Some(name)) => name,
+        Ok(None) => {
+            ctx.link.give_back_kick(slot);
+            return done(serde_json::to_value(Kicked { kicked: 0 }));
+        }
+        Err(refusal) => {
+            ctx.link.give_back_kick(slot);
+            return Err(invalid(
+                match refusal {
+                    KickRefusal::Several => "more than one player has that name: use the unique id",
+                    KickRefusal::Exempt => "that player cannot be kicked by an extension",
+                }
+                .to_owned(),
+            ));
+        }
+    };
+    crate::log::info!(
+        "extension \"{}\" kicked {kicked}: {reason}",
+        ctx.link.name()
+    );
+    done(serde_json::to_value(Kicked { kicked: 1 }))
 }
 
 /// `queue/list`: whether the queue is on, and who waits.

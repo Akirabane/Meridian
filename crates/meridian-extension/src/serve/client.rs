@@ -21,7 +21,8 @@
 //! [`OrderError::retry_later`]).
 
 use crate::orders::{
-    self, Ack, Found, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList, Started, Told,
+    self, Ack, Found, Kicked, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList,
+    Started, Told,
 };
 use crate::wire::{self, RpcError, code};
 use meridian_websocket::Writer;
@@ -473,6 +474,27 @@ impl Proxy {
             from: Some(from.to_owned()),
             ..orders::SendParams::default()
         })
+    }
+
+    /// Kicks the player called `player` (whatever the case) or with that unique id: their session ends and they read `reason`
+    /// (or, when it is `None`, [`orders::DEFAULT_KICK_REASON`]) as plain text. Tells how many were kicked: 1, or 0 if nobody
+    /// online is that (not an error). Needs `orders.moderate`, which the extension asks for with
+    /// [`Extension::wants`](super::Extension::wants) and the operator grants: **it lets the extension expel any player, an
+    /// operator's included**, and is logged by the proxy with the player and the reason.
+    ///
+    /// The reason is valid as the line of [`Proxy::tell`] is (1 to [`orders::MAX_TEXT`] characters with no control,
+    /// formatting or invisible character), or the call is [`OrderError::Invalid`] and nothing is sent. Asking again after a
+    /// timeout or an end of the connection ([`OrderError::may_have_run`]) is harmless: a player who was kicked is not online
+    /// to be kicked again (it answers 0), though if they came back in the meantime they are kicked again.
+    pub fn kick(&self, player: &str, reason: Option<&str>) -> Result<usize, OrderError> {
+        let params = orders::KickParams {
+            player: player.to_owned(),
+            reason: reason.map(str::to_owned),
+        };
+        orders::parse_kick(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        let kicked: Kicked = self.0.read(orders::PLAYERS_KICK, Some(&params))?;
+        Ok(kicked.kicked)
     }
 
     fn send(&self, params: orders::SendParams) -> Result<usize, OrderError> {

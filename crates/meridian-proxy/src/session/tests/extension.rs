@@ -1915,6 +1915,7 @@ groups = ["nobody"]
             rate_per_second: 1,
             burst: 1,
             max_running: 8,
+            max_kicks_per_minute: 0,
         };
         let config = config_with(tight);
         let sessions = sessions_for(&config);
@@ -3186,7 +3187,7 @@ mod reading {
     // ---- the orders that message ----------------------------------------------------------------------
 
     use crate::extension::actions::ProxyActions;
-    use crate::extension::{Actions, Paid, Refusal, SendLot};
+    use crate::extension::{Actions, KickRefusal, Paid, Refusal, SendLot};
     use meridian_extension::orders::{Target, Who};
 
     fn actions_of(sessions: &Arc<Sessions>, config: &Config) -> ProxyActions {
@@ -3400,6 +3401,182 @@ mod reading {
                 "{refused}"
             );
         }
+    }
+
+    // ---- the order that expels ---------------------------------------------------------------------------
+
+    #[test]
+    fn the_actions_of_the_proxy_kick_the_player_who_is_there_by_name_or_id_and_name_who_was_kicked()
+    {
+        let sessions = Arc::new(Sessions::default());
+        let actions = actions_of(&sessions, &balanced());
+        assert_eq!(actions.kick(&Who::Name("Alex".into()), "bye"), Ok(None));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let _notch = connected(
+            &sessions,
+            "Notch",
+            Identity::Verified(offline_uuid("Notch").to_be_bytes()),
+        );
+        // Nobody of that name or id.
+        assert_eq!(actions.kick(&Who::Name("Nobody".into()), "bye"), Ok(None));
+        assert_eq!(
+            actions.kick(
+                &Who::Id("99999999-0000-0000-0000-000000000000".into()),
+                "bye"
+            ),
+            Ok(None)
+        );
+        // By name in any case, and by unique id: the player kicked is named as the proxy knows them.
+        assert_eq!(
+            actions.kick(&Who::Name("ALEX".into()), "Spam."),
+            Ok(Some("Alex".to_owned()))
+        );
+        let notch = hyphenated(offline_uuid("Notch").to_be_bytes()).to_ascii_lowercase();
+        assert_eq!(
+            actions.kick(&Who::Id(notch), "Spam."),
+            Ok(Some("Notch".to_owned()))
+        );
+    }
+
+    /// The reason a kicked player reads, in the phase their client is in.
+    fn kick_reason(player: &mut Connection) -> String {
+        let (id, payload) = player.recv().unwrap();
+        let configuration::Clientbound::Disconnect(d) =
+            configuration::Clientbound::decode(id, &payload).unwrap()
+        else {
+            panic!("not a disconnect");
+        };
+        text::plain(&d.reason, &Default::default())
+    }
+
+    /// Two accounts whose names differ only by case (a verified `alex` beside an unverified `Alex`, which `on-duplicate =
+    /// "refuse"` does not tell apart: it refuses a second one of the same sort) are never kicked by name, since the first of
+    /// the two would be the one a map happens to list first. Nobody is kicked; the unique id names one of them.
+    #[test]
+    fn a_name_that_two_accounts_have_by_case_kicks_nobody_and_the_unique_id_kicks_the_one_it_names()
+    {
+        let sessions = Arc::new(Sessions::default());
+        let actions = actions_of(&sessions, &balanced());
+        let upper = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let lower = connected(
+            &sessions,
+            "alex",
+            Identity::Verified(offline_uuid("alex").to_be_bytes()),
+        );
+        for spelling in ["Alex", "alex", "ALEX"] {
+            assert_eq!(
+                actions.kick(&Who::Name(spelling.into()), "Spam."),
+                Err(KickRefusal::Several),
+                "{spelling}"
+            );
+        }
+        // Neither was told anything: their relays still run.
+        assert!(!upper.1.is_finished() && !lower.1.is_finished());
+        // The unique id names the account: only that one is kicked, whatever the case of the name it has.
+        let id = hyphenated(offline_uuid("alex").to_be_bytes()).to_ascii_lowercase();
+        assert_eq!(
+            actions.kick(&Who::Id(id), "Spam."),
+            Ok(Some("alex".to_owned()))
+        );
+        let (_, relay, mut kicked, _server) = lower;
+        assert_eq!(kick_reason(&mut kicked), "Spam.");
+        assert!(relay.join().unwrap().is_ok());
+        assert!(!upper.1.is_finished(), "the other account was not kicked");
+    }
+
+    /// A player who has `meridian.kick.exempt` (here by a rank of their own) cannot be kicked by an extension, by name or by id;
+    /// the others still can. The permission is given to nobody by default.
+    #[test]
+    fn a_player_with_the_kick_exempt_permission_is_not_kicked_by_an_extension() {
+        let sessions = Arc::new(Sessions::default());
+        let actions = actions_of(&sessions, &balanced());
+        let _boss = connected(&sessions, "Boss", Identity::Unverified("boss".into()));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let boss = hyphenated(offline_uuid("Boss").to_be_bytes()).to_ascii_lowercase();
+        sessions.permissions.install(
+            meridian_config::Permissions::parse(
+                "[group.guard]\nallow = [\"meridian.kick.exempt\"]\n[[player]]\nname = \"Boss\"\ngroups = [\"guard\"]\n",
+            )
+            .unwrap(),
+            None,
+        );
+        assert_eq!(
+            actions.kick(&Who::Name("boss".into()), "Spam."),
+            Err(KickRefusal::Exempt)
+        );
+        assert_eq!(
+            actions.kick(&Who::Id(boss), "Spam."),
+            Err(KickRefusal::Exempt)
+        );
+        assert_eq!(
+            actions.kick(&Who::Name("Alex".into()), "Spam."),
+            Ok(Some("Alex".to_owned()))
+        );
+        // Taking the rank away, the player can be kicked again: it is read at each kick, not when they joined.
+        sessions
+            .permissions
+            .install(meridian_config::Permissions::default(), None);
+        assert_eq!(
+            actions.kick(&Who::Name("Boss".into()), "Spam."),
+            Ok(Some("Boss".to_owned()))
+        );
+    }
+
+    /// A player who is still in the configuration phase reads the reason, a kick of a session already ended says `1` again while
+    /// the session is listed (a player who was leaving counts), and once it is gone nobody is there to be kicked.
+    #[test]
+    fn a_player_in_configuration_reads_the_reason_and_kicking_twice_says_one_while_the_session_is_listed()
+     {
+        let sessions = Arc::new(Sessions::default());
+        let actions = actions_of(&sessions, &balanced());
+        let (open, relay, mut player, _server) =
+            connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        assert_eq!(
+            actions.kick(&Who::Name("alex".into()), "First."),
+            Ok(Some("Alex".to_owned()))
+        );
+        assert_eq!(kick_reason(&mut player), "First.");
+        assert!(relay.join().unwrap().is_ok());
+        // Its session is still listed until the proxy has let it go: a second kick finds it and counts.
+        assert_eq!(
+            actions.kick(&Who::Name("alex".into()), "Second."),
+            Ok(Some("Alex".to_owned()))
+        );
+        drop(open);
+        assert_eq!(actions.kick(&Who::Name("alex".into()), "Third."), Ok(None));
+    }
+
+    #[test]
+    fn an_sdk_kicks_over_the_real_connection_and_a_player_who_is_not_online_is_zero() {
+        let folder = Folder::new();
+        let running = Sdk::new("warden", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .wants("orders.moderate")
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let config = Config {
+            extensions: vec![extension_config(
+                running.local_addr().to_string(),
+                folder.token(),
+                &["orders.moderate"],
+                OnError::Default,
+                1000,
+            )],
+            ..routed()
+        };
+        let sessions = Arc::new(sessions_for(&config));
+        sessions
+            .extensions
+            .serve_actions(Arc::new(actions_of(&sessions, &config)));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let proxy = running.proxy();
+        assert_eq!(proxy.kick("Nobody", Some("hello?")), Ok(0));
+        assert_eq!(proxy.kick("alex", Some("Spam.")), Ok(1));
+        // A reason that is not valid does not leave the SDK.
+        assert!(matches!(
+            proxy.kick("Alex", Some("two\nlines")),
+            Err(meridian_extension::serve::OrderError::Invalid(_))
+        ));
     }
 
     /// A server the balancer drained takes no players: a plan to it is refused, whoever is to be moved.

@@ -502,6 +502,34 @@ where they are). A server that takes no players now (drained, silent, or off tra
 are not on the server yet, but look where the players are first. Like `orders.message`, `orders.move` also tells your
 program whether a name is online and which server names exist.
 
+### Expelling a player
+
+With `orders.moderate` (ask for it with `.wants("orders.moderate")`, and the operator grants it) your program can kick a
+player, as the console's `kick` does:
+
+```rust
+let kicked = proxy.kick("Alex", Some("Spamming the chat."))?;   // 1, or 0 if Alex is not online
+let kicked = proxy.kick("0a2ea4ba-bced-39d2-80e1-1ad51a0e925c", None)?;   // by unique id, with the default reason
+```
+
+The player's session ends and they read the reason **as plain text, exactly as you wrote it** (no colour, no click, no
+hover): 1 to 256 characters with no line break, no `§` and no invisible character, or the call is refused
+(`OrderError::Invalid`) before anything is sent. **This power reaches any player, an operator's included**, so grant
+`orders.moderate` only to a program you would trust with the console's `kick`; the proxy logs every kick with the player and
+the reason. It costs one order of the proxy's budget, and unless the operator wrote `max-kicks-per-minute` only that budget
+limits how many players a program kicks in a second (`-32002 too many kicks`, `retry_later()`, when the operator's limit is
+reached).
+
+- **`1` means a session was found and closed by your order**, a player who was already leaving included; a kick is not always
+  instant when the player is being transferred. **Asking `kick` whether someone is online kicks them if they are**: only `0` is
+  harmless.
+- **A name two accounts have is refused** (`-32602 more than one player has that name: use the unique id`): nobody is kicked;
+  kick by the unique id.
+- **Some players cannot be kicked by an extension**: those the operator gave `meridian.kick.exempt`. You get `-32602 that
+  player cannot be kicked by an extension`, and nothing says more of them.
+- After a timeout or an end of the connection (`may_have_run()`) asking again is harmless (a player who was kicked is no longer
+  online, and the answer is `0`).
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told

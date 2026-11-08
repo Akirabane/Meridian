@@ -496,6 +496,7 @@ group is and how a node is decided is in [CONFIG.md](CONFIG.md) (`[permissions]`
 | `/send <player\|all\|server:name> <server>` | `meridian.send` | no |
 | `/glist [server]` | `meridian.glist` | no |
 | `/alert [server:name] <message>` | `meridian.alert` | no |
+| (no command) a player an extension must not kick | `meridian.kick.exempt`: an extension granted `orders.moderate` cannot kick them with `players/kick`; the console's `kick` still can | no |
 
 So a proxy that has no `permissions.toml` behaves as before: the first four are for everyone. To
 close one, deny its node in `default` (`deny = ["meridian.play"]`), and give it back to a rank by

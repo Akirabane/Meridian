@@ -55,6 +55,8 @@ pub mod node {
     pub const HUB: &str = "meridian.hub";
     /// `/play`.
     pub const PLAY: &str = "meridian.play";
+    /// A player who has it cannot be kicked by an extension (`players/kick`). Nothing gives it by default.
+    pub const KICK_EXEMPT: &str = "meridian.kick.exempt";
 
     /// What every node of a command of an extension begins with.
     pub const EXTENSION: &str = "ext";

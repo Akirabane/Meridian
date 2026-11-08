@@ -22,6 +22,8 @@ pub const ORDERS_READ: &str = "orders.read";
 pub const ORDERS_MESSAGE: &str = "orders.message";
 /// The capability of the order that moves players to a server (docs/EXTENSIONS.md, section 5).
 pub const ORDERS_MOVE: &str = "orders.move";
+/// The capability of the order that kicks a player (docs/EXTENSIONS.md, section 5).
+pub const ORDERS_MODERATE: &str = "orders.moderate";
 /// The capability that gives the players' addresses in what an extension is told (docs/EXTENSIONS.md, section 7).
 pub const ADDRESSES: &str = "addresses";
 
@@ -169,6 +171,8 @@ pub struct Orders {
     pub burst: u32,
     /// The orders that may run at once.
     pub max_running: u32,
+    /// The players it may kick in one minute (`players/kick`); 0 is no limit.
+    pub max_kicks_per_minute: u32,
 }
 
 impl Default for Orders {
@@ -177,6 +181,7 @@ impl Default for Orders {
             rate_per_second: 20,
             burst: 50,
             max_running: 8,
+            max_kicks_per_minute: 0,
         }
     }
 }
@@ -257,6 +262,7 @@ struct FileOrders {
     rate_per_second: Option<u32>,
     burst: Option<u32>,
     max_running: Option<u32>,
+    max_kicks_per_minute: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +324,7 @@ impl FileExtension {
             rate_per_second: None,
             burst: None,
             max_running: None,
+            max_kicks_per_minute: None,
         });
         let orders_default = Orders::default();
         let login = self.decide_login.unwrap_or(FileLoginDecision {
@@ -371,6 +378,9 @@ impl FileExtension {
                     .unwrap_or(orders_default.rate_per_second),
                 burst: orders.burst.unwrap_or(orders_default.burst),
                 max_running: orders.max_running.unwrap_or(orders_default.max_running),
+                max_kicks_per_minute: orders
+                    .max_kicks_per_minute
+                    .unwrap_or(orders_default.max_kicks_per_minute),
             },
         })
     }

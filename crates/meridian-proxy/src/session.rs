@@ -424,6 +424,50 @@ impl Sessions {
         Some(player)
     }
 
+    /// Ends the session of the one player for whom `is` holds, telling them `reason`. **Never the first of several**: if `is` holds
+    /// for two accounts (two names that differ only by case) nobody is kicked ([`Kicked::Several`]), and nobody is kicked either
+    /// when `protected` says the player is (it is asked after the lock is let go, and is told how their account was checked). The
+    /// sessions of one account (a second login that replaces the first is still listed until it ends) are all ended.
+    pub(crate) fn kick_one(
+        &self,
+        reason: &str,
+        is: impl Fn(&Player) -> bool,
+        protected: impl Fn(&Player, meridian_config::AuthKind) -> bool,
+    ) -> Kicked {
+        let found: Vec<(Player, Handle, bool)> = self
+            .lock()
+            .values()
+            .filter(|e| is(&e.player))
+            .map(|e| {
+                (
+                    e.player(),
+                    e.handle.clone(),
+                    matches!(e.identity, Some(Identity::Verified(_))),
+                )
+            })
+            .collect();
+        let Some((player, _, verified)) = found.first() else {
+            return Kicked::Nobody;
+        };
+        if found.iter().any(|(other, _, _)| other.uuid != player.uuid) {
+            return Kicked::Several;
+        }
+        let auth = if *verified {
+            meridian_config::AuthKind::Verified
+        } else {
+            meridian_config::AuthKind::Unverified
+        };
+        if protected(player, auth) {
+            return Kicked::Protected;
+        }
+        for (_, handle, _) in &found {
+            handle.disconnect(configuration::Disconnect {
+                reason: text::literal(reason),
+            });
+        }
+        Kicked::Done(player.clone())
+    }
+
     /// Ends every session, telling each player that the server closed, and refuses
     /// new ones. Returns how many sessions were ended.
     pub fn close_all(&self) -> usize {
@@ -444,6 +488,19 @@ impl Sessions {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Entry>> {
         self.open.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// What [`Sessions::kick_one`] did.
+#[derive(Debug)]
+pub(crate) enum Kicked {
+    /// Nobody online is that.
+    Nobody,
+    /// More than one account matched: nobody was kicked.
+    Several,
+    /// The player may not be kicked this way: nobody was kicked.
+    Protected,
+    /// This player's session was ended.
+    Done(Player),
 }
 
 /// A session counted in [`Sessions`] until it is dropped.

@@ -2404,4 +2404,60 @@ mod orders {
             matches!(asked.join().unwrap(), Err(OrderError::Refused(e)) if e.code == code::INVALID_PARAMS)
         );
     }
+
+    // ---- the order that expels ---------------------------------------------------------------------------
+
+    #[test]
+    fn a_player_is_kicked_with_or_without_a_reason_and_a_player_who_is_not_online_is_zero() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.kick("Steve", Some("Spam <b>again</b>.")))
+        };
+        let (method, params) = serve_one(&mut proxy, |_, _| Ok(json!({"kicked": 1})));
+        assert_eq!(method, shapes::PLAYERS_KICK);
+        assert_eq!(
+            params.unwrap(),
+            json!({"player": "Steve", "reason": "Spam <b>again</b>."})
+        );
+        assert_eq!(asked.join().unwrap(), Ok(1));
+        // No reason: the key is left out, and the proxy gives the default one.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.kick(&ALEX.replace('-', ""), None))
+        };
+        let (_, params) = serve_one(&mut proxy, |_, _| Ok(json!({"kicked": 0})));
+        assert_eq!(params.unwrap(), json!({"player": ALEX.replace('-', "")}));
+        assert_eq!(asked.join().unwrap(), Ok(0));
+    }
+
+    #[test]
+    fn a_reason_that_is_not_valid_and_a_name_that_is_not_one_are_refused_before_anything_is_sent() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let too_long = "x".repeat(shapes::MAX_TEXT + 1);
+        for reason in ["", too_long.as_str(), "two\nlines", "colour \u{a7}c"] {
+            assert!(
+                matches!(
+                    handle.kick("Steve", Some(reason)),
+                    Err(OrderError::Invalid(_))
+                ),
+                "{reason:?}"
+            );
+        }
+        assert!(matches!(handle.kick("", None), Err(OrderError::Invalid(_))));
+        // Nothing was written: the next thing the stand-in proxy reads is the answer to its own request.
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 5}))).unwrap(),
+            json!({"k": 5})
+        );
+        // A capability that was not granted is `-32601`, which the error says.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.kick("Steve", None))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(code::METHOD_NOT_FOUND, "method not found"))
+        });
+        assert!(asked.join().unwrap().unwrap_err().is_not_granted());
+    }
 }

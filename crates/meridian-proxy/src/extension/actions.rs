@@ -3,13 +3,13 @@
 //! (`SessionHandle::tell`), never as a JSON text component, so an extension cannot put a click event in a chat.
 
 use super::link::SendLot;
-use super::orders::{Actions, MovePlan, Paid, Refusal};
+use super::orders::{Actions, KickRefusal, MovePlan, Paid, Refusal};
 use crate::log::warning;
 use crate::placing::{self, Offer};
-use crate::session::{Player, Sessions, Shared, hyphenated};
+use crate::session::{Kicked, Player, Sessions, Shared, hyphenated};
 use crate::staff;
 use crate::switching::Switcher;
-use meridian_config::Config;
+use meridian_config::{Config, node};
 use meridian_extension::orders::{Target, Who};
 use std::sync::{Arc, RwLock, Weak};
 
@@ -74,6 +74,44 @@ impl Actions for ProxyActions {
             return Ok(0);
         };
         staff::alert_shown(&sessions.shared(), &self.config(), server, text)
+    }
+
+    fn kick(&self, who: &Who, reason: &str) -> Result<Option<String>, KickRefusal> {
+        let Some(sessions) = self.sessions.upgrade() else {
+            return Ok(None);
+        };
+        let shared = sessions.shared();
+        // The operators of the server a player is on count as the console's: a player who has `meridian.kick.exempt` by their
+        // group, by their rank or by being an operator is not kicked by an extension.
+        let exempt = |player: &Player, auth| {
+            let groups =
+                shared
+                    .operators
+                    .groups_for(&player.backend, &player.name, player.uuid, auth);
+            let groups: Vec<&str> = groups.iter().map(String::as_str).collect();
+            shared.permissions.snapshot().allows_in(
+                &player.name,
+                player.uuid,
+                node::KICK_EXEMPT,
+                &groups,
+            )
+        };
+        let outcome = match who {
+            Who::Name(name) => {
+                sessions.kick_one(reason, |p| p.name.eq_ignore_ascii_case(name), exempt)
+            }
+            Who::Id(id) => sessions.kick_one(
+                reason,
+                |p| hyphenated(p.uuid).eq_ignore_ascii_case(id),
+                exempt,
+            ),
+        };
+        match outcome {
+            Kicked::Nobody => Ok(None),
+            Kicked::Several => Err(KickRefusal::Several),
+            Kicked::Protected => Err(KickRefusal::Exempt),
+            Kicked::Done(player) => Ok(Some(player.name)),
+        }
     }
 
     fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal> {

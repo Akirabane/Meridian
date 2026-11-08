@@ -521,6 +521,73 @@ pub fn move_methods() -> Vec<(&'static str, DiscoverMethod)> {
     )]
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The order that expels (capability `orders.moderate`)
+
+/// The method that kicks a player: their session ends, and they read why.
+pub const PLAYERS_KICK: &str = "meridian:players/kick";
+
+/// What a player who is kicked is told when the order gives no reason.
+pub const DEFAULT_KICK_REASON: &str = "Kicked by an extension";
+
+/// `params` of [`PLAYERS_KICK`]: who (a name in any case, or a unique id) and, if you like, the reason the player reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KickParams {
+    pub player: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `result` of [`PLAYERS_KICK`]: how many players were kicked, 1 or 0 (nobody online is that: not an error).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kicked {
+    pub kicked: usize,
+}
+
+/// Reads the `params` of [`PLAYERS_KICK`]: who, and the reason ([`DEFAULT_KICK_REASON`] when it is left out). The reason is
+/// shown as a literal, never as a JSON text component, and is valid as the line of an extension's own command is (not empty,
+/// [`MAX_TEXT`] characters at most, none of a control, formatting or invisible character). The error never quotes what was sent.
+pub fn parse_kick(params: Option<&Value>) -> Result<(Who, String), String> {
+    const SHAPE: &str =
+        "params must be an object with \"player\" and, if you like, \"reason\" (strings)";
+    let params = params.ok_or("params are missing")?;
+    if !params.is_object() {
+        return Err(SHAPE.into());
+    }
+    let params: KickParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
+    let who = who_of(params.player)?;
+    let reason = match params.reason {
+        None => DEFAULT_KICK_REASON.to_owned(),
+        Some(reason) => {
+            if reason.is_empty() {
+                return Err("\"reason\" is empty".into());
+            }
+            crate::run::check_line(&reason).map_err(|why| format!("\"reason\": {why}"))?;
+            reason
+        }
+    };
+    Ok((who, reason))
+}
+
+/// How `rpc.discover` of the proxy describes the order that expels.
+pub fn moderate_methods() -> Vec<(&'static str, DiscoverMethod)> {
+    vec![(
+        PLAYERS_KICK,
+        DiscoverMethod::with_params(
+            PLAYERS_KICK,
+            &[
+                ("player", true, json!({ "type": "string" })),
+                (
+                    "reason",
+                    false,
+                    json!({ "type": "string", "maxLength": MAX_TEXT }),
+                ),
+            ],
+        ),
+    )]
+}
+
 /// The longest name of a server [`parse_broadcast`] takes.
 pub const MAX_SERVER: usize = 64;
 
@@ -1289,6 +1356,64 @@ mod tests {
         let methods = move_methods();
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].0, PLAYERS_SEND);
+        assert!(methods[0].1.params[0].required && !methods[0].1.params[1].required);
+    }
+
+    // ---- the order that expels -----------------------------------------------------------------------
+
+    #[test]
+    fn a_player_is_kicked_by_name_or_id_with_a_reason_that_is_checked_like_a_line() {
+        let kick = |v: Value| parse_kick(Some(&v));
+        assert_eq!(
+            kick(json!({"player": "Steve"})),
+            Ok((Who::Name("Steve".into()), DEFAULT_KICK_REASON.to_owned()))
+        );
+        assert_eq!(
+            kick(json!({"player": ALEX.to_ascii_uppercase(), "reason": "Spam."})),
+            Ok((Who::Id(ALEX.into()), "Spam.".to_owned()))
+        );
+        assert!(kick(json!({"player": "Steve", "reason": "é".repeat(MAX_TEXT)})).is_ok());
+        // A null reason is no reason.
+        assert_eq!(
+            kick(json!({"player": "Steve", "reason": null})),
+            Ok((Who::Name("Steve".into()), DEFAULT_KICK_REASON.to_owned()))
+        );
+        let secret = "ZZZ-must-not-come-back";
+        for bad in [
+            json!({"player": "Steve", "reason": ""}),
+            json!({"player": "Steve", "reason": "é".repeat(MAX_TEXT + 1)}),
+            json!({"player": "Steve", "reason": format!("{secret}\n")}),
+            json!({"player": "Steve", "reason": format!("{secret}\u{a7}4")}),
+            json!({"player": "Steve", "reason": format!("{secret}\u{202e}")}),
+            json!({"player": "Steve", "reason": 5}),
+            json!({"reason": "Spam."}),
+            json!({"player": "", "reason": "Spam."}),
+            json!({"player": format!("{secret}\n")}),
+            json!({"player": "Steve", "more": 1}),
+            json!(["Steve", "Spam."]),
+            json!(null),
+        ] {
+            let why = kick(bad.clone()).unwrap_err();
+            assert!(!why.contains("ZZZ") && !why.is_empty(), "{bad}: {why}");
+        }
+        assert!(parse_kick(None).is_err());
+    }
+
+    #[test]
+    fn what_the_sdk_writes_for_the_order_that_expels_is_what_the_proxy_reads() {
+        let written = serde_json::to_value(KickParams {
+            player: "Steve".into(),
+            reason: None,
+        })
+        .unwrap();
+        assert_eq!(written, json!({"player": "Steve"}));
+        assert!(parse_kick(Some(&written)).is_ok());
+        assert_eq!(
+            serde_json::to_value(Kicked { kicked: 1 }).unwrap(),
+            json!({"kicked": 1})
+        );
+        let methods = moderate_methods();
+        assert_eq!((methods.len(), methods[0].0), (1, PLAYERS_KICK));
         assert!(methods[0].1.params[0].required && !methods[0].1.params[1].required);
     }
 }
