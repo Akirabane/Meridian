@@ -112,6 +112,17 @@ pub struct Settings {
     /// The synthetic servers write what falls due in each tick of this length in one write, as a
     /// game server flushes a player's packets once a tick; `None` writes each packet when it is due.
     pub write_per_tick: Option<Duration>,
+    /// The host name every bot writes in its handshake; `None` writes the address it connects to.
+    /// A proxy routes a host of its own (`[[forced-host]]`) to one server: so bots of this bench
+    /// can reach a synthetic server behind a proxy that other clients load, apart from them.
+    pub handshake_host: Option<String>,
+}
+
+/// The host name a bot that connects to `address` writes in its handshake.
+pub(super) fn handshake_host(s: &Settings, address: SocketAddr) -> String {
+    s.handshake_host
+        .clone()
+        .unwrap_or_else(|| address.ip().to_string())
 }
 
 /// A server of the proxy's configuration.
@@ -262,11 +273,12 @@ pub(super) fn plans(
     movers: usize,
     target: Option<&str>,
 ) -> Vec<Plan> {
+    let host = handshake_host(s, address);
     (0..n)
         .map(|i| Plan {
             address,
             name: format!("{prefix}{i}"),
-            host: address.ip().to_string(),
+            host: host.clone(),
             role,
             up_rate: if role == Role::Active { s.up_rate } else { 0 },
             probe_rate: if role == Role::Active {
@@ -1198,6 +1210,7 @@ pub fn churn(s: &Settings, n: usize, cycles: u64) -> Result<Row, String> {
         .filter_map(|worker| {
             let (live, stop, made) = (Arc::clone(&live), Arc::clone(&s.stop), Arc::clone(&made));
             let (address, window) = (proxy.address, s.window);
+            let host = handshake_host(s, address);
             let hold_ms = s.churn_hold.as_millis() as u64;
             std::thread::Builder::new()
                 .name("load-churn".into())
@@ -1211,7 +1224,7 @@ pub fn churn(s: &Settings, n: usize, cycles: u64) -> Result<Row, String> {
                         let plan = Plan {
                             address,
                             name: format!("Ch{worker}x{cycle}"),
-                            host: address.ip().to_string(),
+                            host: host.clone(),
                             role: Role::Idle,
                             up_rate: 0,
                             probe_rate: 0.0,

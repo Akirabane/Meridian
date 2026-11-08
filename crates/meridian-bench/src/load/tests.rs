@@ -104,6 +104,36 @@ fn the_tick_of_the_servers_is_read() {
     assert_eq!(read(&["--proxy", "x", "--write-per-tick", "0"]), None);
 }
 
+/// Every bot writes the host given, or the address it connects to: a proxy's `[[forced-host]]`
+/// can then lead the bench's bots to a server of their own behind a proxy other clients load.
+#[test]
+fn the_bots_write_the_host_they_are_given() {
+    let read = |list: &[&str]| parse(args(list)).map(|o| o.unwrap().settings.handshake_host);
+    assert_eq!(read(&["--proxy", "x"]), Ok(None));
+    assert_eq!(
+        read(&["--proxy", "x", "--handshake-host", "probe.l2"]),
+        Ok(Some("probe.l2".to_owned()))
+    );
+    for bad in ["", "probe l2", "probe/l2", "probé", &"a".repeat(254)] {
+        assert!(
+            read(&["--proxy", "x", "--handshake-host", bad]).is_err(),
+            "{bad:?}"
+        );
+    }
+
+    let address: std::net::SocketAddr = "127.0.0.1:25565".parse().unwrap();
+    let mut s = settings(1);
+    let hosts = |s: &Settings| {
+        scenario::plans(s, address, 3, "P", bot::Role::Active, 0, None)
+            .into_iter()
+            .map(|p| p.host)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(hosts(&s), ["127.0.0.1"; 3]);
+    s.handshake_host = Some("probe.l2".to_owned());
+    assert_eq!(hosts(&s), ["probe.l2"; 3]);
+}
+
 /// The moves are asked only when every bot has its world: one short, even one that never got
 /// in, and the step says why instead of counting moves as failed.
 #[test]

@@ -56,6 +56,8 @@ Options:
   --write-per-tick MS   the synthetic servers write what falls due in each tick of MS milliseconds
                         in one write, every player's on the same clock, as a game server flushes
                         once a tick (Horizon: 50); 0 writes each packet when it is due (default 0)
+  --handshake-host H    the host name every bot writes in its handshake (default: the address it
+                        connects to); a proxy's [[forced-host]] H then leads them to one server
   --movers-percent N    the share of bots that move in `moves` (default 10)
   --churn-cycles N      most connections of a `churn` step (default 3000)
   --churn-hold-ms N     how long a connection of `churn` stays, on average (default 100)
@@ -113,6 +115,23 @@ struct Options {
     settings: Settings,
 }
 
+/// A host name a bot may write in its handshake: 1 to 253 characters of letters, digits, dots and
+/// hyphens (a name or an address, as a client types it).
+fn host_name(text: &str) -> Result<String, String> {
+    let ok = !text.is_empty()
+        && text.len() <= 253
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if ok {
+        Ok(text.to_owned())
+    } else {
+        Err(format!(
+            "--handshake-host {text:?}: a host name of letters, digits, dots and hyphens"
+        ))
+    }
+}
+
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, String> {
     let mut o = Options {
         scenarios: ["idle", "active", "moves", "churn", "micro"]
@@ -158,6 +177,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             waves: 1,
             wave_gap: Duration::from_secs(30),
             write_per_tick: None,
+            handshake_host: None,
         },
         write_remote: None,
     };
@@ -251,6 +271,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             "--write-per-tick" => {
                 let ms = number(&value("--write-per-tick")?, "--write-per-tick")?;
                 o.settings.write_per_tick = (ms > 0).then_some(Duration::from_millis(ms));
+            }
+            "--handshake-host" => {
+                o.settings.handshake_host = Some(host_name(&value("--handshake-host")?)?);
             }
             "--movers-percent" => {
                 o.settings.movers_percent =
