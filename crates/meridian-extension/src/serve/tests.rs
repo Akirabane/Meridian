@@ -2460,4 +2460,112 @@ mod orders {
         });
         assert!(asked.join().unwrap().unwrap_err().is_not_granted());
     }
+
+    // ---- the orders that operate ---------------------------------------------------------------------------
+
+    #[test]
+    fn a_server_is_drained_with_or_without_moving_its_players_offered_again_and_the_configuration_reloaded()
+     {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.drain("lobby", false))
+        };
+        let (method, params) =
+            serve_one(&mut proxy, |_, _| Ok(json!({"drained": true, "moving": 0})));
+        assert_eq!(method, shapes::SERVERS_DRAIN);
+        assert_eq!(params.unwrap(), json!({"server": "lobby"}));
+        assert_eq!(
+            asked.join().unwrap(),
+            Ok(shapes::Drained {
+                drained: true,
+                moving: 0
+            })
+        );
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.drain("lobby", true))
+        };
+        let (_, params) = serve_one(&mut proxy, |_, _| {
+            Ok(json!({"drained": false, "moving": 12}))
+        });
+        assert_eq!(params.unwrap(), json!({"server": "lobby", "move": true}));
+        assert_eq!(
+            asked.join().unwrap(),
+            Ok(shapes::Drained {
+                drained: false,
+                moving: 12
+            })
+        );
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.undrain("lobby"))
+        };
+        let (method, params) = serve_one(&mut proxy, |_, _| Ok(json!({"undrained": true})));
+        assert_eq!(
+            (method.as_str(), params.unwrap()),
+            (shapes::SERVERS_UNDRAIN, json!({"server": "lobby"}))
+        );
+        assert_eq!(asked.join().unwrap(), Ok(true));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.reload())
+        };
+        let (method, params) = serve_one(&mut proxy, |_, _| Ok(json!({"ok": true})));
+        assert_eq!((method.as_str(), params), (shapes::RELOAD, None));
+        assert_eq!(asked.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn a_server_that_is_not_a_name_is_refused_before_anything_is_sent_and_what_the_proxy_refuses_is_told()
+     {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        assert!(matches!(
+            handle.drain("", false),
+            Err(OrderError::Invalid(_))
+        ));
+        assert!(matches!(
+            handle.undrain("bad\nname"),
+            Err(OrderError::Invalid(_))
+        ));
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 6}))).unwrap(),
+            json!({"k": 6})
+        );
+        // A server with no role is a refusal of the proxy's; a reload that is already running, a refusal to ask again.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.drain("west", false))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(
+                code::INVALID_PARAMS,
+                "\"server\" is not a server with a role",
+            ))
+        });
+        assert!(
+            matches!(asked.join().unwrap(), Err(OrderError::Refused(e)) if e.code == code::INVALID_PARAMS)
+        );
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.reload())
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(
+                code::TOO_MANY_RUNNING,
+                "a reload is already running",
+            ))
+        });
+        assert!(asked.join().unwrap().unwrap_err().retry_later());
+        // An answer that is not `{"ok": true}` is not what `reload` defines.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.reload())
+        };
+        serve_one(&mut proxy, |_, _| Ok(json!({"ok": false})));
+        assert!(matches!(
+            asked.join().unwrap(),
+            Err(OrderError::BadAnswer(_))
+        ));
+    }
 }

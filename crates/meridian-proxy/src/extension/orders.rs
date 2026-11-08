@@ -16,12 +16,13 @@
 use super::link::{Link, OrderPlace, SendLot};
 use crate::log::debug;
 use meridian_config::{
-    ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE, ORDERS_READ,
+    ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE, ORDERS_OPERATE,
+    ORDERS_READ,
 };
 use meridian_extension::orders::{
     self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
 };
-use meridian_extension::orders::{Kicked, Started, Target, Told};
+use meridian_extension::orders::{Drained, Kicked, Started, Target, Told, Undrained};
 use meridian_extension::wire::{self, Discover, DiscoverMethod, Id, RpcError, code};
 use meridian_websocket::Writer;
 use serde_json::Value;
@@ -72,6 +73,8 @@ pub enum Refusal {
     UnknownSource,
     /// The proxy could not start the moves (no thread).
     CannotStart,
+    /// The server is not one the balancer places players on (it has no role), so there is nothing to drain.
+    NoRole,
     /// The server to send the players to takes no players now: it is draining, it has not reported lately, or it does not accept
     /// transfers. Sending them would tell each player that they could not be moved.
     DestinationNotTakingPlayers,
@@ -101,9 +104,28 @@ pub trait MovePlan: Send {
     fn start(self: Box<Self>, paid: Paid, lot: SendLot) -> Result<usize, Refusal>;
 }
 
+/// What the orders that operate the network use: the balancer's drain, the evacuation of a server and the reload of the
+/// configuration. Given to the registry once the proxy is built ([`super::Registry::serve_operate`]): `extension/operate.rs` for
+/// the proxy and a stand-in in the tests.
+pub trait Operate: Send + Sync {
+    /// How many players are on `server`, if it is one the balancer places players on (it has a role): `NoRole` otherwise.
+    fn players_on(&self, server: &str) -> Result<usize, Refusal>;
+    /// Stops offering `server` to new players, as the console's `drain` does: `true` when it was drained now, `false` when it
+    /// was drained already.
+    fn drain(&self, server: &str) -> Result<bool, Refusal>;
+    /// Offers `server` again: `true` when it was drained and is offered now, `false` when it was not drained.
+    fn undrain(&self, server: &str) -> bool;
+    /// Plans sending the players of `server` to other servers of its role, one at a time, as the console's `drain --move` does.
+    fn plan_evacuation(&self, server: &str) -> Box<dyn MovePlan>;
+    /// Reads the configuration file again and puts it in force, as the console's `reload` does. It is called **after** the order
+    /// has been answered, since it may close the connection that asked.
+    fn reload(&self);
+}
+
 /// What the orders share with the rest of the proxy.
 #[derive(Default)]
 pub struct Services {
+    operate: Mutex<Option<Arc<dyn Operate>>>,
     facts: Mutex<Option<Arc<dyn Facts>>>,
     actions: Mutex<Option<Arc<dyn Actions>>>,
 }
@@ -115,6 +137,17 @@ impl Services {
 
     pub(super) fn set_facts(&self, facts: Arc<dyn Facts>) {
         *self.facts.lock().unwrap_or_else(|e| e.into_inner()) = Some(facts);
+    }
+
+    pub(super) fn operate(&self) -> Option<Arc<dyn Operate>> {
+        self.operate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(super) fn set_operate(&self, operate: Arc<dyn Operate>) {
+        *self.operate.lock().unwrap_or_else(|e| e.into_inner()) = Some(operate);
     }
 
     pub(super) fn actions(&self) -> Option<Arc<dyn Actions>> {
@@ -134,6 +167,9 @@ pub(super) struct Ctx<'a> {
     pub link: &'a Arc<Link>,
     installed: Option<Arc<dyn Facts>>,
     acting: Option<Arc<dyn Actions>>,
+    operating: Option<Arc<dyn Operate>>,
+    /// What an order does once its answer has been written (a reload may close the connection that asked for it).
+    after: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Ctx<'_> {
@@ -147,6 +183,17 @@ impl Ctx<'_> {
         self.acting
             .as_ref()
             .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
+    }
+
+    fn operate(&self) -> Result<&Arc<dyn Operate>, RpcError> {
+        self.operating
+            .as_ref()
+            .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
+    }
+
+    /// Has `then` run **after** the answer of this order is written, on the thread of the order.
+    fn after_reply(&self, then: impl FnOnce() + Send + 'static) {
+        *self.after.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(then));
     }
 
     /// Charges the budget for an order that reaches `reached` players: **the number of players, and at most the burst**, taken
@@ -270,6 +317,30 @@ const PLAYERS_KICK: Order = Order {
     counted: false,
 };
 
+const SERVERS_DRAIN: Order = Order {
+    method: orders::SERVERS_DRAIN,
+    capability: ORDERS_OPERATE,
+    run: servers_drain,
+    describe: || orders::operate_methods().swap_remove(0).1,
+    counted: true,
+};
+
+const SERVERS_UNDRAIN: Order = Order {
+    method: orders::SERVERS_UNDRAIN,
+    capability: ORDERS_OPERATE,
+    run: servers_undrain,
+    describe: || orders::operate_methods().swap_remove(1).1,
+    counted: false,
+};
+
+const RELOAD: Order = Order {
+    method: orders::RELOAD,
+    capability: ORDERS_OPERATE,
+    run: reload,
+    describe: || orders::operate_methods().swap_remove(2).1,
+    counted: false,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
 pub(super) const ORDERS: &[Order] = &[
@@ -282,6 +353,9 @@ pub(super) const ORDERS: &[Order] = &[
     BROADCAST,
     PLAYERS_SEND,
     PLAYERS_KICK,
+    SERVERS_DRAIN,
+    SERVERS_UNDRAIN,
+    RELOAD,
 ];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
@@ -297,6 +371,9 @@ pub(super) const ORDERS: &[Order] = &[
     BROADCAST,
     PLAYERS_SEND,
     PLAYERS_KICK,
+    SERVERS_DRAIN,
+    SERVERS_UNDRAIN,
+    RELOAD,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -515,7 +592,9 @@ fn players_send(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError
         }
         Refusal::UnknownDestination => invalid("\"to\" is not a server of the proxy".into()),
         Refusal::UnknownSource => invalid("\"from\" is not a server of the proxy".into()),
-        Refusal::CannotStart => RpcError::new(code::INTERNAL_ERROR, "cannot move the players now"),
+        Refusal::CannotStart | Refusal::NoRole => {
+            RpcError::new(code::INTERNAL_ERROR, "cannot move the players now")
+        }
     };
     let plan = ctx.actions()?.plan_send(&target, &to).map_err(refusal)?;
     let paid = ctx.charge(plan.count())?;
@@ -538,6 +617,80 @@ fn players_kick(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError
     done(serde_json::to_value(Kicked {
         kicked: usize::from(kicked.is_some()),
     }))
+}
+
+/// `servers/drain`: stops offering a server to new players; with `move`, sends its players away, one at a time, on a thread of
+/// its own (the answer comes when the moves start). A drain that moves players costs the budget the number of players it moves,
+/// at most the burst, charged all at once, and takes the extension's place for a send; one that does not move any costs one order.
+fn servers_drain(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let (server, moving) = orders::parse_drain(params).map_err(invalid)?;
+    let operate = ctx.operate()?;
+    let refusal = |why: Refusal| match why {
+        Refusal::NoRole => invalid("\"server\" is not a server with a role".into()),
+        _ => RpcError::new(code::INTERNAL_ERROR, "cannot drain now"),
+    };
+    // The players who would be sent are counted first, and paid for first: a server is not drained and then left with its players
+    // because the budget could not pay for sending them.
+    let on = operate.players_on(&server).map_err(refusal)?;
+    let lot = if moving && on > 0 {
+        let Some(lot) = ctx.link.send_lot() else {
+            let _ = ctx.link.charge_order(1);
+            return Err(RpcError::new(
+                code::TOO_MANY_RUNNING,
+                "a send is already running",
+            ));
+        };
+        Some(lot)
+    } else {
+        None
+    };
+    let paid = ctx.charge(if moving { on } else { 1 })?;
+    let drained = operate.drain(&server).map_err(refusal)?;
+    let moving = match lot {
+        Some(lot) => operate
+            .plan_evacuation(&server)
+            .start(paid, lot)
+            .map_err(|_| RpcError::new(code::INTERNAL_ERROR, "cannot move the players now"))?,
+        None => 0,
+    };
+    crate::log::info!(
+        "extension \"{}\" drained {server}{}",
+        ctx.link.name(),
+        if drained { "" } else { " (already drained)" }
+    );
+    done(serde_json::to_value(Drained { drained, moving }))
+}
+
+/// `servers/undrain`: offers a drained server to new players again. A server that was not drained is not an error: `false`.
+fn servers_undrain(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let server = orders::parse_undrain(params).map_err(invalid)?;
+    let undrained = ctx.operate()?.undrain(&server);
+    if undrained {
+        crate::log::info!("extension \"{}\" undrained {server}", ctx.link.name());
+    }
+    done(serde_json::to_value(Undrained { undrained }))
+}
+
+/// `reload`: makes the proxy read its configuration file again. **It answers `{"ok": true}` first and applies afterwards**, on the
+/// thread of the order, once the answer is written: a reload can change this very extension's entry, and close the connection
+/// the answer would go on. So `ok` says that the reload was asked for, not that it worked: the proxy's log says what it did. One
+/// reload at a time for an extension: while one runs, another is refused, and costs one token.
+fn reload(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    orders::parse_no_params(params).map_err(invalid)?;
+    let operate = Arc::clone(ctx.operate()?);
+    let Some(lot) = ctx.link.reload_lot() else {
+        let _ = ctx.link.charge_order(1);
+        return Err(RpcError::new(
+            code::TOO_MANY_RUNNING,
+            "a reload is already running",
+        ));
+    };
+    crate::log::info!("extension \"{}\" asked for a reload", ctx.link.name());
+    ctx.after_reply(move || {
+        let _lot = lot;
+        operate.reload();
+    });
+    done(serde_json::to_value(Ack::done()))
 }
 
 /// `queue/list`: whether the queue is on, and who waits.
@@ -650,6 +803,8 @@ fn run(
         link,
         installed: link.facts(),
         acting: link.actions(),
+        operating: link.operate(),
+        after: Mutex::new(None),
     };
     let (outcome, reply) = match catch_unwind(AssertUnwindSafe(|| (order.run)(&ctx, params))) {
         Ok(Ok(result)) => (Outcome::Done, wire::result(id, &result)),
@@ -687,6 +842,11 @@ fn run(
         );
         // A frame may be half written: the connection is not used again.
         let _ = writer.shutdown();
+    }
+    // After the answer: what the order does once it has been written (a reload, which may close this connection).
+    let after = ctx.after.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(after) = after {
+        after();
     }
 }
 

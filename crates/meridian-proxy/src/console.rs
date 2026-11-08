@@ -1210,6 +1210,59 @@ mod tests {
         assert_eq!(lobby_lines(&proxy)[1], "    role lobby, 1/3 (hard 4): open");
     }
 
+    // ---- what an extension operates is what the console does ----------------------------------------------
+
+    #[test]
+    fn the_operations_of_an_extension_are_the_consoles_drain_undrain_and_evacuation() {
+        use crate::extension::Operate;
+        use crate::extension::operate::ProxyOperate;
+        use crate::extension::{Paid, SendLot};
+        let proxy = Arc::new(balanced_proxy());
+        let operate = ProxyOperate::new(&proxy);
+        let _alex = join(&proxy, "Alex", "lobby");
+        // Only a server with a role: `lobby` has one, `east` has none, and nothing is drained for `east`.
+        assert!(matches!(
+            operate.players_on("east"),
+            Err(crate::extension::Refusal::NoRole)
+        ));
+        assert!(matches!(
+            operate.drain("east"),
+            Err(crate::extension::Refusal::NoRole)
+        ));
+        assert_eq!(operate.players_on("lobby"), Ok(1));
+        // Drain: the balancer's, as the console's `drain`; twice is once.
+        assert_eq!(operate.drain("lobby"), Ok(true));
+        assert!(proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(operate.drain("lobby"), Ok(false));
+        // The evacuation counts the players who are on it, and starts nothing for a server with nobody.
+        let plan = operate.plan_evacuation("lobby");
+        assert_eq!(plan.count(), 1);
+        drop(plan);
+        assert_eq!(operate.plan_evacuation("east").count(), 0);
+        assert_eq!(
+            operate
+                .plan_evacuation("east")
+                .start(Paid::for_tests(), SendLot::free()),
+            Ok(0)
+        );
+        // Undrain, as the console's `undrain`.
+        assert!(operate.undrain("lobby"));
+        assert!(!proxy.sessions.balancer.is_drained("lobby"));
+        assert!(!operate.undrain("lobby"));
+    }
+
+    /// A reload that an extension asks for is the console's: a file that cannot be read changes nothing in use.
+    #[test]
+    fn a_reload_asked_by_an_extension_leaves_the_configuration_as_it_is_when_the_file_cannot_be_read()
+     {
+        use crate::extension::Operate;
+        use crate::extension::operate::ProxyOperate;
+        let proxy = Arc::new(proxy());
+        let before = proxy.config().default_backend.clone();
+        ProxyOperate::new(&proxy).reload();
+        assert_eq!(proxy.config().default_backend, before);
+    }
+
     #[test]
     fn servers_says_why_a_backend_is_restarting_and_offers_it_when_it_is_back() {
         use crate::restart::Cause;

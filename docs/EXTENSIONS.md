@@ -6,8 +6,8 @@ they go to. Part of it is built, and the pull requests of section 10 follow the 
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
-orders (8.1), with the orders that read, those that message, the one that moves and the one that expels (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
-leaves a choice open. Not built: the orders that drain, reload and run console lines (5) and the events the proxy sends the extension (6).
+orders (8.1), with the orders that read, those that message, the one that moves, the one that expels and those that operate (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
+leaves a choice open. Not built: the order that runs console lines (5) and the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -1015,6 +1015,33 @@ configuration in force, the balancer, the queue); until the proxy has given the 
   500, not one for each player. **The SDK's `Proxy::players()` does this**, page after page, and gives up (`BadAnswer`) on a
   proxy whose cursors do not go forward or whose pages do not end.
 
+**As built, for the orders that operate** (`extension/orders.rs`, `extension/operate.rs`, `meridian-extension/src/orders.rs`):
+`servers/drain`, `servers/undrain` and `reload`, capability `orders.operate`. They are the console's `drain`, `undrain` and `reload`:
+the same calls, so what an operator can do at the console an extension granted `orders.operate` can do over its connection.
+
+- **`servers/drain`**: `{"server": "<name>", "move": true|false}` (`move` optional, `false` by default). It stops offering the server
+  to new players (the balancer's drain, kept when the restart detector's own drain ends, as the console does) and answers
+  `{"drained": bool, "moving": N}`: whether it was drained **now** (`false`: drained already, harmless), and, with `move`, how many
+  players the proxy **started** to send to other servers of its role, one at a time on a thread of their own (the answer comes when
+  the moves start). A server with no role (the balancer places players only on those) is `-32602 "server" is not a server with a
+  role`: there is nothing to drain.
+- **Cost, and what is paid first.** A drain without `move` costs one order. **A drain with `move` costs the number of players it
+  sends, at most the burst, charged all at once, and takes the extension's place for a send** (one lot of moves at a time, as for
+  `players/send`: another is `-32002 a send is already running`). The players on the server are counted and the budget pays
+  **before anything is drained**: a drain that the budget cannot pay is `-32001` and drains nothing, so a server is never left
+  drained with its players on it for want of budget.
+- **`servers/undrain`**: `{"server": "<name>"}`; answers `{"undrained": bool}`: `true` when it was drained and is offered again now,
+  `false` when it was not drained (not an error).
+- **`reload`**: no params. **It answers `{"ok": true}` first and applies afterwards** (decision Q6): the proxy reads its file on the
+  thread of the order **once the answer is written**, because a reload can change this very extension's entry (new address, token, or
+  disabled), which closes the connection the answer would go on. So `ok` says that the proxy took the order, **not that the reload
+  worked**: a file that cannot be read, or that does not pass the checks, changes nothing in use, and only the proxy's log says so
+  (`reload (asked by an extension): ...`). One reload at a time for an extension: while one runs, another is `-32002 a reload is
+  already running` and costs one token. Parameters are refused (`-32602`).
+- Until the proxy has given the registry what to operate they answer `-32603 not available`. **`orders.operate` lets the extension take
+  servers out of rotation and make the proxy read another configuration** (the file on disk, not one the extension sends): grant it to a
+  program as trusted as the operator's console.
+
 **As built, for the order that expels** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):
 `players/kick`, capability `orders.moderate`.
 
@@ -1106,7 +1133,9 @@ and keep their signatures, so the handle is made apart and given to the closures
 `let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
 is connected its orders end with `NotConnected`.
 
-- **Methods.** `Proxy::kick(player, reason)` for the order that expels (it needs `orders.moderate`; a reason that is not valid is
+- **Methods.** `Proxy::drain(server, move_players)`, `undrain(server)` and `reload()` for the orders that operate (they need
+  `orders.operate`; a server that is not a name is `Invalid` and nothing is sent; `reload`'s `Ok(())` is that the proxy took the
+  order); `Proxy::kick(player, reason)` for the order that expels (it needs `orders.moderate`; a reason that is not valid is
   `Invalid` and nothing is sent); `Proxy::send_player(player, to)`, `send_all(to)` and `send_server(from, to)` for the order that moves (they need
   `orders.move`; a name that is not one is `Invalid` and nothing is sent); `Proxy::tell(player, text)` and `Proxy::broadcast(server, text)` for the orders that message (they need
   `orders.message`: `Extension::wants("orders.message")` and the operator's grant; a line that is not valid is `Invalid` and

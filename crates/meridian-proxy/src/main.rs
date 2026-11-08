@@ -141,6 +141,10 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
         config.default_backend.clone(),
     );
     let proxy = Arc::new(Proxy::new(config, path, stop));
+    // What the orders that operate the network (drain, undrain, reload) use. Held weakly: the proxy holds the registry.
+    proxy
+        .extensions
+        .serve_operate(Arc::new(extension::operate::ProxyOperate::new(&proxy)));
     // Installed before the signals are watched and before the line below, so that a SIGHUP
     // never finds the lists missing.
     if let Some(access) = access {
