@@ -103,20 +103,22 @@ impl Ctx<'_> {
             .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
     }
 
-    /// Charges the budget for an order that reaches `reached` players: **the number of players, and at most the burst**
-    /// (the dispatcher took one already). An order that reaches more than the burst holds costs the whole burst, so that
-    /// it can run at all; one that the budget cannot pay is refused here with the code of a spent budget, **before
-    /// anyone is reached**.
-    fn spend_for(&self, reached: usize) -> Result<(), RpcError> {
+    /// Charges the budget for an order that reaches `reached` players: **the number of players, and at most the burst**, taken
+    /// all at once or not at all, so that two orders that each need the whole burst cannot each take part of it and both
+    /// fail. An order that reaches more than the burst holds costs the whole burst, so that it can run at all; one that the
+    /// budget cannot pay is refused here with the code of a spent budget (and costs one token), **before anyone is
+    /// reached**.
+    fn charge(&self, reached: usize) -> Result<(), RpcError> {
         let burst = self.link.settings.order_burst.max(1);
         let total = u32::try_from(reached).unwrap_or(u32::MAX).clamp(1, burst);
-        if total > 1 && !self.link.take_order(total - 1) {
-            return Err(RpcError::new(
+        if self.link.charge_order(total) {
+            Ok(())
+        } else {
+            Err(RpcError::new(
                 code::OVER_BUDGET,
                 "over the budget of orders",
-            ));
+            ))
         }
-        Ok(())
     }
 
     /// The players, with an address only if the extension was granted `addresses`.
@@ -145,6 +147,9 @@ pub(super) struct Order {
     pub run: Run,
     /// How `rpc.discover` of the proxy describes it.
     pub describe: fn() -> DiscoverMethod,
+    /// Whether the order is charged **by the handler**, once it knows what it reaches ([`Ctx::charge`]), instead of one
+    /// token at the start. The dispatcher only looks that a token is there.
+    pub counted: bool,
 }
 
 const INVALIDATE: Order = Order {
@@ -152,6 +157,7 @@ const INVALIDATE: Order = Order {
     capability: DECIDE_COMMAND,
     run: invalidate,
     describe: orders::invalidate_method,
+    counted: false,
 };
 
 const PLAYERS_LIST: Order = Order {
@@ -159,6 +165,7 @@ const PLAYERS_LIST: Order = Order {
     capability: ORDERS_READ,
     run: players_list,
     describe: || orders::read_methods().swap_remove(0).1,
+    counted: false,
 };
 
 const PLAYERS_FIND: Order = Order {
@@ -166,6 +173,7 @@ const PLAYERS_FIND: Order = Order {
     capability: ORDERS_READ,
     run: players_find,
     describe: || orders::read_methods().swap_remove(1).1,
+    counted: false,
 };
 
 const SERVERS_LIST: Order = Order {
@@ -173,6 +181,7 @@ const SERVERS_LIST: Order = Order {
     capability: ORDERS_READ,
     run: servers_list,
     describe: || orders::read_methods().swap_remove(2).1,
+    counted: false,
 };
 
 const QUEUE_LIST: Order = Order {
@@ -180,6 +189,7 @@ const QUEUE_LIST: Order = Order {
     capability: ORDERS_READ,
     run: queue_list,
     describe: || orders::read_methods().swap_remove(3).1,
+    counted: false,
 };
 
 const PLAYERS_TELL: Order = Order {
@@ -187,6 +197,7 @@ const PLAYERS_TELL: Order = Order {
     capability: ORDERS_MESSAGE,
     run: players_tell,
     describe: || orders::message_methods().swap_remove(0).1,
+    counted: false,
 };
 
 const BROADCAST: Order = Order {
@@ -194,6 +205,7 @@ const BROADCAST: Order = Order {
     capability: ORDERS_MESSAGE,
     run: broadcast,
     describe: || orders::message_methods().swap_remove(1).1,
+    counted: true,
 };
 
 /// The orders the proxy serves.
@@ -298,6 +310,32 @@ impl Budget {
         }
     }
 
+    fn refill(&mut self, now: Instant) {
+        let passed = now.saturating_duration_since(self.at).as_secs_f64();
+        self.tokens = (self.tokens + passed * self.rate).min(self.burst);
+        self.at = self.at.max(now);
+    }
+
+    /// Whether a token is there to take, taking none.
+    pub fn has_one(&mut self, now: Instant) -> bool {
+        self.refill(now);
+        self.tokens >= 1.0
+    }
+
+    /// Spends `cost` tokens (at least one, at most the burst) **all at once** if there are that many; if there are not it
+    /// spends one, if there is one, and says no: an order that is refused is not free.
+    pub fn take_all_or_one(&mut self, cost: u32, now: Instant) -> bool {
+        self.refill(now);
+        let cost = f64::from(cost).clamp(1.0, self.burst);
+        if self.tokens >= cost {
+            self.tokens -= cost;
+            true
+        } else {
+            self.tokens = (self.tokens - 1.0).max(0.0);
+            false
+        }
+    }
+
     /// Spends `cost` tokens if there are that many. A cost is at least one and **at most the burst**: an order
     /// that reaches more players than the burst holds (a `send all`) costs the whole burst, and is not made
     /// impossible by its own size.
@@ -380,7 +418,7 @@ fn broadcast(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     // The proxy's own words for a server it does not have name it: they are not given back.
     let no_server = |_: String| invalid("\"server\" is not a server of the proxy".into());
     let reached = actions.audience(server.as_deref()).map_err(no_server)?;
-    ctx.spend_for(reached)?;
+    ctx.charge(reached)?;
     let told = actions
         .broadcast(server.as_deref(), &text)
         .map_err(no_server)?;
@@ -448,7 +486,14 @@ pub(super) fn dispatch(
     let Some(place) = link.order_place() else {
         return busy();
     };
-    if !link.take_order(1) {
+    // One token at the start, or, for an order that is charged by what it reaches, a look that there is one: the handler
+    // charges the whole cost at once, once it knows it.
+    let paid = if order.counted {
+        link.has_order_budget()
+    } else {
+        link.take_order(1)
+    };
+    if !paid {
         return refuse(
             order.method,
             Outcome::OverBudget,
@@ -562,6 +607,7 @@ pub(super) mod test_support {
         capability: "orders.read",
         run: block,
         describe: || DiscoverMethod::new("meridian:test/block"),
+        counted: false,
     };
 
     /// Set to let the answers of `SLOW_WRITE` go.
@@ -589,6 +635,7 @@ pub(super) mod test_support {
         capability: "orders.read",
         run: quick,
         describe: || DiscoverMethod::new("meridian:test/slow-write"),
+        counted: false,
     };
 
     pub const PANIC: Order = Order {
@@ -596,6 +643,7 @@ pub(super) mod test_support {
         capability: "orders.read",
         run: panic,
         describe: || DiscoverMethod::new("meridian:test/panic"),
+        counted: false,
     };
 }
 
@@ -652,6 +700,26 @@ mod tests {
         // An earlier instant than the last one: no tokens come from it.
         assert!(!b.take(1, t0));
         assert!(!b.take(1, later));
+    }
+
+    #[test]
+    fn an_order_charged_by_what_it_reaches_pays_all_at_once_or_not_at_all_and_a_refusal_costs_one()
+    {
+        let (mut b, t0) = budget(1, 10);
+        assert!(b.has_one(t0));
+        // 7 of 10 at once; 3 are left; 5 cannot be paid, so none of the 3 is taken, but one is.
+        assert!(b.take_all_or_one(7, t0));
+        assert!(!b.take_all_or_one(5, t0));
+        // Two left: a cost of 2 can be paid, and then nothing is left to look at.
+        assert!(b.take_all_or_one(2, t0));
+        assert!(!b.has_one(t0));
+        // With none left, a refusal takes nothing more (it cannot go below nothing).
+        assert!(!b.take_all_or_one(3, t0));
+        assert!(!b.has_one(t0));
+        // A cost over the burst is the burst: it needs the whole budget.
+        let rested = t0 + Duration::from_secs(60);
+        assert!(b.take_all_or_one(500, rested));
+        assert!(!b.has_one(rested));
     }
 
     #[test]

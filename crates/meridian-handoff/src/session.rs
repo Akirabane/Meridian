@@ -723,9 +723,16 @@ impl SessionHandle {
     /// Shows the player `message` in the chat. Nothing is sent outside the play
     /// phase, where the client reads no chat.
     pub fn tell(&self, message: &str) {
+        let _ = self.try_tell(message);
+    }
+
+    /// [`SessionHandle::tell`], and says whether the message was written, or kept to be written after the command that is
+    /// being answered (`true`), or dropped because the session is not in the play phase, where the client reads no chat
+    /// (`false`).
+    pub fn try_tell(&self, message: &str) -> bool {
         let mut down = self.0.down();
         if down.phase != Phase::Play {
-            return;
+            return false;
         }
         let packet = play::Clientbound::SystemChat(play::SystemChat {
             content: text::literal(message),
@@ -738,9 +745,10 @@ impl SessionHandle {
             && *reader != std::thread::current().id()
         {
             waiting.push(packet);
-            return;
+            return true;
         }
         let _ = down.writer.send(&packet);
+        true
     }
 
     /// Whether a switch of this player is under way.

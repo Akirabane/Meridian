@@ -1031,9 +1031,20 @@ configuration in force, the balancer, the queue); until the proxy has given the 
   the proxy does not have is `-32602` in fixed words (the name the extension gave is not given back).
 - **Cost** (decision Q7). `players/tell` costs one order. **`broadcast` costs the number of players it reaches, and at most
   the burst** (`[extension.orders] burst`): one that reaches 500 players costs the whole burst of 50, not 500, which would
-  have made it impossible to run. The dispatcher takes one order at the start and the rest is taken once the audience is known,
-  **before anyone is told**: a broadcast that the budget cannot pay is `-32001`, and nobody was shown anything (it can be
-  asked again). It is logged as `extension "<name>" alerted <server or every server> to N: <line>`.
+  have made it impossible to run. **It is charged all at once, or not at all**: the dispatcher only looks that a token is there,
+  the handler works out how many players it reaches, and then the budget pays the whole of it in one step. Two broadcasts that
+  each need the whole burst, sent together, cannot each take a part of it and both fail: one is paid, the other is `-32001`.
+  A broadcast that the budget cannot pay is `-32001`, **nobody was shown anything**, and it costs one token anyway (if there
+  is one), so that trying again and again to find a cost that fits is not free; it can be asked again. It is logged as
+  `extension "<name>" alerted <server or every server> to N: <line>`. **There is no limit for a given player or server**:
+  only the budget bounds how often a line is sent to the same people.
+- **`told` counts the players who were shown the line**, not those who were found: a session that has not finished its
+  configuration (a player who is still joining) reads no chat, and is not counted. The proxy's own `/alert` still counts the
+  players it found.
+- **What `orders.message` tells the extension besides.** `players/tell` answers 1 or 0, which tells whether a name is online,
+  and `broadcast` with a `server` answers `-32602` for a server the proxy does not have, which tells which server names exist:
+  **`orders.message` also tells the extension whether a name is online and which server names exist.** A program that must
+  not learn that is not granted it.
 - **Not the same twice.** Unlike `permissions/invalidate`, these orders show a line each time they run: after a timeout or an
   end of the connection (`may_have_run`) the line may have been shown, and asking again may show it twice. Whether that
   matters is for the extension.

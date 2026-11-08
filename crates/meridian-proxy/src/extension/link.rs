@@ -375,6 +375,25 @@ impl Link {
             .take(cost, Instant::now())
     }
 
+    /// Whether the budget of orders has a token to spare, taking none: the test of an order that is charged by what it
+    /// reaches, before it computes what that is.
+    pub(super) fn has_order_budget(&self) -> bool {
+        self.budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_one(Instant::now())
+    }
+
+    /// Charges the whole of an order's cost at once, or none of it: `true` when the budget paid `cost` (at least one, at most
+    /// the burst). A refused order is not free: it still costs one token, if there is one, so that trying again and again
+    /// to find a cost that fits is not free either.
+    pub(super) fn charge_order(&self, cost: u32) -> bool {
+        self.budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_all_or_one(cost, Instant::now())
+    }
+
     /// Whether the connection that is up was granted `capability` (asked for in its hello and granted).
     pub(super) fn is_granted(&self, capability: &str) -> bool {
         self.lock()

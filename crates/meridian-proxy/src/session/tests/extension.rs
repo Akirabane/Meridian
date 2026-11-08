@@ -3208,9 +3208,11 @@ mod reading {
             Identity::Verified(offline_uuid("Notch").to_be_bytes()),
         );
         // One player, by name in any case and by unique id; nobody else.
-        assert_eq!(actions.tell(&Who::Name("ALEX".into()), "hi"), 1);
+        // The sessions of this test have not finished their configuration: they read no chat, so nobody is shown the line
+        // (the positive case is `try_tell`'s, tested where a session can be put in play).
+        assert_eq!(actions.tell(&Who::Name("ALEX".into()), "hi"), 0);
         let notch = hyphenated(offline_uuid("Notch").to_be_bytes()).to_ascii_lowercase();
-        assert_eq!(actions.tell(&Who::Id(notch), "hi"), 1);
+        assert_eq!(actions.tell(&Who::Id(notch), "hi"), 0);
         assert_eq!(actions.tell(&Who::Name("Nobody".into()), "hi"), 0);
         assert_eq!(
             actions.tell(
@@ -3226,7 +3228,9 @@ mod reading {
         assert_eq!(actions.audience(Some("east")), Ok(0));
         assert!(actions.audience(Some("nowhere")).is_err());
         // The alert of the proxy, counted as it counts.
-        assert_eq!(actions.broadcast(None, "hello"), Ok(2));
+        // Two found, none shown the line.
+        assert_eq!(actions.audience(None), Ok(2));
+        assert_eq!(actions.broadcast(None, "hello"), Ok(0));
         assert_eq!(actions.broadcast(Some("east"), "hello"), Ok(0));
         assert!(actions.broadcast(Some("nowhere"), "hello").is_err());
     }
@@ -3267,9 +3271,10 @@ mod reading {
             .serve_actions(Arc::new(actions_of(&sessions, &config)));
         let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
         let proxy = running.proxy();
-        assert_eq!(proxy.tell("alex", "Hello."), Ok(1));
+        // Found, but not in the play phase: nobody is shown the line, and the answer says so.
+        assert_eq!(proxy.tell("alex", "Hello."), Ok(0));
         assert_eq!(proxy.tell("Nobody", "Hello?"), Ok(0));
-        assert_eq!(proxy.broadcast(None, "Restart in five minutes."), Ok(1));
+        assert_eq!(proxy.broadcast(None, "Restart in five minutes."), Ok(0));
         assert_eq!(proxy.broadcast(Some("east"), "Hello east."), Ok(0));
         // A server the proxy does not have: refused by the proxy (-32602), and told in fixed words.
         let refused = proxy.broadcast(Some("nowhere"), "hi").unwrap_err();

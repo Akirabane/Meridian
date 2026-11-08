@@ -97,6 +97,46 @@ fn the_proxy_answers_its_commands() {
     run.join().unwrap().unwrap();
 }
 
+/// A message is shown only in the play phase, and `try_tell` says whether it was: before the configuration is finished the client
+/// reads no chat, nothing is written, and it says so; after, it is written and read.
+#[test]
+fn a_message_is_shown_only_in_the_play_phase_and_try_tell_says_whether_it_was() {
+    let (proxy_client, mut player) = pipe();
+    let (proxy_backend, mut source) = pipe();
+    player.reader.set_read_timeout(Some(WAIT)).unwrap();
+    source.reader.set_read_timeout(Some(WAIT)).unwrap();
+    let (session, handle) = Session::new(
+        ClientSession {
+            profile: profile(),
+            auth: AuthKind::Offline,
+            virtual_host: None,
+            connection: proxy_client,
+        },
+        BackendLink {
+            connection: proxy_backend,
+        },
+        "source",
+    )
+    .unwrap();
+    let run = std::thread::spawn(move || session.run());
+    // Not in play yet: nothing is written, and it says so.
+    assert!(!handle.try_tell("Too early."));
+    send(&mut source, cfg::clientbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut player, cfg::clientbound::FINISH_CONFIGURATION).unwrap();
+    // In play: written, and said.
+    assert!(handle.try_tell("Hello."));
+    let (id, payload) = player.recv().unwrap();
+    match decode(id, &payload) {
+        C::SystemChat(chat) => assert_eq!(
+            horizon_protocol::text::plain(&chat.content, &Default::default()),
+            "Hello."
+        ),
+        other => panic!("{other:?}"),
+    }
+    drop(source);
+    run.join().unwrap().unwrap();
+}
+
 /// A command the hook takes (`TAKEN`) never reaches the backend, nothing is written for it at
 /// once, and what the hook's threads tell the player afterwards is read, in order: the one that
 /// ran while the command was being taken (kept until the reader is done with it) and the one

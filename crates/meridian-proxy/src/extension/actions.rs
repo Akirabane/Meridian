@@ -31,6 +31,7 @@ impl ProxyActions {
 
 impl Actions for ProxyActions {
     fn tell(&self, who: &Who, text: &str) -> usize {
+        // 1 when the player was shown the line, 0 when nobody is online by that name or their session reads no chat yet.
         let Some(sessions) = self.sessions.upgrade() else {
             return 0;
         };
@@ -43,13 +44,8 @@ impl Actions for ProxyActions {
                 .find(|(player, _)| hyphenated(player.uuid).eq_ignore_ascii_case(id))
                 .map(|(_, handle)| handle),
         };
-        match handle {
-            Some(handle) => {
-                handle.tell(text);
-                1
-            }
-            None => 0,
-        }
+        // Shown, not only found: a session that is not in the play phase reads no chat.
+        usize::from(handle.is_some_and(|handle| handle.try_tell(text)))
     }
 
     fn audience(&self, server: Option<&str>) -> Result<usize, String> {
@@ -73,6 +69,6 @@ impl Actions for ProxyActions {
         let Some(sessions) = self.sessions.upgrade() else {
             return Ok(0);
         };
-        staff::alert(&sessions.shared(), &self.config(), server, text)
+        staff::alert_shown(&sessions.shared(), &self.config(), server, text)
     }
 }

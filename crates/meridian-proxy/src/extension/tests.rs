@@ -2630,4 +2630,84 @@ mod the_orders {
         assert_eq!(link.stats().orders(shapes::BROADCAST, Ended::Failed), 1);
         assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
     }
+
+    /// Two broadcasts that each need the whole burst, sent together: one is paid, the other is refused (not both
+    /// half-charged and both refused), and nobody is told by the one that is refused.
+    #[test]
+    fn two_broadcasts_that_each_need_the_whole_burst_cannot_both_take_part_of_it() {
+        let acting = Acting::new(50);
+        let (fake, _registry, link, _folder) =
+            acting_with(&["orders.message"], &acting, |settings| {
+                settings.order_burst = 50;
+                settings.order_rate = 1;
+                settings.orders_running = 8;
+            });
+        order(
+            &fake,
+            &json!(7000),
+            shapes::BROADCAST,
+            r#"{"text":"first"}"#,
+        );
+        order(
+            &fake,
+            &json!(7001),
+            shapes::BROADCAST,
+            r#"{"text":"second"}"#,
+        );
+        let replies = [answer(&fake, &json!(7000)), answer(&fake, &json!(7001))];
+        let paid = replies.iter().filter(|r| r.get("result").is_some()).count();
+        let refused = replies.iter().filter(|r| r.get("error").is_some()).count();
+        assert_eq!((paid, refused), (1, 1), "{replies:?}");
+        assert!(
+            replies
+                .iter()
+                .filter_map(|r| r.get("error"))
+                .all(|e| e["code"] == -32001)
+        );
+        assert_eq!(
+            acting.cast().len(),
+            1,
+            "only the one that was paid told anyone"
+        );
+        assert_eq!(link.stats().orders(shapes::BROADCAST, Ended::Done), 1);
+        assert_eq!(link.stats().orders(shapes::BROADCAST, Ended::OverBudget), 1);
+    }
+
+    /// A broadcast the budget cannot pay is refused, shows nothing, and costs one token anyway: with one token left, the
+    /// order after it finds none.
+    #[test]
+    fn a_refused_broadcast_costs_one_token_and_shows_nothing() {
+        let acting = Acting::new(5);
+        let (fake, _registry, _link, _folder) =
+            acting_with(&["orders.message"], &acting, |settings| {
+                settings.order_burst = 6;
+                settings.order_rate = 1;
+            });
+        // 5 of 6: a broadcast to five players is paid, and one token is left.
+        order(
+            &fake,
+            &json!(7100),
+            shapes::BROADCAST,
+            r#"{"text":"to five"}"#,
+        );
+        assert_eq!(told_of(&answer(&fake, &json!(7100))), 5);
+        // Another to five needs five: it is refused, shows nothing, and takes the one token that is left.
+        order(
+            &fake,
+            &json!(7101),
+            shapes::BROADCAST,
+            r#"{"text":"to five again"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(7101))), -32001);
+        assert_eq!(acting.cast().len(), 1);
+        // So the next order, which would have cost one, finds nothing at the door.
+        order(
+            &fake,
+            &json!(7102),
+            shapes::PLAYERS_TELL,
+            r#"{"player":"Alex","text":"hi"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(7102))), -32001);
+        assert!(acting.told().is_empty());
+    }
 }

@@ -400,7 +400,7 @@ impl Proxy {
     }
 
     /// Shows `text` in the chat of the player called `player` (whatever the case) or with that unique id, and tells how many
-    /// were shown it: 1, or 0 if nobody online is (not an error). Needs `orders.message`, which the extension asks for with
+    /// were **shown** it: 1, or 0 if nobody online is or their session reads no chat yet (not an error). Needs `orders.message`, which the extension asks for with
     /// [`Extension::wants`](super::Extension::wants) and the operator grants.
     ///
     /// The line is shown **as written, as plain text**, with no formatting and no click event: it must be 1 to
@@ -420,7 +420,7 @@ impl Proxy {
     }
 
     /// Shows `text` to every player online, or to those on `server`, as the proxy's own `/alert` does, and tells how many
-    /// were shown it. A server the proxy does not have is a refusal (`-32602`). Needs `orders.message`.
+    /// were **shown** it (a player who is still joining reads no chat and is not counted). A server the proxy does not have is a refusal (`-32602`). Needs `orders.message`.
     ///
     /// **It costs the proxy's budget of orders the number of players it reaches, and at most its burst** (the proxy
     /// refuses it, before anyone is told, with `-32001` ([`OrderError::retry_later`]) if the budget cannot pay). The line is
