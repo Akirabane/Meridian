@@ -116,10 +116,12 @@ struct Options {
 }
 
 /// A host name a bot may write in its handshake: 1 to 253 characters of letters, digits, dots and
-/// hyphens (a name or an address, as a client types it).
+/// hyphens (a name or an address, as a client types it), not starting with a dot or a hyphen (so
+/// an option that follows a forgotten value, `--handshake-host --players`, is not taken for it).
 fn host_name(text: &str) -> Result<String, String> {
     let ok = !text.is_empty()
         && text.len() <= 253
+        && !text.starts_with(['-', '.'])
         && text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
@@ -375,6 +377,20 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
     }
     if o.settings.window.is_zero() || o.direct_window.is_zero() {
         return Err("a window needs at least a second".into());
+    }
+    // The spectator's host leads to a real server: bots that wrote it would all join that server.
+    // The proxy compares host names without case and without a final dot; so does this.
+    let same_host = |a: &str, b: &str| {
+        a.strip_suffix('.')
+            .unwrap_or(a)
+            .eq_ignore_ascii_case(b.strip_suffix('.').unwrap_or(b))
+    };
+    if let (Some(_), Some(bots)) = (&spectator, &o.settings.handshake_host) {
+        if same_host(bots, &host) {
+            return Err(format!(
+                "--handshake-host {bots} is the spectator's host: the bots would join its real server"
+            ));
+        }
     }
     o.settings.spectator = spectator.map(|address| Spectator {
         address,

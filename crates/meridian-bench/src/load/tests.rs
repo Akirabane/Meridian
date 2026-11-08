@@ -114,12 +114,36 @@ fn the_bots_write_the_host_they_are_given() {
         read(&["--proxy", "x", "--handshake-host", "probe.l2"]),
         Ok(Some("probe.l2".to_owned()))
     );
-    for bad in ["", "probe l2", "probe/l2", "probé", &"a".repeat(254)] {
+    // A forgotten value takes the next option: refused, as a name that starts with a dot.
+    for bad in [
+        "",
+        "probe l2",
+        "probe/l2",
+        "probé",
+        "--players",
+        ".probe",
+        &"a".repeat(254),
+    ] {
         assert!(
             read(&["--proxy", "x", "--handshake-host", bad]).is_err(),
             "{bad:?}"
         );
     }
+
+    // The spectator's host, whatever its case and final dot, would send the bots to its real server.
+    let spectator = |host: &str| {
+        parse(args(&[
+            "--proxy",
+            "x",
+            "--spectator",
+            "127.0.0.1:25566",
+            "--handshake-host",
+            host,
+        ]))
+        .map(|_| ())
+    };
+    assert!(spectator("LOCALHOST.").is_err());
+    assert!(spectator("probe.l2").is_ok());
 
     let address: std::net::SocketAddr = "127.0.0.1:25565".parse().unwrap();
     let mut s = settings(1);

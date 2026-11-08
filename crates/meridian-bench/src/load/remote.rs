@@ -216,8 +216,13 @@ pub fn read_config(
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let folder = path.parent().unwrap_or(Path::new("."));
-    let config = Config::from_toml_str_in(&text, folder)
-        .map_err(|e| format!("{} is not a configuration: {e}", path.display()))?;
+    let config = Config::from_toml_str_in(&text, folder).map_err(|e| {
+        // A parse error quotes the line it stopped on, which may be the secret's.
+        hide_secret(
+            &text,
+            format!("{} is not a configuration: {e}", path.display()),
+        )
+    })?;
     let want = remote.server_address(0).to_string();
     let name = match host {
         Some(host) => config.forced_backend(host).ok_or_else(|| {
@@ -229,6 +234,13 @@ pub fn read_config(
         })?,
         None => "lobby",
     };
+    if host.is_some() && config.balanced(name).is_some() {
+        return Err(format!(
+            "{} gives {name} a role: the balancer could send the other clients' players to the \
+             bench's server; it needs a backend of no role",
+            path.display()
+        ));
+    }
     match config.backends.iter().find(|b| b.name == name) {
         Some(server) if server.address == want => {}
         Some(server) => {
@@ -248,6 +260,32 @@ pub fn read_config(
         );
     }
     Ok((config.forwarding_secret, config.compression_threshold))
+}
+
+/// `said` with the value of every `forwarding-secret` line of `text` replaced by `<secret>`,
+/// whether or not the line is valid (the value runs to its closing quote, or to the line's end).
+fn hide_secret(text: &str, said: String) -> String {
+    let mut said = said;
+    for line in text.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("forwarding-secret") else {
+            continue;
+        };
+        let Some((_, value)) = rest.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let value = match value.chars().next() {
+            Some(quote @ ('"' | '\'')) => {
+                let inner = &value[1..];
+                inner.split(quote).next().unwrap_or(inner)
+            }
+            _ => value,
+        };
+        if value.len() >= 4 {
+            said = said.replace(value, "<secret>");
+        }
+    }
+    said
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -731,6 +769,60 @@ backend = "probe"
             "{moved}"
         );
         for said in [no_lobby, unknown, moved] {
+            assert!(!said.contains(secret), "{said}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bench's server must have no role: the balancer would place other clients there. And a
+    /// file the proxy cannot read is refused without quoting its secret, even on the secret's line.
+    #[test]
+    fn a_server_with_a_role_is_refused_and_a_broken_file_keeps_its_secret() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let dir =
+            std::env::temp_dir().join(format!("meridian-remote-role-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meridian.toml");
+        let with_role = format!(
+            r#"listen = "192.168.1.25:25565"
+forwarding-secret = "{secret}"
+default-backend = "s1"
+
+[balancing]
+enabled = true
+
+[[backends]]
+name = "s1"
+address = "192.168.1.18:25601"
+role = "lobby"
+soft-cap = 50
+hard-cap = 60
+
+[[backends]]
+name = "probe"
+address = "192.168.1.18:25701"
+role = "lobby"
+soft-cap = 50
+hard-cap = 60
+
+[[forced-host]]
+host = "probe.l2"
+backend = "probe"
+"#
+        );
+        std::fs::write(&path, &with_role).unwrap();
+        let refused = read_config(&path, &remote(), Some("PROBE.L2.")).unwrap_err();
+        assert!(refused.contains("role"), "{refused}");
+        assert!(!refused.contains(secret));
+
+        // The string of the secret is never closed: the parse error stops on its line.
+        for broken in [
+            format!("listen = \"192.168.1.25:25565\"\nforwarding-secret = \"{secret}\n"),
+            format!("forwarding-secret = '{secret}' x\n"),
+        ] {
+            std::fs::write(&path, &broken).unwrap();
+            let said = read_config(&path, &remote(), Some("probe.l2")).unwrap_err();
+            assert!(said.contains("not a configuration"), "{said}");
             assert!(!said.contains(secret), "{said}");
         }
         let _ = std::fs::remove_dir_all(&dir);
