@@ -320,7 +320,8 @@ fn the_page_names_no_player() {
                     "result",
                     "cause",
                     "version",
-                    "direction"
+                    "direction",
+                    "outcome"
                 ]
                 .contains(&key),
                 "{line}"

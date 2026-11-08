@@ -200,6 +200,11 @@ pub struct Config {
     /// Connections one address may have logging in at once; 0 means no limit,
     /// the default, since many players may share an address (a school, a LAN).
     pub max_pending_logins_per_address: u32,
+    /// Whether a player another server sends here with a vanilla transfer (`/transfer`, the
+    /// handshake's TRANSFER intention) is taken, as a vanilla server's `accepts-transfers`.
+    /// Taken, they log in exactly as any player does: the same checks, the host they were sent
+    /// to choosing the server. Off by default: refused as vanilla refuses them.
+    pub accept_transfers: bool,
     /// Seconds a backend that failed to take a player is passed over, so the
     /// next players go straight to the next candidate; 0 never passes one over.
     pub backend_retry_seconds: u64,
@@ -298,6 +303,7 @@ impl Default for Config {
             connections_per_minute: 20,
             max_pending_logins: 2048,
             max_pending_logins_per_address: 0,
+            accept_transfers: false,
             backend_retry_seconds: 10,
             status_sample: 12,
             commands: CommandSettings::default(),
@@ -348,6 +354,7 @@ impl std::fmt::Debug for Config {
             connections_per_minute,
             max_pending_logins,
             max_pending_logins_per_address,
+            accept_transfers,
             backend_retry_seconds,
             status_sample,
             commands,
@@ -399,6 +406,7 @@ impl std::fmt::Debug for Config {
                 "max_pending_logins_per_address",
                 max_pending_logins_per_address,
             )
+            .field("accept_transfers", accept_transfers)
             .field("backend_retry_seconds", backend_retry_seconds)
             .field("status_sample", status_sample)
             .field("commands", commands)
@@ -456,6 +464,7 @@ struct File {
     connections_per_minute: Option<u32>,
     max_pending_logins: Option<u32>,
     max_pending_logins_per_address: Option<u32>,
+    accept_transfers: Option<bool>,
     backend_retry_seconds: Option<u64>,
     status_sample: Option<u32>,
     #[serde(default)]
@@ -659,6 +668,7 @@ impl Config {
             max_pending_logins_per_address: file
                 .max_pending_logins_per_address
                 .unwrap_or(defaults.max_pending_logins_per_address),
+            accept_transfers: file.accept_transfers.unwrap_or(defaults.accept_transfers),
             backend_retry_seconds: file
                 .backend_retry_seconds
                 .unwrap_or(defaults.backend_retry_seconds),

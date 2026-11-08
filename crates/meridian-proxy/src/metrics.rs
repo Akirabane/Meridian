@@ -434,6 +434,20 @@ pub fn render(proxy: &Proxy) -> String {
     );
     family(
         &mut out,
+        "meridian_transfers_total",
+        "counter",
+        "Players another server sent with a vanilla transfer: refused (accept-transfers off), logged_in, or failed (taken, the login did not finish).",
+    );
+    let transfers = meridian_net::client::transfers();
+    for (outcome, n) in [
+        ("refused", transfers.refused),
+        ("logged_in", transfers.logged_in),
+        ("failed", transfers.failed),
+    ] {
+        let _ = writeln!(out, "meridian_transfers_total{{outcome=\"{outcome}\"}} {n}");
+    }
+    family(
+        &mut out,
         "meridian_logins_total",
         "counter",
         "Players who logged in and were sent to a backend.",
