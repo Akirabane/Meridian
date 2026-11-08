@@ -1016,7 +1016,8 @@ meridian_connections_throttled_total 1
                 .reason_json
                 .contains("multiplayer.disconnect.transfers_disabled")
         );
-        // On, by a reload: the next transferred player logs in.
+        // On, by a reload: the next transferred player logs in, and those whose login a check refuses
+        // count as failed (three of them, so that every outcome has its own count below).
         let mut reloaded = (*proxy.config()).clone();
         reloaded.accept_transfers = true;
         proxy.set_config(reloaded);
@@ -1029,28 +1030,41 @@ meridian_connections_throttled_total 1
             ),
             "the transferred player is let in after the reload"
         );
-        // Each outcome under its own label: no other test of this crate makes a transfer, so the
-        // page says exactly what the counters hold.
-        let counted = meridian_net::client::transfers();
+        let acknowledged = login::Serverbound::LoginAcknowledged(Default::default());
+        taken.send(&acknowledged.encode()).unwrap();
+        let mut failing = Vec::new();
+        for _ in 0..3 {
+            let mut bad = transferred(address, Some("no spaces"));
+            let (id, payload) = bad.recv().unwrap();
+            assert!(matches!(
+                login::Clientbound::decode(id, &payload).unwrap(),
+                login::Clientbound::Disconnect(_)
+            ));
+            failing.push(bad);
+        }
+        // The counts are kept by the connections' threads: wait for them. No other test of this
+        // crate makes a transfer, so they are exact.
+        let expected = meridian_net::client::Transfers {
+            refused: 2,
+            logged_in: 1,
+            failed: 3,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while meridian_net::client::transfers() != expected && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(meridian_net::client::transfers(), expected);
+        // Each outcome under its own label, with its own count.
         let page = crate::metrics::render(&proxy);
-        assert!(
-            counted.refused >= 2 && counted.refused != counted.failed,
-            "{counted:?}"
-        );
-        for (outcome, n) in [
-            ("refused", counted.refused),
-            ("logged_in", counted.logged_in),
-            ("failed", counted.failed),
-        ] {
+        for (outcome, n) in [("refused", 2), ("logged_in", 1), ("failed", 3)] {
             assert!(
                 page.contains(&format!(
-                    "meridian_transfers_total{{outcome=\"{outcome}\"}} {n}
-"
+                    "\nmeridian_incoming_transfers_total{{outcome=\"{outcome}\"}} {n}\n"
                 )),
                 "{page}"
             );
         }
-        drop((once, refused, taken));
+        drop((once, refused, taken, failing));
         proxy.stop();
         server.join().unwrap().unwrap();
     }
