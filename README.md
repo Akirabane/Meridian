@@ -23,7 +23,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 
 | Function | Status | Notes |
 | --- | --- | --- |
-| Relay between a player and a Horizon server | Done | Both directions, with compression and encryption on each side |
+| Relay between a player and a Horizon server | Done | Both directions, with compression and encryption on each side. The packets that one read of a server brought are written to the player in one write (at most 64 packets or 32 KiB of payload at a time), with the same bytes as one write each ([#160](https://github.com/Akirabane/Meridian/pull/160)). In a loopback bench with servers that write once a tick, the proxy's processor for a relayed packet went from about 20 µs to about 8 µs at 500 and at 1,000 typical players, and nothing changed where a server writes each packet alone ([docs/LOAD-1000.md](docs/LOAD-1000.md), section 5): the bench is on one machine over the loopback; section 5 adds one test on a real network, where a real game server's packets went about 15.5 to a write (three players, one run) |
 | Player information forwarding | Done | Horizon's Velocity-style forwarding with a shared secret |
 | Named servers and a default server | Done | |
 | Login modes: online, offline, hybrid | Done | See [Login modes](#login-modes). The hybrid lookup has not been tried against the real account service |
@@ -34,7 +34,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Backend health | Done | A server that just failed is tried last for a while |
 | Server list status | Done | The proxy's own message (or the one of the forced host the player typed), a favicon, player count, limit and a sample of names |
 | Console | Done | `list`, `servers`, `drain [--move]`, `undrain`, `switch`, `send`, `kick`, `ban`, `pardon`, `banlist`, `whitelist`, `alert`, `perm`, `queue`, `reload`, `end`, `help` |
-| Metrics and health check | Done, off by default | A Prometheus text page and a health check ([docs/OPERATING.md](docs/OPERATING.md), section 8.1). Without a password or TLS: keep it on the loopback or a private address |
+| Metrics and health check | Done, off by default | A Prometheus text page and a health check ([docs/OPERATING.md](docs/OPERATING.md), section 8.1), with the packets the relays sent the players and the writes they took (`meridian_relay_packets_total`, `meridian_relay_writes_total`). Without a password or TLS: keep it on the loopback or a private address |
 | Staying in step with Horizon | Built | A nightly build of Meridian against the head of Horizon opens an issue when it fails, and a script moves the pinned commit ([docs/COMPAT.md](docs/COMPAT.md)). It starts no Horizon server: it checks that the code builds and the tests pass against the new protocol, not that a real Horizon and Meridian still work together |
 | Reload | Done | Without a restart; `listen` needs a restart |
 | In-game commands | Done | `/server`, `/hub`, `/lobby`, `/play`; and `/send`, `/glist`, `/alert` for the players who have the permission; moving starts a seamless switch |
@@ -88,6 +88,13 @@ part of every figure, and each page says them first.
   of cycles of 150 simulated players on a four-core VPS showed about 6 MiB kept for each cycle and
   600 file descriptors never given back; the cause was a reference cycle in a session, fixed in
   #119, and 13 cycles on the fixed build ended each at the same 7 descriptors and 16 to 17 MiB.
+- [docs/LOAD-1000.md](docs/LOAD-1000.md): up to 1,500 light players and 1,000 typical players (built from one
+  real client) against synthetic servers, on one Windows machine over the loopback, with the load generator on
+  its own cores, on 7 and 8 November 2026: the proxy's processor, memory and threads, an hour at 1,000, logins,
+  and the change that writes a read's packets together (#160). The bench is on the loopback; section 5 adds one
+  test on a real network (three real clients, one run of each scenario) and a reading of the proxy's memory on
+  Linux. At 1,000 typical players the load generator was the limit, so the latency there is not judged; the raw
+  files are not in this repository.
 - [docs/BENCH.md](docs/BENCH.md): the older latency benchmark, over the loopback, against a
   stand-in server.
 - [docs/REAL-NETWORK-RUN.md](docs/REAL-NETWORK-RUN.md): the seamless switch with real clients over a real
@@ -358,7 +365,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   build against Horizon's head, and how to move the pin.
 - [docs/BASELINE.md](docs/BASELINE.md), [docs/LOAD-REMOTE.md](docs/LOAD-REMOTE.md),
   [docs/LOAD-LAN-250.md](docs/LOAD-LAN-250.md), [docs/LOAD-VPS-250.md](docs/LOAD-VPS-250.md),
-  [docs/BENCH.md](docs/BENCH.md): the load measurements and their limits (see Measures).
+  [docs/LOAD-1000.md](docs/LOAD-1000.md), [docs/BENCH.md](docs/BENCH.md): the load measurements and their limits
+  (see Measures).
 - [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md): the runs made with a real Horizon client:
   one over the Internet to a proxy on a rented server with 250 bots, the fallback of a player whose
   server is killed, kicks them or stops, and earlier moves between servers on one machine.
