@@ -216,7 +216,6 @@ impl Detector {
     }
 
     /// Whether `backend` is going down now.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_restarting(&self, backend: &str) -> bool {
         self.lock().episodes.contains_key(backend)
     }

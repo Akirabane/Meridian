@@ -3396,6 +3396,10 @@ mod the_orders {
         }
 
         fn start(self: Box<Self>, _paid: Paid, lot: SendLot) -> Result<usize, Refusal> {
+            // `stuck` is a server whose moves cannot be started: the lot is dropped with the plan.
+            if self.server == "stuck" {
+                return Err(Refusal::CannotStart);
+            }
             self.log.evacuated.lock().unwrap().push(self.server.clone());
             if self.log.hold_lots.load(Ordering::SeqCst) {
                 self.log.lots.lock().unwrap().push(lot);
@@ -3434,11 +3438,14 @@ mod the_orders {
             Ok(true)
         }
 
-        fn undrain(&self, server: &str) -> bool {
+        fn undrain(&self, server: &str) -> Result<bool, Refusal> {
+            if server == "restarting" {
+                return Err(Refusal::Restarting);
+            }
             let mut drained = self.drained.lock().unwrap();
             let before = drained.len();
             drained.retain(|d| d != server);
-            drained.len() != before
+            Ok(drained.len() != before)
         }
 
         fn plan_evacuation(&self, server: &str) -> Box<dyn MovePlan> {
@@ -3690,8 +3697,12 @@ mod the_orders {
     fn a_reload_is_answered_first_and_applied_after_and_one_runs_at_a_time() {
         let operating = Operating::new(0);
         operating.hold_reload.store(true, Ordering::SeqCst);
+        // A reload costs half the burst and the retries cost a token each: a large budget keeps this about the places.
         let (fake, _registry, link, _folder) =
-            operating_with(&["orders.operate"], &operating, |_| {});
+            operating_with(&["orders.operate"], &operating, |settings| {
+                settings.order_burst = 10_000;
+                settings.order_rate = 1_000;
+            });
         order(&fake, &json!(10_500), shapes::RELOAD, "{}");
         assert_eq!(answer(&fake, &json!(10_500))["result"], json!({"ok": true}));
         until("the reload to begin", || {
@@ -3756,5 +3767,149 @@ mod the_orders {
         }
         assert_eq!(link.stats().orders(shapes::RELOAD, Ended::Failed), 1);
         assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
+    }
+
+    // ---- the review of the orders that operate --------------------------------------------------------------
+
+    /// A reload reads, checks and applies everything: it costs half the burst, charged at once, and one the budget cannot pay is
+    /// refused for budget, before anything is read.
+    #[test]
+    fn a_reload_costs_half_the_burst_and_a_second_close_one_is_refused_for_budget() {
+        let operating = Operating::new(0);
+        let (fake, _registry, _link, _folder) =
+            operating_with(&["orders.operate"], &operating, |settings| {
+                settings.order_burst = 3;
+                settings.order_rate = 1;
+            });
+        order(&fake, &json!(12_000), shapes::RELOAD, "{}");
+        assert_eq!(answer(&fake, &json!(12_000))["result"], json!({"ok": true}));
+        until("the reload to end", || {
+            operating.reloads_done.load(Ordering::SeqCst) == 1
+        });
+        // Two tokens of three went to the first (half the burst, rounded up): one is left, and the second needs two.
+        order(&fake, &json!(12_001), shapes::RELOAD, "{}");
+        let reply = answer(&fake, &json!(12_001));
+        assert_eq!(code_of(&reply), -32001, "{reply}");
+        assert_eq!(
+            operating.reloads_begun.load(Ordering::SeqCst),
+            1,
+            "nothing was read for it"
+        );
+    }
+
+    /// Once the server is drained the order has done what matters: if the moves cannot be started it answers `moving: 0`, not an
+    /// error, and the place for a send is let go.
+    #[test]
+    fn a_drain_whose_moves_cannot_start_is_still_a_drain_and_says_zero_moving() {
+        let operating = Operating::new(5);
+        let (fake, _registry, _link, _folder) =
+            operating_with(&["orders.operate"], &operating, |_| {});
+        order(
+            &fake,
+            &json!(12_100),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"stuck","move":true}"#,
+        );
+        assert_eq!(
+            drained_of(&answer(&fake, &json!(12_100))),
+            Drained {
+                drained: true,
+                moving: 0
+            }
+        );
+        assert_eq!(operating.drained(), ["stuck"]);
+        // The place for a send was let go: another drain moves.
+        order(
+            &fake,
+            &json!(12_101),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby","move":true}"#,
+        );
+        assert_eq!(drained_of(&answer(&fake, &json!(12_101))).moving, 5);
+    }
+
+    /// A server that is going down for a restart is not offered again by an extension: fixed words, and nothing changes.
+    #[test]
+    fn an_undrain_of_a_server_that_is_restarting_is_refused_in_fixed_words() {
+        let operating = Operating::new(0);
+        let (fake, _registry, link, _folder) =
+            operating_with(&["orders.operate"], &operating, |_| {});
+        order(
+            &fake,
+            &json!(12_200),
+            shapes::SERVERS_UNDRAIN,
+            r#"{"server":"restarting"}"#,
+        );
+        let reply = answer(&fake, &json!(12_200));
+        assert_eq!(code_of(&reply), -32602);
+        assert_eq!(
+            reply["error"]["message"],
+            "\"server\" is draining for a restart"
+        );
+        assert_eq!(
+            link.stats().orders(shapes::SERVERS_UNDRAIN, Ended::Invalid),
+            1
+        );
+    }
+
+    /// A reload that removes this very extension: the answer is written first, then the connection is closed by the reload itself,
+    /// and nothing is left blocked: the thread of the order ends, and the place for a reload is let go.
+    #[test]
+    fn a_reload_that_removes_the_extension_that_asked_for_it_answers_first_and_leaves_nothing_blocked()
+     {
+        struct Removing(std::sync::Weak<Registry>, Arc<AtomicBool>);
+        impl Operate for Removing {
+            fn players_on(&self, _: &str) -> Result<usize, Refusal> {
+                Ok(0)
+            }
+            fn drain(&self, _: &str) -> Result<bool, Refusal> {
+                Ok(true)
+            }
+            fn undrain(&self, _: &str) -> Result<bool, Refusal> {
+                Ok(false)
+            }
+            fn plan_evacuation(&self, _: &str) -> Box<dyn MovePlan> {
+                unreachable!("no drain here")
+            }
+            /// What a reload of a file without the extension does to the connections: `follow` with no extension left.
+            fn reload(&self) {
+                if let Some(registry) = self.0.upgrade() {
+                    registry.follow(&meridian_config::Config::default());
+                }
+                self.1.store(true, Ordering::SeqCst);
+            }
+        }
+        let fake = Fake::start(Script {
+            capabilities: vec!["orders.operate".to_owned()],
+            ..Script::default()
+        });
+        let folder = Folder::new();
+        let mut settings = settings(&fake, &folder);
+        settings.grant = vec!["orders.operate".to_owned()];
+        let registry = Arc::new(Registry::default());
+        let link = registry.start(settings).unwrap();
+        until("the connection", || link.is_connected());
+        let applied = Arc::new(AtomicBool::new(false));
+        registry.serve_operate(Arc::new(Removing(
+            Arc::downgrade(&registry),
+            Arc::clone(&applied),
+        )));
+        order(&fake, &json!(12_300), shapes::RELOAD, "{}");
+        // Answered first, with the connection still the one that asked.
+        assert_eq!(answer(&fake, &json!(12_300))["result"], json!({"ok": true}));
+        until("the reload to be applied", || {
+            applied.load(Ordering::SeqCst)
+        });
+        // The extension is gone from the registry, its connection is closed, and nothing waits: no thread of an order is alive and
+        // the place for a reload is free.
+        assert!(registry.links().is_empty());
+        until("the connection to close", || !link.is_connected());
+        until("the thread of the order to end", || {
+            link.order_threads_alive() == 0
+        });
+        assert!(
+            link.reload_lot().is_some(),
+            "the place for a reload was let go"
+        );
     }
 }

@@ -545,7 +545,9 @@ proxy.reload()?;                                // the proxy took the order: rea
 - **A drain with `move` costs the proxy's budget the number of players it sends, at most the burst, and drains nothing if the budget cannot
   pay.** It is one lot of moves at a time (`-32002`, `retry_later()`), and the answer is when the moves **start**: they go on, one player
   after the other, and the proxy's log says how each ended. A server with no role is refused (`-32602`): the balancer only drains the
-  servers it places players on.
+  servers it places players on. If the drain was done but the moves could not start, you get `moving: 0` and not an error: the server is
+  drained all the same. `undrain` of a server that is draining **for a restart** is refused (`-32602`): it is offered when it is back.
+- **`reload()` costs half the proxy's burst**, so ask for it rarely (over the budget: `-32001`, `retry_later()`).
 - **`reload()` answers before it applies.** `Ok(())` says that the proxy took the order, **not that the new configuration is in use**: a
   file that cannot be read changes nothing, and the log says so. Do not rely on the connection staying up: a reload can change your
   own `[[extension]]` entry and close it, and then your program reconnects as it always does. One reload runs at a time (`-32002`).

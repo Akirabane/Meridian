@@ -58,15 +58,20 @@ impl Operate for ProxyOperate {
         Ok(newly)
     }
 
-    fn undrain(&self, server: &str) -> bool {
+    fn undrain(&self, server: &str) -> Result<bool, Refusal> {
         let Some(proxy) = self.proxy.upgrade() else {
-            return false;
+            return Ok(false);
         };
+        // The detector drained it for a restart: it is offered again when it is back, not before. (The console's `undrain` takes
+        // the operator's word for it; an extension's is not taken that far.)
+        if proxy.restarts.is_restarting(server) {
+            return Err(Refusal::Restarting);
+        }
         let undrained = proxy.sessions.balancer.undrain(server);
         if undrained {
             info!("backend \"{server}\" is offered again by an extension");
         }
-        undrained
+        Ok(undrained)
     }
 
     fn plan_evacuation(&self, server: &str) -> Box<dyn MovePlan> {

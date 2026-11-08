@@ -1029,15 +1029,22 @@ the same calls, so what an operator can do at the console an extension granted `
   sends, at most the burst, charged all at once, and takes the extension's place for a send** (one lot of moves at a time, as for
   `players/send`: another is `-32002 a send is already running`). The players on the server are counted and the budget pays
   **before anything is drained**: a drain that the budget cannot pay is `-32001` and drains nothing, so a server is never left
-  drained with its players on it for want of budget.
+  drained with its players on it for want of budget. **Once the server is drained the order has done what matters**: if the moves
+  cannot be started (no thread) it does not fail, it answers `{"drained": true, "moving": 0}` and the proxy's log says `could not
+  start the moves`; look where the players are.
 - **`servers/undrain`**: `{"server": "<name>"}`; answers `{"undrained": bool}`: `true` when it was drained and is offered again now,
-  `false` when it was not drained (not an error).
+  `false` when it was not drained (not an error). **A server that the restart detector is draining for a restart is not offered
+  again by an extension**: `-32602 "server" is draining for a restart`, and it is offered when it is back. The console's own
+  `undrain` is not bound by this: the operator's word is taken.
 - **`reload`**: no params. **It answers `{"ok": true}` first and applies afterwards** (decision Q6): the proxy reads its file on the
   thread of the order **once the answer is written**, because a reload can change this very extension's entry (new address, token, or
   disabled), which closes the connection the answer would go on. So `ok` says that the proxy took the order, **not that the reload
   worked**: a file that cannot be read, or that does not pass the checks, changes nothing in use, and only the proxy's log says so
   (`reload (asked by an extension): ...`). One reload at a time for an extension: while one runs, another is `-32002 a reload is
-  already running` and costs one token. Parameters are refused (`-32602`).
+  already running` and costs one token. Parameters are refused (`-32602`). **A reload costs half the burst** (rounded up), charged at
+  once, since it reads, checks and applies the whole configuration: one that the budget cannot pay is `-32001` and costs one token,
+  and nothing is read for it. A reload that removes or changes this extension's own entry closes the connection **after** the answer
+  is written: the thread of the order ends and the place for a reload is let go.
 - Until the proxy has given the registry what to operate they answer `-32603 not available`. **`orders.operate` lets the extension take
   servers out of rotation and make the proxy read another configuration** (the file on disk, not one the extension sends): grant it to a
   program as trusted as the operator's console.

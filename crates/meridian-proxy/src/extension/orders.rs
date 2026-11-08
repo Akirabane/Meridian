@@ -89,6 +89,9 @@ pub enum Refusal {
     /// The server to send the players to takes no players now: it is draining, it has not reported lately, or it does not accept
     /// transfers. Sending them would tell each player that they could not be moved.
     DestinationNotTakingPlayers,
+    /// The server is going down for a restart (the detector drained it): offering it again would send players to a server that
+    /// is restarting.
+    Restarting,
 }
 
 /// The proof that the budget paid for an order: only [`Ctx::charge`] makes one, and [`MovePlan::start`] asks for it, so that a
@@ -124,8 +127,9 @@ pub trait Operate: Send + Sync {
     /// Stops offering `server` to new players, as the console's `drain` does: `true` when it was drained now, `false` when it
     /// was drained already.
     fn drain(&self, server: &str) -> Result<bool, Refusal>;
-    /// Offers `server` again: `true` when it was drained and is offered now, `false` when it was not drained.
-    fn undrain(&self, server: &str) -> bool;
+    /// Offers `server` again: `true` when it was drained and is offered now, `false` when it was not drained. A server that is
+    /// going down for a restart is not offered again: `Restarting` (the console's `undrain` is not bound by this).
+    fn undrain(&self, server: &str) -> Result<bool, Refusal>;
     /// Plans sending the players of `server` to other servers of its role, one at a time, as the console's `drain --move` does.
     fn plan_evacuation(&self, server: &str) -> Box<dyn MovePlan>;
     /// Reads the configuration file again and puts it in force, as the console's `reload` does. It is called **after** the order
@@ -349,7 +353,7 @@ const RELOAD: Order = Order {
     capability: ORDERS_OPERATE,
     run: reload,
     describe: || orders::operate_methods().swap_remove(2).1,
-    counted: false,
+    counted: true,
 };
 
 /// The orders the proxy serves.
@@ -603,7 +607,7 @@ fn players_send(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError
         }
         Refusal::UnknownDestination => invalid("\"to\" is not a server of the proxy".into()),
         Refusal::UnknownSource => invalid("\"from\" is not a server of the proxy".into()),
-        Refusal::CannotStart | Refusal::NoRole => {
+        Refusal::CannotStart | Refusal::NoRole | Refusal::Restarting => {
             RpcError::new(code::INTERNAL_ERROR, "cannot move the players now")
         }
     };
@@ -679,11 +683,19 @@ fn servers_drain(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcErro
     };
     let paid = ctx.charge(if moving { on } else { 1 })?;
     let drained = operate.drain(&server).map_err(refusal)?;
+    // The server **is** drained by now: if the moves cannot be started the order did not fail, it did less than asked, and says so
+    // in the number it answers (0) and in the log.
     let moving = match lot {
-        Some(lot) => operate
-            .plan_evacuation(&server)
-            .start(paid, lot)
-            .map_err(|_| RpcError::new(code::INTERNAL_ERROR, "cannot move the players now"))?,
+        Some(lot) => match operate.plan_evacuation(&server).start(paid, lot) {
+            Ok(started) => started,
+            Err(_) => {
+                crate::log::warning!(
+                    "extension \"{}\" drained {server}: could not start the moves",
+                    ctx.link.name()
+                );
+                0
+            }
+        },
         None => 0,
     };
     crate::log::info!(
@@ -697,7 +709,10 @@ fn servers_drain(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcErro
 /// `servers/undrain`: offers a drained server to new players again. A server that was not drained is not an error: `false`.
 fn servers_undrain(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     let server = orders::parse_undrain(params).map_err(invalid)?;
-    let undrained = ctx.operate()?.undrain(&server);
+    let undrained = ctx.operate()?.undrain(&server).map_err(|why| match why {
+        Refusal::Restarting => invalid("\"server\" is draining for a restart".into()),
+        _ => RpcError::new(code::INTERNAL_ERROR, "cannot undrain now"),
+    })?;
     if undrained {
         crate::log::info!("extension \"{}\" undrained {server}", ctx.link.name());
     }
@@ -707,7 +722,8 @@ fn servers_undrain(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcEr
 /// `reload`: makes the proxy read its configuration file again. **It answers `{"ok": true}` first and applies afterwards**, on the
 /// thread of the order, once the answer is written: a reload can change this very extension's entry, and close the connection
 /// the answer would go on. So `ok` says that the reload was asked for, not that it worked: the proxy's log says what it did. One
-/// reload at a time for an extension: while one runs, another is refused, and costs one token.
+/// reload at a time for an extension: while one runs, another is refused, and costs one token. **It costs half the burst**, charged
+/// at once; one that the budget cannot pay is `-32001` and costs one token.
 fn reload(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     orders::parse_no_params(params).map_err(invalid)?;
     let operate = Arc::clone(ctx.operate()?);
@@ -718,6 +734,10 @@ fn reload(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
             "a reload is already running",
         ));
     };
+    // A reload reads, checks and applies the whole configuration: it costs half the burst, charged at once, so that a program
+    // cannot ask for it over and over. A reload the budget cannot pay is refused here, before anything is read.
+    let burst = ctx.link.settings.order_burst.max(1);
+    ctx.charge(usize::try_from(burst.div_ceil(2)).unwrap_or(usize::MAX))?;
     crate::log::info!("extension \"{}\" asked for a reload", ctx.link.name());
     ctx.after_reply(move || {
         let _lot = lot;

@@ -1246,9 +1246,25 @@ mod tests {
             Ok(0)
         );
         // Undrain, as the console's `undrain`.
-        assert!(operate.undrain("lobby"));
+        assert_eq!(operate.undrain("lobby"), Ok(true));
         assert!(!proxy.sessions.balancer.is_drained("lobby"));
-        assert!(!operate.undrain("lobby"));
+        assert_eq!(operate.undrain("lobby"), Ok(false));
+        // A server that the detector drained for a restart is not offered again by an extension, and the console's `undrain` is not
+        // bound by that: the operator's word is taken.
+        proxy
+            .restarts
+            .announce("lobby", crate::restart::Cause::Announced, Instant::now());
+        assert!(proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(
+            operate.undrain("lobby"),
+            Err(crate::extension::Refusal::Restarting)
+        );
+        assert!(proxy.sessions.balancer.is_drained("lobby"));
+        assert_eq!(
+            run(&proxy, "undrain lobby"),
+            ["lobby is offered to new players again"]
+        );
+        assert!(!proxy.sessions.balancer.is_drained("lobby"));
     }
 
     /// A reload that an extension asks for is the console's: a file that cannot be read changes nothing in use.
