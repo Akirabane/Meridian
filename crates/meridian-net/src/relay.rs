@@ -10,7 +10,8 @@
 //! it, so that a [`Handle`] can tell the player why the session ends.
 //!
 //! A [`CommandHook`] may answer some of the commands the player types: those are
-//! not passed to the backend, and the player gets the answer in the chat.
+//! not passed to the backend, and the player gets the answer in the chat. It may
+//! also take a command and answer it later ([`TAKEN`]).
 //!
 //! When either side closes, the other is closed too, and both threads end.
 use crate::{Result, backend::BackendLink, client::ClientSession};
@@ -50,7 +51,17 @@ pub enum Phase {
 /// Answers a command the player typed in the play phase, given without its
 /// slash: `Some(text)` when the proxy answers it, and the command then never
 /// reaches the backend; `None` to pass it on as it is.
+///
+/// `Some(TAKEN)` is a command the proxy takes and answers later, from another
+/// thread (`Handle::tell`): it never reaches the backend either, and the player
+/// is told nothing now. The hook must have started what answers it before it
+/// returns, since the command is not offered to anyone else.
 pub type CommandHook = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+/// What a [`CommandHook`] returns for a command it takes and will answer itself,
+/// later: the relay drops the command and writes no chat line for it. An empty
+/// line is never an answer, so nothing else can be mistaken for it.
+pub const TAKEN: &str = "";
 
 /// Relays the session until either side closes it.
 pub fn run(client: ClientSession, backend: BackendLink) -> Result<()> {
@@ -297,6 +308,11 @@ fn answer_command(id: i32, payload: &[u8], hook: &CommandHook, shared: &Shared) 
     let Some(reply) = hook(&command) else {
         return false;
     };
+    // Taken: the hook has started its answer, so the command must not also reach the
+    // backend, whatever phase the client is in now.
+    if reply == TAKEN {
+        return true;
+    }
     let mut client = shared.client();
     // The client reads a chat message only in the play phase; while the backend
     // takes it back to configuration, the command goes on to the backend.
@@ -755,6 +771,48 @@ mod tests {
             Step::ExpectClose,
         ];
         with_hook(Some(server_hook()), backend_script, player_script);
+    }
+
+    /// A command the hook takes ([`TAKEN`]) is not passed on, signed or not, and the
+    /// player reads nothing for it: the first line they read is the answer to the
+    /// next command.
+    #[test]
+    fn a_command_the_proxy_takes_is_not_passed_on_and_says_nothing() {
+        use ids::{configuration as cfg, play as ids_play};
+        let hook: Arc<CommandHook> = Arc::new(|command: &str| match command {
+            "party" => Some(TAKEN.to_owned()),
+            "server" => Some("proxy answers /server".to_owned()),
+            _ => None,
+        });
+        let backend_script = vec![
+            finish_configuration(),
+            Step::Expect {
+                id: cfg::serverbound::FINISH_CONFIGURATION,
+            },
+            // Neither `party` reaches the backend: the first command it gets is this one.
+            Step::expect_exactly(ids_play::serverbound::CHAT_COMMAND, command("tell Bob hi")),
+            Step::Close,
+        ];
+        let player_script = vec![
+            Step::Expect {
+                id: cfg::clientbound::FINISH_CONFIGURATION,
+            },
+            acknowledge_configuration(),
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("party")),
+            Step::send(
+                ids_play::serverbound::CHAT_COMMAND_SIGNED,
+                signed_command("party"),
+            ),
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("server")),
+            // Nothing came for the two taken commands, or this would be an empty line.
+            Step::expect_exactly(
+                ids_play::clientbound::SYSTEM_CHAT,
+                chat("proxy answers /server"),
+            ),
+            Step::send(ids_play::serverbound::CHAT_COMMAND, command("tell Bob hi")),
+            Step::ExpectClose,
+        ];
+        with_hook(Some(hook), backend_script, player_script);
     }
 
     /// Before the play phase the same ids are other packets: nothing is answered

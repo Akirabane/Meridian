@@ -97,6 +97,85 @@ fn the_proxy_answers_its_commands() {
     run.join().unwrap().unwrap();
 }
 
+/// A command the hook takes (`TAKEN`) never reaches the backend, nothing is written for it at
+/// once, and what the hook's threads tell the player afterwards is read, in order: the one that
+/// ran while the command was being taken (kept until the reader is done with it) and the one
+/// that comes later. The next command, which the hook leaves alone, reaches the backend first.
+#[test]
+fn a_command_the_proxy_takes_is_answered_later_and_never_reaches_the_backend() {
+    let (proxy_client, mut player) = pipe();
+    let (proxy_backend, mut source) = pipe();
+    player.reader.set_read_timeout(Some(WAIT)).unwrap();
+    source.reader.set_read_timeout(Some(WAIT)).unwrap();
+    let (session, handle) = Session::new(
+        ClientSession {
+            profile: profile(),
+            auth: AuthKind::Offline,
+            virtual_host: None,
+            connection: proxy_client,
+        },
+        BackendLink {
+            connection: proxy_backend,
+        },
+        "source",
+    )
+    .unwrap();
+    let hooked = handle.clone();
+    let session = session.with_commands(Arc::new(move |command: &str| match command {
+        // A thread of the hook that tells while the command is still being taken.
+        "party" => {
+            let told = hooked.clone();
+            std::thread::spawn(move || told.tell("Party: quick."))
+                .join()
+                .unwrap();
+            Some(meridian_net::relay::TAKEN.to_owned())
+        }
+        // A thread that tells after the reader has finished with the command.
+        "slow" => {
+            let told = hooked.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                told.tell("Slow: done.");
+            });
+            Some(meridian_net::relay::TAKEN.to_owned())
+        }
+        _ => None,
+    }));
+    let run = std::thread::spawn(move || session.run());
+    send(&mut source, cfg::clientbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut player, cfg::clientbound::FINISH_CONFIGURATION).unwrap();
+    send(&mut player, cfg::serverbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut source, cfg::serverbound::FINISH_CONFIGURATION).unwrap();
+    let command = |text: &str| {
+        play::Serverbound::ChatCommand(play::ChatCommand {
+            command: text.into(),
+        })
+        .encode()
+    };
+    let said = |player: &mut Connection| {
+        let (id, payload) = player.recv().unwrap();
+        match decode(id, &payload) {
+            C::SystemChat(chat) => {
+                horizon_protocol::text::plain(&chat.content, &Default::default())
+            }
+            other => panic!("{other:?}"),
+        }
+    };
+    player.send(&command("party")).unwrap();
+    player.send(&command("slow")).unwrap();
+    // The lines the hook's threads told, and no other: nothing was written for the commands.
+    assert_eq!(said(&mut player), "Party: quick.");
+    assert_eq!(said(&mut player), "Slow: done.");
+    player.send(&command("list")).unwrap();
+    let payload = expect(&mut source, ps::CHAT_COMMAND).unwrap();
+    match play::Serverbound::decode(ps::CHAT_COMMAND, &payload) {
+        Ok(play::Serverbound::ChatCommand(c)) => assert_eq!(c.command, "list"),
+        other => panic!("{other:?}"),
+    }
+    drop(source);
+    run.join().unwrap().unwrap();
+}
+
 /// A session whose command hook holds a handle to it, as the proxy's hook does, with the
 /// player's and the backend's ends of its connections.
 fn hooked() -> (Session, SessionHandle, Connection, Connection) {
