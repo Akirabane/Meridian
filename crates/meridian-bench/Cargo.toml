@@ -48,7 +48,7 @@ windows-sys = { version = "0.61", features = [
 meridian-net.workspace = true
 
 # The workspace's lints, except that unsafe code is denied instead of forbidden:
-# src/cpu.rs, and only it, allows it for the Windows calls it makes.
+# src/cpu.rs and src/netsim.rs, and only they, allow it for the Windows calls they make.
 [lints.rust]
 unsafe_code = "deny"
 
