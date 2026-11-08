@@ -133,6 +133,8 @@ impl Registry {
                 Err(e) => lines.push(format!("extension \"{name}\" not started: {e}")),
             }
         }
+        // What was resolved holds links: those this reload stopped are let go with it.
+        self.forget_words();
         lines
     }
 
@@ -173,6 +175,7 @@ impl Registry {
                 let _ = thread.join();
             }
         }
+        self.forget_words();
     }
 
     /// The extensions' families for the page of `/metrics`.

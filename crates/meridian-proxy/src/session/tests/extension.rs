@@ -2738,4 +2738,57 @@ groups = ["staff"]
         assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
         assert_eq!(told_by_now(&told, 1), ["gate ran party"]);
     }
+
+    #[test]
+    fn when_no_extension_has_commands_any_more_the_resolved_words_and_their_links_are_let_go() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let registry = &sessions.extensions;
+        let link = registry.link("gate").unwrap();
+        let base = Arc::strong_count(&link);
+        drop(registry.claim(&config, "party").unwrap());
+        assert!(
+            Arc::strong_count(&link) > base,
+            "the resolved words hold the link"
+        );
+        // Every extension without commands, or none: the next command a player types finds nothing to look
+        // up, and what was resolved is let go with the link it held.
+        let none = config_of(Vec::new(), &[]);
+        assert!(registry.claim(&none, "party").is_none());
+        assert_eq!(Arc::strong_count(&link), base, "nothing is held any more");
+        // And they are resolved again when an extension has commands again.
+        assert!(registry.claim(&config, "party").is_some());
+    }
+
+    #[test]
+    fn a_link_that_a_reload_stopped_is_not_kept_alive_by_the_resolved_words() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let registry = &sessions.extensions;
+        let weak = {
+            let link = registry.link("gate").unwrap();
+            drop(registry.claim(&config, "party").unwrap());
+            Arc::downgrade(&link)
+        };
+        // The reload removes the extension: its link is stopped, and the words it held are let go.
+        registry.follow(&config_of(Vec::new(), &[]));
+        assert!(weak.upgrade().is_none(), "the stopped link is still held");
+    }
+
+    #[test]
+    fn stopping_the_registry_lets_go_of_the_resolved_words_and_their_links() {
+        let party = party();
+        let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+        let sessions = sessions_for(&config);
+        let registry = &sessions.extensions;
+        let weak = {
+            let link = registry.link("gate").unwrap();
+            drop(registry.claim(&config, "party").unwrap());
+            Arc::downgrade(&link)
+        };
+        registry.stop();
+        assert!(weak.upgrade().is_none(), "the stopped link is still held");
+    }
 }

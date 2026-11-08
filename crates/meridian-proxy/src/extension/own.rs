@@ -87,7 +87,11 @@ impl Registry {
     /// registry's, and its lock is taken for each command typed: briefly, and on purpose.
     pub(crate) fn claim(&self, config: &Config, word: &str) -> Option<Claim> {
         let granted = || config.enabled_extensions().filter(|e| e.grants(COMMANDS));
-        granted().next()?;
+        if granted().next().is_none() {
+            // No extension has commands: what was resolved, and the links it holds, are let go.
+            self.forget_words();
+            return None;
+        }
         let mask = built_in_mask(config);
         let mut cache = self.resolved.lock().unwrap_or_else(|e| e.into_inner());
         let current = cache.as_ref().is_some_and(|resolved| {
@@ -109,6 +113,12 @@ impl Registry {
             *cache = Some(Arc::new(self.resolve(config, mask)));
         }
         cache.as_ref()?.words.get(word).cloned()
+    }
+
+    /// Lets go of the words that were resolved, and of the links they hold: a link that was stopped is not
+    /// kept alive by the cache. The next command that is an extension's resolves them again.
+    pub(crate) fn forget_words(&self) {
+        *self.resolved.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Reads the declarations of the extensions in the order of the configuration, and logs what it refuses.

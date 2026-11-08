@@ -668,7 +668,11 @@ before the proxy's own are looked at:
 - **The characters of a line.** `run::is_refused` lists them: control characters, `§`, direction marks and
   separators, the soft hyphen, the combining grapheme joiner, the Hangul fillers, the characters of no width, the
   variation selectors (an emoji that one turns into a picture shows as its plain form), the interlinear annotation
-  marks and the tag characters.
+  marks and the tag characters. **A known limit of this prudent default**: taking out the zero-width non-joiner and
+  joiner (U+200C, U+200D) breaks the joins and the separations of letters in Persian and in some Indic scripts, and
+  taking out the left-to-right and right-to-left marks (U+200E, U+200F) can change the order in which Arabic or
+  Hebrew mixed with Latin text reads. An extension that has to write such text needs the field that would relax the
+  rule, which is not built.
 - **The places for commands.** An extension granted `commands` needs `max-in-flight` of at least 2 (its commands use at
   most half of its places, so that its decisions keep one); a configuration with 1 is refused when it is read.
 - **The bounds of a hello.** At most 64 commands, 8 aliases for each and a `usage` of at most 256 characters; the
