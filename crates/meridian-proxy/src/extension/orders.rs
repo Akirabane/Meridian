@@ -15,11 +15,11 @@
 
 use super::link::{Link, OrderPlace};
 use crate::log::debug;
-use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_READ};
-use meridian_extension::orders::Told;
+use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MOVE, ORDERS_READ};
 use meridian_extension::orders::{
     self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
 };
+use meridian_extension::orders::{Started, Target, Told};
 use meridian_extension::wire::{self, Discover, DiscoverMethod, Id, RpcError, code};
 use meridian_websocket::Writer;
 use serde_json::Value;
@@ -53,6 +53,29 @@ pub trait Actions: Send + Sync {
     fn audience(&self, server: Option<&str>) -> Result<usize, String>;
     /// Shows `text` to them, as `/alert` does, and tells how many were told.
     fn broadcast(&self, server: Option<&str>, text: &str) -> Result<usize, String>;
+    /// Plans sending `target` to the server `to`: nobody is moved until the plan is started.
+    fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal>;
+}
+
+/// Why a move could not be planned or started. The words the extension reads for each are fixed (they never quote what it
+/// sent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The server to send the players to is not one of the proxy's.
+    UnknownDestination,
+    /// The server whose players are to be sent is not one of the proxy's.
+    UnknownSource,
+    /// The proxy could not start the moves (no thread).
+    CannotStart,
+}
+
+/// Players to be moved, planned and not started: how many there are tells the order what it costs, and it is started only
+/// once the budget has paid.
+pub trait MovePlan: Send {
+    /// How many players would be moved: those who are not on the destination already.
+    fn count(&self) -> usize;
+    /// Starts moving them, one after the other, on a thread of its own, and returns at once with how many it started.
+    fn start(self: Box<Self>) -> Result<usize, Refusal>;
 }
 
 /// What the orders share with the rest of the proxy.
@@ -208,6 +231,14 @@ const BROADCAST: Order = Order {
     counted: true,
 };
 
+const PLAYERS_SEND: Order = Order {
+    method: orders::PLAYERS_SEND,
+    capability: ORDERS_MOVE,
+    run: players_send,
+    describe: || orders::move_methods().swap_remove(0).1,
+    counted: true,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
 pub(super) const ORDERS: &[Order] = &[
@@ -218,6 +249,7 @@ pub(super) const ORDERS: &[Order] = &[
     QUEUE_LIST,
     PLAYERS_TELL,
     BROADCAST,
+    PLAYERS_SEND,
 ];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
@@ -231,6 +263,7 @@ pub(super) const ORDERS: &[Order] = &[
     QUEUE_LIST,
     PLAYERS_TELL,
     BROADCAST,
+    PLAYERS_SEND,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -428,6 +461,26 @@ fn broadcast(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
         server.as_deref().unwrap_or("every server")
     );
     done(serde_json::to_value(Told { told }))
+}
+
+/// `players/send`: moves one player, every player or those of a server to a server. It answers when the moves **start**, with
+/// how many; they go on one after the other on a thread of their own. It costs the budget the number of players it moves, and
+/// at most the burst, and it is refused for want of budget before anyone is moved.
+fn players_send(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let (target, to) = orders::parse_send(params).map_err(invalid)?;
+    let refusal = |why: Refusal| match why {
+        Refusal::UnknownDestination => invalid("\"to\" is not a server of the proxy".into()),
+        Refusal::UnknownSource => invalid("\"from\" is not a server of the proxy".into()),
+        Refusal::CannotStart => RpcError::new(code::INTERNAL_ERROR, "cannot move the players now"),
+    };
+    let plan = ctx.actions()?.plan_send(&target, &to).map_err(refusal)?;
+    ctx.charge(plan.count())?;
+    let started = plan.start().map_err(refusal)?;
+    crate::log::info!(
+        "extension \"{}\" sends {started} player(s) to {to}",
+        ctx.link.name()
+    );
+    done(serde_json::to_value(Started { started }))
 }
 
 /// `queue/list`: whether the queue is on, and who waits.

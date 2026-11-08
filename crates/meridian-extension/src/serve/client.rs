@@ -21,7 +21,7 @@
 //! [`OrderError::retry_later`]).
 
 use crate::orders::{
-    self, Ack, Found, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList, Told,
+    self, Ack, Found, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList, Started, Told,
 };
 use crate::wire::{self, RpcError, code};
 use meridian_websocket::Writer;
@@ -434,6 +434,52 @@ impl Proxy {
             .map_err(OrderError::Invalid)?;
         let told: Told = self.0.read(orders::BROADCAST, Some(&params))?;
         Ok(told.told)
+    }
+
+    /// Sends the player called `player` (whatever the case) or with that unique id to the server `to`, and tells how many
+    /// players the proxy **started** to move: 1, or 0 if nobody online is that or they are on `to` already (not an error).
+    /// Needs `orders.move`, which the extension asks for with [`Extension::wants`](super::Extension::wants) and the operator
+    /// grants. See [`Proxy::send_all`] for what the answer means.
+    pub fn send_player(&self, player: &str, to: &str) -> Result<usize, OrderError> {
+        self.send(orders::SendParams {
+            to: to.to_owned(),
+            player: Some(player.to_owned()),
+            ..orders::SendParams::default()
+        })
+    }
+
+    /// Sends every player online to the server `to` (those who are on it already are not moved), and tells how many the proxy
+    /// **started** to move.
+    ///
+    /// **The answer comes when the moves start, not when they end**: they go on one after the other, as the proxy's own `send`
+    /// does, and how each one ended is in the proxy's log. A player who is moving is not moved twice at once. A server the
+    /// proxy does not have is a refusal (`-32602`). **It costs the proxy's budget of orders the number of players it moves, at
+    /// most its burst**, charged all at once: one the budget cannot pay is refused (`-32001`, [`OrderError::retry_later`]) and
+    /// moves nobody. A repeated order moves only those who are not on `to` yet, but after a timeout or an end of the
+    /// connection ([`OrderError::may_have_run`]) look where the players are before asking again.
+    pub fn send_all(&self, to: &str) -> Result<usize, OrderError> {
+        self.send(orders::SendParams {
+            to: to.to_owned(),
+            all: Some(true),
+            ..orders::SendParams::default()
+        })
+    }
+
+    /// Sends the players of the server `from` to the server `to`. As [`Proxy::send_all`], for those players; a `from` the
+    /// proxy does not have is a refusal.
+    pub fn send_server(&self, from: &str, to: &str) -> Result<usize, OrderError> {
+        self.send(orders::SendParams {
+            to: to.to_owned(),
+            from: Some(from.to_owned()),
+            ..orders::SendParams::default()
+        })
+    }
+
+    fn send(&self, params: orders::SendParams) -> Result<usize, OrderError> {
+        orders::parse_send(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        let started: Started = self.0.read(orders::PLAYERS_SEND, Some(&params))?;
+        Ok(started.started)
     }
 
     fn invalidate(&self, params: &orders::InvalidateParams) -> Result<(), OrderError> {

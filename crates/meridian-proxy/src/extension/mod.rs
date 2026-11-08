@@ -27,7 +27,9 @@ mod stats;
 mod tests;
 
 pub use link::{Link, Settings};
-pub use orders::{Actions, Facts, Services};
+#[cfg(test)]
+pub(crate) use orders::Refusal;
+pub use orders::{Actions, Facts, MovePlan, Services};
 #[cfg(test)]
 pub(crate) use stats::Outcome as RequestOutcome;
 

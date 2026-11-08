@@ -6,8 +6,8 @@ they go to. Part of it is built, and the pull requests of section 10 follow the 
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
-orders (8.1), with the orders that read and those that message (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
-leaves a choice open. Not built: the orders that move, expel, drain, reload and run console lines (5) and the events the proxy sends the extension (6).
+orders (8.1), with the orders that read, those that message and the one that moves (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
+leaves a choice open. Not built: the orders that expel, drain, reload and run console lines (5) and the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -1015,6 +1015,25 @@ configuration in force, the balancer, the queue); until the proxy has given the 
   500, not one for each player. **The SDK's `Proxy::players()` does this**, page after page, and gives up (`BadAnswer`) on a
   proxy whose cursors do not go forward or whose pages do not end.
 
+**As built, for the order that moves** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):
+`players/send`, capability `orders.move`.
+
+- **Params**: `{"to": "<server>"}` and **exactly one** of `"player": "<name or id>"` (a name in any case, or a unique id),
+  `"all": true` (every player online) and `"from": "<server>"` (the players on that server). It answers
+  `{"started": N}`: **how many players the proxy started to move**, those who were not on `to` already. `0` is not an error
+  (nobody was there to move, or they were all there already). A server the proxy does not have, as `to` or as `from`, is
+  `-32602` in fixed words (the name is not given back); so is a `to` and a way to say whom that are not as above.
+- **The answer comes when the moves start, not when they end.** The moves go on after it, one after the other, on a thread
+  of their own, as the staff's `/send` does (the same function, `staff::move_all`): each player is told they are being
+  moved and where, and how each move ended is in the proxy's log (and, in version 1.1, an event). Until then `players/find`
+  tells where a player is. A player whose move is under way is not moved twice at once. A repeated order moves only those
+  who are not on `to` yet.
+- **Cost** (decision Q7): the number of players it moves, **and at most the burst**, charged all at once as a broadcast is
+  (above): a `send all` of 500 players costs the whole burst of 50 and can run; one that the budget cannot pay is `-32001`,
+  moves nobody, and costs one token. A plan is made first (who would move) and started only once the budget has paid it.
+- Until the proxy has given the registry its actions it answers `-32603 not available`. `orders.move` also tells the
+  extension whether a name is online and which server names exist, as `orders.message` does.
+
 **As built, for the orders that message** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):
 `players/tell` and `broadcast`, capability `orders.message`.
 
@@ -1056,7 +1075,8 @@ and keep their signatures, so the handle is made apart and given to the closures
 `let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
 is connected its orders end with `NotConnected`.
 
-- **Methods.** `Proxy::tell(player, text)` and `Proxy::broadcast(server, text)` for the orders that message (they need
+- **Methods.** `Proxy::send_player(player, to)`, `send_all(to)` and `send_server(from, to)` for the order that moves (they need
+  `orders.move`; a name that is not one is `Invalid` and nothing is sent); `Proxy::tell(player, text)` and `Proxy::broadcast(server, text)` for the orders that message (they need
   `orders.message`: `Extension::wants("orders.message")` and the operator's grant; a line that is not valid is `Invalid` and
   nothing is sent); `Proxy::players_page(limit, cursor)`, `players()`, `find_player(&str)`, `servers()` and `queue()` for the orders
   that read (they need `orders.read`: the extension asks for it with `Extension::wants("orders.read")`, and for the addresses

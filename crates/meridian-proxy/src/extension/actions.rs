@@ -2,11 +2,13 @@
 //! `staff::alert`, the function that the console's `alert` and the staff's `/alert` call. A line is shown as a literal
 //! (`SessionHandle::tell`), never as a JSON text component, so an extension cannot put a click event in a chat.
 
-use super::orders::Actions;
-use crate::session::{Sessions, hyphenated};
+use super::orders::{Actions, MovePlan, Refusal};
+use crate::log::warning;
+use crate::session::{Player, Sessions, Shared, hyphenated};
 use crate::staff;
+use crate::switching::Switcher;
 use meridian_config::Config;
-use meridian_extension::orders::Who;
+use meridian_extension::orders::{Target, Who};
 use std::sync::{Arc, RwLock, Weak};
 
 /// The proxy's own actions. It holds the sessions weakly, as [`super::facts::ProxyFacts`] does.
@@ -70,5 +72,95 @@ impl Actions for ProxyActions {
             return Ok(0);
         };
         staff::alert_shown(&sessions.shared(), &self.config(), server, text)
+    }
+
+    fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal> {
+        let config = self.config();
+        let backend = config.backend(to).ok_or(Refusal::UnknownDestination)?;
+        let Some(sessions) = self.sessions.upgrade() else {
+            return Ok(Box::new(Planned::nobody()));
+        };
+        let shared = sessions.shared();
+        let players: Vec<Player> = match target {
+            Target::All => shared.players(),
+            Target::Server(name) => {
+                let source = config.backend(name).ok_or(Refusal::UnknownSource)?;
+                shared
+                    .players()
+                    .into_iter()
+                    .filter(|p| p.backend == source.name)
+                    .collect()
+            }
+            Target::Player(Who::Name(name)) => shared
+                .session(name)
+                .map(|(player, _)| vec![player])
+                .unwrap_or_default(),
+            Target::Player(Who::Id(id)) => shared
+                .players()
+                .into_iter()
+                .filter(|p| hyphenated(p.uuid).eq_ignore_ascii_case(id))
+                .collect(),
+        };
+        // Those who are on the server already are not moved (as the console's and the staff's `send` do).
+        let moving: Vec<Player> = players
+            .into_iter()
+            .filter(|p| p.backend != backend.name)
+            .collect();
+        Ok(Box::new(Planned {
+            moving,
+            destination: backend.name.clone(),
+            run: Some((config, shared, Arc::clone(&sessions.switcher))),
+        }))
+    }
+}
+
+/// Players to move to a server: started on a thread of their own, as the staff's `/send` does, so that the order answers
+/// when the moves start and not when they end (a move waits for the servers).
+struct Planned {
+    moving: Vec<Player>,
+    destination: String,
+    /// What the moves need; `None` for a plan with nobody to move.
+    run: Option<(Arc<Config>, Shared, Arc<Switcher>)>,
+}
+
+impl Planned {
+    fn nobody() -> Self {
+        Self {
+            moving: Vec::new(),
+            destination: String::new(),
+            run: None,
+        }
+    }
+}
+
+impl MovePlan for Planned {
+    fn count(&self) -> usize {
+        self.moving.len()
+    }
+
+    fn start(self: Box<Self>) -> Result<usize, Refusal> {
+        let Planned {
+            moving,
+            destination,
+            run,
+        } = *self;
+        let started = moving.len();
+        let Some((config, shared, switcher)) = run.filter(|_| started > 0) else {
+            return Ok(0);
+        };
+        std::thread::Builder::new()
+            .name("extension-send".into())
+            .spawn(move || {
+                let (_, failed) =
+                    staff::move_all(&config, &shared, &switcher, &moving, &destination);
+                if failed > 0 {
+                    warning!("an extension sent players to {destination}: {failed} failed");
+                }
+            })
+            .map(|_| started)
+            .map_err(|e| {
+                warning!("cannot start a thread to send players: {e}");
+                Refusal::CannotStart
+            })
     }
 }

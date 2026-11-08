@@ -1870,6 +1870,7 @@ mod the_orders {
             methods(&["orders.message"]),
             ["meridian:players/tell", "meridian:broadcast"]
         );
+        assert_eq!(methods(&["orders.move"]), ["meridian:players/send"]);
         assert!(methods(&["decide.login", "events"]).is_empty());
     }
 
@@ -2344,7 +2345,8 @@ mod the_orders {
     // ---- the orders that message ----------------------------------------------------------------------
 
     use crate::extension::orders::Actions;
-    use meridian_extension::orders::{Told, Who};
+    use crate::extension::orders::{MovePlan, Refusal};
+    use meridian_extension::orders::{Started, Target, Told, Who};
     use std::sync::Mutex as StdMutex;
 
     /// Actions that are made up: they record what they were asked, `Nobody` is not online, `east` has two players, any
@@ -2352,7 +2354,37 @@ mod the_orders {
     struct Acting {
         told: StdMutex<Vec<(Who, String)>>,
         cast: StdMutex<Vec<(Option<String>, String)>>,
+        /// The plans that were started: whom, and where to.
+        started: StdMutex<Vec<(Target, String)>>,
         everyone: AtomicUsize,
+    }
+
+    /// A plan of the stand-in: it records itself when it is started.
+    struct Plan {
+        count: usize,
+        entry: (Target, String),
+        log: Arc<Acting>,
+    }
+
+    impl MovePlan for Plan {
+        fn count(&self) -> usize {
+            self.count
+        }
+
+        fn start(self: Box<Self>) -> Result<usize, Refusal> {
+            self.log.started.lock().unwrap().push(self.entry.clone());
+            Ok(self.count)
+        }
+    }
+
+    /// The stand-in as the registry holds it: an `Arc`, so that the plans it makes can record themselves in it.
+    struct ActingArc(Arc<Acting>);
+
+    impl std::ops::Deref for ActingArc {
+        type Target = Acting;
+        fn deref(&self) -> &Acting {
+            &self.0
+        }
     }
 
     impl Acting {
@@ -2360,8 +2392,13 @@ mod the_orders {
             Arc::new(Self {
                 told: StdMutex::new(Vec::new()),
                 cast: StdMutex::new(Vec::new()),
+                started: StdMutex::new(Vec::new()),
                 everyone: AtomicUsize::new(everyone),
             })
+        }
+
+        fn started(&self) -> Vec<(Target, String)> {
+            self.started.lock().unwrap().clone()
         }
 
         fn told(&self) -> Vec<(Who, String)> {
@@ -2373,7 +2410,26 @@ mod the_orders {
         }
     }
 
-    impl Actions for Acting {
+    impl Actions for ActingArc {
+        /// `nowhere` is a server nobody has; `Nobody` is not online; a server's players are two; all are `everyone`.
+        fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal> {
+            if to == "nowhere" {
+                return Err(Refusal::UnknownDestination);
+            }
+            let count = match target {
+                Target::Server(from) if from == "nowhere" => return Err(Refusal::UnknownSource),
+                Target::Server(_) => 2,
+                Target::All => self.everyone.load(Ordering::SeqCst),
+                Target::Player(Who::Name(name)) if name.eq_ignore_ascii_case("Nobody") => 0,
+                Target::Player(_) => 1,
+            };
+            Ok(Box::new(Plan {
+                count,
+                entry: (target.clone(), to.to_owned()),
+                log: Arc::clone(&self.0),
+            }))
+        }
+
         fn tell(&self, who: &Who, text: &str) -> usize {
             self.told
                 .lock()
@@ -2407,7 +2463,7 @@ mod the_orders {
         change: impl FnOnce(&mut Settings),
     ) -> (Fake, Registry, Arc<Link>, Folder) {
         let (fake, registry, link, folder) = orderly(grant, change);
-        registry.serve_actions(Arc::clone(acting) as Arc<dyn Actions>);
+        registry.serve_actions(Arc::new(ActingArc(Arc::clone(acting))) as Arc<dyn Actions>);
         (fake, registry, link, folder)
     }
 
@@ -2709,5 +2765,203 @@ mod the_orders {
         );
         assert_eq!(code_of(&answer(&fake, &json!(7102))), -32001);
         assert!(acting.told().is_empty());
+    }
+
+    // ---- the order that moves --------------------------------------------------------------------------
+
+    fn started_of(reply: &Value) -> usize {
+        serde_json::from_value::<Started>(reply["result"].clone())
+            .unwrap_or_else(|e| panic!("{e}: {reply}"))
+            .started
+    }
+
+    #[test]
+    fn the_order_that_moves_needs_orders_move_and_is_refused_as_if_it_did_not_exist_without_it() {
+        let acting = Acting::new(5);
+        // `orders.message` and `orders.read` are granted, `orders.move` is not.
+        let (fake, _registry, link, _folder) =
+            acting_with(&["orders.message", "orders.read"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(8000),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","all":true}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(8000))), -32601);
+        assert!(acting.started().is_empty());
+        assert_eq!(link.stats().orders(shapes::PLAYERS_SEND, Ended::Refused), 1);
+        // Granted, it starts.
+        let (fake, _registry, _link, _folder) = acting_with(&["orders.move"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(8100),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","all":true}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8100))), 5);
+    }
+
+    #[test]
+    fn one_player_every_player_or_those_of_a_server_are_sent_and_the_answer_is_how_many_started() {
+        let acting = Acting::new(5);
+        let (fake, _registry, _link, _folder) = acting_with(&["orders.move"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(8200),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","player":"Alex"}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8200))), 1);
+        order(
+            &fake,
+            &json!(8201),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","player":"0A2EA4BABCED39D280E11AD51A0E925C"}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8201))), 1);
+        order(
+            &fake,
+            &json!(8202),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","all":true}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8202))), 5);
+        order(
+            &fake,
+            &json!(8203),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","from":"lobby"}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8203))), 2);
+        // Nobody to move: not an error, `0`.
+        order(
+            &fake,
+            &json!(8204),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","player":"Nobody"}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8204))), 0);
+        assert_eq!(
+            acting.started(),
+            [
+                (Target::Player(Who::Name("Alex".into())), "east".to_owned()),
+                (
+                    Target::Player(Who::Id("0a2ea4ba-bced-39d2-80e1-1ad51a0e925c".into())),
+                    "east".to_owned()
+                ),
+                (Target::All, "east".to_owned()),
+                (Target::Server("lobby".into()), "east".to_owned()),
+                (
+                    Target::Player(Who::Name("Nobody".into())),
+                    "east".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_server_the_proxy_does_not_have_is_refused_in_fixed_words_and_nobody_is_moved() {
+        let acting = Acting::new(5);
+        let (fake, _registry, link, _folder) = acting_with(&["orders.move"], &acting, |_| {});
+        let secret = "name-that-must-not-come-back";
+        order(
+            &fake,
+            &json!(8300),
+            shapes::PLAYERS_SEND,
+            "{\"to\":\"nowhere\",\"all\":true}",
+        );
+        order(
+            &fake,
+            &json!(8301),
+            shapes::PLAYERS_SEND,
+            "{\"to\":\"east\",\"from\":\"nowhere\"}",
+        );
+        for id in [8300, 8301] {
+            let reply = answer(&fake, &json!(id));
+            assert_eq!(code_of(&reply), -32602, "{reply}");
+            assert!(
+                reply["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("is not a server of the proxy")
+            );
+        }
+        // What was written is not given back.
+        order(
+            &fake,
+            &json!(8302),
+            shapes::PLAYERS_SEND,
+            &format!("{{\"to\":\"{secret}\\n\",\"all\":true}}"),
+        );
+        let reply = answer(&fake, &json!(8302));
+        assert_eq!(code_of(&reply), -32602);
+        assert!(!reply.to_string().contains(secret), "{reply}");
+        // Parameters that are not one of the three ways to say whom.
+        for (n, params) in [
+            r#"{"to":"east"}"#,
+            r#"{"to":"east","player":"Alex","all":true}"#,
+            r#"{"to":"east","all":false}"#,
+            r#"{"all":true}"#,
+            r#"["east"]"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = json!(8310 + n);
+            order(&fake, &id, shapes::PLAYERS_SEND, params);
+            assert_eq!(code_of(&answer(&fake, &id)), -32602, "{params}");
+        }
+        assert!(acting.started().is_empty());
+        assert_eq!(link.stats().orders(shapes::PLAYERS_SEND, Ended::Invalid), 8);
+    }
+
+    /// The order costs the players it moves, at most the burst, charged all at once: a `send all` of 500 players runs on a
+    /// rested budget, and one that the budget cannot pay is refused before anybody is moved.
+    #[test]
+    fn the_order_that_moves_costs_the_players_it_moves_up_to_the_burst_and_moves_nobody_if_it_cannot_be_paid()
+     {
+        let acting = Acting::new(500);
+        let (fake, _registry, link, _folder) = acting_with(&["orders.move"], &acting, |settings| {
+            settings.order_burst = 4;
+            settings.order_rate = 1;
+        });
+        order(
+            &fake,
+            &json!(8400),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","all":true}"#,
+        );
+        assert_eq!(started_of(&answer(&fake, &json!(8400))), 500);
+        // It took the whole burst: the next, at once, is over the budget and moves nobody.
+        order(
+            &fake,
+            &json!(8401),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","from":"lobby"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(8401))), -32001);
+        assert_eq!(acting.started().len(), 1);
+        assert_eq!(
+            link.stats().orders(shapes::PLAYERS_SEND, Ended::OverBudget),
+            1
+        );
+    }
+
+    #[test]
+    fn with_no_actions_given_the_order_that_moves_says_it_is_not_available() {
+        let (fake, _registry, link, _folder) = orderly(&["orders.move"], |_| {});
+        order(
+            &fake,
+            &json!(8500),
+            shapes::PLAYERS_SEND,
+            r#"{"to":"east","all":true}"#,
+        );
+        let reply = answer(&fake, &json!(8500));
+        assert_eq!(
+            (code_of(&reply), reply["error"]["message"].as_str()),
+            (-32603, Some("not available"))
+        );
+        assert_eq!(link.stats().orders(shapes::PLAYERS_SEND, Ended::Failed), 1);
+        assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
     }
 }
