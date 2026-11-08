@@ -8,7 +8,7 @@ choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridi
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
 orders (8.1), with the orders that read, those that message, the one that moves, the one that expels, those that operate and the one that runs console lines (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
 leaves a choice open. Built of the events the proxy sends the extension (6): the bus, the queue of each connection, `events/dropped`,
-`players/joined` and `players/left`. Not built: `players/moved`, `players/fallback`, `servers/up`, `servers/down`, `queue/entered` and `queue/left`.
+`players/joined`, `players/left`, `players/moved` and `players/fallback`. Not built: `servers/up`, `servers/down`, `queue/entered` and `queue/left`.
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -890,7 +890,7 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
   point.
 
 **As built, for the events** (`extension/events.rs`, `meridian-extension/src/events.rs`, `meridian-extension/src/serve/events.rs`).
-`players/joined`, `players/left` and `events/dropped` are built; the other notifications of the table are not yet.
+`players/joined`, `players/left`, `players/moved`, `players/fallback` and `events/dropped` are built; the notifications about servers and the queue are not yet.
 
 - **Who is told.** Only a connection whose hello asked for `events` **and** that the operator granted it (`grant = ["events", ...]`), as for any
   capability. The SDK's `on_event` asks for it. A player's **address** is in `joined` only for a connection that asked for `addresses` and was
@@ -904,6 +904,16 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
     is `left` (the player or the connection ended it), `kicked` (an operator, the console, a ban or an extension), `replaced` (the same player logged in again
     with `on-duplicate = "replace"`), `shutdown` (the proxy was stopping) or `error` (the session broke). The proxy marks a session it ends itself just before
     it disconnects the player; the others are `left` or `error` by how the relay ended. A reason this version of the SDK does not know is read as `other`.
+  - `meridian:notification/players/moved`: `{seq, at, player, from, to, outcome, reason?}`. It is told for **every switch the proxy tried**, whoever asked for it (the console's `switch`
+    and `send`, `/server` and `/hub` in game, the orders `players/send` and `servers/drain` with `move`, and the evacuation of a server that is going down): a switch is **tried** when `to` is a server
+    of the proxy other than the one the player is on; a name that is no server, or the server the player is on, is not a switch and is not told, so what a player typed is never in an event. `outcome` is
+    `seamless` (the player moved without leaving the game) or `failed` (the player stays where they were), and `reason` is there for a failure only: the step it failed at, in one word of the
+    metrics of the transfers, `check` (before anything was asked of a server: no sidecar, a sidecar that cannot be reached, a switch already under way), `prepare`, `freeze`, `hand_over` or
+    `commit`. **Nothing the servers said is in it.** The word `cold` of the first table of this section is not sent: a switch is seamless, and the other way a player changes server is a fallback.
+    A word this version does not know is read as `other` (`outcome`) or `Other` (`reason`).
+  - `meridian:notification/players/fallback`: `{seq, at, player, from, to?, loss}`: the server `from` was lost for the player, `loss` is `crashed` (the connection closed or broke) or
+    `kicked` (the server disconnected them), and `to` is the server the proxy **chose** for them; it is left out when no server could take the player, who is then disconnected (`players/left` follows).
+    It is told when the proxy chooses, **before** the player's client follows: a client that does not follow ends the session (`left`). What the server said when it kicked is not in it.
   - `meridian:notification/events/dropped`: `{at, count}`, with no `seq`.
   The proxy tells an event **after** the session is listed (`joined`) and **after** it is let go of (`left`): an extension that asks `players/list` on `left`
   finds the player gone. `left` is told by the session's guard, so it is told once **even if the relay panics** (the reason is then `error`). Fields are optional and a reader ignores one it does not know: **protocol 0, no change of version** when one is added.

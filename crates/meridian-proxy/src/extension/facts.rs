@@ -58,6 +58,12 @@ impl Facts for ProxyFacts {
             .collect()
     }
 
+    fn verified(&self, uuid: [u8; 16]) -> bool {
+        self.sessions.upgrade().is_some_and(|sessions| {
+            sessions.is_connected(&crate::session::Identity::Verified(uuid))
+        })
+    }
+
     fn servers(&self) -> Vec<ServerInfo> {
         let Some(sessions) = self.sessions.upgrade() else {
             return Vec::new();

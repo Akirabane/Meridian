@@ -20,6 +20,10 @@ use serde_json::Value;
 pub const PLAYERS_JOINED: &str = "meridian:notification/players/joined";
 /// A player's session ended.
 pub const PLAYERS_LEFT: &str = "meridian:notification/players/left";
+/// A player was moved from a server to another (a switch that ended), or the proxy tried and could not.
+pub const PLAYERS_MOVED: &str = "meridian:notification/players/moved";
+/// A player was moved off a server that was lost (it crashed or disconnected them).
+pub const PLAYERS_FALLBACK: &str = "meridian:notification/players/fallback";
 /// The proxy dropped events for want of room in the queue of this connection (the newest are the ones dropped).
 pub const EVENTS_DROPPED: &str = "meridian:notification/events/dropped";
 
@@ -63,6 +67,75 @@ pub struct Left {
     pub reason: LeftReason,
 }
 
+/// How a switch ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MoveOutcome {
+    /// The player moved without leaving the game: the switch the proxy does with the sidecars of the two servers.
+    Seamless,
+    /// The proxy tried and the player stays where they were (`reason` says at which step).
+    Failed,
+    /// A word that this version does not know, which a later proxy may send.
+    #[serde(other)]
+    Other,
+}
+
+/// The step a switch failed at, in one of a few words (the same as the metrics of the transfers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailedStep {
+    /// Before anything was asked of a server: no sidecar, a sidecar that cannot be reached, a switch already under way.
+    Check,
+    Prepare,
+    Freeze,
+    HandOver,
+    Commit,
+    /// A word that this version does not know.
+    #[serde(other)]
+    Other,
+}
+
+/// `players/moved`: who, from which server to which, and how it ended. `to` is a server of the proxy: a move to a name that is
+/// none is not told. `reason` is there for a failure only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Moved {
+    pub seq: u64,
+    pub at: u64,
+    pub player: Player,
+    pub from: String,
+    pub to: String,
+    pub outcome: MoveOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<FailedStep>,
+}
+
+/// What was lost for a player to be moved off a server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Loss {
+    /// The connection to the server closed or broke.
+    Crashed,
+    /// The server disconnected the player.
+    Kicked,
+    /// A word that this version does not know.
+    #[serde(other)]
+    Other,
+}
+
+/// `players/fallback`: the server `from` was lost for the player (`loss`) and the proxy chose `to` for them; `to` is left out when no server
+/// could take them (the player is then disconnected, and `players/left` follows). The player follows `to` once their client acknowledges: a
+/// client that does not ends the session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fallback {
+    pub seq: u64,
+    pub at: u64,
+    pub player: Player,
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    pub loss: Loss,
+}
+
 /// `events/dropped`: how many events the proxy dropped since the last it told. The SDK also makes one of these when its own queue
 /// overflowed (`at` is then the SDK's clock). An extension that needs to be exact asks `players/list` again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +152,8 @@ pub const MAX_UNKNOWN_METHOD: usize = 64;
 pub enum Event {
     Joined(Joined),
     Left(Left),
+    Moved(Moved),
+    Fallback(Fallback),
     Dropped(Dropped),
     /// A method this SDK does not know, or one whose parameters are not the shape it knows.
     Unknown(String),
@@ -93,6 +168,8 @@ impl Event {
         let event = match method {
             PLAYERS_JOINED => read(params).map(Event::Joined),
             PLAYERS_LEFT => read(params).map(Event::Left),
+            PLAYERS_MOVED => read(params).map(Event::Moved),
+            PLAYERS_FALLBACK => read(params).map(Event::Fallback),
             EVENTS_DROPPED => read(params).map(Event::Dropped),
             _ => None,
         };
@@ -202,6 +279,95 @@ mod tests {
                 Some(&json!({"at": 1, "count": 4, "more": true}))
             ),
             Event::Dropped(Dropped { at: 1, count: 4 })
+        );
+    }
+
+    #[test]
+    fn a_move_and_a_fallback_are_read_in_their_shape_and_their_words_are_fixed() {
+        let moved = Moved {
+            seq: 4,
+            at: 5,
+            player: player(),
+            from: "lobby".into(),
+            to: "east".into(),
+            outcome: MoveOutcome::Seamless,
+            reason: None,
+        };
+        let written = serde_json::to_value(&moved).unwrap();
+        assert_eq!(written["outcome"], "seamless");
+        assert!(written.get("reason").is_none(), "a success has no reason");
+        assert_eq!(
+            Event::parse(PLAYERS_MOVED, Some(&written)),
+            Event::Moved(moved.clone())
+        );
+        let failed = Moved {
+            outcome: MoveOutcome::Failed,
+            reason: Some(FailedStep::HandOver),
+            ..moved
+        };
+        let written = serde_json::to_value(&failed).unwrap();
+        assert_eq!(
+            (written["outcome"].as_str(), written["reason"].as_str()),
+            (Some("failed"), Some("hand_over"))
+        );
+        assert_eq!(
+            Event::parse(PLAYERS_MOVED, Some(&written)),
+            Event::Moved(failed)
+        );
+        for (step, word) in [
+            (FailedStep::Check, "check"),
+            (FailedStep::Prepare, "prepare"),
+            (FailedStep::Freeze, "freeze"),
+            (FailedStep::HandOver, "hand_over"),
+            (FailedStep::Commit, "commit"),
+        ] {
+            assert_eq!(serde_json::to_value(step).unwrap(), json!(word));
+            assert_eq!(
+                serde_json::from_value::<FailedStep>(json!(word)).unwrap(),
+                step
+            );
+        }
+        // A word nobody knows is `other`, never an error.
+        assert_eq!(
+            serde_json::from_value::<FailedStep>(json!("teleport")).unwrap(),
+            FailedStep::Other
+        );
+        assert_eq!(
+            serde_json::from_value::<MoveOutcome>(json!("cold")).unwrap(),
+            MoveOutcome::Other
+        );
+        assert_eq!(
+            serde_json::from_value::<Loss>(json!("exploded")).unwrap(),
+            Loss::Other
+        );
+        let fallback = Fallback {
+            seq: 9,
+            at: 10,
+            player: player(),
+            from: "lobby".into(),
+            to: Some("east".into()),
+            loss: Loss::Crashed,
+        };
+        let written = serde_json::to_value(&fallback).unwrap();
+        assert_eq!(
+            (written["to"].as_str(), written["loss"].as_str()),
+            (Some("east"), Some("crashed"))
+        );
+        assert_eq!(
+            Event::parse(PLAYERS_FALLBACK, Some(&written)),
+            Event::Fallback(fallback.clone())
+        );
+        let nowhere = Fallback {
+            to: None,
+            loss: Loss::Kicked,
+            ..fallback
+        };
+        let written = serde_json::to_value(&nowhere).unwrap();
+        assert!(written.get("to").is_none(), "no replacement: no `to`");
+        assert_eq!(written["loss"], "kicked");
+        assert_eq!(
+            Event::parse(PLAYERS_FALLBACK, Some(&written)),
+            Event::Fallback(nowhere)
         );
     }
 }

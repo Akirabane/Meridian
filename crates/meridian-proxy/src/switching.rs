@@ -26,6 +26,9 @@ pub struct Switcher {
     /// What the proxy counts, here because every part of the proxy that moves players
     /// reaches the sessions through the switcher (`Sessions::metrics`).
     pub metrics: Arc<Metrics>,
+    /// The extensions that are told how each switch ended (docs/EXTENSIONS.md, section 6): the registry of the sessions, given once
+    /// when the proxy is built. Until it is, nobody is told.
+    pub extensions: std::sync::OnceLock<Arc<crate::extension::Registry>>,
 }
 
 impl Default for Switcher {
@@ -34,7 +37,36 @@ impl Default for Switcher {
             controls: Arc::new(sidecar_control),
             digests: Digests::default(),
             metrics: Arc::default(),
+            extensions: std::sync::OnceLock::new(),
         }
+    }
+}
+
+impl Switcher {
+    /// Tells the extensions that listen that `make()` happened, if there is a registry to tell. Never waits.
+    fn emit(&self, make: impl FnOnce() -> crate::extension::events::Kind) {
+        if let Some(extensions) = self.extensions.get() {
+            extensions.emit(make);
+        }
+    }
+
+    /// Whether the player was let in as a verified account.
+    fn verified(&self, uuid: [u8; 16]) -> bool {
+        self.extensions
+            .get()
+            .is_some_and(|extensions| extensions.verified(uuid))
+    }
+}
+
+/// The step a failed switch is told to have failed at: the words of the metrics, as the events know them.
+fn failed_step(label: &str) -> meridian_extension::events::FailedStep {
+    use meridian_extension::events::FailedStep;
+    match label {
+        "prepare" => FailedStep::Prepare,
+        "freeze" => FailedStep::Freeze,
+        "hand_over" => FailedStep::HandOver,
+        "commit" => FailedStep::Commit,
+        _ => FailedStep::Check,
     }
 }
 
@@ -112,6 +144,13 @@ pub fn switch(
 ) -> Result<Moved, String> {
     // The step a failure happened at: anything before the switch itself is a check.
     let step = Cell::new(metrics::step_label(meridian_handoff::Step::Check));
+    // A switch is told to the extensions that listen when it was **tried**: to a server the proxy has, other than the one the player is
+    // on. A name that is none, or the server they are on, is not a switch, and what a player typed is never in an event.
+    let from = handle.backend();
+    let attempted = config
+        .backend(target)
+        .map(|b| b.name.clone())
+        .filter(|to| *to != from);
     let result = attempt(
         config,
         switcher,
@@ -124,6 +163,21 @@ pub fn switch(
     match &result {
         Ok(moved) => switcher.metrics.transfer_done(&moved.done, moved.took),
         Err(_) => switcher.metrics.transfer_failed(step.get()),
+    }
+    if let Some(to) = attempted {
+        use meridian_extension::events::MoveOutcome;
+        let uuid = handle.profile().uuid;
+        switcher.emit(|| crate::extension::events::Kind::Moved {
+            player: crate::extension::events::Kind::player(name, uuid, switcher.verified(uuid)),
+            from,
+            to,
+            outcome: if result.is_ok() {
+                MoveOutcome::Seamless
+            } else {
+                MoveOutcome::Failed
+            },
+            reason: result.is_err().then(|| failed_step(step.get())),
+        });
     }
     result
 }

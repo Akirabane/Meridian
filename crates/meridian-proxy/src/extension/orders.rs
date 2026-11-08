@@ -44,6 +44,10 @@ pub trait Facts: Send + Sync {
     fn servers(&self) -> Vec<ServerInfo>;
     /// The queue, with at most [`orders::MAX_PAGE`] of those who wait.
     fn queue(&self) -> QueueState;
+    /// Whether the player `uuid` has a session that the session service confirmed. `false` for a player who is not online.
+    fn verified(&self, _uuid: [u8; 16]) -> bool {
+        false
+    }
 }
 
 /// What the orders that act on the players use, taken from the rest of the proxy: the sessions, to tell a player, and the

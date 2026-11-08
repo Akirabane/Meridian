@@ -615,3 +615,67 @@ fn the_scripted_player_follows_the_move_after_a_crash() {
 fn the_scripted_player_follows_the_move_after_a_kick() {
     followed_over_tcp(true);
 }
+
+// ---- the events of a fallback --------------------------------------------------------------------------------------
+
+fn told_fallbacks(told: &std::sync::Mutex<Vec<String>>, count: usize) -> Vec<serde_json::Value> {
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found = told.lock().unwrap().clone();
+        if found.len() >= count {
+            return found
+                .iter()
+                .map(|text| serde_json::from_str::<serde_json::Value>(text).unwrap())
+                .collect();
+        }
+        assert!(
+            Instant::now() < limit,
+            "gave up waiting for {count} events, got {found:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The server that was lost, why, and the one chosen: told to the extensions that listen, for a crash and for a kick, and without a destination when
+/// none could take the player.
+#[test]
+fn a_fallback_is_told_to_the_extensions_that_listen_with_where_to_and_why() {
+    let sessions = Sessions::default();
+    let told = sessions.extensions.bus().recording(false);
+    let (answer, _) = ask(&listed(), &sessions, vec![(EAST, true)], crash());
+    assert_eq!(answer.unwrap().backend, "east");
+    let (answer, _) = ask(
+        &listed(),
+        &sessions,
+        vec![(EAST, true)],
+        Loss::Kicked("Server closed".into()),
+    );
+    assert_eq!(answer.unwrap().backend, "east");
+    let (answer, _) = ask(&listed(), &sessions, vec![], crash());
+    assert!(answer.is_err());
+    let events = told_fallbacks(&told, 3);
+    let method = "meridian:notification/players/fallback";
+    assert!(events.iter().all(|e| e["method"] == method), "{events:?}");
+    let p = |n: usize| &events[n]["params"];
+    assert_eq!(
+        (
+            p(0)["from"].as_str(),
+            p(0)["to"].as_str(),
+            p(0)["loss"].as_str()
+        ),
+        (Some("lobby"), Some("east"), Some("crashed"))
+    );
+    assert_eq!(
+        (p(1)["to"].as_str(), p(1)["loss"].as_str()),
+        (Some("east"), Some("kicked"))
+    );
+    assert!(
+        p(2).get("to").is_none(),
+        "no server took the player: no destination"
+    );
+    assert_eq!(p(2)["loss"], "crashed");
+    assert_eq!(p(0)["player"]["name"], "Alex");
+    assert_eq!(p(0)["player"]["auth"], "unverified");
+    // What the server said when it kicked is not in it.
+    assert!(!events[1].to_string().contains("Server closed"));
+}

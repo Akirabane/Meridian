@@ -3004,6 +3004,22 @@ mod reading {
         ProxyFacts::new(sessions, &Arc::new(RwLock::new(Arc::new(config.clone()))))
     }
 
+    /// Whether a player was let in as a verified account is what the events of a move say of them: true only for a session that the session
+    /// service confirmed, and false for one that did not, and for nobody who is online.
+    #[test]
+    fn the_facts_say_whether_a_player_was_let_in_as_a_verified_account() {
+        let sessions = Arc::new(Sessions::default());
+        let facts = facts_of(&sessions, &balanced());
+        let notch = offline_uuid("Notch").to_be_bytes();
+        let alex = offline_uuid("Alex").to_be_bytes();
+        assert!(!facts.verified(notch), "nobody is online");
+        let _notch = connected(&sessions, "Notch", Identity::Verified(notch));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        assert!(facts.verified(notch));
+        assert!(!facts.verified(alex));
+        assert!(!facts.verified([9; 16]));
+    }
+
     /// The routing config, with `lobby` balanced (soft cap 40, hard cap 50).
     fn balanced() -> Config {
         Config {

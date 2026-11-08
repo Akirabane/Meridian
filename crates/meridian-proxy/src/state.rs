@@ -45,6 +45,11 @@ impl Proxy {
     /// is the flag Ctrl+C sets.
     pub fn new(config: Config, config_path: PathBuf, stop: Arc<AtomicBool>) -> Self {
         let sessions = Arc::new(Sessions::default());
+        // The switches tell the extensions how they ended.
+        let _ = sessions
+            .switcher
+            .extensions
+            .set(Arc::clone(&sessions.extensions));
         let extensions = Arc::clone(&sessions.extensions);
         sessions.operators.follow(&config);
         let settings = Settings::from(&config.restart);

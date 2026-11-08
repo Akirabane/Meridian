@@ -162,6 +162,15 @@ impl Registry {
         self.services.set_facts(facts);
     }
 
+    /// Whether the player `uuid` was let in as a verified account (a session of theirs is open and the session service confirmed it).
+    /// What an event says of a player when the place it is told from does not know how they logged in. `false` when the proxy has
+    /// not given the orders their facts.
+    pub fn verified(&self, uuid: [u8; 16]) -> bool {
+        self.services
+            .facts()
+            .is_some_and(|facts| facts.verified(uuid))
+    }
+
     /// The bus, for the tests that listen without a connection.
     #[cfg(test)]
     pub(crate) fn bus(&self) -> &events::Bus {

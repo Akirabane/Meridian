@@ -58,8 +58,27 @@ impl Run {
 pub fn replacer<'a>(context: Context<'a>) -> impl FnMut(&Loss) -> Result<Replacement, Notice> + 'a {
     let mut run = Run::default();
     move |loss| {
+        let from = context.handle.backend();
         let result = replace(&context, &mut run, loss);
         context.sessions.metrics().fallback(loss, result.is_ok());
+        // Told to the extensions that listen: the server that was lost, why, and the one chosen for the player, if there is one.
+        let to = result.as_ref().ok().map(|r| r.backend.clone());
+        context
+            .sessions
+            .extensions
+            .emit(|| crate::extension::events::Kind::Fallback {
+                player: crate::extension::events::Kind::player(
+                    &context.profile.name,
+                    context.profile.uuid,
+                    context.auth == AuthKind::Verified,
+                ),
+                from,
+                to,
+                loss: match loss {
+                    Loss::Crashed(_) => meridian_extension::events::Loss::Crashed,
+                    Loss::Kicked(_) => meridian_extension::events::Loss::Kicked,
+                },
+            });
         result
     }
 }
