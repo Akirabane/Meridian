@@ -1388,3 +1388,200 @@ mod command {
         let _ = ranks(&Arc::default()).on_command(|_| NodeAnswers::new());
     }
 }
+
+mod own_commands {
+    use super::*;
+    use crate::run::{self, Lines as Said, RunRequest};
+
+    fn declared(name: &str, aliases: &[&str]) -> CommandSpec {
+        CommandSpec {
+            name: name.into(),
+            aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+            usage: String::new(),
+        }
+    }
+
+    /// `/party` (alias `/p`) and `/ping`.
+    fn parties(lines: &Arc<Lines>) -> Extension {
+        let mut party = declared("party", &["p"]);
+        party.usage = "/party <invite|leave> [player]".into();
+        let mut extension = Extension::new("parties", "1.0.0", token())
+            .log(Arc::clone(lines) as Arc<dyn Log>)
+            .command(party, |request: &RunRequest| {
+                match request.args.as_slice() {
+                    [word, who] if word == "invite" => Said::new([
+                        format!("{who} is invited to your party."),
+                        format!("Your party: {}, {who}.", request.player.name),
+                    ]),
+                    _ => Said::one("Usage: /party <invite|leave> [player]"),
+                }
+            })
+            .command(declared("ping", &[]), |request: &RunRequest| {
+                Said::one(&format!("pong from {}", request.server))
+            });
+        extension.timings.look = Duration::from_millis(10);
+        extension
+    }
+
+    /// The golden request's params, for another command and other arguments.
+    fn params_for(command: &str, args: &[&str]) -> Value {
+        let mut request: Value = serde_json::from_str(&golden("run.request.json")).unwrap();
+        request["params"]["request"]["command"] = json!(command);
+        request["params"]["request"]["args"] = json!(args);
+        request["params"].clone()
+    }
+
+    fn run(proxy: &mut Proxy, command: &str, args: &[&str]) -> Result<Value, RpcError> {
+        proxy.call(run::RUN, Some(&params_for(command, args)))
+    }
+
+    #[test]
+    fn the_hello_declares_the_capability_and_the_commands_and_the_list_names_the_method() {
+        let running = start(parties(&Arc::default()));
+        let mut proxy = Proxy::connect(running.local_addr());
+        let (hello, _) = proxy.hello(&token());
+        assert_eq!(hello.capabilities, ["commands"]);
+        assert_eq!(hello.commands.len(), 2);
+        assert_eq!(hello.commands[0].name, "party");
+        assert_eq!(hello.commands[0].aliases, ["p"]);
+        assert_eq!(hello.commands[0].usage, "/party <invite|leave> [player]");
+        assert_eq!(hello.commands[1].name, "ping");
+        let listed = proxy.call(method::DISCOVER, None).unwrap();
+        let methods = listed["methods"].as_array().unwrap();
+        // One method serves every command of the extension.
+        let ours: Vec<&Value> = methods.iter().filter(|m| m["name"] == run::RUN).collect();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0]["params"][0]["name"], "request");
+        assert_eq!(ours[0]["params"][0]["required"], true);
+    }
+
+    #[test]
+    fn the_golden_request_gets_the_golden_answer_and_it_passes_the_proxys_check() {
+        let running = start(parties(&Arc::default()));
+        let mut proxy = Proxy::up(running.local_addr());
+        proxy.send(&golden("run.request.json"));
+        let Message::Response { id, outcome } = message(&mut proxy.socket) else {
+            panic!("an answer");
+        };
+        assert_eq!(id, Some(Id::Number(7)));
+        let result = outcome.unwrap();
+        let expected: Value = serde_json::from_str(&golden("run.answer.json")).unwrap();
+        assert_eq!(result, expected["result"]);
+        assert_eq!(
+            run::parse_run_answer(&result).unwrap(),
+            ["Bob is invited to your party.", "Your party: Alex, Bob."]
+        );
+    }
+
+    #[test]
+    fn each_command_runs_its_own_handler_and_an_alias_runs_the_one_it_stands_for() {
+        let running = start(parties(&Arc::default()));
+        let mut proxy = Proxy::up(running.local_addr());
+        assert_eq!(
+            run(&mut proxy, "ping", &[]).unwrap(),
+            json!({"lines": ["pong from lobby"]})
+        );
+        assert_eq!(
+            run(&mut proxy, "party", &["leave"]).unwrap(),
+            json!({"lines": ["Usage: /party <invite|leave> [player]"]})
+        );
+        // The proxy sends the declared name; a proxy that sent the alias would be understood too.
+        assert_eq!(
+            run(&mut proxy, "p", &["invite", "Cy"]).unwrap()["lines"][0],
+            "Cy is invited to your party."
+        );
+    }
+
+    #[test]
+    fn a_command_nobody_declared_and_params_that_are_not_a_request_are_errors_that_do_not_quote() {
+        let lines = Arc::new(Lines::default());
+        let running = start(parties(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        let error = run(&mut proxy, "PrivateCommand", &["PrivateArg"]).unwrap_err();
+        assert_eq!(error.code, code::INVALID_PARAMS);
+        assert!(!error.message.contains("Private"), "{}", error.message);
+        for params in [
+            None,
+            Some(json!([])),
+            Some(json!({})),
+            Some(json!({"request": "PrivateName"})),
+            // No arguments: not a request.
+            Some(
+                json!({"request": {"player": {"name": "PrivateName", "uuid": "u", "auth": "verified"}, "server": "lobby", "command": "ping"}}),
+            ),
+        ] {
+            let error = proxy.call(run::RUN, params.as_ref()).unwrap_err();
+            assert_eq!(error.code, code::INVALID_PARAMS, "{params:?}");
+            assert!(!error.message.contains("Private"), "{}", error.message);
+        }
+        assert_eq!(
+            run(&mut proxy, "ping", &[]).unwrap(),
+            json!({"lines": ["pong from lobby"]})
+        );
+        assert!(lines.all().iter().all(|l| !l.contains("Private")));
+    }
+
+    #[test]
+    fn what_a_command_says_is_made_to_pass_the_proxys_check() {
+        let running = start(Extension::new("loud", "1.0.0", token()).command(
+            declared("loud", &[]),
+            |_: &RunRequest| {
+                let mut lines: Vec<String> = (0..30).map(|i| format!("line {i}\r\n")).collect();
+                lines[0] = "x".repeat(400);
+                Said::new(lines)
+            },
+        ));
+        let mut proxy = Proxy::up(running.local_addr());
+        let result = run(&mut proxy, "loud", &[]).unwrap();
+        let lines = run::parse_run_answer(&result).unwrap();
+        assert_eq!(lines.len(), run::MAX_LINES);
+        assert_eq!(lines[0].chars().count(), run::MAX_LINE_CHARS);
+        assert_eq!(lines[1], "line 1");
+    }
+
+    #[test]
+    fn a_login_gate_and_commands_live_in_one_extension_and_the_capabilities_are_listed_once() {
+        let extension = Extension::new("both", "1.0.0", token())
+            .on_login(|_| crate::decide::Decision::Default)
+            .command(declared("one", &[]), |_: &RunRequest| Said::none())
+            .command(declared("two", &[]), |_: &RunRequest| Said::none());
+        assert_eq!(extension.capabilities(), ["decide.login", "commands"]);
+        let running = start(extension);
+        let mut proxy = Proxy::up(running.local_addr());
+        assert_eq!(run(&mut proxy, "two", &[]).unwrap(), json!({"lines": []}));
+    }
+
+    #[test]
+    fn nothing_of_the_player_or_the_arguments_is_in_the_extensions_lines() {
+        let lines = Arc::new(Lines::default());
+        let running = start(parties(&lines));
+        let mut proxy = Proxy::up(running.local_addr());
+        run(&mut proxy, "party", &["invite", "SecretFriend"]).unwrap();
+        let everything = lines.all().join("\n");
+        for private in ["Alex", "SecretFriend", "0a2ea4ba", "invite"] {
+            assert!(!everything.contains(private), "{private}\n{everything}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "is declared twice")]
+    fn a_word_declared_by_two_commands_is_a_mistake_of_the_program() {
+        let _ = Extension::new("x", "1", token())
+            .command(declared("one", &["o"]), |_| Said::none())
+            .command(declared("two", &["o"]), |_| Said::none());
+    }
+
+    #[test]
+    #[should_panic(expected = "is declared twice")]
+    fn a_command_declared_twice_is_a_mistake_of_the_program() {
+        let _ = Extension::new("x", "1", token())
+            .command(declared("one", &[]), |_| Said::none())
+            .command(declared("one", &[]), |_| Said::none());
+    }
+
+    #[test]
+    #[should_panic(expected = "the command is not valid")]
+    fn a_word_the_proxy_would_refuse_is_a_mistake_of_the_program() {
+        let _ = Extension::new("x", "1", token()).command(declared("Party", &[]), |_| Said::none());
+    }
+}

@@ -98,6 +98,41 @@ pub struct CommandSpec {
     pub usage: String,
 }
 
+/// The most characters of a command's name or alias.
+pub const MAX_COMMAND_WORD: usize = 32;
+
+impl CommandSpec {
+    /// Every word a player types for the command: its name, then its aliases.
+    pub fn words(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
+
+    /// Whether the declaration is one the proxy accepts: a name and aliases of 1 to [`MAX_COMMAND_WORD`]
+    /// characters among `a-z`, `0-9`, `-` and `_`, none given twice. The error says what is wrong and never
+    /// quotes a word (the proxy logs it, and the word is the extension's). Whether a word is also taken by
+    /// a command of the proxy or of another extension is for the proxy to say.
+    pub fn check(&self) -> Result<(), String> {
+        let mut seen: Vec<&str> = Vec::new();
+        for word in self.words() {
+            let fine = !word.is_empty()
+                && word.chars().count() <= MAX_COMMAND_WORD
+                && word.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                });
+            if !fine {
+                return Err(format!(
+                    "a command word has 1 to {MAX_COMMAND_WORD} characters among a-z, 0-9, - and _"
+                ));
+            }
+            if seen.contains(&word) {
+                return Err("a command word is given twice".into());
+            }
+            seen.push(word);
+        }
+        Ok(())
+    }
+}
+
 /// `params` of `meridian:hello/confirm`: the proxy's proof.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Confirm {
@@ -394,6 +429,45 @@ mod tests {
     /// The golden file, read as a message and written again, is the same JSON.
     fn same_json(name: &str, written: &str) {
         assert_eq!(value(&golden(name)), value(written), "{name}");
+    }
+
+    fn spec(name: &str, aliases: &[&str]) -> CommandSpec {
+        CommandSpec {
+            name: name.into(),
+            aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+            usage: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_command_is_declared_with_plain_lower_case_words_given_once() {
+        assert_eq!(spec("party", &["p", "pa-rty_2"]).check(), Ok(()));
+        assert_eq!(spec("a", &[]).check(), Ok(()));
+        assert_eq!(
+            spec(&"x".repeat(MAX_COMMAND_WORD), &[]).check(),
+            Ok(()),
+            "the longest word"
+        );
+        let declared = spec("party", &["p"]);
+        assert_eq!(declared.words().collect::<Vec<_>>(), ["party", "p"]);
+        for bad in [
+            spec("", &[]),
+            spec("Party", &[]),
+            spec("par ty", &[]),
+            spec("/party", &[]),
+            spec("part\u{e9}", &[]),
+            spec("par\nty", &[]),
+            spec(&"x".repeat(MAX_COMMAND_WORD + 1), &[]),
+            spec("party", &[""]),
+            spec("party", &["P"]),
+            // A word twice: the name and an alias, or two aliases.
+            spec("party", &["party"]),
+            spec("party", &["p", "p"]),
+        ] {
+            let why = bad.check().unwrap_err();
+            // The word is the extension's: it is never quoted.
+            assert!(!why.contains("Party") && !why.contains('\n'), "{why}");
+        }
     }
 
     #[test]
