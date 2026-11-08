@@ -30,6 +30,8 @@ mod tests;
 pub(crate) use link::SendLot;
 pub use link::{Link, Settings};
 #[cfg(test)]
+pub(crate) use orders::KickRefusal;
+#[cfg(test)]
 pub(crate) use orders::Paid;
 #[cfg(test)]
 pub(crate) use orders::Refusal;

@@ -2347,7 +2347,7 @@ mod the_orders {
 
     use crate::extension::link::SendLot;
     use crate::extension::orders::Actions;
-    use crate::extension::orders::{MovePlan, Paid, Refusal};
+    use crate::extension::orders::{KickRefusal, MovePlan, Paid, Refusal};
     use meridian_extension::orders::{Started, Target, Told, Who};
     use std::sync::Mutex as StdMutex;
 
@@ -2434,16 +2434,19 @@ mod the_orders {
     }
 
     impl Actions for ActingArc {
-        /// `Nobody` is not online: the others are kicked, and named as they were asked for.
-        fn kick(&self, who: &Who, reason: &str) -> Option<String> {
+        /// `Nobody` is not online, `Twin` is two accounts and `Boss` cannot be kicked by an extension: the others are
+        /// kicked, and named as they were asked for.
+        fn kick(&self, who: &Who, reason: &str) -> Result<Option<String>, KickRefusal> {
             self.kicked
                 .lock()
                 .unwrap()
                 .push((who.clone(), reason.to_owned()));
             match who {
-                Who::Name(name) if name.eq_ignore_ascii_case("Nobody") => None,
-                Who::Name(name) => Some(name.clone()),
-                Who::Id(_) => Some("ById".to_owned()),
+                Who::Name(name) if name.eq_ignore_ascii_case("Nobody") => Ok(None),
+                Who::Name(name) if name.eq_ignore_ascii_case("Twin") => Err(KickRefusal::Several),
+                Who::Name(name) if name.eq_ignore_ascii_case("Boss") => Err(KickRefusal::Exempt),
+                Who::Name(name) => Ok(Some(name.clone())),
+                Who::Id(_) => Ok(Some("ById".to_owned())),
             }
         }
 
@@ -3129,6 +3132,133 @@ mod the_orders {
         );
         assert_eq!(code_of(&answer(&fake, &json!(9410))), -32001);
         assert_eq!(acting.kicked().len(), 2, "the refused one kicked nobody");
+    }
+
+    /// A name that two accounts have, and a player who may not be kicked by an extension, are refused in words that are
+    /// fixed: nobody is kicked, and the place among the kicks of the minute is not used.
+    #[test]
+    fn a_kick_of_a_name_two_accounts_have_or_of_an_exempt_player_is_refused_in_fixed_words_and_costs_no_place()
+     {
+        let acting = Acting::new(5);
+        let (fake, _registry, link, _folder) =
+            acting_with(&["orders.moderate"], &acting, |settings| {
+                settings.kicks_per_minute = 1;
+            });
+        let cases = [
+            (
+                "Twin",
+                "more than one player has that name: use the unique id",
+            ),
+            (
+                "twin",
+                "more than one player has that name: use the unique id",
+            ),
+            ("Boss", "that player cannot be kicked by an extension"),
+        ];
+        for (n, (name, words)) in cases.iter().enumerate() {
+            let id = json!(9600 + n);
+            let params =
+                serde_json::to_string(&json!({"player": name, "reason": "secret-reason"})).unwrap();
+            order(&fake, &id, shapes::PLAYERS_KICK, &params);
+            let reply = answer(&fake, &id);
+            assert_eq!(code_of(&reply), -32602, "{name}");
+            assert_eq!(reply["error"]["message"].as_str(), Some(*words), "{name}");
+            assert!(!reply.to_string().contains("secret-reason"), "{reply}");
+        }
+        assert_eq!(link.stats().orders(shapes::PLAYERS_KICK, Ended::Invalid), 3);
+        // None of the three kept the one place of the minute: Alex can still be kicked.
+        order(
+            &fake,
+            &json!(9610),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"Alex"}"#,
+        );
+        assert_eq!(kicked_of(&answer(&fake, &json!(9610))), 1);
+    }
+
+    /// `max-kicks-per-minute`: past it a kick is `-32002 too many kicks` and kicks nobody; only a kick that ended a session
+    /// counts, so asking after players who are not there does not spend it.
+    #[test]
+    fn the_kicks_of_a_minute_are_limited_when_the_operator_says_so_and_only_a_kick_that_kicked_counts()
+     {
+        let acting = Acting::new(5);
+        let (fake, _registry, _link, _folder) =
+            acting_with(&["orders.moderate"], &acting, |settings| {
+                settings.kicks_per_minute = 2;
+            });
+        for n in 0..5 {
+            order(
+                &fake,
+                &json!(9700 + n),
+                shapes::PLAYERS_KICK,
+                r#"{"player":"Nobody"}"#,
+            );
+            assert_eq!(kicked_of(&answer(&fake, &json!(9700 + n))), 0);
+        }
+        for n in 0..2 {
+            order(
+                &fake,
+                &json!(9710 + n),
+                shapes::PLAYERS_KICK,
+                r#"{"player":"Alex"}"#,
+            );
+            assert_eq!(kicked_of(&answer(&fake, &json!(9710 + n))), 1);
+        }
+        order(
+            &fake,
+            &json!(9720),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"Steve"}"#,
+        );
+        let reply = answer(&fake, &json!(9720));
+        assert_eq!(code_of(&reply), -32002);
+        assert_eq!(reply["error"]["message"].as_str(), Some("too many kicks"));
+        let kicked = acting.kicked();
+        assert_eq!(
+            kicked
+                .iter()
+                .filter(|(who, _)| *who == Who::Name("Steve".into()))
+                .count(),
+            0,
+            "the refused one kicked nobody and did not even look for the player"
+        );
+    }
+
+    /// The window of the limit is a minute, kept per extension, and a place that kicked nobody is given back.
+    #[test]
+    fn the_place_of_a_kick_is_free_again_after_a_minute_or_when_nobody_was_kicked_and_no_limit_counts_nothing()
+     {
+        let acting = Acting::new(5);
+        let (_fake, _registry, link, _folder) =
+            acting_with(&["orders.moderate"], &acting, |settings| {
+                settings.kicks_per_minute = 2;
+            });
+        let t0 = Instant::now();
+        let first = link.reserve_kick(t0).expect("the first");
+        let second = link
+            .reserve_kick(t0 + Duration::from_secs(10))
+            .expect("the second");
+        assert!(
+            link.reserve_kick(t0 + Duration::from_secs(59)).is_none(),
+            "two in the minute"
+        );
+        // A minute after the first, its place is free; the second still counts.
+        let third = link
+            .reserve_kick(t0 + Duration::from_secs(61))
+            .expect("the first one left the window");
+        assert!(link.reserve_kick(t0 + Duration::from_secs(62)).is_none());
+        // A place that kicked nobody is given back, and only that one.
+        link.give_back_kick(second);
+        let fourth = link
+            .reserve_kick(t0 + Duration::from_secs(63))
+            .expect("the second was given back");
+        assert!(link.reserve_kick(t0 + Duration::from_secs(64)).is_none());
+        let _kept = (first, third, fourth);
+        // Without a limit (0, the default) every kick has its place and nothing is counted.
+        let (_fake, _registry, free, _folder) = acting_with(&["orders.moderate"], &acting, |_| {});
+        for n in 0..1_000 {
+            assert!(free.reserve_kick(t0 + Duration::from_millis(n)).is_some());
+        }
     }
 
     #[test]

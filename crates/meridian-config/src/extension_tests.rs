@@ -79,6 +79,7 @@ fn an_extension_takes_the_defaults_of_the_specification() {
                 rate_per_second: 20,
                 burst: 50,
                 max_running: 8,
+                max_kicks_per_minute: 0,
             },
         }]
     );
@@ -299,16 +300,31 @@ fn the_orders_of_an_extension_have_a_budget_that_can_be_set_within_bounds_and_ne
     let table = "[extension.orders]
 rate-per-second = 5
 burst = 7
-max-running = 2";
+max-running = 2
+max-kicks-per-minute = 30";
     let config = load(&dir, "", &granted("\"orders.read\"", table)).unwrap();
     assert_eq!(
         orders(&config),
         Orders {
             rate_per_second: 5,
             burst: 7,
-            max_running: 2
+            max_running: 2,
+            max_kicks_per_minute: 30
         }
     );
+    // No limit on kicks unless the operator writes one, and 0 says so too.
+    assert_eq!(Orders::default().max_kicks_per_minute, 0);
+    let config = load(
+        &dir,
+        "",
+        &granted(
+            "\"orders.moderate\"",
+            "[extension.orders]
+max-kicks-per-minute = 0",
+        ),
+    )
+    .unwrap();
+    assert_eq!(orders(&config), Orders::default());
     // A key written alone leaves the others as they are; an empty table is the defaults.
     let config = load(
         &dir,
