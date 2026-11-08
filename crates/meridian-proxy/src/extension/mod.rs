@@ -26,7 +26,11 @@ mod stats;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use link::SendLot;
 pub use link::{Link, Settings};
+#[cfg(test)]
+pub(crate) use orders::Paid;
 #[cfg(test)]
 pub(crate) use orders::Refusal;
 pub use orders::{Actions, Facts, MovePlan, Services};

@@ -1031,6 +1031,18 @@ configuration in force, the balancer, the queue); until the proxy has given the 
 - **Cost** (decision Q7): the number of players it moves, **and at most the burst**, charged all at once as a broadcast is
   (above): a `send all` of 500 players costs the whole burst of 50 and can run; one that the budget cannot pay is `-32001`,
   moves nobody, and costs one token. A plan is made first (who would move) and started only once the budget has paid it.
+- **One send at a time for each extension.** The moves of a lot go on, one after the other, on a thread of their own; while that
+  thread runs, another `players/send` of the same extension is answered **`-32002 a send is already running`** (fixed words)
+  and costs one token. The thread gives its place back when it has moved them all, **however it ends** (a panic included). So a
+  program cannot start threads without end, and the lots are moved in the order they were asked. Ask again when the moves
+  have ended (watch `players/find`).
+- **A destination that takes no players now is refused when the send is planned**: a server the balancer drained, that has not
+  reported lately (`not_offered`) or that does not accept transfers answers **`-32602 "to" is a server that takes no players
+  now`** (a code of its own would have been `-32603`, which this page keeps for an order that failed while it ran), and nobody
+  is moved: sending a whole network to it would tell each player that they could not be moved. A server with no role is not
+  the balancer's, and is taken; a server over its soft cap (`closed`) is taken too, as the staff's `/send` takes it.
+- **A plan cannot be started unpaid.** The budget's payment is a value (`Paid`) that only the handler's charge makes, and
+  `MovePlan::start` asks for it together with the extension's place for a send.
 - Until the proxy has given the registry its actions it answers `-32603 not available`. `orders.move` also tells the
   extension whether a name is online and which server names exist, as `orders.message` does.
 

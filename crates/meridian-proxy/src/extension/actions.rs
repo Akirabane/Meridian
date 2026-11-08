@@ -2,8 +2,10 @@
 //! `staff::alert`, the function that the console's `alert` and the staff's `/alert` call. A line is shown as a literal
 //! (`SessionHandle::tell`), never as a JSON text component, so an extension cannot put a click event in a chat.
 
-use super::orders::{Actions, MovePlan, Refusal};
+use super::link::SendLot;
+use super::orders::{Actions, MovePlan, Paid, Refusal};
 use crate::log::warning;
+use crate::placing::{self, Offer};
 use crate::session::{Player, Sessions, Shared, hyphenated};
 use crate::staff;
 use crate::switching::Switcher;
@@ -81,24 +83,32 @@ impl Actions for ProxyActions {
             return Ok(Box::new(Planned::nobody()));
         };
         let shared = sessions.shared();
+        let all = shared.players();
+        // A server that takes no players now (draining, silent, or off transfers) is refused at once: sending to it would tell
+        // each player that they could not be moved. A server with no role is not known to the balancer, and is taken.
+        let on = all.iter().filter(|p| p.backend == backend.name).count();
+        if let Some(standing) = placing::standing(&config, &shared, &backend.name, on, None)
+            && !matches!(standing.offer, Offer::Open | Offer::Closed)
+        {
+            return Err(Refusal::DestinationNotTakingPlayers);
+        }
         let players: Vec<Player> = match target {
-            Target::All => shared.players(),
+            Target::All => all,
             Target::Server(name) => {
                 let source = config.backend(name).ok_or(Refusal::UnknownSource)?;
-                shared
-                    .players()
-                    .into_iter()
+                all.into_iter()
                     .filter(|p| p.backend == source.name)
                     .collect()
             }
-            Target::Player(Who::Name(name)) => shared
-                .session(name)
-                .map(|(player, _)| vec![player])
-                .unwrap_or_default(),
-            Target::Player(Who::Id(id)) => shared
-                .players()
+            Target::Player(Who::Name(name)) => all
+                .into_iter()
+                .filter(|p| p.name.eq_ignore_ascii_case(name))
+                .take(1)
+                .collect(),
+            Target::Player(Who::Id(id)) => all
                 .into_iter()
                 .filter(|p| hyphenated(p.uuid).eq_ignore_ascii_case(id))
+                .take(1)
                 .collect(),
         };
         // Those who are on the server already are not moved (as the console's and the staff's `send` do).
@@ -138,7 +148,7 @@ impl MovePlan for Planned {
         self.moving.len()
     }
 
-    fn start(self: Box<Self>) -> Result<usize, Refusal> {
+    fn start(self: Box<Self>, _paid: Paid, lot: SendLot) -> Result<usize, Refusal> {
         let Planned {
             moving,
             destination,
@@ -151,6 +161,8 @@ impl MovePlan for Planned {
         std::thread::Builder::new()
             .name("extension-send".into())
             .spawn(move || {
+                // The extension's place for a send is held until every move is done, and let go however this ends.
+                let _lot = lot;
                 let (_, failed) =
                     staff::move_all(&config, &shared, &switcher, &moving, &destination);
                 if failed > 0 {

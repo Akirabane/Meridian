@@ -201,6 +201,30 @@ impl Drop for RunPlace {
     }
 }
 
+/// A send of players is running for the extension: held by the thread that moves them, and let go when it ends, **however it
+/// ends** (a panic included). The extension has one at a time.
+pub struct SendLot(Arc<AtomicBool>);
+
+impl Drop for SendLot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+impl SendLot {
+    /// A lot that no link holds, for the tests of what a plan does with it.
+    pub(crate) fn free() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+
+    /// A lot, and the flag that says whether it is still held: true until the lot is dropped.
+    pub(crate) fn watched() -> (Self, Arc<AtomicBool>) {
+        let flag = Arc::new(AtomicBool::new(true));
+        (Self(Arc::clone(&flag)), flag)
+    }
+}
+
 /// One order of the extension is running; the place is free again when this goes.
 pub(super) struct OrderPlace(Arc<Link>);
 
@@ -270,6 +294,8 @@ pub struct Link {
     runs: AtomicUsize,
     /// How many of its orders are running (`order_place`).
     orders_running: AtomicUsize,
+    /// Whether a send of players is running: held by the thread that moves them.
+    sending: Arc<AtomicBool>,
     /// How many threads of its orders are alive, whether they run or wait to write (`order_thread`).
     order_threads: AtomicUsize,
     /// What is left of its budget of orders.
@@ -294,6 +320,7 @@ impl Link {
             epoch: AtomicU64::new(0),
             runs: AtomicUsize::new(0),
             orders_running: AtomicUsize::new(0),
+            sending: Arc::new(AtomicBool::new(false)),
             order_threads: AtomicUsize::new(0),
             budget: Mutex::new(budget),
             forgotten: Mutex::new(Forgotten::default()),
@@ -342,6 +369,15 @@ impl Link {
     /// The facts the orders that read tell, if the proxy has given them.
     pub(super) fn facts(&self) -> Option<Arc<dyn Facts>> {
         self.services.facts()
+    }
+
+    /// The place for a send of players, or `None` while one is running: an extension sends one lot at a time, so that a program
+    /// cannot start threads for ever, and each lot is moved in the order it was asked.
+    pub(super) fn send_lot(&self) -> Option<SendLot> {
+        self.sending
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            .then(|| SendLot(Arc::clone(&self.sending)))
     }
 
     /// What the orders that act act on, if the proxy has given it.
