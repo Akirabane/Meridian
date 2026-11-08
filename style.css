@@ -112,3 +112,9 @@ ul.legend li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10p
 .bar .fill.before { background: var(--grey); }
 .bar .fill.after { background: var(--good); }
 @media (max-width: 640px) { .pair { grid-template-columns: 1fr; } .mid { transform: rotate(90deg); justify-self: start; margin-left: 12px; } }
+/* Language links: English | Français */
+.tools { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 10px 14px; }
+.lang { font-size: 15px; color: var(--muted); }
+.lang a { color: var(--link); padding: 4px 2px; }
+.lang a[aria-current="page"] { color: var(--text); font-weight: 600; text-decoration: none; }
+.top .wrap { flex-wrap: wrap; }
