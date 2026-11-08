@@ -191,3 +191,11 @@ table.lt { border-collapse: collapse; width: 100%; min-width: 480px; font-size: 
 table.lt th, table.lt td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 table.lt thead th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 table.lt tbody th { font-weight: 600; width: 34%; }
+
+/* The fourth state of a task: in test (blue) */
+:root { --test: #0b5cad; --test-bg: #dcebfb; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --test: #7db8ff; --test-bg: #142a44; } }
+:root[data-theme="dark"] { --test: #7db8ff; --test-bg: #142a44; }
+.badge.test { color: var(--test); background: var(--test-bg); }
+.ritem.testing { border-left-color: var(--test); }
+.legend4 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 8px 0 0; font-size: 14px; color: var(--muted); }
