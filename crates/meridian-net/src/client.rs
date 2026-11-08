@@ -83,6 +83,44 @@ pub fn virtual_host(raw: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
+/// What became of the players other servers sent here with a vanilla transfer (the handshake's
+/// TRANSFER intention), for the metrics page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Transfers {
+    /// Refused, as `accept-transfers` is off.
+    pub refused: u64,
+    /// Taken, and logged in as any player.
+    pub logged_in: u64,
+    /// Taken, but their login did not finish (a check refused it, or it failed).
+    pub failed: u64,
+}
+
+static TRANSFERS_REFUSED: AtomicU64 = AtomicU64::new(0);
+static TRANSFERS_LOGGED_IN: AtomicU64 = AtomicU64::new(0);
+static TRANSFERS_FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// The count a login ends in: none for a player who came on their own; for a transferred one,
+/// logged in or failed.
+fn transfer_count(transferred: bool, joined: bool) -> Option<&'static AtomicU64> {
+    if !transferred {
+        return None;
+    }
+    Some(if joined {
+        &TRANSFERS_LOGGED_IN
+    } else {
+        &TRANSFERS_FAILED
+    })
+}
+
+/// The transfers counted since the proxy started.
+pub fn transfers() -> Transfers {
+    Transfers {
+        refused: TRANSFERS_REFUSED.load(Ordering::Relaxed),
+        logged_in: TRANSFERS_LOGGED_IN.load(Ordering::Relaxed),
+        failed: TRANSFERS_FAILED.load(Ordering::Relaxed),
+    }
+}
+
 /// How a player's login was checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthKind {
@@ -223,7 +261,18 @@ fn accept_bounded(
             )));
         }
     };
-    match intention.intent {
+    // A player another server sent here (`/transfer`). With `accept-transfers` they log in
+    // exactly as a player who came on their own, by the same code: the same checks, the host they
+    // were sent to choosing the server. A transferred client sends nothing more; it gives the
+    // cookies the other server left only when asked, and the proxy asks for none (`finish`). Off,
+    // they are refused, as a vanilla server does by default (`accepts-transfers`).
+    let transferred = intention.intent == handshake::TRANSFER;
+    let intent = if transferred && config.accept_transfers {
+        handshake::LOGIN
+    } else {
+        intention.intent
+    };
+    match intent {
         handshake::STATUS => {
             serve_status(
                 &mut connection,
@@ -236,18 +285,21 @@ fn accept_bounded(
         handshake::LOGIN => {
             early.until = start + bounds.login;
             early.login = true;
-            log_in(
+            let joined = log_in(
                 connection,
                 &mut early,
                 config,
                 checks,
                 intention.protocol,
                 virtual_host(&intention.host),
-            )
+            );
+            if let Some(counter) = transfer_count(transferred, matches!(joined, Ok(Some(_)))) {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            joined
         }
-        // The proxy is where players arrive; it takes no transfers from other
-        // servers, as a vanilla server does by default (`accepts-transfers`).
         handshake::TRANSFER => {
+            TRANSFERS_REFUSED.fetch_add(1, Ordering::Relaxed);
             disconnect(
                 &mut connection,
                 &translatable("multiplayer.disconnect.transfers_disabled", &[]),
@@ -1336,6 +1388,7 @@ mod tests {
 
     #[test]
     fn a_transfer_is_refused() {
+        let before = transfers();
         let (mut client, accepted) = proxy(offline(-1));
         handshake(
             &mut client,
@@ -1346,6 +1399,104 @@ mod tests {
         assert_eq!(
             json["translate"],
             "multiplayer.disconnect.transfers_disabled"
+        );
+        assert!(accepted.join().unwrap().unwrap().is_none());
+        // Other tests may count at the same time: the count grew by this one at least.
+        assert!(transfers().refused > before.refused);
+    }
+
+    /// Which count a login ends in, apart from the other tests' logins (the counts are shared).
+    #[test]
+    fn only_a_transferred_player_is_counted_and_in_the_count_of_how_it_ended() {
+        assert!(transfer_count(false, true).is_none());
+        assert!(transfer_count(false, false).is_none());
+        assert!(std::ptr::eq(
+            transfer_count(true, true).unwrap(),
+            &TRANSFERS_LOGGED_IN
+        ));
+        assert!(std::ptr::eq(
+            transfer_count(true, false).unwrap(),
+            &TRANSFERS_FAILED
+        ));
+    }
+
+    /// The same as `start_login`, for a player another server sent to `host`.
+    fn start_transfer(client: &mut Connection, host: &str, name: &str) {
+        handshake_to(
+            client,
+            host,
+            horizon_protocol::PROTOCOL_VERSION,
+            handshake::TRANSFER,
+        );
+        let hello = login::Serverbound::Hello(login::ServerHello {
+            name: name.into(),
+            uuid: 42,
+        });
+        client.send(&hello.encode()).unwrap();
+    }
+
+    fn accepting(config: Config) -> Config {
+        Config {
+            accept_transfers: true,
+            ..config
+        }
+    }
+
+    #[test]
+    fn with_accept_transfers_a_transferred_player_logs_in_as_any_other() {
+        let before = transfers();
+        let (mut client, accepted) = proxy(accepting(offline(64)));
+        start_transfer(&mut client, "Survival.Example.", "Steve");
+        // The same login as one that came on its own: the compression, then the finished
+        // login. Nothing comes between: the proxy asks the client for no cookie.
+        assert_eq!(
+            login_reply(&mut client),
+            login::Clientbound::Compression(login::Compression { threshold: 64 })
+        );
+        client.set_compression(64);
+        let login::Clientbound::LoginFinished(finished) = login_reply(&mut client) else {
+            panic!("expected the finished login");
+        };
+        assert_eq!(finished.profile.uuid, crypto::offline_uuid("Steve"));
+        acknowledge(&mut client);
+        let session = accepted.join().unwrap().unwrap().expect("a session");
+        assert_eq!(session.auth, AuthKind::Offline);
+        // The host it was sent to chooses the server, as for any login (case and the
+        // final dot do not matter), and an unknown one is kept as it is.
+        assert_eq!(session.virtual_host.as_deref(), Some("survival.example"));
+        assert!(transfers().logged_in > before.logged_in);
+    }
+
+    #[test]
+    fn a_transferred_player_meets_the_same_checks() {
+        let before = transfers();
+        let (mut client, accepted) = proxy(accepting(offline(-1)));
+        // A name a login refuses is refused after a transfer too.
+        start_transfer(&mut client, "lobby.example", "no spaces");
+        let json = reason(login_reply(&mut client));
+        assert_eq!(json["translate"], "disconnect.genericReason");
+        assert!(accepted.join().unwrap().unwrap().is_none());
+        assert!(transfers().failed > before.failed);
+    }
+
+    #[test]
+    fn an_unasked_cookie_after_a_transfer_still_ends_the_login() {
+        let (mut client, accepted) = proxy(accepting(offline(-1)));
+        start_transfer(&mut client, "lobby.example", "Alex");
+        assert!(matches!(
+            login_reply(&mut client),
+            login::Clientbound::LoginFinished(_)
+        ));
+        // A cookie the other server left, offered unasked: refused as vanilla refuses it.
+        let cookie = login::Serverbound::CookieResponse(login::CookieResponse {
+            key: "lobby:ticket".into(),
+            payload: Some(b"vip".to_vec()),
+        });
+        client.send(&cookie.encode()).unwrap();
+        let json = reason(login_reply(&mut client));
+        assert_eq!(
+            json["translate"],
+            "multiplayer.disconnect.unexpected_query_response"
         );
         assert!(accepted.join().unwrap().unwrap().is_none());
     }

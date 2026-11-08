@@ -154,6 +154,33 @@ fn a_forced_backend_also_in_try_is_listed_once() {
     );
 }
 
+/// A network of three worlds that do not share their players (OPERATING.md, "A lobby that
+/// sends players to other worlds"): the lobby sends a player on with `/transfer survival.<domain>`,
+/// and the proxy, which takes the transfer as a login, places them by that host. Routing does not
+/// know how the player came: a host leads to its server, an unknown one to the default.
+#[test]
+fn a_player_sent_by_a_transfer_is_placed_by_the_host_they_were_sent_to() {
+    let config = config(
+        "accept-transfers = true",
+        "[[forced-host]]\nhost = \"lobby.example.com\"\nbackend = \"lobby\"\n\
+         [[forced-host]]\nhost = \"survival.example.com\"\nbackend = \"east\"\n\
+         [[forced-host]]\nhost = \"hardcore.example.com\"\nbackend = \"west\"",
+    );
+    assert!(config.accept_transfers);
+    for (host, server) in [
+        ("lobby.example.com", "lobby"),
+        ("survival.example.com", "east"),
+        ("HARDCORE.example.com.", "west"),
+        ("unknown.example.com", "lobby"),
+    ] {
+        assert_eq!(
+            names(candidates(&config, Some(host), VERIFIED))[0],
+            server,
+            "{host}"
+        );
+    }
+}
+
 // Routes.
 
 #[test]

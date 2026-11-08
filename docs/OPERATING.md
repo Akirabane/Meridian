@@ -877,6 +877,68 @@ client, over a network, with another Horizon build or with more than three serve
 on one server first: ban a test name on the server, see `banned on <server>` in `banlist`, then ban
 another at the console and read `banlist` on the server.
 
+### 5.13 A lobby that sends players to other worlds (vanilla transfers)
+
+A network of worlds that must **not** share a player's state (a lobby, a survival world, a hardcore world) cannot use
+the proxy's `/server`: a switch carries the player's inventory, experience and game mode to the other server
+([STATE-TRANSFER.md](STATE-TRANSFER.md)). Use vanilla's transfer instead: the lobby sends the client to another
+address, the client connects again, and each server keeps its own player file.
+
+With `accept-transfers = true`, the proxy takes these players. They log in **exactly** as a player who came on their own:
+the same connection limits, bans, whitelist and account check (online mode), and the host they were sent to chooses
+the server through `[[forced-host]]`. Off (the default), they are refused with vanilla's "transfers disabled".
+
+```toml
+# meridian.toml
+listen = "0.0.0.0:25565"
+accept-transfers = true
+default-backend = "lobby"
+
+[[backends]]
+name = "lobby"
+address = "127.0.0.1:25601"
+[[backends]]
+name = "survival"
+address = "127.0.0.1:25602"
+[[backends]]
+name = "hardcore"
+address = "127.0.0.1:25603"
+
+[[forced-host]]
+host = "play.<domain>"
+backend = "lobby"
+[[forced-host]]
+host = "survival.<domain>"
+backend = "survival"
+[[forced-host]]
+host = "hardcore.<domain>"
+backend = "hardcore"
+```
+
+The three names point to the proxy's address (DNS records `play`, `survival` and `hardcore`). In the lobby, a command,
+a sign or a plugin of the server runs vanilla's transfer for one player:
+
+```
+/transfer survival.<domain> 25565 <player>
+/transfer hardcore.<domain> 25565 <player>
+```
+
+The proxy passes the server's transfer packet to the client untouched. The client then connects to `survival.<domain>`:
+that is the proxy again, which logs the player in and sends them to `survival`. A host no `[[forced-host]]` names
+leads to `default-backend`.
+
+**The risk.** With `accept-transfers` on, **any** server on the internet can send a player to the proxy. That gives
+the player nothing: the proxy checks them as any login, and their account is checked in online mode. Leave it off
+if the network does not use transfers.
+
+**Cookies.** A server can leave cookies on the client (`store_cookie`), which the client gives back only when asked.
+The proxy never asks for one during the login and uses none to decide anything. It refuses one offered unasked, as
+vanilla does. Once the player is on a server, that server may ask for the cookies another server left; the proxy
+passes the request and the answer as they are, so what a cookie means is the servers' business.
+
+`meridian_transfers_total{outcome}` counts them: `refused` (the setting is off), `logged_in`, and `failed` (taken, but
+the login did not finish: a check refused it, or it broke off).
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it
@@ -986,6 +1048,7 @@ the gauges are worked out when the page is read.
 | `meridian_backend_soft_cap{backend}`, `meridian_backend_hard_cap{backend}` | The caps of each server that has a role |
 | `meridian_backend_state{backend,state}` | 1 for the state the balancer sees: `open`, `closed`, `draining` (drained, restarting, or not accepting transfers) or `not_offered` (no recent report) |
 | `meridian_connections_total`, `meridian_connections_throttled_total` | Connections accepted, and the ones closed unread for opening too many in a minute |
+| `meridian_transfers_total{outcome}` | Players other servers sent with a vanilla transfer: `refused` (`accept-transfers` off), `logged_in`, `failed` (section 5.13) |
 | `meridian_logins_total` | Players who ended on a server |
 | `meridian_login_failures_total{reason}` | Logins that did not: `protocol` (the handshake or login broke the protocol, or the connection failed), `duplicate`, `full`, `no_route`, `unreachable`, `banned` (including a connection closed for its address), `not_whitelisted`, `extension` (an extension refused the login, or refused the player at the choice of server, or could not be asked and its on-error policy refuses; [EXTENSIONS.md](EXTENSIONS.md) sections 4.2 and 4.4). A refusal by the authentication, and a server list ping, are not counted here |
 | `meridian_transfers_total` | Transfers that succeeded |
@@ -1150,8 +1213,10 @@ switch, and keep the proxy's log and both servers' logs.
   ([REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)), and before that with a real client on one machine (a public comment,
   [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2). Many players and long sessions were
   not tried against a real server (the 250 bots of [LOAD-VPS-250.md](LOAD-VPS-250.md) went to
-  stand-in servers). The hybrid mode's name lookup and the online mode's account check have not been
-  tried against the real services in a recorded run.
+  stand-in servers). The online mode's account check was run once against the real account service, with a real
+  Horizon client and a real Java client and one account ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 5). The
+  hybrid mode's name lookup, several accounts at once, long sessions, an account with no licence and the queue in online
+  mode have not been tried.
 - A server that stops without warning, or disconnects a player, moves them to another server
   (section 5.11) as a new arrival, with a loading screen, and what was unsaved on the lost server
   is lost. This ran with a real client over the Internet, once each for a killed server, a kick
