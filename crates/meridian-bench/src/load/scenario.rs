@@ -882,8 +882,23 @@ fn median(mut values: Vec<u64>) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(0) as f64
 }
 
+/// How long the bots of `moves` are given to have their worlds before the moves.
+const JOINED_WITHIN: Duration = Duration::from_secs(120);
+
+/// Why the moves of `moves` are not asked: some of the `n` bots had no world when the wait for
+/// them ended, `joined` of them had theirs and `failed` never got in. `None` when all are in.
+pub(super) fn not_ready(n: usize, joined: u64, failed: u64, waited: Duration) -> Option<String> {
+    (joined < n as u64).then(|| {
+        format!(
+            "not ready: {joined} of {n} bots had their world after {:.0} s, {failed} never got in; no move was asked",
+            waited.as_secs_f64()
+        )
+    })
+}
+
 /// S3: `n` bots play on the first server, and `movers_percent` of them are moved to the second
-/// at once, as they would by typing `/server`.
+/// at once, as they would by typing `/server`. The moves are asked only when every bot has its
+/// world; otherwise the row says `ready` false and why, and counts no move as failed.
 pub fn moves(s: &Settings, n: usize) -> Result<Row, String> {
     let movers = (n * s.movers_percent / 100).max(1);
     let transfers = Arc::new(Transfers::default());
@@ -957,12 +972,21 @@ pub fn moves(s: &Settings, n: usize) -> Result<Row, String> {
         ),
         &live,
     );
+    let joining = Instant::now();
     wait_until(s, Duration::from_secs(120), || {
         live.logins.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed) >= n as u64
     });
-    wait_until(s, Duration::from_secs(60), || {
+    wait_until(s, JOINED_WITHIN, || {
         live.joined.load(Ordering::Relaxed) + live.failed.load(Ordering::Relaxed) >= n as u64
     });
+    // The moves are asked only of a swarm that is all in: moves asked while worlds are still
+    // being sent, or of players who never got in, measure the joins and not the moves.
+    let not_ready = not_ready(
+        n,
+        live.joined.load(Ordering::Relaxed),
+        live.failed.load(Ordering::Relaxed),
+        joining.elapsed(),
+    );
     pause(s, Duration::from_secs(5));
     // A quiet stretch first: what the proxy holds and how the others' round trips are before.
     live.measuring.store(true, Ordering::Relaxed);
@@ -979,11 +1003,13 @@ pub fn moves(s: &Settings, n: usize) -> Result<Row, String> {
     let (rss_before, _, threads_before) = proc_now(pid);
     // The moves, all at once.
     let began = sampler.now();
-    live.move_now.store(true, Ordering::Relaxed);
-    let all_moved = wait_until(s, Duration::from_secs(60), || {
-        (live.moves.lock().unwrap().len() as u64 + live.moves_failed.load(Ordering::Relaxed))
-            >= movers as u64
-    });
+    let all_moved = not_ready.is_none() && {
+        live.move_now.store(true, Ordering::Relaxed);
+        wait_until(s, Duration::from_secs(60), || {
+            (live.moves.lock().unwrap().len() as u64 + live.moves_failed.load(Ordering::Relaxed))
+                >= movers as u64
+        })
+    };
     let moved_at = sampler.now();
     pause(s, Duration::from_secs(6));
     let during = sampler.between(began, sampler.now());
@@ -1007,7 +1033,9 @@ pub fn moves(s: &Settings, n: usize) -> Result<Row, String> {
     let on_east = east.counters.online.load(Ordering::Relaxed);
     let asked = &transfers.asked;
     let mut first = first_failure(&live);
-    if done as u64 + failed_moves < movers as u64 {
+    if let Some(why) = &not_ready {
+        first = format!("{why} {first}").trim_end().to_owned();
+    } else if done as u64 + failed_moves < movers as u64 {
         // A move nobody answered: what the proxy said about moves, to find out why.
         let said: Vec<&str> = log
             .lines()
@@ -1026,6 +1054,7 @@ pub fn moves(s: &Settings, n: usize) -> Result<Row, String> {
         .with("scenario", "moves")
         .with("players", n)
         .with("movers", movers)
+        .with("ready", not_ready.is_none())
         .with("moved", done)
         .with("move_failed", failed_moves)
         .with("all_answered", all_moved)

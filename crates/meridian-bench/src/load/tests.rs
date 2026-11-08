@@ -104,6 +104,18 @@ fn the_tick_of_the_servers_is_read() {
     assert_eq!(read(&["--proxy", "x", "--write-per-tick", "0"]), None);
 }
 
+/// The moves are asked only when every bot has its world: one short, even one that never got
+/// in, and the step says why instead of counting moves as failed.
+#[test]
+fn moves_wait_for_every_world() {
+    let waited = Duration::from_secs(120);
+    assert_eq!(scenario::not_ready(1000, 1000, 0, waited), None);
+    let short = scenario::not_ready(1000, 736, 264, waited).unwrap();
+    assert!(short.starts_with("not ready: 736 of 1000"), "{short}");
+    assert!(short.contains("264 never got in"), "{short}");
+    assert!(scenario::not_ready(1000, 999, 0, waited).is_some());
+}
+
 #[test]
 fn some_bots_play_against_a_synthetic_server() {
     let _turn = ONE_PROXY.lock().unwrap_or_else(|e| e.into_inner());
