@@ -74,6 +74,7 @@ fn an_extension_takes_the_defaults_of_the_specification() {
                 timeout_ms: 1000,
                 on_error: ServerOnError::Default,
             },
+            own_commands: OwnCommands { timeout_ms: 2000 },
         }]
     );
 }
@@ -249,6 +250,89 @@ fn a_name_is_plain_and_unique() {
         load(&dir, "", &twice).unwrap_err(),
         ConfigError::DuplicateExtension(name) if name == "same"
     ));
+    // The case does not tell two names apart: their permission nodes are lower case.
+    let cases = format!(
+        "{}{}",
+        extension("Perms", 25590, "a.token", ""),
+        extension("perms", 25591, "b.token", "")
+    );
+    let e = load(&dir, "", &cases).unwrap_err();
+    assert!(
+        matches!(&e, ConfigError::DuplicateExtension(name) if name == "perms"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("without regard to case"), "{e}");
+}
+
+#[test]
+fn the_commands_of_an_extension_wait_two_seconds_unless_told_and_need_their_capability() {
+    let dir = folder("own-commands");
+    let granted = |more: &str| {
+        extension(
+            "x",
+            25590,
+            "a.token",
+            &format!("grant = [\"commands\"]\n{more}"),
+        )
+    };
+    let config = load(&dir, "", &granted("")).unwrap();
+    assert_eq!(config.extensions[0].own_commands.timeout_ms, 2000);
+    let config = load(&dir, "", &granted("[extension.commands]\ntimeout-ms = 750")).unwrap();
+    assert_eq!(config.extensions[0].own_commands.timeout_ms, 750);
+    // An empty table is the defaults.
+    let config = load(&dir, "", &granted("[extension.commands]")).unwrap();
+    assert_eq!(config.extensions[0].own_commands.timeout_ms, 2000);
+    // Not granted, the table would be read and never used.
+    let text = extension(
+        "x",
+        25590,
+        "a.token",
+        "[extension.commands]\ntimeout-ms = 750",
+    );
+    let e = load(&dir, "", &text).unwrap_err();
+    assert!(matches!(e, ConfigError::DecideWithoutGrant { .. }), "{e}");
+    assert!(e.to_string().contains("commands"), "{e}");
+    // Zero is no time at all; a key nobody knows is a mistake.
+    let e = load(&dir, "", &granted("[extension.commands]\ntimeout-ms = 0")).unwrap_err();
+    assert!(matches!(e, ConfigError::ZeroExtensionSetting { .. }), "{e}");
+    assert!(e.to_string().contains("commands timeout-ms"), "{e}");
+    assert!(
+        load(
+            &dir,
+            "",
+            &granted("[extension.commands]\non-error = \"deny\"")
+        )
+        .is_err()
+    );
+    // Ten seconds at most: a thread of the proxy waits that long for the lines of one command.
+    let config = load(
+        &dir,
+        "",
+        &granted(
+            "[extension.commands]
+timeout-ms = 10000",
+        ),
+    )
+    .unwrap();
+    assert_eq!(config.extensions[0].own_commands.timeout_ms, 10_000);
+    let e = load(
+        &dir,
+        "",
+        &granted(
+            "[extension.commands]
+timeout-ms = 10001",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, ConfigError::ExtensionSettingAbove { most: 10_000, .. }),
+        "{e}"
+    );
+    assert!(
+        e.to_string()
+            .contains("commands timeout-ms must be at most 10000"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -333,6 +417,37 @@ fn a_capability_exists_and_is_granted_once() {
     let all = format!("grant = {CAPABILITIES:?}");
     assert!(load(&dir, "", &extension("x", 25590, "a.token", &all)).is_ok());
     assert_eq!(CAPABILITIES.len(), 12);
+}
+
+#[test]
+fn the_commands_of_an_extension_need_two_places_so_that_its_decisions_keep_one() {
+    let dir = folder("places");
+    let with = |grant: &str, places: u32| {
+        extension(
+            "x",
+            25590,
+            "a.token",
+            &format!(
+                "grant = [\"{grant}\"]
+max-in-flight = {places}"
+            ),
+        )
+    };
+    // One place: the commands would take it, and every decision would find none.
+    let e = load(&dir, "", &with("commands", 1)).unwrap_err();
+    assert!(matches!(e, ConfigError::CommandsNeedPlaces { .. }), "{e}");
+    assert!(
+        e.to_string().contains("max-in-flight must be at least 2"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("\"x\""), "{e}");
+    assert!(load(&dir, "", &with("commands", 2)).is_ok());
+    assert!(load(&dir, "", &with("commands", 64)).is_ok());
+    // Without the capability one place is as it was.
+    assert!(load(&dir, "", &with("decide.login", 1)).is_ok());
+    // Zero is still told as zero.
+    let e = load(&dir, "", &with("commands", 0)).unwrap_err();
+    assert!(matches!(e, ConfigError::ZeroExtensionSetting { .. }), "{e}");
 }
 
 #[test]

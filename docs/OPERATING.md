@@ -608,6 +608,21 @@ Not done: in-game commands to manage the groups, a permission for the backends' 
 proxy decides only what it answers), a group for a kind of login (verified or not), a rank that
 expires, and a link with the servers' own operator levels.
 
+**The commands of an extension.** An extension that you grant `commands` can have commands of its own
+([EXTENSIONS.md](EXTENSIONS.md) 4.3): the proxy takes them from the player and never passes them to a server.
+Each has the node `ext.<extension>.<command>` (the extension's name in `[[extension]]`, lower case), **open to
+everyone** like `/hub`; to close one, deny its node in `permissions.toml`
+(`[group.default] deny = ["ext.parties.party"]`). Two things to know before you grant it:
+
+- **An extension granted `commands` can take any word that is not a command of the proxy that is enabled in
+  `[commands]`, including a command of your servers** (`/msg`, `/tell`, `/login`, `/op`...): the proxy then
+  never passes it to a server, the extension is told what the player typed after it, and answers what it
+  likes. **The token of such an extension is an administrator's credential**; keep its file readable by the
+  proxy and the extension only. The proxy has no list of words it keeps from an extension.
+- **While the extension is down, its commands stay its own** (**provisional**: this may change): the player
+  who types one reads `That command did not answer.`, and the server does not see it. Before the first hello
+  after the proxy starts, the word is not known yet and goes to the server.
+
 ### 5.10 Waiting for a place when the network is full
 
 Off by default. Without it, a player who finds the proxy at `max-players`, or every lobby at its

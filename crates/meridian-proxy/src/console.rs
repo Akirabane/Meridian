@@ -987,6 +987,7 @@ mod tests {
             },
             decide_command: Default::default(),
             decide_server: Default::default(),
+            own_commands: Default::default(),
         };
         let with = |extensions| Config {
             extensions,

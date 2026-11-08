@@ -101,17 +101,37 @@ pub struct CommandSpec {
 /// The most characters of a command's name or alias.
 pub const MAX_COMMAND_WORD: usize = 32;
 
+/// The most commands a hello declares: the proxy reads no more, and the SDK panics at one more.
+pub const MAX_COMMANDS: usize = 64;
+
+/// The most aliases of one command.
+pub const MAX_COMMAND_ALIASES: usize = 8;
+
+/// The most characters of a command's `usage`.
+pub const MAX_COMMAND_USAGE: usize = 256;
+
 impl CommandSpec {
     /// Every word a player types for the command: its name, then its aliases.
     pub fn words(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.name.as_str()).chain(self.aliases.iter().map(String::as_str))
     }
 
-    /// Whether the declaration is one the proxy accepts: a name and aliases of 1 to [`MAX_COMMAND_WORD`]
-    /// characters among `a-z`, `0-9`, `-` and `_`, none given twice. The error says what is wrong and never
-    /// quotes a word (the proxy logs it, and the word is the extension's). Whether a word is also taken by
-    /// a command of the proxy or of another extension is for the proxy to say.
+    /// Whether the declaration is one the proxy accepts: a name and at most [`MAX_COMMAND_ALIASES`] aliases
+    /// of 1 to [`MAX_COMMAND_WORD`] characters among `a-z`, `0-9`, `-` and `_`, none given twice, and a
+    /// `usage` of at most [`MAX_COMMAND_USAGE`] characters. The error says what is wrong and never quotes a
+    /// word (the proxy logs it, and the word is the extension's). Whether a word is also taken by a command
+    /// of the proxy or of another extension is for the proxy to say.
     pub fn check(&self) -> Result<(), String> {
+        if self.aliases.len() > MAX_COMMAND_ALIASES {
+            return Err(format!(
+                "a command has at most {MAX_COMMAND_ALIASES} aliases"
+            ));
+        }
+        if self.usage.chars().count() > MAX_COMMAND_USAGE {
+            return Err(format!(
+                "the usage of a command is longer than {MAX_COMMAND_USAGE} characters"
+            ));
+        }
         let mut seen: Vec<&str> = Vec::new();
         for word in self.words() {
             let fine = !word.is_empty()
@@ -468,6 +488,30 @@ mod tests {
             // The word is the extension's: it is never quoted.
             assert!(!why.contains("Party") && !why.contains('\n'), "{why}");
         }
+    }
+
+    #[test]
+    fn a_command_has_at_most_eight_aliases_and_a_usage_of_at_most_256_characters() {
+        let aliases = |n: usize| -> Vec<String> { (0..n).map(|i| format!("a{i}")).collect() };
+        let with = |n: usize, usage: &str| CommandSpec {
+            name: "party".into(),
+            aliases: aliases(n),
+            usage: usage.into(),
+        };
+        assert_eq!(with(MAX_COMMAND_ALIASES, "").check(), Ok(()));
+        assert_eq!(
+            with(0, &"u".repeat(MAX_COMMAND_USAGE)).check(),
+            Ok(()),
+            "the longest usage"
+        );
+        let why = with(MAX_COMMAND_ALIASES + 1, "").check().unwrap_err();
+        assert!(why.contains("at most 8 aliases"), "{why}");
+        let why = with(0, &"PrivateUsage".repeat(30)).check().unwrap_err();
+        assert!(why.contains("256") && !why.contains("Private"), "{why}");
+        assert_eq!(
+            (MAX_COMMANDS, MAX_COMMAND_ALIASES, MAX_COMMAND_USAGE),
+            (64, 8, 256)
+        );
     }
 
     #[test]

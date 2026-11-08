@@ -56,6 +56,42 @@ fn nothing_written_leaves_the_old_commands_open_and_the_new_ones_closed() {
 }
 
 #[test]
+fn the_commands_of_an_extension_are_open_until_a_group_denies_them() {
+    assert_eq!(node::extension("Perms", "Party"), "ext.perms.party");
+    let open = node::extension("perms", "party");
+    assert!(Permissions::default().allows("Alex", ALEX, &open));
+    // What only looks like it is not one.
+    for closed in ["ext", "extra.perms.party", "extperms.party", "exts.a.b"] {
+        assert!(
+            !Permissions::default().allows("Alex", ALEX, closed),
+            "{closed}"
+        );
+    }
+    let p = parse(
+        r#"
+[group.default]
+deny = ["ext.perms.party"]
+[group.vip]
+allow = ["ext.perms.party"]
+[[player]]
+name = "Alex"
+groups = ["vip"]
+"#,
+    );
+    assert!(!p.allows("Anyone", STEVE, &open), "closed to everyone");
+    assert!(p.allows("Alex", ALEX, &open), "a group of theirs gives it");
+    assert!(
+        p.allows("Anyone", STEVE, "ext.perms.other"),
+        "another stays open"
+    );
+    let none = parse("[group.default]\ndeny = [\"ext.*\"]\n");
+    assert!(
+        !none.allows("Alex", ALEX, &open),
+        "a pattern closes them all"
+    );
+}
+
+#[test]
 fn a_player_has_the_nodes_of_their_groups() {
     let p = parse(
         r#"

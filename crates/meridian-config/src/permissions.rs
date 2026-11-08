@@ -56,19 +56,35 @@ pub mod node {
     /// `/play`.
     pub const PLAY: &str = "meridian.play";
 
+    /// What every node of a command of an extension begins with.
+    pub const EXTENSION: &str = "ext";
+
     /// The node for going to the server `name` with `/server <name>`.
     pub fn server(name: &str) -> String {
         format!("{SERVER}.{}", name.to_ascii_lowercase())
+    }
+
+    /// The node of the command `command` of the extension `extension`: `ext.<extension>.<command>`.
+    pub fn extension(extension: &str, command: &str) -> String {
+        format!(
+            "{EXTENSION}.{}.{}",
+            extension.to_ascii_lowercase(),
+            command.to_ascii_lowercase()
+        )
     }
 }
 
 /// Whether `node`, that no group says anything about, is allowed all the same. The
 /// commands of the proxy that were for everyone before permissions existed stay so, until
-/// a group denies them.
+/// a group denies them. So are the commands of an extension (`ext.<extension>.<command>`): the
+/// extension can refuse when it runs one, and an operator who wants one closed denies its node.
 fn open_by_default(node: &str) -> bool {
     matches!(node, node::SERVER | node::HUB | node::PLAY)
         || node
             .strip_prefix(node::SERVER)
+            .is_some_and(|rest| rest.starts_with('.'))
+        || node
+            .strip_prefix(node::EXTENSION)
             .is_some_and(|rest| rest.starts_with('.'))
 }
 

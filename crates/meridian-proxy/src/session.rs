@@ -846,14 +846,25 @@ fn commands_hook(
     // The extension that decides the permission of a command, if there is one, is asked with the
     // configuration in force when the command is typed. What it keeps of the answers belongs to this
     // session; the session holds the registry, and the registry holds nothing of the session.
-    let permit = {
+    let current = {
         let (live, login) = (sessions.live.get().cloned(), Arc::clone(&config));
-        Arc::new(crate::extension::command::Gate::new(
+        move || match &live {
+            Some(live) => Arc::clone(&live.read().unwrap_or_else(|e| e.into_inner())),
+            None => Arc::clone(&login),
+        }
+    };
+    let permit = Arc::new(crate::extension::command::Gate::new(
+        Arc::clone(&sessions.extensions),
+        current.clone(),
+    ));
+    // The commands an extension declared are the same player's: one runs at a time, and its lines are told
+    // through the session's handle when they come.
+    let own = {
+        let handle = handle.clone();
+        Arc::new(crate::extension::own::Own::new(
             Arc::clone(&sessions.extensions),
-            move || match &live {
-                Some(live) => Arc::clone(&live.read().unwrap_or_else(|e| e.into_inner())),
-                None => Arc::clone(&login),
-            },
+            current,
+            move |line: &str| handle.tell(line),
         ))
     };
     let typist = {
@@ -937,7 +948,15 @@ fn commands_hook(
             }
         }
     };
-    commands::hook_with(config, typist, mover, placer, staff, Some(permit))
+    commands::hook_with(
+        config,
+        typist,
+        mover,
+        placer,
+        staff,
+        Some(permit),
+        Some(own),
+    )
 }
 
 /// What a player is told when none of the backends tried answers.

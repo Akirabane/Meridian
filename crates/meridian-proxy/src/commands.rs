@@ -81,12 +81,16 @@ pub fn hook(
     placer: impl Fn(Role, &Typist) -> String + Send + Sync + 'static,
     staff: impl Fn(&Typist, Answer) -> String + Send + Sync + 'static,
 ) -> Arc<CommandHook> {
-    hook_with(config, typist, mover, placer, staff, None)
+    hook_with(config, typist, mover, placer, staff, None, None)
 }
 
 /// [`hook`], where the extension that holds `decide.command`, if there is one (`permit`), says which
 /// nodes of permission the player has. It is asked only for a command the proxy answers, once for all the
 /// nodes the command checks (`nodes_of`); every other command goes to the server as before.
+///
+/// A command that an extension declared (`own`) is taken before the proxy's own are looked at: no word of an
+/// extension is one of an enabled command of the proxy, so the order cannot change which answers. It is
+/// answered at once if the player may not use it, and otherwise taken (`TAKEN`) and answered later.
 pub fn hook_with(
     config: Arc<Config>,
     typist: impl Fn() -> Typist + Send + Sync + 'static,
@@ -94,9 +98,15 @@ pub fn hook_with(
     placer: impl Fn(Role, &Typist) -> String + Send + Sync + 'static,
     staff: impl Fn(&Typist, Answer) -> String + Send + Sync + 'static,
     permit: Option<Arc<crate::extension::command::Gate>>,
+    own: Option<Arc<crate::extension::own::Own>>,
 ) -> Arc<CommandHook> {
     Arc::new(move |command: &str| {
         let typist = typist();
+        if let Some(own) = &own
+            && let Some(reply) = own.take(&typist, command, permit.as_deref())
+        {
+            return Some(reply);
+        }
         let decided = match &permit {
             Some(gate) => {
                 let nodes = nodes_of(&config, &typist, command);

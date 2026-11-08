@@ -300,13 +300,24 @@ fn info_from(settings: &super::link::Settings, answer: HelloAnswer) -> Info {
             refused.push(capability);
         }
     }
+    if answer.commands.len() > wire::MAX_COMMANDS {
+        crate::log::warning!(
+            "extension \"{}\": declares more than {} commands; the rest are ignored",
+            settings.name,
+            wire::MAX_COMMANDS
+        );
+    }
     Info {
         protocol: answer.protocol,
         name: text::clean(&answer.name, 64),
         version: text::clean(&answer.version, 64),
         granted,
         refused,
-        commands: answer.commands.into_iter().take(64).collect(),
+        commands: answer
+            .commands
+            .into_iter()
+            .take(wire::MAX_COMMANDS)
+            .collect(),
     }
 }
 

@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
@@ -173,6 +173,19 @@ pub(super) struct State {
     next_id: u64,
     waiting: HashMap<u64, mpsc::Sender<Reply>>,
     pub info: Option<Info>,
+    /// The commands of its own the extension declared in its latest hello, **kept when the connection
+    /// ends**: a command that an extension that is down declared is still the extension's, and a player who
+    /// types it reads that it did not answer (docs/EXTENSIONS.md, 4.3). Only a hello changes it.
+    pub declared: Vec<CommandSpec>,
+}
+
+/// One of the extension's own commands is running; the place is free again when this goes.
+pub(crate) struct RunPlace(Arc<Link>);
+
+impl Drop for RunPlace {
+    fn drop(&mut self) {
+        self.0.runs.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// One extension, as the proxy sees it.
@@ -189,6 +202,8 @@ pub struct Link {
     /// would answer after it (a restarted extension may have new rights to give), so what is kept of its
     /// answers is dropped when this changes.
     epoch: AtomicU64,
+    /// How many of the extension's own commands are running (`run_place`).
+    runs: AtomicUsize,
 }
 
 impl Link {
@@ -203,6 +218,7 @@ impl Link {
             stop: AtomicBool::new(false),
             last_wait_ms: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            runs: AtomicUsize::new(0),
         })
     }
 
@@ -222,6 +238,34 @@ impl Link {
     /// What the extension declared in the hello of the connection that is up.
     pub fn info(&self) -> Option<Info> {
         self.lock().info.clone()
+    }
+
+    /// The commands it declared in its latest hello, whether it is connected now or not (see the field).
+    pub fn declared(&self) -> Vec<CommandSpec> {
+        self.lock().declared.clone()
+    }
+
+    /// A place for one of the extension's own commands to run, or `None` when half of `max-in-flight` are
+    /// running already. The commands share the extension's places with its decisions; without this a number
+    /// of players equal to `max-in-flight` typing a slow command would leave a login or a permission no
+    /// place, and it would take its on-error policy. The place is given back when it is dropped.
+    pub(crate) fn run_place(self: &Arc<Self>) -> Option<RunPlace> {
+        let most = (self.settings.max_in_flight / 2).max(1);
+        let mut running = self.runs.load(Ordering::SeqCst);
+        loop {
+            if running >= most {
+                return None;
+            }
+            match self.runs.compare_exchange_weak(
+                running,
+                running + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Some(RunPlace(Arc::clone(self))),
+                Err(now) => running = now,
+            }
+        }
     }
 
     /// How many hellos the extension has been through (see the field).
@@ -281,6 +325,12 @@ impl Link {
             let mut state = self.lock();
             state.writer = Some(writer);
             state.outbox = Some(outbox);
+            // Only an extension that asked for `commands` and is granted it has commands.
+            state.declared = if info.granted.iter().any(|c| c == meridian_config::COMMANDS) {
+                info.commands.clone()
+            } else {
+                Vec::new()
+            };
             state.info = Some(info);
         }
         self.epoch.fetch_add(1, Ordering::Relaxed);
@@ -361,6 +411,23 @@ impl Link {
         timeout: Duration,
         parse: impl FnOnce(&Value) -> Result<T, String>,
     ) -> Result<T, CallError> {
+        self.call_counting(method, params, timeout, parse, true)
+    }
+
+    /// [`Link::call`], where `counts` says whether the call counts for the breaker. A command of the
+    /// extension's own does not, **for it or against it**: one command that is slow must not make every login
+    /// and every permission take its on-error policy, and one that answers must not hide that the logins do
+    /// not (an extension whose logins time out and whose commands answer would never open its breaker if an
+    /// answer reset the count of failures in a row). The call is only refused while the breaker is open, and
+    /// it is never the trial of one: the next decision is.
+    pub fn call_counting<T>(
+        &self,
+        method: &'static str,
+        params: Option<&Value>,
+        timeout: Duration,
+        parse: impl FnOnce(&Value) -> Result<T, String>,
+        counts: bool,
+    ) -> Result<T, CallError> {
         // A place, and an id.
         let (id, writer, outbox, replies) = {
             let mut state = self.lock();
@@ -384,14 +451,23 @@ impl Link {
             self.lock().waiting.remove(&id);
         };
         // The breaker.
-        let trial = match self.breaker().permit(Instant::now()) {
-            Permit::Go => false,
-            Permit::Trial => true,
-            Permit::Refuse => {
-                forget(id);
-                self.end(method, Outcome::Breaker, None);
-                return Err(CallError::BreakerOpen);
+        let trial = if counts {
+            match self.breaker().permit(Instant::now()) {
+                Permit::Go => false,
+                Permit::Trial => true,
+                Permit::Refuse => {
+                    forget(id);
+                    self.end(method, Outcome::Breaker, None);
+                    return Err(CallError::BreakerOpen);
+                }
             }
+        } else if self.breaker().is_open() {
+            // Looked at, not asked: a call that counts for nothing is never the trial.
+            forget(id);
+            self.end(method, Outcome::Breaker, None);
+            return Err(CallError::BreakerOpen);
+        } else {
+            false
         };
         // The request, and the wait for its answer.
         let started = Instant::now();
@@ -404,8 +480,10 @@ impl Link {
         if outbox.try_send(request).is_err() {
             forget(id);
             self.end(method, Outcome::Disconnected, None);
-            let change = self.breaker().failure(Instant::now(), trial);
-            self.breaker_changed(change);
+            if counts {
+                let change = self.breaker().failure(Instant::now(), trial);
+                self.breaker_changed(change);
+            }
             let _ = writer.shutdown();
             return Err(CallError::Disconnected);
         }
@@ -437,11 +515,13 @@ impl Link {
             }
         };
         self.end(method, outcome, Some(took));
-        let change = match outcome {
-            Outcome::Answered => self.breaker().success(trial),
-            _ => self.breaker().failure(Instant::now(), trial),
-        };
-        self.breaker_changed(change);
+        if counts {
+            let change = match outcome {
+                Outcome::Answered => self.breaker().success(trial),
+                _ => self.breaker().failure(Instant::now(), trial),
+            };
+            self.breaker_changed(change);
+        }
         result
     }
 }

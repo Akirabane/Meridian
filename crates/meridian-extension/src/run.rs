@@ -43,15 +43,18 @@ pub struct RunParams {
 
 /// What a command says to the player who typed it: at most [`MAX_LINES`] lines of at most
 /// [`MAX_LINE_CHARS`] characters, plain text. The proxy shows each as a literal, never as a JSON text
-/// component, so an extension cannot put a click event in a player's chat. [`Lines::new`] makes lines that
-/// pass the proxy's check ([`check_line`]).
+/// component, so an extension cannot put a click event in a player's chat, and a line holds **no formatting
+/// code** (`§`) and no character that changes how the text reads or hides in it (see [`is_refused`]), so
+/// that it cannot be coloured, made to flicker or made to look like a line of the proxy or of a player.
+/// [`Lines::new`] makes lines that pass the proxy's check ([`check_line`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lines(Vec<String>);
 
 impl Lines {
-    /// These lines, made valid: a control character is dropped from a line (a line break ends nothing: give
-    /// another line), a line is cut to [`MAX_LINE_CHARS`] characters, and the lines past [`MAX_LINES`] are
-    /// left out. What the extension means is kept; what the proxy would refuse is not.
+    /// These lines, made valid: the characters the proxy refuses ([`is_refused`]: control characters, `§` and
+    /// the marks that change the direction of the text or are invisible) are dropped from a line (a line
+    /// break ends nothing: give another line), a line is cut to [`MAX_LINE_CHARS`] characters, and the lines
+    /// past [`MAX_LINES`] are left out. What the extension means is kept; what the proxy would refuse is not.
     pub fn new<I, S>(lines: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -64,7 +67,7 @@ impl Lines {
                 .map(|line| {
                     line.as_ref()
                         .chars()
-                        .filter(|c| !c.is_control())
+                        .filter(|c| !is_refused(*c))
                         .take(MAX_LINE_CHARS)
                         .collect()
                 })
@@ -87,14 +90,47 @@ impl Lines {
     }
 }
 
+/// Whether a character may not be in a line: a control character; `§`, which the client reads as a
+/// formatting code (colour, bold, flicker) in any text; the marks that set or change the direction of the
+/// text (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069, U+206A to U+206F) and the separators of
+/// lines and paragraphs (U+2028, U+2029), which could make a line read differently than it is; and the
+/// characters that show nothing or change nothing a reader sees, which hide text or stand in for a space:
+/// the soft hyphen (U+00AD), the combining grapheme joiner (U+034F), the Hangul fillers (U+115F, U+1160,
+/// U+3164, U+FFA0), the characters of no width (U+200B to U+200D, U+2060 to U+2064, U+FEFF), the variation
+/// selectors (U+FE00 to U+FE0F), the interlinear annotation marks (U+FFF9 to U+FFFB) and the tag characters
+/// (U+E0000 to U+E007F). **This is a prudent default**: an extension that is meant to colour its lines, or
+/// to write an emoji that a variation selector turns into its picture, would need a field of its own, added
+/// later, that the operator allows.
+pub fn is_refused(c: char) -> bool {
+    c.is_control()
+        || c == '\u{a7}'
+        || matches!(
+            c,
+            '\u{ad}'
+                | '\u{34f}'
+                | '\u{61c}'
+                | '\u{115f}'
+                | '\u{1160}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{e0000}'..='\u{e007f}'
+        )
+}
+
 /// Whether `text` is a valid line, as the proxy checks the ones an extension sent. The error says what is
 /// wrong in a few words and never quotes the text.
 pub fn check_line(text: &str) -> Result<(), String> {
     if text.chars().count() > MAX_LINE_CHARS {
         return Err(format!("a line is longer than {MAX_LINE_CHARS} characters"));
     }
-    if text.chars().any(char::is_control) {
-        return Err("a line holds a control character".into());
+    if text.chars().any(is_refused) {
+        return Err("a line holds a control, formatting or invisible character".into());
     }
     Ok(())
 }
@@ -214,6 +250,77 @@ mod tests {
         }
         assert_eq!(Lines::new(&many).as_slice().len(), MAX_LINES);
         assert_eq!(Lines::new(&many).as_slice()[MAX_LINES - 1], "line 9");
+    }
+
+    /// A formatting code, a mark that changes the direction of the text and a character of no width are
+    /// not shown to the player: they are dropped from what is made, and refused in what is read.
+    #[test]
+    fn no_formatting_code_and_no_hidden_or_reversing_character_reaches_the_player() {
+        let made = Lines::new([
+            "\u{a7}4Server\u{a7}r says \u{a7}kxx",
+            "x\u{202e}evil\u{2066}y\u{200f}z",
+            "a\u{200b}b\u{200c}c\u{200d}d\u{2060}e\u{feff}f\u{2028}g\u{2029}h",
+            "a\u{ad}b\u{34f}c\u{61c}d\u{115f}e\u{1160}f\u{3164}g\u{ffa0}h",
+            "a\u{206a}b\u{206f}c\u{fe0f}d\u{fe00}e\u{fff9}f\u{fffb}g\u{e0041}h\u{e007f}i",
+            "caf\u{e9} \u{2014} \u{65e5}\u{672c}",
+        ]);
+        assert_eq!(
+            made.as_slice(),
+            [
+                "4Serverr says kxx",
+                "xevilyz",
+                "abcdefgh",
+                "abcdefgh",
+                "abcdefghi",
+                "caf\u{e9} \u{2014} \u{65e5}\u{672c}"
+            ]
+        );
+        for line in made.as_slice() {
+            check_line(line).unwrap();
+        }
+        for bad in [
+            "\u{a7}c red",
+            "x\u{202e}y",
+            "x\u{2066}y",
+            "x\u{200e}y",
+            "x\u{200b}y",
+            "x\u{2060}y",
+            "x\u{feff}y",
+            "x\u{2028}y",
+            "x\u{85}y",
+            "x\u{ad}y",
+            "x\u{34f}y",
+            "x\u{61c}y",
+            "x\u{115f}y",
+            "x\u{1160}y",
+            "x\u{3164}y",
+            "x\u{ffa0}y",
+            "x\u{206a}y",
+            "x\u{206f}y",
+            "x\u{fe0f}y",
+            "x\u{fe00}y",
+            "x\u{fff9}y",
+            "x\u{fffb}y",
+            "x\u{e0041}y",
+            "x\u{e0000}y",
+            "x\u{e007f}y",
+            "x\u{7f}y",
+        ] {
+            assert!(check_line(bad).is_err(), "{bad:?} was shown");
+            assert!(
+                !parse_run_answer(&json!({ "lines": [bad] })).is_ok(),
+                "{bad:?}"
+            );
+        }
+        // Text of other scripts and the usual marks of writing pass.
+        for good in [
+            "caf\u{e9}",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "\u{2014} \u{2026} \u{201c}ok\u{201d}",
+            "100%",
+        ] {
+            assert!(check_line(good).is_ok(), "{good:?}");
+        }
     }
 
     #[test]
