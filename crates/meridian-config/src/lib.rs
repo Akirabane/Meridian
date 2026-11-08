@@ -26,8 +26,8 @@ pub use error::ConfigError;
 pub use extension::{
     ADDRESSES, CAPABILITIES, COMMANDS, CommandDecision, DECIDE_COMMAND, DECIDE_LOGIN,
     DECIDE_SERVER, Extension, LoginDecision, MAX_EXTENSION_NAME, MIN_EXTENSION_TOKEN,
-    ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE, ORDERS_READ, OnError, Orders, OwnCommands,
-    ServerDecision, ServerOnError, opens_orders,
+    ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE, ORDERS_OPERATE, ORDERS_READ, OnError, Orders,
+    OwnCommands, ServerDecision, ServerOnError, opens_orders,
 };
 pub use fallback::Fallback;
 pub use favicon::{FAVICON_SIDE, Favicon, MAX_FAVICON_BYTES};

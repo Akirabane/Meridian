@@ -21,8 +21,8 @@
 //! [`OrderError::retry_later`]).
 
 use crate::orders::{
-    self, Ack, Found, Kicked, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList,
-    Started, Told,
+    self, Ack, Drained, Found, Kicked, PlayerInfo, PlayersPage, QueueState, ServerInfo,
+    ServersList, Started, Told, Undrained,
 };
 use crate::wire::{self, RpcError, code};
 use meridian_websocket::Writer;
@@ -495,6 +495,50 @@ impl Proxy {
             .map_err(OrderError::Invalid)?;
         let kicked: Kicked = self.0.read(orders::PLAYERS_KICK, Some(&params))?;
         Ok(kicked.kicked)
+    }
+
+    /// Stops offering the server `server` to new players, as the proxy's console `drain` does: the proxy tells whether it was
+    /// drained **now** (`false`: it was drained already) and, with `move_players`, how many players it **started** to send to other
+    /// servers of its role (one at a time, on a thread of its own: the answer comes when the moves start). Needs `orders.operate`,
+    /// which the extension asks for with [`Extension::wants`](super::Extension::wants) and the operator grants: **it lets the
+    /// extension take servers out of rotation and reload the proxy's configuration**.
+    ///
+    /// A server with no role is a refusal (`-32602`: there is nothing to drain). A drain that moves players costs the proxy's budget the
+    /// number of players it sends, at most its burst, charged all at once, and takes the extension's place for a send (one lot at a
+    /// time): a drain that cannot be paid drains nothing. Draining twice is harmless.
+    pub fn drain(&self, server: &str, move_players: bool) -> Result<Drained, OrderError> {
+        let params = orders::DrainParams {
+            server: server.to_owned(),
+            move_players: move_players.then_some(true),
+        };
+        orders::parse_drain(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        self.0.read(orders::SERVERS_DRAIN, Some(&params))
+    }
+
+    /// Offers the drained server `server` to new players again: `true` when it was drained and is offered now, `false` when it was
+    /// not drained (not an error). Needs `orders.operate`.
+    pub fn undrain(&self, server: &str) -> Result<bool, OrderError> {
+        let params = orders::UndrainParams {
+            server: server.to_owned(),
+        };
+        orders::parse_undrain(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        let undrained: Undrained = self.0.read(orders::SERVERS_UNDRAIN, Some(&params))?;
+        Ok(undrained.undrained)
+    }
+
+    /// Asks the proxy to read its configuration file again and put it in force, as its console's `reload` does. **`Ok(())` means
+    /// that the proxy took the order, not that the reload worked**: the proxy answers first and applies after (a reload can change
+    /// this extension's own entry and close the connection the answer would go on), and what it did is in its log. One reload at a
+    /// time for an extension: while one runs another is refused (`-32002`, [`OrderError::retry_later`]). Needs `orders.operate`.
+    pub fn reload(&self) -> Result<(), OrderError> {
+        let ack: Ack = self.0.read(orders::RELOAD, None::<&Value>)?;
+        if ack.ok {
+            Ok(())
+        } else {
+            Err(OrderError::BadAnswer("expected {\"ok\": true}".into()))
+        }
     }
 
     fn send(&self, params: orders::SendParams) -> Result<usize, OrderError> {

@@ -9,7 +9,7 @@
 //! on-error policy.
 
 use super::breaker::{Breaker, Change, Permit};
-use super::orders::{Actions, Budget, Facts, Services};
+use super::orders::{Actions, Budget, Facts, Operate, Services};
 use super::stats::{Outcome, Stats};
 use meridian_extension::wire::{self, CommandSpec, Id, RpcError};
 use meridian_websocket::Writer;
@@ -205,18 +205,24 @@ impl Drop for RunPlace {
     }
 }
 
-/// A send of players is running for the extension: held by the thread that moves them, and let go when it ends, **however it
-/// ends** (a panic included). The extension has one at a time.
-pub struct SendLot(Arc<AtomicBool>);
+/// A place of which the extension has one at a time, held by a thread and let go when it ends, **however it ends** (a panic
+/// included): a send of players, or a reload.
+pub struct Lot(Arc<AtomicBool>);
 
-impl Drop for SendLot {
+/// The extension's place for a send of players.
+pub type SendLot = Lot;
+
+/// The extension's place for a reload of the configuration.
+pub type ReloadLot = Lot;
+
+impl Drop for Lot {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
 }
 
 #[cfg(test)]
-impl SendLot {
+impl Lot {
     /// A lot that no link holds, for the tests of what a plan does with it.
     pub(crate) fn free() -> Self {
         Self(Arc::new(AtomicBool::new(true)))
@@ -304,6 +310,8 @@ pub struct Link {
     orders_running: AtomicUsize,
     /// Whether a send of players is running: held by the thread that moves them.
     sending: Arc<AtomicBool>,
+    /// Whether a reload that the extension asked for is running.
+    reloading: Arc<AtomicBool>,
     /// How many threads of its orders are alive, whether they run or wait to write (`order_thread`).
     order_threads: AtomicUsize,
     /// What is left of its budget of orders.
@@ -331,6 +339,7 @@ impl Link {
             runs: AtomicUsize::new(0),
             orders_running: AtomicUsize::new(0),
             sending: Arc::new(AtomicBool::new(false)),
+            reloading: Arc::new(AtomicBool::new(false)),
             order_threads: AtomicUsize::new(0),
             budget: Mutex::new(budget),
             kicks: Mutex::new(Vec::new()),
@@ -388,7 +397,20 @@ impl Link {
         self.sending
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
-            .then(|| SendLot(Arc::clone(&self.sending)))
+            .then(|| Lot(Arc::clone(&self.sending)))
+    }
+
+    /// The place for a reload, or `None` while one that the extension asked for is running.
+    pub(super) fn reload_lot(&self) -> Option<ReloadLot> {
+        self.reloading
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            .then(|| Lot(Arc::clone(&self.reloading)))
+    }
+
+    /// What the orders that operate the network use, if the proxy has given it.
+    pub(super) fn operate(&self) -> Option<Arc<dyn Operate>> {
+        self.services.operate()
     }
 
     /// A place among the kicks of the last minute, taken **before** the player is looked for so that two orders at once cannot

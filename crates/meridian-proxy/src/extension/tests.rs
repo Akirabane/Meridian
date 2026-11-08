@@ -1872,6 +1872,14 @@ mod the_orders {
         );
         assert_eq!(methods(&["orders.move"]), ["meridian:players/send"]);
         assert_eq!(methods(&["orders.moderate"]), ["meridian:players/kick"]);
+        assert_eq!(
+            methods(&["orders.operate"]),
+            [
+                "meridian:servers/drain",
+                "meridian:servers/undrain",
+                "meridian:reload"
+            ]
+        );
         assert!(methods(&["decide.login", "events"]).is_empty());
     }
 
@@ -3336,5 +3344,572 @@ mod the_orders {
             r#"{"to":"east","all":true}"#,
         );
         assert_eq!(started_of(&answer(&fake, &json!(8701))), 5);
+    }
+
+    // ---- the orders that operate ----------------------------------------------------------------------
+
+    use crate::extension::orders::Operate;
+    use meridian_extension::orders::{Drained, Undrained};
+
+    /// An `Operate` that is made up: `nowhere` has no role, `lobby` and `east` have; `on` players are on any server with a role;
+    /// a drain, an undrain, an evacuation and a reload are recorded. `reload` waits while `hold_reload` is set, to keep a reload
+    /// running.
+    struct Operating {
+        on: usize,
+        drained: StdMutex<Vec<String>>,
+        evacuated: StdMutex<Vec<String>>,
+        hold_lots: AtomicBool,
+        lots: StdMutex<Vec<SendLot>>,
+        hold_reload: AtomicBool,
+        reloads_begun: AtomicUsize,
+        reloads_done: AtomicUsize,
+    }
+
+    impl Operating {
+        fn new(on: usize) -> Arc<Self> {
+            Arc::new(Self {
+                on,
+                drained: StdMutex::new(Vec::new()),
+                evacuated: StdMutex::new(Vec::new()),
+                hold_lots: AtomicBool::new(false),
+                lots: StdMutex::new(Vec::new()),
+                hold_reload: AtomicBool::new(false),
+                reloads_begun: AtomicUsize::new(0),
+                reloads_done: AtomicUsize::new(0),
+            })
+        }
+
+        fn drained(&self) -> Vec<String> {
+            self.drained.lock().unwrap().clone()
+        }
+    }
+
+    struct Evacuation {
+        count: usize,
+        server: String,
+        log: Arc<Operating>,
+    }
+
+    impl MovePlan for Evacuation {
+        fn count(&self) -> usize {
+            self.count
+        }
+
+        fn start(self: Box<Self>, _paid: Paid, lot: SendLot) -> Result<usize, Refusal> {
+            // `stuck` is a server whose moves cannot be started: the lot is dropped with the plan.
+            if self.server == "stuck" {
+                return Err(Refusal::CannotStart);
+            }
+            self.log.evacuated.lock().unwrap().push(self.server.clone());
+            if self.log.hold_lots.load(Ordering::SeqCst) {
+                self.log.lots.lock().unwrap().push(lot);
+            }
+            Ok(self.count)
+        }
+    }
+
+    struct OperatingArc(Arc<Operating>);
+
+    impl std::ops::Deref for OperatingArc {
+        type Target = Operating;
+        fn deref(&self) -> &Operating {
+            &self.0
+        }
+    }
+
+    impl Operate for OperatingArc {
+        fn players_on(&self, server: &str) -> Result<usize, Refusal> {
+            if server == "nowhere" {
+                Err(Refusal::NoRole)
+            } else {
+                Ok(self.on)
+            }
+        }
+
+        fn drain(&self, server: &str) -> Result<bool, Refusal> {
+            if server == "nowhere" {
+                return Err(Refusal::NoRole);
+            }
+            let mut drained = self.drained.lock().unwrap();
+            if drained.iter().any(|d| d == server) {
+                return Ok(false);
+            }
+            drained.push(server.to_owned());
+            Ok(true)
+        }
+
+        fn undrain(&self, server: &str) -> Result<bool, Refusal> {
+            if server == "restarting" {
+                return Err(Refusal::Restarting);
+            }
+            let mut drained = self.drained.lock().unwrap();
+            let before = drained.len();
+            drained.retain(|d| d != server);
+            Ok(drained.len() != before)
+        }
+
+        fn plan_evacuation(&self, server: &str) -> Box<dyn MovePlan> {
+            Box::new(Evacuation {
+                count: self.on,
+                server: server.to_owned(),
+                log: Arc::clone(&self.0),
+            })
+        }
+
+        fn reload(&self) {
+            self.reloads_begun.fetch_add(1, Ordering::SeqCst);
+            let limit = Instant::now() + Duration::from_secs(20);
+            while self.hold_reload.load(Ordering::SeqCst) && Instant::now() < limit {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            self.reloads_done.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// `orderly`, with the operations of `operating` served.
+    fn operating_with(
+        grant: &[&str],
+        operating: &Arc<Operating>,
+        change: impl FnOnce(&mut Settings),
+    ) -> (Fake, Registry, Arc<Link>, Folder) {
+        let (fake, registry, link, folder) = orderly(grant, change);
+        registry.serve_operate(Arc::new(OperatingArc(Arc::clone(operating))) as Arc<dyn Operate>);
+        (fake, registry, link, folder)
+    }
+
+    fn drained_of(reply: &Value) -> Drained {
+        serde_json::from_value(reply["result"].clone()).unwrap_or_else(|e| panic!("{e}: {reply}"))
+    }
+
+    #[test]
+    fn the_orders_that_operate_need_orders_operate_and_are_refused_as_if_they_did_not_exist_without_it()
+     {
+        let operating = Operating::new(5);
+        // The other powers over the network are granted, this one is not.
+        let (fake, _registry, link, _folder) =
+            operating_with(&["orders.move", "orders.moderate"], &operating, |_| {});
+        order(
+            &fake,
+            &json!(10_000),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        order(
+            &fake,
+            &json!(10_001),
+            shapes::SERVERS_UNDRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        order(&fake, &json!(10_002), shapes::RELOAD, "{}");
+        for id in [10_000, 10_001, 10_002] {
+            assert_eq!(code_of(&answer(&fake, &json!(id))), -32601);
+        }
+        assert!(operating.drained().is_empty());
+        assert_eq!(operating.reloads_begun.load(Ordering::SeqCst), 0);
+        assert_eq!(link.stats().orders(shapes::RELOAD, Ended::Refused), 1);
+    }
+
+    #[test]
+    fn a_server_is_drained_and_offered_again_and_each_answer_says_whether_it_changed() {
+        let operating = Operating::new(5);
+        let (fake, _registry, _link, _folder) =
+            operating_with(&["orders.operate"], &operating, |_| {});
+        order(
+            &fake,
+            &json!(10_100),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        assert_eq!(
+            drained_of(&answer(&fake, &json!(10_100))),
+            Drained {
+                drained: true,
+                moving: 0
+            }
+        );
+        // Again: it was drained already.
+        order(
+            &fake,
+            &json!(10_101),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        assert_eq!(
+            drained_of(&answer(&fake, &json!(10_101))),
+            Drained {
+                drained: false,
+                moving: 0
+            }
+        );
+        assert!(
+            operating.evacuated.lock().unwrap().is_empty(),
+            "no `move`: nobody was sent"
+        );
+        order(
+            &fake,
+            &json!(10_102),
+            shapes::SERVERS_UNDRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        let undrained: Undrained =
+            serde_json::from_value(answer(&fake, &json!(10_102))["result"].clone()).unwrap();
+        assert!(undrained.undrained);
+        // Not drained: `false`, not an error.
+        order(
+            &fake,
+            &json!(10_103),
+            shapes::SERVERS_UNDRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        let undrained: Undrained =
+            serde_json::from_value(answer(&fake, &json!(10_103))["result"].clone()).unwrap();
+        assert!(!undrained.undrained);
+        assert!(operating.drained().is_empty());
+    }
+
+    #[test]
+    fn a_drain_with_move_sends_the_players_away_and_costs_the_players_it_moves_up_to_the_burst() {
+        let operating = Operating::new(500);
+        let (fake, _registry, _link, _folder) =
+            operating_with(&["orders.operate"], &operating, |settings| {
+                settings.order_burst = 4;
+                settings.order_rate = 1;
+            });
+        order(
+            &fake,
+            &json!(10_200),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby","move":true}"#,
+        );
+        assert_eq!(
+            drained_of(&answer(&fake, &json!(10_200))),
+            Drained {
+                drained: true,
+                moving: 500
+            }
+        );
+        assert_eq!(*operating.evacuated.lock().unwrap(), ["lobby"]);
+        // It took the whole burst: the next order, at once, is over the budget.
+        order(
+            &fake,
+            &json!(10_201),
+            shapes::SERVERS_UNDRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(10_201))), -32001);
+    }
+
+    /// A drain whose evacuation the budget cannot pay does not drain: the server is not left drained with its players on it.
+    #[test]
+    fn a_drain_with_move_that_the_budget_cannot_pay_drains_nothing() {
+        let operating = Operating::new(5);
+        let (fake, _registry, link, _folder) =
+            operating_with(&["orders.operate"], &operating, |settings| {
+                settings.order_burst = 3;
+                settings.order_rate = 1;
+            });
+        // Two undrains: two tokens of three. A drain that sends five players needs the three of the burst.
+        for n in 0..2 {
+            order(
+                &fake,
+                &json!(10_300 + n),
+                shapes::SERVERS_UNDRAIN,
+                r#"{"server":"east"}"#,
+            );
+            let _ = answer(&fake, &json!(10_300 + n));
+        }
+        order(
+            &fake,
+            &json!(10_310),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby","move":true}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(10_310))), -32001);
+        assert!(
+            operating.drained().is_empty(),
+            "the server was drained although the budget could not pay"
+        );
+        assert!(operating.evacuated.lock().unwrap().is_empty());
+        assert_eq!(
+            link.stats()
+                .orders(shapes::SERVERS_DRAIN, Ended::OverBudget),
+            1
+        );
+    }
+
+    #[test]
+    fn a_server_with_no_role_is_refused_in_fixed_words_and_a_second_evacuation_waits_for_the_first()
+    {
+        let operating = Operating::new(5);
+        let (fake, _registry, link, _folder) =
+            operating_with(&["orders.operate"], &operating, |_| {});
+        let secret = "server-name-that-must-not-come-back";
+        order(
+            &fake,
+            &json!(10_400),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"nowhere","move":true}"#,
+        );
+        let reply = answer(&fake, &json!(10_400));
+        assert_eq!(code_of(&reply), -32602);
+        assert_eq!(
+            reply["error"]["message"],
+            "\"server\" is not a server with a role"
+        );
+        order(
+            &fake,
+            &json!(10_401),
+            shapes::SERVERS_DRAIN,
+            &format!("{{\"server\":\"{secret}\\n\"}}"),
+        );
+        let reply = answer(&fake, &json!(10_401));
+        assert_eq!(code_of(&reply), -32602);
+        assert!(!reply.to_string().contains(secret), "{reply}");
+        // One lot of moves at a time, as for `players/send`.
+        operating.hold_lots.store(true, Ordering::SeqCst);
+        order(
+            &fake,
+            &json!(10_410),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby","move":true}"#,
+        );
+        assert_eq!(drained_of(&answer(&fake, &json!(10_410))).moving, 5);
+        order(
+            &fake,
+            &json!(10_411),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"east","move":true}"#,
+        );
+        let busy = answer(&fake, &json!(10_411));
+        assert_eq!(code_of(&busy), -32002);
+        assert_eq!(busy["error"]["message"], "a send is already running");
+        assert_eq!(
+            operating.drained(),
+            ["lobby"],
+            "the refused drain drained nothing"
+        );
+        assert_eq!(link.stats().orders(shapes::SERVERS_DRAIN, Ended::Busy), 1);
+    }
+
+    /// `reload` answers `{"ok": true}` **first** and applies afterwards: the reload here waits to be let go, and the answer
+    /// arrives anyway (were the answer written after, it would never come). While it runs, another is refused.
+    #[test]
+    fn a_reload_is_answered_first_and_applied_after_and_one_runs_at_a_time() {
+        let operating = Operating::new(0);
+        operating.hold_reload.store(true, Ordering::SeqCst);
+        // A reload costs half the burst and the retries cost a token each: a large budget keeps this about the places.
+        let (fake, _registry, link, _folder) =
+            operating_with(&["orders.operate"], &operating, |settings| {
+                settings.order_burst = 10_000;
+                settings.order_rate = 1_000;
+            });
+        order(&fake, &json!(10_500), shapes::RELOAD, "{}");
+        assert_eq!(answer(&fake, &json!(10_500))["result"], json!({"ok": true}));
+        until("the reload to begin", || {
+            operating.reloads_begun.load(Ordering::SeqCst) == 1
+        });
+        assert_eq!(
+            operating.reloads_done.load(Ordering::SeqCst),
+            0,
+            "the reload was still running when it was answered"
+        );
+        // A second, while the first runs.
+        order(&fake, &json!(10_501), shapes::RELOAD, "{}");
+        let busy = answer(&fake, &json!(10_501));
+        assert_eq!(code_of(&busy), -32002);
+        assert_eq!(busy["error"]["message"], "a reload is already running");
+        assert_eq!(link.stats().orders(shapes::RELOAD, Ended::Busy), 1);
+        assert_eq!(operating.reloads_begun.load(Ordering::SeqCst), 1);
+        // The first ends; the next is taken.
+        operating.hold_reload.store(false, Ordering::SeqCst);
+        until("the reload to end", || {
+            operating.reloads_done.load(Ordering::SeqCst) == 1
+        });
+        let mut again = 0;
+        until("the place for a reload to be let go", || {
+            again += 1;
+            let id = json!(10_700 + again);
+            order(&fake, &id, shapes::RELOAD, "{}");
+            answer(&fake, &id).get("result").is_some()
+        });
+        // Parameters it does not take are refused, and nothing is reloaded for them.
+        order(
+            &fake,
+            &json!(10_510),
+            shapes::RELOAD,
+            r#"{"file":"other.toml"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(10_510))), -32602);
+    }
+
+    #[test]
+    fn with_nothing_to_operate_given_the_orders_that_operate_say_they_are_not_available() {
+        let (fake, _registry, link, _folder) = orderly(&["orders.operate"], |_| {});
+        order(
+            &fake,
+            &json!(10_600),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        order(
+            &fake,
+            &json!(10_601),
+            shapes::SERVERS_UNDRAIN,
+            r#"{"server":"lobby"}"#,
+        );
+        order(&fake, &json!(10_602), shapes::RELOAD, "{}");
+        for id in [10_600, 10_601, 10_602] {
+            let reply = answer(&fake, &json!(id));
+            assert_eq!(
+                (code_of(&reply), reply["error"]["message"].as_str()),
+                (-32603, Some("not available"))
+            );
+        }
+        assert_eq!(link.stats().orders(shapes::RELOAD, Ended::Failed), 1);
+        assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
+    }
+
+    // ---- the review of the orders that operate --------------------------------------------------------------
+
+    /// A reload reads, checks and applies everything: it costs half the burst, charged at once, and one the budget cannot pay is
+    /// refused for budget, before anything is read.
+    #[test]
+    fn a_reload_costs_half_the_burst_and_a_second_close_one_is_refused_for_budget() {
+        let operating = Operating::new(0);
+        let (fake, _registry, _link, _folder) =
+            operating_with(&["orders.operate"], &operating, |settings| {
+                settings.order_burst = 3;
+                settings.order_rate = 1;
+            });
+        order(&fake, &json!(12_000), shapes::RELOAD, "{}");
+        assert_eq!(answer(&fake, &json!(12_000))["result"], json!({"ok": true}));
+        until("the reload to end", || {
+            operating.reloads_done.load(Ordering::SeqCst) == 1
+        });
+        // Two tokens of three went to the first (half the burst, rounded up): one is left, and the second needs two.
+        order(&fake, &json!(12_001), shapes::RELOAD, "{}");
+        let reply = answer(&fake, &json!(12_001));
+        assert_eq!(code_of(&reply), -32001, "{reply}");
+        assert_eq!(
+            operating.reloads_begun.load(Ordering::SeqCst),
+            1,
+            "nothing was read for it"
+        );
+    }
+
+    /// Once the server is drained the order has done what matters: if the moves cannot be started it answers `moving: 0`, not an
+    /// error, and the place for a send is let go.
+    #[test]
+    fn a_drain_whose_moves_cannot_start_is_still_a_drain_and_says_zero_moving() {
+        let operating = Operating::new(5);
+        let (fake, _registry, _link, _folder) =
+            operating_with(&["orders.operate"], &operating, |_| {});
+        order(
+            &fake,
+            &json!(12_100),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"stuck","move":true}"#,
+        );
+        assert_eq!(
+            drained_of(&answer(&fake, &json!(12_100))),
+            Drained {
+                drained: true,
+                moving: 0
+            }
+        );
+        assert_eq!(operating.drained(), ["stuck"]);
+        // The place for a send was let go: another drain moves.
+        order(
+            &fake,
+            &json!(12_101),
+            shapes::SERVERS_DRAIN,
+            r#"{"server":"lobby","move":true}"#,
+        );
+        assert_eq!(drained_of(&answer(&fake, &json!(12_101))).moving, 5);
+    }
+
+    /// A server that is going down for a restart is not offered again by an extension: fixed words, and nothing changes.
+    #[test]
+    fn an_undrain_of_a_server_that_is_restarting_is_refused_in_fixed_words() {
+        let operating = Operating::new(0);
+        let (fake, _registry, link, _folder) =
+            operating_with(&["orders.operate"], &operating, |_| {});
+        order(
+            &fake,
+            &json!(12_200),
+            shapes::SERVERS_UNDRAIN,
+            r#"{"server":"restarting"}"#,
+        );
+        let reply = answer(&fake, &json!(12_200));
+        assert_eq!(code_of(&reply), -32602);
+        assert_eq!(
+            reply["error"]["message"],
+            "\"server\" is draining for a restart"
+        );
+        assert_eq!(
+            link.stats().orders(shapes::SERVERS_UNDRAIN, Ended::Invalid),
+            1
+        );
+    }
+
+    /// A reload that removes this very extension: the answer is written first, then the connection is closed by the reload itself,
+    /// and nothing is left blocked: the thread of the order ends, and the place for a reload is let go.
+    #[test]
+    fn a_reload_that_removes_the_extension_that_asked_for_it_answers_first_and_leaves_nothing_blocked()
+     {
+        struct Removing(std::sync::Weak<Registry>, Arc<AtomicBool>);
+        impl Operate for Removing {
+            fn players_on(&self, _: &str) -> Result<usize, Refusal> {
+                Ok(0)
+            }
+            fn drain(&self, _: &str) -> Result<bool, Refusal> {
+                Ok(true)
+            }
+            fn undrain(&self, _: &str) -> Result<bool, Refusal> {
+                Ok(false)
+            }
+            fn plan_evacuation(&self, _: &str) -> Box<dyn MovePlan> {
+                unreachable!("no drain here")
+            }
+            /// What a reload of a file without the extension does to the connections: `follow` with no extension left.
+            fn reload(&self) {
+                if let Some(registry) = self.0.upgrade() {
+                    registry.follow(&meridian_config::Config::default());
+                }
+                self.1.store(true, Ordering::SeqCst);
+            }
+        }
+        let fake = Fake::start(Script {
+            capabilities: vec!["orders.operate".to_owned()],
+            ..Script::default()
+        });
+        let folder = Folder::new();
+        let mut settings = settings(&fake, &folder);
+        settings.grant = vec!["orders.operate".to_owned()];
+        let registry = Arc::new(Registry::default());
+        let link = registry.start(settings).unwrap();
+        until("the connection", || link.is_connected());
+        let applied = Arc::new(AtomicBool::new(false));
+        registry.serve_operate(Arc::new(Removing(
+            Arc::downgrade(&registry),
+            Arc::clone(&applied),
+        )));
+        order(&fake, &json!(12_300), shapes::RELOAD, "{}");
+        // Answered first, with the connection still the one that asked.
+        assert_eq!(answer(&fake, &json!(12_300))["result"], json!({"ok": true}));
+        until("the reload to be applied", || {
+            applied.load(Ordering::SeqCst)
+        });
+        // The extension is gone from the registry, its connection is closed, and nothing waits: no thread of an order is alive and
+        // the place for a reload is free.
+        assert!(registry.links().is_empty());
+        until("the connection to close", || !link.is_connected());
+        until("the thread of the order to end", || {
+            link.order_threads_alive() == 0
+        });
+        assert!(
+            link.reload_lot().is_some(),
+            "the place for a reload was let go"
+        );
     }
 }

@@ -18,6 +18,7 @@ mod connection;
 pub(crate) mod facts;
 mod link;
 pub(crate) mod login;
+pub(crate) mod operate;
 mod orders;
 pub(crate) mod own;
 pub(crate) mod server;
@@ -35,7 +36,7 @@ pub(crate) use orders::KickRefusal;
 pub(crate) use orders::Paid;
 #[cfg(test)]
 pub(crate) use orders::Refusal;
-pub use orders::{Actions, Facts, MovePlan, Services};
+pub use orders::{Actions, Facts, MovePlan, Operate, Services};
 #[cfg(test)]
 pub(crate) use stats::Outcome as RequestOutcome;
 
@@ -157,6 +158,12 @@ impl Registry {
     /// answer that they are not available.
     pub fn serve_facts(&self, facts: Arc<dyn Facts>) {
         self.services.set_facts(facts);
+    }
+
+    /// Gives the orders that operate the network what they operate (drain, undrain, reload). Until it is called they answer
+    /// that they are not available.
+    pub fn serve_operate(&self, operate: Arc<dyn Operate>) {
+        self.services.set_operate(operate);
     }
 
     /// Gives the orders that act what they act on (tell a player, show a line to many). Until it is called they answer

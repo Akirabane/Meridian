@@ -588,6 +588,100 @@ pub fn moderate_methods() -> Vec<(&'static str, DiscoverMethod)> {
     )]
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The orders that operate (capability `orders.operate`): drain, undrain and reload
+
+/// The method that stops offering a server to new players, and, if asked, sends its players elsewhere.
+pub const SERVERS_DRAIN: &str = "meridian:servers/drain";
+/// The method that offers a drained server to new players again.
+pub const SERVERS_UNDRAIN: &str = "meridian:servers/undrain";
+/// The method that makes the proxy read its configuration file again.
+pub const RELOAD: &str = "meridian:reload";
+
+/// `params` of [`SERVERS_DRAIN`]: the server, and `move` (`true`: its players are sent, one at a time, to other servers of its
+/// role; `false` or left out: they stay).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrainParams {
+    pub server: String,
+    #[serde(default, rename = "move", skip_serializing_if = "Option::is_none")]
+    pub move_players: Option<bool>,
+}
+
+/// `params` of [`SERVERS_UNDRAIN`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndrainParams {
+    pub server: String,
+}
+
+/// `result` of [`SERVERS_DRAIN`]: whether the server was drained **now** (`false`: it was drained already), and how many
+/// players the proxy **started** to send away (0 unless `move`, and 0 if nobody was on it). The moves go on after the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Drained {
+    pub drained: bool,
+    pub moving: usize,
+}
+
+/// `result` of [`SERVERS_UNDRAIN`]: whether the server was drained and is offered again now (`false`: it was not drained, which is
+/// not an error).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Undrained {
+    pub undrained: bool,
+}
+
+/// Reads the `params` of [`SERVERS_DRAIN`]: the server and whether to move its players. The error never quotes what was sent.
+pub fn parse_drain(params: Option<&Value>) -> Result<(String, bool), String> {
+    const SHAPE: &str = "params must be an object with \"server\" (a string) and, if you like, \"move\" (true or false)";
+    let params = params.ok_or("params are missing")?;
+    if !params.is_object() {
+        return Err(SHAPE.into());
+    }
+    let params: DrainParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
+    if !server_name(&params.server) {
+        return Err("\"server\" is not a name of a server".into());
+    }
+    Ok((params.server, params.move_players.unwrap_or(false)))
+}
+
+/// Reads the `params` of [`SERVERS_UNDRAIN`]: the server. The error never quotes what was sent.
+pub fn parse_undrain(params: Option<&Value>) -> Result<String, String> {
+    const SHAPE: &str = "params must be an object with \"server\" (a string)";
+    let params = params.ok_or("params are missing")?;
+    if !params.is_object() {
+        return Err(SHAPE.into());
+    }
+    let params: UndrainParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
+    if !server_name(&params.server) {
+        return Err("\"server\" is not a name of a server".into());
+    }
+    Ok(params.server)
+}
+
+/// How `rpc.discover` of the proxy describes the orders that operate.
+pub fn operate_methods() -> Vec<(&'static str, DiscoverMethod)> {
+    vec![
+        (
+            SERVERS_DRAIN,
+            DiscoverMethod::with_params(
+                SERVERS_DRAIN,
+                &[
+                    ("server", true, json!({ "type": "string" })),
+                    ("move", false, json!({ "type": "boolean" })),
+                ],
+            ),
+        ),
+        (
+            SERVERS_UNDRAIN,
+            DiscoverMethod::with_params(
+                SERVERS_UNDRAIN,
+                &[("server", true, json!({ "type": "string" }))],
+            ),
+        ),
+        (RELOAD, DiscoverMethod::new(RELOAD)),
+    ]
+}
+
 /// The longest name of a server [`parse_broadcast`] takes.
 pub const MAX_SERVER: usize = 64;
 
@@ -1415,5 +1509,93 @@ mod tests {
         let methods = moderate_methods();
         assert_eq!((methods.len(), methods[0].0), (1, PLAYERS_KICK));
         assert!(methods[0].1.params[0].required && !methods[0].1.params[1].required);
+    }
+
+    // ---- the orders that operate ---------------------------------------------------------------------
+
+    #[test]
+    fn drain_takes_a_server_and_whether_to_move_its_players_and_undrain_a_server() {
+        let drain = |v: Value| parse_drain(Some(&v));
+        assert_eq!(
+            drain(json!({"server": "lobby"})),
+            Ok(("lobby".into(), false))
+        );
+        assert_eq!(
+            drain(json!({"server": "lobby", "move": true})),
+            Ok(("lobby".into(), true))
+        );
+        assert_eq!(
+            drain(json!({"server": "lobby", "move": false})),
+            Ok(("lobby".into(), false))
+        );
+        assert_eq!(
+            drain(json!({"server": "lobby", "move": null})),
+            Ok(("lobby".into(), false))
+        );
+        let secret = "ZZZ-must-not-come-back";
+        for bad in [
+            json!({}),
+            json!({"move": true}),
+            json!({"server": ""}),
+            json!({"server": "x".repeat(MAX_SERVER + 1)}),
+            json!({"server": format!("{secret}\n")}),
+            json!({"server": "lobby", "move": "yes"}),
+            json!({"server": "lobby", "more": 1}),
+            json!({"server": 7}),
+            json!(["lobby"]),
+            json!("lobby"),
+            json!(null),
+        ] {
+            let why = drain(bad.clone()).unwrap_err();
+            assert!(!why.contains("ZZZ") && !why.is_empty(), "{bad}: {why}");
+        }
+        assert!(parse_drain(None).is_err());
+        assert_eq!(
+            parse_undrain(Some(&json!({"server": "lobby"}))),
+            Ok("lobby".into())
+        );
+        for bad in [
+            json!({}),
+            json!({"server": ""}),
+            json!({"server": "lobby", "move": true}),
+            json!(["lobby"]),
+            json!(null),
+        ] {
+            assert!(parse_undrain(Some(&bad)).is_err(), "{bad}");
+        }
+        assert!(parse_undrain(None).is_err());
+    }
+
+    #[test]
+    fn what_the_sdk_writes_for_the_orders_that_operate_is_what_the_proxy_reads() {
+        let written = serde_json::to_value(DrainParams {
+            server: "lobby".into(),
+            move_players: Some(true),
+        })
+        .unwrap();
+        // The key is `move`, which is a word of the language: the field is not called that.
+        assert_eq!(written, json!({"server": "lobby", "move": true}));
+        assert_eq!(parse_drain(Some(&written)), Ok(("lobby".into(), true)));
+        let left_out = serde_json::to_value(DrainParams {
+            server: "lobby".into(),
+            move_players: None,
+        })
+        .unwrap();
+        assert_eq!(left_out, json!({"server": "lobby"}));
+        assert_eq!(
+            serde_json::to_value(Drained {
+                drained: true,
+                moving: 3
+            })
+            .unwrap(),
+            json!({"drained": true, "moving": 3})
+        );
+        assert_eq!(
+            serde_json::to_value(Undrained { undrained: false }).unwrap(),
+            json!({"undrained": false})
+        );
+        let methods = operate_methods();
+        let names: Vec<_> = methods.iter().map(|(_, m)| m.name.as_str()).collect();
+        assert_eq!(names, [SERVERS_DRAIN, SERVERS_UNDRAIN, RELOAD]);
     }
 }
