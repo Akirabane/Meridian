@@ -3,8 +3,9 @@
 //! the configuration, a method of the proxy's own, or a fixed word: never a player's name, address or
 //! unique id, and never anything the extension said.
 
+use super::orders;
 use crate::metrics::{Histogram, escaped, family};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +65,8 @@ pub struct Stats {
     methods: Mutex<BTreeMap<&'static str, Arc<Method>>>,
     /// Decisions by point and by what became of them.
     decisions: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
+    /// The extension's orders by method and by how they ended.
+    orders: Mutex<BTreeMap<(&'static str, orders::Outcome), u64>>,
 }
 
 impl Stats {
@@ -114,6 +117,27 @@ impl Stats {
             .unwrap_or_else(|e| e.into_inner())
             .entry((point, decision))
             .or_default() += 1;
+    }
+
+    /// An order of the extension, `method` (one of the proxy's own, or `unknown`), ended as `outcome`.
+    pub fn order(&self, method: &'static str, outcome: orders::Outcome) {
+        *self
+            .orders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry((method, outcome))
+            .or_default() += 1;
+    }
+
+    /// How many orders of `method` ended as `outcome`.
+    #[cfg(test)]
+    pub fn orders(&self, method: &'static str, outcome: orders::Outcome) -> u64 {
+        self.orders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(method, outcome))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// How many decisions of `point` ended as `decision`.
@@ -231,6 +255,28 @@ pub fn render(extensions: &[(String, Arc<Stats>)], out: &mut String) {
                 "meridian_extension_decisions_total{{extension=\"{}\",point=\"{point}\",decision=\"{decision}\"}} {count}",
                 escaped(name),
             );
+        }
+    }
+    family(
+        out,
+        "meridian_extension_orders_total",
+        "counter",
+        "Orders the extension gave the proxy, by method and by how they ended.",
+    );
+    for (name, stats) in extensions {
+        let orders = stats.orders.lock().unwrap_or_else(|e| e.into_inner());
+        let methods: BTreeSet<&str> = orders.keys().map(|(method, _)| *method).collect();
+        for method in methods {
+            for outcome in orders::Outcome::ALL {
+                let _ = writeln!(
+                    out,
+                    "meridian_extension_orders_total{{extension=\"{}\",method=\"{}\",outcome=\"{}\"}} {}",
+                    escaped(name),
+                    escaped(method),
+                    outcome.label(),
+                    orders.get(&(method, outcome)).copied().unwrap_or(0)
+                );
+            }
         }
     }
     family(

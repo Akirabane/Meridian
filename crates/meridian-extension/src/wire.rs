@@ -53,6 +53,12 @@ pub mod code {
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
     pub const INTERNAL_ERROR: i64 = -32603;
+    /// An order over the extension's budget (docs/EXTENSIONS.md, section 5): it was not run. Asking again
+    /// later is fine. In the range JSON-RPC keeps for the errors of a server.
+    pub const OVER_BUDGET: i64 = -32001;
+    /// Too many orders of the extension are running already: this one was not run. Asking again later is
+    /// fine.
+    pub const TOO_MANY_RUNNING: i64 = -32002;
 }
 
 /// `params` of `meridian:hello`, the proxy's first message.

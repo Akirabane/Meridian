@@ -6,7 +6,8 @@
 //! which the decision points use: it holds the `max-in-flight` places, the breaker, the deadline, the
 //! counters and the log lines. The decision points wired so far are the admission at login ([`login`]), the
 //! choice of server ([`server`]) and the permission of a command ([`command`]); [`own`] takes the commands
-//! of an extension's own.
+//! of an extension's own, and [`orders`] serves the requests the extension sends the proxy (the budget, the
+//! places, the thread of each order, and `permissions/invalidate`).
 //! Without an extension in the [`Registry`], which is how the proxy starts, nothing here runs and nothing
 //! is on the metrics page.
 
@@ -15,6 +16,7 @@ pub(crate) mod command;
 mod connection;
 mod link;
 pub(crate) mod login;
+mod orders;
 pub(crate) mod own;
 pub(crate) mod server;
 mod stats;

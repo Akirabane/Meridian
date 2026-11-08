@@ -9,11 +9,12 @@
 //! on-error policy.
 
 use super::breaker::{Breaker, Change, Permit};
+use super::orders::Budget;
 use super::stats::{Outcome, Stats};
 use meridian_extension::wire::{self, CommandSpec, Id, RpcError};
 use meridian_websocket::Writer;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -72,6 +73,12 @@ pub struct Settings {
     pub breaker_failures: u32,
     /// How long the breaker stays open.
     pub breaker_open: Duration,
+    /// The orders it may give each second, once its burst is used (docs/EXTENSIONS.md, section 5).
+    pub order_rate: u32,
+    /// The orders it may give at once, from a rested budget.
+    pub order_burst: u32,
+    /// The orders that may run at once.
+    pub orders_running: usize,
     pub timings: Timings,
 }
 
@@ -92,6 +99,9 @@ impl Settings {
             max_in_flight: 64,
             breaker_failures: 5,
             breaker_open: Duration::from_secs(30),
+            order_rate: 20,
+            order_burst: 50,
+            orders_running: 8,
             timings: Timings::default(),
         }
     }
@@ -110,6 +120,9 @@ impl From<&meridian_config::Extension> for Settings {
             max_in_flight: e.max_in_flight as usize,
             breaker_failures: e.breaker_failures,
             breaker_open: Duration::from_secs(e.breaker_seconds),
+            order_rate: e.orders.rate_per_second,
+            order_burst: e.orders.burst,
+            orders_running: e.orders.max_running as usize,
             timings: Timings::default(),
         }
     }
@@ -188,6 +201,47 @@ impl Drop for RunPlace {
     }
 }
 
+/// One order of the extension is running; the place is free again when this goes.
+pub(super) struct OrderPlace(Arc<Link>);
+
+impl Drop for OrderPlace {
+    fn drop(&mut self) {
+        self.0.orders_running.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Takes one of `most` places counted in `running`, if there is one.
+fn acquire(running: &AtomicUsize, most: usize) -> bool {
+    let mut now = running.load(Ordering::SeqCst);
+    loop {
+        if now >= most {
+            return false;
+        }
+        match running.compare_exchange_weak(now, now + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(seen) => now = seen,
+        }
+    }
+}
+
+/// The most requests to forget one player's permissions that a session can still be told of. Past it the oldest
+/// are lost, and a session that did not see them forgets everything it kept: a bound on memory that errs on the
+/// side of forgetting.
+const MAX_FORGOTTEN: usize = 256;
+
+/// What the extension asked the proxy to forget of the permissions it kept (`meridian:permissions/invalidate`).
+#[derive(Default)]
+struct Forgotten {
+    /// How many times it asked for all.
+    all: u64,
+    /// How many times it asked for one player: the number of the latest.
+    seq: u64,
+    /// The number of the latest request that fell off `recent`.
+    lost: u64,
+    /// The latest requests for one player, by number, oldest first.
+    recent: VecDeque<(u64, String)>,
+}
+
 /// One extension, as the proxy sees it.
 pub struct Link {
     pub(super) settings: Settings,
@@ -204,11 +258,17 @@ pub struct Link {
     epoch: AtomicU64,
     /// How many of the extension's own commands are running (`run_place`).
     runs: AtomicUsize,
+    /// How many of its orders are running (`order_place`).
+    orders_running: AtomicUsize,
+    /// What is left of its budget of orders.
+    budget: Mutex<Budget>,
+    forgotten: Mutex<Forgotten>,
 }
 
 impl Link {
     pub(super) fn new(settings: Settings) -> Arc<Self> {
         let breaker = Breaker::new(settings.breaker_failures, settings.breaker_open);
+        let budget = Budget::new(settings.order_rate, settings.order_burst, Instant::now());
         Arc::new(Self {
             settings,
             stats: Arc::new(Stats::default()),
@@ -219,6 +279,9 @@ impl Link {
             last_wait_ms: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             runs: AtomicUsize::new(0),
+            orders_running: AtomicUsize::new(0),
+            budget: Mutex::new(budget),
+            forgotten: Mutex::new(Forgotten::default()),
         })
     }
 
@@ -251,21 +314,69 @@ impl Link {
     /// place, and it would take its on-error policy. The place is given back when it is dropped.
     pub(crate) fn run_place(self: &Arc<Self>) -> Option<RunPlace> {
         let most = (self.settings.max_in_flight / 2).max(1);
-        let mut running = self.runs.load(Ordering::SeqCst);
-        loop {
-            if running >= most {
-                return None;
-            }
-            match self.runs.compare_exchange_weak(
-                running,
-                running + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return Some(RunPlace(Arc::clone(self))),
-                Err(now) => running = now,
+        acquire(&self.runs, most).then(|| RunPlace(Arc::clone(self)))
+    }
+
+    /// A place for one order of the extension to run, or `None` when `orders_running` of them run already.
+    pub(super) fn order_place(self: &Arc<Self>) -> Option<OrderPlace> {
+        acquire(&self.orders_running, self.settings.orders_running)
+            .then(|| OrderPlace(Arc::clone(self)))
+    }
+
+    /// Spends `cost` of the extension's budget of orders, or says there is not enough left.
+    pub(super) fn take_order(&self, cost: u32) -> bool {
+        self.budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(cost, Instant::now())
+    }
+
+    /// Whether the connection that is up was granted `capability` (asked for in its hello and granted).
+    pub(super) fn is_granted(&self, capability: &str) -> bool {
+        self.lock()
+            .info
+            .as_ref()
+            .is_some_and(|info| info.granted.iter().any(|c| c == capability))
+    }
+
+    fn forgotten(&self) -> MutexGuard<'_, Forgotten> {
+        self.forgotten.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The extension asked the proxy to forget the permissions it kept of its answers, for every player.
+    pub(crate) fn forget_all(&self) {
+        self.forgotten().all += 1;
+    }
+
+    /// The same, for the player with this unique id (canonical spelling).
+    pub(crate) fn forget_player(&self, uuid: String) {
+        let mut forgotten = self.forgotten();
+        forgotten.seq += 1;
+        let seq = forgotten.seq;
+        forgotten.recent.push_back((seq, uuid));
+        while forgotten.recent.len() > MAX_FORGOTTEN {
+            if let Some((lost, _)) = forgotten.recent.pop_front() {
+                forgotten.lost = lost;
             }
         }
+    }
+
+    /// How many times the extension has asked to forget everyone's permissions: a session that kept answers
+    /// under another number drops them.
+    pub fn forgotten_all(&self) -> u64 {
+        self.forgotten().all
+    }
+
+    /// The number of the latest request to forget one player, and whether a request newer than `since` was for
+    /// this player (`uuid`, any case) or may have been, because it fell off the list that is kept.
+    pub fn forgotten_player(&self, since: u64, uuid: &str) -> (u64, bool) {
+        let forgotten = self.forgotten();
+        let hit = forgotten.lost > since
+            || forgotten
+                .recent
+                .iter()
+                .any(|(seq, who)| *seq > since && who.eq_ignore_ascii_case(uuid));
+        (forgotten.seq, hit)
     }
 
     /// How many hellos the extension has been through (see the field).

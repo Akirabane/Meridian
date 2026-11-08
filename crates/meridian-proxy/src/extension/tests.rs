@@ -1239,6 +1239,7 @@ fn configured(
         decide_command: Default::default(),
         decide_server: Default::default(),
         own_commands: Default::default(),
+        orders: Default::default(),
     };
     change(&mut extension);
     meridian_config::Config {
@@ -1263,6 +1264,7 @@ fn the_defaults_of_the_configuration_are_the_defaults_of_the_connection() {
         decide_command: Default::default(),
         decide_server: Default::default(),
         own_commands: Default::default(),
+        orders: Default::default(),
     });
     assert_eq!(configured, defaults);
     // The shortest token the configuration accepts is the shortest the handshake accepts.
@@ -1593,5 +1595,289 @@ mod login_with_the_sdk {
         let info = link.info().unwrap();
         assert!(info.granted.is_empty());
         assert_eq!(info.refused, ["decide.login"]);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The orders of the extension (docs/EXTENSIONS.md, section 5)
+
+mod the_orders {
+    use super::*;
+    use crate::extension::orders::{Outcome as Ended, test_support};
+
+    const INVALIDATE: &str = "meridian:permissions/invalidate";
+    const BLOCK: &str = "meridian:test/block";
+    const PANIC: &str = "meridian:test/panic";
+    const ALEX: &str = "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c";
+    const BOB: &str = "1b3fb5cb-cdfe-4ae3-91f2-2be62b1fa36d";
+
+    /// A fake that says hello asking for `grant`, and a link that is granted it, with `change` applied to
+    /// the link's settings.
+    fn orderly(
+        grant: &[&str],
+        change: impl FnOnce(&mut Settings),
+    ) -> (Fake, Registry, Arc<Link>, Folder) {
+        let grant: Vec<String> = grant.iter().map(|g| (*g).to_owned()).collect();
+        let fake = Fake::start(Script {
+            capabilities: grant.clone(),
+            ..Script::default()
+        });
+        let (registry, link, folder) = connect_with(&fake, |settings| {
+            settings.grant = grant;
+            change(settings);
+        });
+        until("the connection", || link.is_connected());
+        (fake, registry, link, folder)
+    }
+
+    /// Sends the request `method` with `params` (as JSON text) and the id `id`.
+    fn order(fake: &Fake, id: &Value, method: &str, params: &str) {
+        fake.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#
+        ));
+    }
+
+    /// The answer the proxy gave to the request with this id, waited for.
+    fn answer(fake: &Fake, id: &Value) -> Value {
+        let mut found = None;
+        until("the answer", || {
+            found = fake.seen(|seen| {
+                seen.texts.iter().find_map(|text| {
+                    let message: Value = serde_json::from_str(text).ok()?;
+                    (message["id"] == *id
+                        && (message.get("result").is_some() || message.get("error").is_some()))
+                    .then_some(message)
+                })
+            });
+            found.is_some()
+        });
+        found.unwrap()
+    }
+
+    fn code_of(answer: &Value) -> i64 {
+        answer["error"]["code"].as_i64().expect("an error")
+    }
+
+    #[test]
+    fn an_order_with_its_capability_runs_and_is_answered_with_the_id_it_came_with() {
+        let (fake, _registry, link, _folder) = orderly(&["decide.command"], |_| {});
+        order(&fake, &json!(100), INVALIDATE, r#"{"all":true}"#);
+        assert_eq!(answer(&fake, &json!(100))["result"], json!({"ok": true}));
+        assert_eq!(link.forgotten_all(), 1);
+        // One player, the id written in capitals and with no hyphens, as a program may write it.
+        let written = ALEX.replace('-', "").to_ascii_uppercase();
+        order(
+            &fake,
+            &json!("a-string-id"),
+            INVALIDATE,
+            &format!(r#"{{"player":"{written}"}}"#),
+        );
+        assert_eq!(
+            answer(&fake, &json!("a-string-id"))["result"],
+            json!({"ok": true})
+        );
+        assert!(link.forgotten_player(0, ALEX).1);
+        assert!(!link.forgotten_player(0, BOB).1);
+        assert_eq!(link.stats().orders(INVALIDATE, Ended::Done), 2);
+    }
+
+    #[test]
+    fn parameters_that_are_not_what_the_order_takes_are_answered_32602_and_run_nothing() {
+        let (fake, _registry, link, _folder) = orderly(&["decide.command"], |_| {});
+        let secret = "an-id-that-must-not-come-back";
+        for (n, params) in [
+            "{}".to_owned(),
+            r#"{"all":false}"#.to_owned(),
+            format!(r#"{{"player":"{secret}"}}"#),
+            format!(r#"{{"player":"{ALEX}","all":true}}"#),
+            r#"{"player":7}"#.to_owned(),
+            r#"{"all":true,"more":1}"#.to_owned(),
+            "[1]".to_owned(),
+            "null".to_owned(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = json!(200 + n);
+            order(&fake, &id, INVALIDATE, params);
+            let reply = answer(&fake, &id);
+            assert_eq!(code_of(&reply), -32602, "{params}");
+            assert!(!reply.to_string().contains(secret), "{reply}");
+        }
+        // No `params` at all.
+        fake.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":299,"method":"{INVALIDATE}"}}"#
+        ));
+        assert_eq!(code_of(&answer(&fake, &json!(299))), -32602);
+        assert_eq!(
+            (link.forgotten_all(), link.forgotten_player(0, ALEX)),
+            (0, (0, false))
+        );
+        assert_eq!(link.stats().orders(INVALIDATE, Ended::Invalid), 9);
+        assert_eq!(link.stats().orders(INVALIDATE, Ended::Done), 0);
+    }
+
+    #[test]
+    fn an_order_without_its_capability_and_a_method_nobody_has_are_answered_as_if_they_did_not_exist()
+     {
+        // `decide.command` is not granted: `orders.read` is.
+        let (fake, registry, link, _folder) = orderly(&["orders.read"], |_| {});
+        order(&fake, &json!(300), INVALIDATE, r#"{"all":true}"#);
+        order(&fake, &json!(301), "meridian:players/list", "{}");
+        order(&fake, &json!(302), "meridian:made/up", "{}");
+        let (ungranted, unbuilt, made_up) = (
+            answer(&fake, &json!(300)),
+            answer(&fake, &json!(301)),
+            answer(&fake, &json!(302)),
+        );
+        // The same answer for all three: the extension cannot tell a method it may not use from one that is not there.
+        assert_eq!(ungranted["error"], unbuilt["error"]);
+        assert_eq!(ungranted["error"], made_up["error"]);
+        assert_eq!(code_of(&ungranted), -32601);
+        assert_eq!(link.forgotten_all(), 0);
+        assert_eq!(link.stats().orders(INVALIDATE, Ended::Refused), 1);
+        // The two methods the proxy does not have are counted under one name, not under what the extension said.
+        assert_eq!(link.stats().orders("unknown", Ended::Refused), 2);
+        let mut page = String::new();
+        registry.render(&mut page);
+        assert!(
+            !page.contains("made/up") && !page.contains("players/list"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_request_with_no_id_is_a_notification_and_nothing_is_run_for_it() {
+        let (fake, _registry, link, _folder) = orderly(&["decide.command"], |_| {});
+        fake.send(&format!(
+            r#"{{"jsonrpc":"2.0","method":"{INVALIDATE}","params":{{"all":true}}}}"#
+        ));
+        // A request after it: once this is answered, the notification has been read.
+        order(&fake, &json!(400), INVALIDATE, r#"{"all":true}"#);
+        let _ = answer(&fake, &json!(400));
+        assert_eq!(link.forgotten_all(), 1, "only the request ran");
+        assert_eq!(link.stats().orders(INVALIDATE, Ended::Done), 1);
+    }
+
+    #[test]
+    fn an_order_over_the_budget_is_answered_with_its_own_code_and_is_not_run() {
+        let (fake, _registry, link, _folder) = orderly(&["decide.command"], |settings| {
+            settings.order_burst = 3;
+            settings.order_rate = 1;
+        });
+        for n in 0..6 {
+            order(&fake, &json!(500 + n), INVALIDATE, r#"{"all":true}"#);
+        }
+        let answers: Vec<Value> = (0..6).map(|n| answer(&fake, &json!(500 + n))).collect();
+        let over = answers.iter().filter(|a| a.get("error").is_some()).count();
+        let done = answers.len() - over;
+        // The burst is three. A second may have passed on a loaded machine and given one more back.
+        assert!((3..=4).contains(&done), "{done} ran");
+        assert!(
+            answers
+                .iter()
+                .filter(|a| a.get("error").is_some())
+                .all(|a| code_of(a) == -32001
+                    && a["error"]["message"] == "over the budget of orders")
+        );
+        assert_eq!(
+            usize::try_from(link.forgotten_all()).unwrap(),
+            done,
+            "an order that was refused did not run"
+        );
+        assert_eq!(
+            link.stats().orders(INVALIDATE, Ended::OverBudget),
+            over as u64
+        );
+        assert_eq!(link.stats().orders(INVALIDATE, Ended::Done), done as u64);
+    }
+
+    /// A slow order holds neither the thread that reads the connection nor the places of the others: the proxy's
+    /// own request is answered while it waits, a second order finds no place and is told so at once, and the
+    /// place is given back when the first ends.
+    #[test]
+    fn a_slow_order_does_not_hold_the_reader_and_at_most_the_places_there_are_run() {
+        test_support::RELEASE.store(false, Ordering::SeqCst);
+        test_support::ENTERED.store(0, Ordering::SeqCst);
+        let (fake, _registry, link, _folder) = orderly(&["orders.read"], |settings| {
+            settings.orders_running = 1;
+        });
+        order(&fake, &json!(600), BLOCK, "{}");
+        until("the order to start", || {
+            test_support::ENTERED.load(Ordering::SeqCst) == 1
+        });
+        // No place left.
+        order(&fake, &json!(601), BLOCK, "{}");
+        let busy = answer(&fake, &json!(601));
+        assert_eq!(code_of(&busy), -32002);
+        assert_eq!(busy["error"]["message"], "too many orders running");
+        assert_eq!(test_support::ENTERED.load(Ordering::SeqCst), 1);
+        // The reader is free: a request of the proxy to the extension is answered, and so is `rpc.discover`.
+        assert!(ping(&link, Duration::from_secs(2)).is_ok());
+        fake.send(r#"{"jsonrpc":"2.0","id":"d-1","method":"meridian:rpc.discover"}"#);
+        assert!(answer(&fake, &json!("d-1")).get("result").is_some());
+        // Let it go: it answers, and a place is free again.
+        test_support::RELEASE.store(true, Ordering::SeqCst);
+        assert_eq!(answer(&fake, &json!(600))["result"], json!({"ok": true}));
+        order(&fake, &json!(602), BLOCK, "{}");
+        assert_eq!(answer(&fake, &json!(602))["result"], json!({"ok": true}));
+        assert_eq!(link.stats().orders(BLOCK, Ended::Done), 2);
+        assert_eq!(link.stats().orders(BLOCK, Ended::Busy), 1);
+        test_support::RELEASE.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn an_order_that_fails_is_answered_with_an_error_and_gives_its_place_back() {
+        let (fake, _registry, link, _folder) = orderly(&["orders.read"], |settings| {
+            settings.orders_running = 1;
+        });
+        for n in 0..3 {
+            order(&fake, &json!(700 + n), PANIC, "{}");
+            let reply = answer(&fake, &json!(700 + n));
+            // Each finds its place free: the one before it ended and gave it back.
+            assert_eq!(code_of(&reply), -32603, "{reply}");
+            assert_eq!(reply["error"]["message"], "the order failed");
+        }
+        assert_eq!(link.stats().orders(PANIC, Ended::Failed), 3);
+        assert_eq!(link.stats().orders(PANIC, Ended::Busy), 0);
+        // And the connection is up, and answers.
+        assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
+    }
+
+    #[test]
+    fn rpc_discover_lists_the_orders_the_capabilities_that_were_granted_allow() {
+        let methods = |grant: &[&str]| -> Vec<String> {
+            let (fake, _registry, _link, _folder) = orderly(grant, |_| {});
+            fake.send(r#"{"jsonrpc":"2.0","id":800,"method":"rpc.discover"}"#);
+            let reply = answer(&fake, &json!(800));
+            let document: Discover = serde_json::from_value(reply["result"].clone()).unwrap();
+            document.methods.into_iter().map(|m| m.name).collect()
+        };
+        assert_eq!(methods(&["decide.command"]), [INVALIDATE]);
+        assert_eq!(methods(&["orders.read"]), [BLOCK, PANIC]);
+        assert!(methods(&["decide.login", "events"]).is_empty());
+    }
+
+    #[test]
+    fn the_orders_are_on_the_page_of_metrics_by_extension_method_and_outcome() {
+        let (fake, registry, _link, _folder) = orderly(&["decide.command"], |_| {});
+        order(&fake, &json!(900), INVALIDATE, r#"{"all":true}"#);
+        let _ = answer(&fake, &json!(900));
+        order(&fake, &json!(901), INVALIDATE, "{}");
+        let _ = answer(&fake, &json!(901));
+        let mut page = String::new();
+        registry.render(&mut page);
+        for line in [
+            "meridian_extension_orders_total{extension=\"perms\",method=\"meridian:permissions/invalidate\",outcome=\"done\"} 1",
+            "meridian_extension_orders_total{extension=\"perms\",method=\"meridian:permissions/invalidate\",outcome=\"invalid\"} 1",
+            "meridian_extension_orders_total{extension=\"perms\",method=\"meridian:permissions/invalidate\",outcome=\"budget\"} 0",
+            "meridian_extension_orders_total{extension=\"perms\",method=\"meridian:permissions/invalidate\",outcome=\"busy\"} 0",
+        ] {
+            assert!(page.contains(line), "{line}\n{page}");
+        }
+        assert!(
+            page.contains("# TYPE meridian_extension_orders_total counter"),
+            "{page}"
+        );
     }
 }

@@ -6,6 +6,7 @@
 //! the sidecar's `management::run` is for a server's management protocol.
 
 use super::link::{Info, Link};
+use super::orders;
 use meridian_extension::handshake::{self, Nonce, Secret};
 use meridian_extension::text;
 use meridian_extension::wire::{
@@ -449,7 +450,7 @@ fn discard(stream: &mut impl io::Read, until: Instant) {
 fn serve(
     reader: &mut meridian_websocket::Reader,
     writer: &meridian_websocket::Writer,
-    link: &Link,
+    link: &Arc<Link>,
 ) -> Result<(), String> {
     while !link.stopped() {
         let text = match reader.read_message() {
@@ -468,21 +469,18 @@ fn serve(
         };
         match Message::parse(&text) {
             Ok(Message::Response { id, outcome }) => link.answered(id.as_ref(), outcome),
-            Ok(Message::Request { id, method, .. }) => {
-                // The orders of section 5 are not served yet: only the list of methods, which has
-                // none, and an error for the rest.
+            Ok(Message::Request { id, method, params }) => {
+                // A request with no id is a notification: nothing to answer, and nothing is run for it.
                 let Some(id) = id else { continue };
-                let reply = if wire::method::is_discover(&method) {
-                    wire::result(&id, &Discover::new(0, Vec::new()))
+                if wire::method::is_discover(&method) {
+                    let document = orders::discover(orders::ORDERS, link);
+                    writer
+                        .send_text(&wire::result(&id, &document))
+                        .map_err(|e| format!("cannot send: {e}"))?;
                 } else {
-                    wire::error(
-                        Some(&id),
-                        &RpcError::new(wire::code::METHOD_NOT_FOUND, "method not found"),
-                    )
-                };
-                writer
-                    .send_text(&reply)
-                    .map_err(|e| format!("cannot send: {e}"))?;
+                    // The orders of section 5. Counted, and started on a thread of their own: never run here.
+                    orders::dispatch(orders::ORDERS, link, writer, id, &method, params)?;
+                }
             }
             Err(why) => {
                 crate::log::debug!(

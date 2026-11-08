@@ -69,7 +69,9 @@ pub(crate) struct Typed<'a> {
 }
 
 /// What a session keeps of the extension's answers: a verdict for a node, until a time, for the
-/// registry's generation and the extension's epoch it was given under.
+/// registry's generation, the extension's epoch and its count of "forget everyone" it was given under. A request of
+/// the extension to forget one player (`meridian:permissions/invalidate`) is told to the session of that player
+/// by number: `seen` is the latest it has looked at.
 ///
 /// The extension decides with the request it was sent, which holds the server the player is on, the command
 /// and its arguments as well as the node, so a verdict is kept for **that** request and no other: the key is
@@ -78,7 +80,9 @@ pub(crate) struct Typed<'a> {
 /// emptied when the player's server changes.
 #[derive(Default)]
 struct Kept {
-    stamp: (u64, u64),
+    stamp: (u64, u64, u64),
+    /// The number of the latest request to forget one player that this session has looked at.
+    seen: u64,
     /// The server the player was on when the answers were given.
     server: String,
     nodes: HashMap<(u64, String), (NodeVerdict, Instant)>,
@@ -158,15 +162,21 @@ impl Gate {
         }
 
         // What is kept, and what is left to ask.
-        let stamp = (self.registry.generation(), link.epoch());
+        let stamp = stamp_of(&self.registry, &link);
         let asked_of = self.digest_of(typed);
         let now = Instant::now();
         let mut known = HashMap::new();
         let mut unknown = Vec::new();
+        let seen;
         {
             let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-            // A reload, a new hello or a change of server: what was said before is not said of this.
-            if kept.stamp != stamp || kept.server != typed.server {
+            // The extension asked to forget this player (or lost count of who): what was kept is not used.
+            let (latest, forgotten) = link.forgotten_player(kept.seen, &typed.uuid);
+            kept.seen = latest;
+            seen = latest;
+            // A reload, a new hello, a request to forget everyone, one to forget this player, or a change
+            // of server: what was said before is not said of this.
+            if kept.stamp != stamp || kept.server != typed.server || forgotten {
                 kept.nodes.clear();
                 kept.stamp = stamp;
                 kept.server = typed.server.to_owned();
@@ -206,7 +216,7 @@ impl Gate {
                 link.stats().decided(POINT, label);
                 self.keep(
                     &link,
-                    stamp,
+                    (stamp, seen, &typed.uuid),
                     typed.server,
                     asked_of,
                     &unknown,
@@ -235,18 +245,21 @@ impl Gate {
     }
 
     /// Keeps `answers` for `nodes`, as long as the extension said and the configuration allows, if
-    /// nothing changed meanwhile (a reload, a new hello).
+    /// nothing changed meanwhile (a reload, a new hello, a request to forget this player or everyone). `asked`
+    /// is what the answers were asked under: the stamp, the number of the latest request to forget one
+    /// player that was looked at, and the player.
     #[allow(clippy::too_many_arguments)]
     fn keep(
         &self,
         link: &Link,
-        stamp: (u64, u64),
+        asked: ((u64, u64, u64), u64, &str),
         server: &str,
         asked_of: u64,
         nodes: &[String],
         answers: &decide::NodeAnswers,
         max_cache: u64,
     ) {
+        let (stamp, seen, uuid) = asked;
         let seconds = answers.seconds().min(max_cache);
         if seconds == 0 {
             return;
@@ -256,7 +269,8 @@ impl Gate {
         let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
         if kept.stamp != stamp
             || kept.server != server
-            || (self.registry.generation(), link.epoch()) != stamp
+            || stamp_of(&self.registry, link) != stamp
+            || link.forgotten_player(seen, uuid).1
         {
             return;
         }
@@ -293,6 +307,12 @@ impl Gate {
             .nodes
             .len()
     }
+}
+
+/// What the answers kept under it were given under: the registry's generation (a reload), the extension's epoch (a
+/// new hello), and how many times it asked the proxy to forget everyone's permissions.
+fn stamp_of(registry: &Registry, link: &Link) -> (u64, u64, u64) {
+    (registry.generation(), link.epoch(), link.forgotten_all())
 }
 
 fn all(nodes: &[String], verdict: NodeVerdict) -> HashMap<String, NodeVerdict> {
