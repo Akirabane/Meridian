@@ -54,6 +54,10 @@ impl Proxy {
         extensions.serve_facts(Arc::new(crate::extension::facts::ProxyFacts::new(
             &sessions, &config,
         )));
+        // What the orders that act on the players (tell, alert) use.
+        extensions.serve_actions(Arc::new(crate::extension::actions::ProxyActions::new(
+            &sessions, &config,
+        )));
         let restarts = Detector::new(
             Arc::clone(&sessions.balancer),
             Arc::new(Counted {

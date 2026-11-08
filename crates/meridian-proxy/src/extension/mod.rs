@@ -11,6 +11,7 @@
 //! Without an extension in the [`Registry`], which is how the proxy starts, nothing here runs and nothing
 //! is on the metrics page.
 
+pub(crate) mod actions;
 mod breaker;
 pub(crate) mod command;
 mod connection;
@@ -26,7 +27,7 @@ mod stats;
 mod tests;
 
 pub use link::{Link, Settings};
-pub use orders::{Facts, Services};
+pub use orders::{Actions, Facts, Services};
 #[cfg(test)]
 pub(crate) use stats::Outcome as RequestOutcome;
 
@@ -148,6 +149,12 @@ impl Registry {
     /// answer that they are not available.
     pub fn serve_facts(&self, facts: Arc<dyn Facts>) {
         self.services.set_facts(facts);
+    }
+
+    /// Gives the orders that act what they act on (tell a player, show a line to many). Until it is called they answer
+    /// that they are not available.
+    pub fn serve_actions(&self, actions: Arc<dyn Actions>) {
+        self.services.set_actions(actions);
     }
 
     /// How many configurations the registry has followed (see the field).

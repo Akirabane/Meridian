@@ -293,14 +293,20 @@ pub fn parse_find(params: Option<&Value>) -> Result<Who, String> {
     }
     let params: FindParams = serde_json::from_value(params.clone())
         .map_err(|_| "params must be an object with \"player\" (a string)")?;
-    if let Some(id) = canonical_uuid(&params.player) {
+    who_of(params.player)
+}
+
+/// A text that is a unique id is one; any other is a name if it is 1 to [`MAX_NAME`] characters with no control
+/// character. The error never quotes the text.
+fn who_of(player: String) -> Result<Who, String> {
+    if let Some(id) = canonical_uuid(&player) {
         return Ok(Who::Id(id));
     }
-    let chars = params.player.chars().count();
-    if chars == 0 || chars > MAX_NAME || params.player.chars().any(char::is_control) {
+    let chars = player.chars().count();
+    if chars == 0 || chars > MAX_NAME || player.chars().any(char::is_control) {
         return Err("\"player\" is neither a unique id nor a name".into());
     }
-    Ok(Who::Name(params.player))
+    Ok(Who::Name(player))
 }
 
 /// `result` of [`PLAYERS_FIND`]: the player, or `null` when nobody online is called that.
@@ -355,6 +361,131 @@ pub struct QueueState {
     pub enabled: bool,
     pub total: usize,
     pub waiting: Vec<Waiting>,
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The orders that message (capability `orders.message`): one player, or many
+
+/// The method that tells one player a line in their chat.
+pub const PLAYERS_TELL: &str = "meridian:players/tell";
+/// The method that shows a line to every player, or to those on one server, as `/alert` does.
+pub const BROADCAST: &str = "meridian:broadcast";
+
+/// The most characters of a line an order shows: the same as a line an extension's own command answers (a line is
+/// valid as [`crate::run::check_line`] says: no control, formatting or invisible character).
+pub const MAX_TEXT: usize = crate::run::MAX_LINE_CHARS;
+
+/// `params` of [`PLAYERS_TELL`]: who (a name in any case, or a unique id) and the line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TellParams {
+    pub player: String,
+    pub text: String,
+}
+
+/// `params` of [`BROADCAST`]: the line, and the server whose players are told (every player when it is left out).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BroadcastParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    pub text: String,
+}
+
+/// `result` of [`PLAYERS_TELL`] and [`BROADCAST`]: how many players were shown the line. A player who is not online
+/// is not an error: `0`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Told {
+    pub told: usize,
+}
+
+/// The line of an order that messages: not empty, and valid as a line an extension's own command answers is.
+fn check_text(text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("\"text\" is empty".into());
+    }
+    crate::run::check_line(text).map_err(|why| format!("\"text\": {why}"))
+}
+
+/// Reads the `params` of [`PLAYERS_TELL`]: who, and the line. The error never quotes what was sent.
+pub fn parse_tell(params: Option<&Value>) -> Result<(Who, String), String> {
+    const SHAPE: &str = "params must be an object with \"player\" and \"text\" (strings)";
+    let params = params.ok_or("params are missing")?;
+    if !params.is_object() {
+        return Err(SHAPE.into());
+    }
+    let params: TellParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
+    let who = who_of(params.player)?;
+    check_text(&params.text)?;
+    Ok((who, params.text))
+}
+
+/// `text` made valid as the line of an order that messages ([`MAX_TEXT`] characters, none of those a line may not
+/// hold): what a line may not hold is dropped (a line break ends nothing: send another line) and the line is cut.
+/// What the extension means is kept; what the proxy would refuse is not. The SDK's `tell` and `broadcast` refuse a
+/// line that is not valid, and do not change it: this is for a program that would rather have it cleaned.
+pub fn clean_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !crate::run::is_refused(*c))
+        .take(MAX_TEXT)
+        .collect()
+}
+
+/// The longest name of a server [`parse_broadcast`] takes.
+pub const MAX_SERVER: usize = 64;
+
+/// Reads the `params` of [`BROADCAST`]: the server (if any) and the line. Whether the server exists is for the proxy
+/// to say. The error never quotes what was sent.
+pub fn parse_broadcast(params: Option<&Value>) -> Result<(Option<String>, String), String> {
+    const SHAPE: &str =
+        "params must be an object with \"text\" and, if you like, \"server\" (strings)";
+    let params = params.ok_or("params are missing")?;
+    if !params.is_object() {
+        return Err(SHAPE.into());
+    }
+    let params: BroadcastParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
+    if let Some(server) = &params.server {
+        let chars = server.chars().count();
+        if chars == 0 || chars > MAX_SERVER || server.chars().any(char::is_control) {
+            return Err("\"server\" is not a name of a server".into());
+        }
+    }
+    check_text(&params.text)?;
+    Ok((params.server, params.text))
+}
+
+/// How `rpc.discover` of the proxy describes the orders that message.
+pub fn message_methods() -> Vec<(&'static str, DiscoverMethod)> {
+    vec![
+        (
+            PLAYERS_TELL,
+            DiscoverMethod::with_params(
+                PLAYERS_TELL,
+                &[
+                    ("player", true, json!({ "type": "string" })),
+                    (
+                        "text",
+                        true,
+                        json!({ "type": "string", "maxLength": MAX_TEXT }),
+                    ),
+                ],
+            ),
+        ),
+        (
+            BROADCAST,
+            DiscoverMethod::with_params(
+                BROADCAST,
+                &[
+                    ("server", false, json!({ "type": "string" })),
+                    (
+                        "text",
+                        true,
+                        json!({ "type": "string", "maxLength": MAX_TEXT }),
+                    ),
+                ],
+            ),
+        ),
+    ]
 }
 
 /// How `rpc.discover` of the proxy describes the orders that read.
@@ -889,5 +1020,113 @@ mod tests {
         );
         assert!(methods.iter().all(|(name, m)| *name == m.name));
         assert!(methods[1].1.params[0].required);
+    }
+
+    // ---- the orders that message ---------------------------------------------------------------------
+
+    #[test]
+    fn a_player_is_told_by_name_or_id_and_the_line_is_checked_like_the_line_of_a_command() {
+        let tell = |v: Value| parse_tell(Some(&v));
+        assert_eq!(
+            tell(json!({"player": "Steve", "text": "Hello."})),
+            Ok((Who::Name("Steve".into()), "Hello.".into()))
+        );
+        assert_eq!(
+            tell(json!({"player": ALEX.to_ascii_uppercase(), "text": "x"})),
+            Ok((Who::Id(ALEX.into()), "x".into()))
+        );
+        // The longest line, and one more.
+        assert!(tell(json!({"player": "a-b", "text": "é".repeat(MAX_TEXT)})).is_ok());
+        let secret = "ZZZ-must-not-come-back";
+        for bad in [
+            json!({"player": "Steve", "text": ""}),
+            json!({"player": "Steve", "text": "é".repeat(MAX_TEXT + 1)}),
+            json!({"player": "Steve", "text": format!("{secret}\n")}),
+            json!({"player": "Steve", "text": format!("{secret}\u{a7}c")}),
+            json!({"player": "Steve", "text": format!("{secret}\u{202e}")}),
+            json!({"player": "Steve"}),
+            json!({"text": "hi"}),
+            json!({"player": "", "text": "hi"}),
+            json!({"player": 7, "text": "hi"}),
+            json!({"player": "Steve", "text": "hi", "more": 1}),
+            json!(["Steve", "hi"]),
+            json!("hi"),
+            json!(null),
+        ] {
+            let why = tell(bad.clone()).unwrap_err();
+            assert!(!why.contains("ZZZ") && !why.is_empty(), "{bad}: {why}");
+        }
+        assert!(parse_tell(None).is_err());
+    }
+
+    #[test]
+    fn a_broadcast_has_a_line_and_may_name_a_server() {
+        let cast = |v: Value| parse_broadcast(Some(&v));
+        assert_eq!(
+            cast(json!({"text": "Restart in 5 minutes."})),
+            Ok((None, "Restart in 5 minutes.".into()))
+        );
+        assert_eq!(
+            cast(json!({"server": "east", "text": "Hi"})),
+            Ok((Some("east".into()), "Hi".into()))
+        );
+        let secret = "ZZZ-must-not-come-back";
+        for bad in [
+            json!({}),
+            json!({"server": "east"}),
+            json!({"server": "", "text": "Hi"}),
+            json!({"server": "x".repeat(MAX_SERVER + 1), "text": "Hi"}),
+            json!({"server": format!("{secret}\n"), "text": "Hi"}),
+            json!({"server": 3, "text": "Hi"}),
+            json!({"text": ""}),
+            json!({"text": format!("{secret}\u{7}")}),
+            json!({"text": "é".repeat(MAX_TEXT + 1)}),
+            json!({"text": "Hi", "more": 1}),
+            json!(["Hi"]),
+            json!(null),
+        ] {
+            let why = cast(bad.clone()).unwrap_err();
+            assert!(!why.contains("ZZZ") && !why.is_empty(), "{bad}: {why}");
+        }
+        assert!(parse_broadcast(None).is_err());
+    }
+
+    #[test]
+    fn a_line_can_be_cleaned_into_one_the_proxy_takes() {
+        let dirty = format!("a\nb\u{a7}c\u{202e}d{}", "x".repeat(2 * MAX_TEXT));
+        let clean = clean_text(&dirty);
+        assert!(
+            clean.starts_with("abcdx") && clean.chars().count() == MAX_TEXT,
+            "{clean:?}"
+        );
+        assert!(crate::run::check_line(&clean).is_ok());
+        assert_eq!(clean_text("Hello."), "Hello.");
+        // Nothing but what a line may not hold: nothing is left, and an order says the line is empty.
+        assert_eq!(clean_text("\n\u{a7}"), "");
+    }
+
+    #[test]
+    fn what_the_sdk_writes_for_the_orders_that_message_is_what_the_proxy_reads() {
+        let written = serde_json::to_value(TellParams {
+            player: "Steve".into(),
+            text: "Hello.".into(),
+        })
+        .unwrap();
+        assert_eq!(written, json!({"player": "Steve", "text": "Hello."}));
+        assert!(parse_tell(Some(&written)).is_ok());
+        // `server` is left out when it is not given, not written as null.
+        let written = serde_json::to_value(BroadcastParams {
+            server: None,
+            text: "Hi".into(),
+        })
+        .unwrap();
+        assert_eq!(written, json!({"text": "Hi"}));
+        assert_eq!(
+            serde_json::to_value(Told { told: 3 }).unwrap(),
+            json!({"told": 3})
+        );
+        let methods = message_methods();
+        let names: Vec<_> = methods.iter().map(|(_, m)| m.name.as_str()).collect();
+        assert_eq!(names, [PLAYERS_TELL, BROADCAST]);
     }
 }

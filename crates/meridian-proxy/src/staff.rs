@@ -131,6 +131,27 @@ pub fn alert(
     server: Option<&str>,
     message: &str,
 ) -> Result<usize, String> {
+    alert_counted(shared, config, server, message).map(|(found, _)| found)
+}
+
+/// [`alert`], counting the players **shown** the message: those whose session was in the play phase (a session that is not
+/// reads no chat). For the orders of an extension, which tell it how many were shown.
+pub fn alert_shown(
+    shared: &Shared,
+    config: &Config,
+    server: Option<&str>,
+    message: &str,
+) -> Result<usize, String> {
+    alert_counted(shared, config, server, message).map(|(_, shown)| shown)
+}
+
+/// The alert: how many players it found, and how many of them were shown it.
+fn alert_counted(
+    shared: &Shared,
+    config: &Config,
+    server: Option<&str>,
+    message: &str,
+) -> Result<(usize, usize), String> {
     let backend = match server {
         Some(name) => Some(
             config
@@ -147,10 +168,9 @@ pub fn alert(
         .filter(|(player, _)| backend.is_none_or(|b| player.backend == b))
         .map(|(_, handle)| handle)
         .collect();
-    for handle in &told {
-        handle.tell(&format!("{ALERT_PREFIX}{message}"));
-    }
-    Ok(told.len())
+    let line = format!("{ALERT_PREFIX}{message}");
+    let shown = told.iter().filter(|handle| handle.try_tell(&line)).count();
+    Ok((told.len(), shown))
 }
 
 /// Where a command typed in game is run from: the player's own session and what the proxy

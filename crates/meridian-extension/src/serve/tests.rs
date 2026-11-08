@@ -2193,4 +2193,129 @@ mod orders {
         assert!(matches!(bad, OrderError::BadAnswer(_)));
         assert!(!bad.to_string().contains("secret"), "{bad}");
     }
+
+    // ---- the orders that message ----------------------------------------------------------------------
+
+    #[test]
+    fn a_player_is_told_a_line_and_a_broadcast_goes_to_a_server_or_to_all() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        // tell: the params the proxy reads, and the number told.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.tell("Steve", "Hello <b>there</b>."))
+        };
+        let (method, params) = serve_one(&mut proxy, |_, _| Ok(json!({"told": 1})));
+        assert_eq!(method, shapes::PLAYERS_TELL);
+        assert_eq!(
+            params.unwrap(),
+            json!({"player": "Steve", "text": "Hello <b>there</b>."})
+        );
+        assert_eq!(asked.join().unwrap(), Ok(1));
+        // A player who is not online: 0, not an error.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.tell(&ALEX.replace('-', ""), "hi"))
+        };
+        serve_one(&mut proxy, |_, _| Ok(json!({"told": 0})));
+        assert_eq!(asked.join().unwrap(), Ok(0));
+        // broadcast to everyone: no `server` key.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.broadcast(None, "Restart in 5 minutes."))
+        };
+        let (method, params) = serve_one(&mut proxy, |_, _| Ok(json!({"told": 12})));
+        assert_eq!(method, shapes::BROADCAST);
+        assert_eq!(params.unwrap(), json!({"text": "Restart in 5 minutes."}));
+        assert_eq!(asked.join().unwrap(), Ok(12));
+        // broadcast to a server.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.broadcast(Some("east"), "Hello east."))
+        };
+        let (_, params) = serve_one(&mut proxy, |_, _| Ok(json!({"told": 2})));
+        assert_eq!(
+            params.unwrap(),
+            json!({"server": "east", "text": "Hello east."})
+        );
+        assert_eq!(asked.join().unwrap(), Ok(2));
+    }
+
+    /// A line that is not valid, a name that is not one and a server that is not a name are refused before anything is
+    /// sent; `clean_text` makes a line valid.
+    #[test]
+    fn a_line_that_is_not_valid_is_refused_before_anything_is_sent_and_clean_text_makes_it_valid() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let too_long = "x".repeat(shapes::MAX_TEXT + 1);
+        for text in [
+            "",
+            too_long.as_str(),
+            "two\nlines",
+            "colour \u{a7}c",
+            "reversed \u{202e}",
+        ] {
+            assert!(
+                matches!(handle.tell("Steve", text), Err(OrderError::Invalid(_))),
+                "{text:?}"
+            );
+            assert!(
+                matches!(handle.broadcast(None, text), Err(OrderError::Invalid(_))),
+                "{text:?}"
+            );
+        }
+        assert!(matches!(handle.tell("", "hi"), Err(OrderError::Invalid(_))));
+        assert!(matches!(
+            handle.broadcast(Some(""), "hi"),
+            Err(OrderError::Invalid(_))
+        ));
+        // Nothing was written: the next thing the stand-in proxy reads is the answer to its own request.
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 3}))).unwrap(),
+            json!({"k": 3})
+        );
+        // The same lines, cleaned, are sent.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                handle.tell("Steve", &shapes::clean_text("two\nlines \u{a7}c"))
+            })
+        };
+        let (_, params) = serve_one(&mut proxy, |_, _| Ok(json!({"told": 1})));
+        assert_eq!(
+            params.unwrap(),
+            json!({"player": "Steve", "text": "twolines c"})
+        );
+        assert_eq!(asked.join().unwrap(), Ok(1));
+    }
+
+    /// A broadcast the proxy's budget cannot pay is refused before anyone is told: -32001, which can be asked again; and a
+    /// timeout leaves it open whether the line was shown, which, for an order that is not the same twice, is not for the
+    /// SDK to say.
+    #[test]
+    fn a_refused_broadcast_did_not_happen_and_a_timeout_may_have_shown_the_line() {
+        let (_running, handle, mut proxy) = up(Duration::from_millis(150));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.broadcast(None, "hi"))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(
+                code::OVER_BUDGET,
+                "over the budget of orders",
+            ))
+        });
+        let refused = asked.join().unwrap().unwrap_err();
+        assert!(
+            refused.retry_later() && !refused.may_have_run(),
+            "{refused}"
+        );
+        // No answer in time.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.tell("Steve", "hi"))
+        };
+        let _ = message(&mut proxy.socket);
+        let late = asked.join().unwrap().unwrap_err();
+        assert_eq!(late, OrderError::Timeout);
+        assert!(late.may_have_run() && !late.retry_later());
+    }
 }

@@ -3182,4 +3182,111 @@ mod reading {
         let refused = running.proxy().players().unwrap_err();
         assert!(refused.is_not_granted(), "{refused}");
     }
+
+    // ---- the orders that message ----------------------------------------------------------------------
+
+    use crate::extension::Actions;
+    use crate::extension::actions::ProxyActions;
+    use meridian_extension::orders::Who;
+
+    fn actions_of(sessions: &Arc<Sessions>, config: &Config) -> ProxyActions {
+        ProxyActions::new(sessions, &Arc::new(RwLock::new(Arc::new(config.clone()))))
+    }
+
+    #[test]
+    fn the_actions_of_the_proxy_tell_the_players_that_are_there_and_count_those_a_line_reaches() {
+        let sessions = Arc::new(Sessions::default());
+        let config = balanced();
+        let actions = actions_of(&sessions, &config);
+        // Nobody is online.
+        assert_eq!(actions.tell(&Who::Name("Alex".into()), "hi"), 0);
+        assert_eq!(actions.audience(None), Ok(0));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let _notch = connected(
+            &sessions,
+            "Notch",
+            Identity::Verified(offline_uuid("Notch").to_be_bytes()),
+        );
+        // One player, by name in any case and by unique id; nobody else.
+        // The sessions of this test have not finished their configuration: they read no chat, so nobody is shown the line
+        // (the positive case is `try_tell`'s, tested where a session can be put in play).
+        assert_eq!(actions.tell(&Who::Name("ALEX".into()), "hi"), 0);
+        let notch = hyphenated(offline_uuid("Notch").to_be_bytes()).to_ascii_lowercase();
+        assert_eq!(actions.tell(&Who::Id(notch), "hi"), 0);
+        assert_eq!(actions.tell(&Who::Name("Nobody".into()), "hi"), 0);
+        assert_eq!(
+            actions.tell(
+                &Who::Id("99999999-0000-0000-0000-000000000000".into()),
+                "hi"
+            ),
+            0
+        );
+        // The players a line reaches: all of them, those of a server (both are on `lobby`), none of `east`'s, and a
+        // server that is not one is an error whose words do not matter (the order gives its own).
+        assert_eq!(actions.audience(None), Ok(2));
+        assert_eq!(actions.audience(Some("lobby")), Ok(2));
+        assert_eq!(actions.audience(Some("east")), Ok(0));
+        assert!(actions.audience(Some("nowhere")).is_err());
+        // The alert of the proxy, counted as it counts.
+        // Two found, none shown the line.
+        assert_eq!(actions.audience(None), Ok(2));
+        assert_eq!(actions.broadcast(None, "hello"), Ok(0));
+        assert_eq!(actions.broadcast(Some("east"), "hello"), Ok(0));
+        assert!(actions.broadcast(Some("nowhere"), "hello").is_err());
+    }
+
+    #[test]
+    fn the_actions_hold_the_sessions_weakly_and_reach_nobody_once_they_are_gone() {
+        let sessions = Arc::new(Sessions::default());
+        let actions = actions_of(&sessions, &balanced());
+        drop(sessions);
+        assert_eq!(actions.tell(&Who::Name("Alex".into()), "hi"), 0);
+        assert_eq!(actions.audience(None), Ok(0));
+        assert_eq!(actions.broadcast(None, "hi"), Ok(0));
+    }
+
+    /// An extension that asks for `orders.message`, granted by the operator, giving its orders with its SDK over the real
+    /// connection to the real sessions.
+    #[test]
+    fn an_sdk_tells_a_player_and_broadcasts_over_the_real_connection() {
+        let folder = Folder::new();
+        let running = Sdk::new("speaker", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .wants("orders.message")
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let config = Config {
+            extensions: vec![extension_config(
+                running.local_addr().to_string(),
+                folder.token(),
+                &["orders.message"],
+                OnError::Default,
+                1000,
+            )],
+            ..routed()
+        };
+        let sessions = Arc::new(sessions_for(&config));
+        sessions
+            .extensions
+            .serve_actions(Arc::new(actions_of(&sessions, &config)));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let proxy = running.proxy();
+        // Found, but not in the play phase: nobody is shown the line, and the answer says so.
+        assert_eq!(proxy.tell("alex", "Hello."), Ok(0));
+        assert_eq!(proxy.tell("Nobody", "Hello?"), Ok(0));
+        assert_eq!(proxy.broadcast(None, "Restart in five minutes."), Ok(0));
+        assert_eq!(proxy.broadcast(Some("east"), "Hello east."), Ok(0));
+        // A server the proxy does not have: refused by the proxy (-32602), and told in fixed words.
+        let refused = proxy.broadcast(Some("nowhere"), "hi").unwrap_err();
+        assert!(
+            matches!(&refused, meridian_extension::serve::OrderError::Refused(e) if e.code == -32602),
+            "{refused}"
+        );
+        assert!(!refused.to_string().contains("nowhere"), "{refused}");
+        // A line that is not valid does not leave the SDK.
+        assert!(matches!(
+            proxy.tell("Alex", "two\nlines"),
+            Err(meridian_extension::serve::OrderError::Invalid(_))
+        ));
+    }
 }
