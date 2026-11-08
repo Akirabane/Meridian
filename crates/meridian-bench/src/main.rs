@@ -4,6 +4,7 @@ mod backend;
 mod cpu;
 mod echo;
 mod load;
+mod netsim;
 mod player;
 mod proxy;
 mod report;
@@ -27,6 +28,7 @@ Measures the proxy on this machine, over 127.0.0.1: the same players and packets
 directly to a stand-in backend, then through the real `meridian` program.
 
        meridian-bench load [OPTIONS]    the load baseline: see `load --help`
+       meridian-bench netsim [OPTIONS]  a TCP relay that makes a link worse: see `netsim --help`
 
 Options:
   --players LIST   player counts, one step each (default 10,100)
@@ -109,6 +111,11 @@ fn main() -> ExitCode {
     if args.first().is_some_and(|a| a == "load") {
         args.remove(0);
         return load::main(args);
+    }
+    // `meridian-bench netsim ...` is a relay that makes a link worse (docs/NETSIM.md).
+    if args.first().is_some_and(|a| a == "netsim") {
+        args.remove(0);
+        return netsim::main(args);
     }
     let options = match parse(args) {
         Ok(Some(options)) => options,
