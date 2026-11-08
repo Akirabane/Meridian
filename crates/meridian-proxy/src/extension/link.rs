@@ -336,6 +336,12 @@ impl Link {
             .then(|| OrderPlace(Arc::clone(self)))
     }
 
+    /// How many threads of orders are alive, running or waiting to write (for the tests).
+    #[cfg(test)]
+    pub(super) fn order_threads_alive(&self) -> usize {
+        self.order_threads.load(Ordering::SeqCst)
+    }
+
     /// A thread for one order, or `None` when `2 x max-running` of them are alive. An order gives its place back
     /// when it has run, **before** it writes its answer, and a write that blocks (an extension that does not
     /// read) holds its thread for the write timeout: so the places bound the orders that run, and this bounds the

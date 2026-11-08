@@ -1854,7 +1854,10 @@ mod the_orders {
             document.methods.into_iter().map(|m| m.name).collect()
         };
         assert_eq!(methods(&["decide.command"]), [INVALIDATE]);
-        assert_eq!(methods(&["orders.read"]), [BLOCK, PANIC]);
+        assert_eq!(
+            methods(&["orders.read"]),
+            [BLOCK, PANIC, "meridian:test/slow-write"]
+        );
         assert!(methods(&["decide.login", "events"]).is_empty());
     }
 
@@ -1883,55 +1886,55 @@ mod the_orders {
 
     /// An extension that does not read its answers holds the threads of the orders it gave, each for the time of a
     /// write, and no place: the places count the orders that run, so they cannot bound those threads; the threads
-    /// themselves are bounded, to twice `max-running`. The writes are blocked here for three seconds; everything
-    /// the test looks at is looked at in the first one.
+    /// themselves are bounded, to twice `max-running`. The writes that block are the test's own (`SLOW_WRITE` waits
+    /// before it writes, until it is let go), so that nothing here depends on how much a socket takes before a
+    /// write blocks, which is not the same on every system.
     #[test]
     fn an_order_that_waits_to_write_holds_no_place_and_the_threads_that_wait_are_bounded() {
-        let fake = Fake::start(Script {
-            capabilities: vec!["decide.command".into()],
-            deaf: Some(Duration::from_secs(60)),
-            ..Script::default()
-        });
-        let (_registry, link, _folder) = connect_with(&fake, |settings| {
-            settings.grant = vec!["decide.command".into()];
+        const SLOW: &str = "meridian:test/slow-write";
+        test_support::WRITE_OPEN.store(false, Ordering::SeqCst);
+        let (fake, _registry, link, _folder) = orderly(&["orders.read"], |settings| {
             settings.orders_running = 4;
             settings.order_rate = 1000;
             settings.order_burst = 1000;
-            settings.timings.write = Duration::from_secs(3);
         });
-        until("the connection", || link.is_connected());
-        // Fill the socket until a write blocks, with a thread that holds the writer while it does: the answers of
-        // the orders wait behind it, as they would wait for the socket.
-        let writer = link.lock().writer.clone().expect("a connection");
-        let filler = std::thread::spawn(move || {
-            let big = "x".repeat(200 << 10);
-            while writer.send_text(&big).is_ok() {}
-        });
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(
-            !filler.is_finished(),
-            "the socket never filled: this system takes more than the test sends before a write blocks"
-        );
-        for n in 0..12 {
-            order(&fake, &json!(1000 + n), INVALIDATE, r#"{"all":true}"#);
-            // Each order has run and given its place back before the next comes: only the threads are a limit.
-            std::thread::sleep(Duration::from_millis(25));
+        // Eight orders, one after the other: each runs, gives its place back, and waits to write. The next is sent
+        // when the one before waits, so that no place is ever the limit: only the threads are.
+        for n in 0..8 {
+            order(&fake, &json!(1000 + n), SLOW, "{}");
+            until("an order to wait to write", || {
+                test_support::WAITING_TO_WRITE.load(Ordering::SeqCst) == n + 1
+            });
         }
-        let first_second = Instant::now() + Duration::from_secs(1);
-        until("an order to be refused for want of a thread", || {
-            link.stats().orders(INVALIDATE, Ended::Busy) >= 1
-        });
-        // The threads that wait to write are at most twice the places: 8 of the 12 got one, and the ninth was refused.
-        assert_eq!(link.stats().orders(INVALIDATE, Ended::Done), 8);
-        // Their places are free: they gave them back before they wrote. (Were they kept until the write
-        // ended, this would only come true when the writes give up, in three seconds.)
-        let mut places = Vec::new();
-        until("the places of the orders that wait to write", || {
-            places.extend(link.order_place());
-            places.len() == 4
-        });
-        assert!(Instant::now() < first_second, "the places came back late");
-        // A fifth is not given: the places are the limit of what runs.
+        assert_eq!(link.order_threads_alive(), 8);
+        // Their places are free: they gave them back before they waited. (Kept until the write ended, they would
+        // have refused the fifth.) All four can be taken, and no fifth.
+        let places: Vec<_> = (0..4)
+            .map(|_| link.order_place().expect("a place"))
+            .collect();
         assert!(link.order_place().is_none());
+        drop(places);
+        // The ninth, and the ones after it, find no thread: told so at once, and none runs. The number of threads
+        // never goes above twice the places.
+        for n in 8..12 {
+            order(&fake, &json!(1000 + n), SLOW, "{}");
+            let refused = answer(&fake, &json!(1000 + n));
+            assert_eq!(code_of(&refused), -32002, "{refused}");
+            assert_eq!(link.order_threads_alive(), 8);
+        }
+        assert_eq!(link.stats().orders(SLOW, Ended::Busy), 4);
+        assert_eq!(link.stats().orders(SLOW, Ended::Done), 8);
+        // The writes can go: all eight answer, the threads end, and orders are served again.
+        test_support::WRITE_OPEN.store(true, Ordering::SeqCst);
+        for n in 0..8 {
+            assert_eq!(
+                answer(&fake, &json!(1000 + n))["result"],
+                json!({"ok": true})
+            );
+        }
+        until("the threads to end", || link.order_threads_alive() == 0);
+        order(&fake, &json!(2000), SLOW, "{}");
+        assert_eq!(answer(&fake, &json!(2000))["result"], json!({"ok": true}));
+        test_support::WRITE_OPEN.store(false, Ordering::SeqCst);
     }
 }

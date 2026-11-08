@@ -51,7 +51,25 @@ pub(super) const ORDERS: &[Order] = &[INVALIDATE];
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
 /// panics, to see what the dispatcher does with a slow order and a failing one.
 #[cfg(test)]
-pub(super) const ORDERS: &[Order] = &[INVALIDATE, test_support::BLOCK, test_support::PANIC];
+pub(super) const ORDERS: &[Order] = &[
+    INVALIDATE,
+    test_support::BLOCK,
+    test_support::PANIC,
+    test_support::SLOW_WRITE,
+];
+
+/// Writes the answer of an order. In the tests an order of `SLOW_WRITE` waits here, as a write that blocks does
+/// (an extension that does not read), until the test lets it go: the same thing for any size of socket buffer, which
+/// no test can rely on (Linux takes a good deal more than Windows before a write blocks).
+fn deliver(order: &Order, writer: &Writer, text: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if order.method == test_support::SLOW_WRITE.method {
+        test_support::wait_to_write();
+    }
+    #[cfg(not(test))]
+    let _ = order;
+    writer.send_text(text)
+}
 
 /// How an order ended, for the metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -272,7 +290,7 @@ fn run(
         order.method,
         outcome.label()
     );
-    if let Err(e) = writer.send_text(&reply) {
+    if let Err(e) = deliver(order, writer, &reply) {
         crate::log::warning!(
             "extension \"{}\": cannot write the answer to an order: {e}; closing the connection",
             link.name()
@@ -311,6 +329,33 @@ pub(super) mod test_support {
         capability: "orders.read",
         run: block,
         describe: || DiscoverMethod::new("meridian:test/block"),
+    };
+
+    /// Set to let the answers of `SLOW_WRITE` go.
+    pub static WRITE_OPEN: AtomicBool = AtomicBool::new(false);
+    /// How many answers of `SLOW_WRITE` wait to be written.
+    pub static WAITING_TO_WRITE: AtomicUsize = AtomicUsize::new(0);
+
+    /// What `deliver` does for `SLOW_WRITE`.
+    pub fn wait_to_write() {
+        WAITING_TO_WRITE.fetch_add(1, Ordering::SeqCst);
+        let limit = Instant::now() + std::time::Duration::from_secs(20);
+        while !WRITE_OPEN.load(Ordering::SeqCst) && Instant::now() < limit {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        WAITING_TO_WRITE.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn quick(_: &Arc<Link>, _: Option<&Value>) -> Result<Value, RpcError> {
+        Ok(serde_json::to_value(Ack::done()).unwrap())
+    }
+
+    /// An order that runs at once and whose answer then waits to be written.
+    pub const SLOW_WRITE: Order = Order {
+        method: "meridian:test/slow-write",
+        capability: "orders.read",
+        run: quick,
+        describe: || DiscoverMethod::new("meridian:test/slow-write"),
     };
 
     pub const PANIC: Order = Order {
