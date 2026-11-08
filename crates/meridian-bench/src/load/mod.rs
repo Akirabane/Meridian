@@ -413,7 +413,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
             let path = remote_config.ok_or(
                 "a run against a proxy of another machine needs --remote-config FILE (write it with --write-remote-config DIR first)",
             )?;
-            let (secret, threshold) = remote::read_config(&path, &remote)?;
+            let (secret, threshold) =
+                remote::read_config(&path, &remote, o.settings.handshake_host.as_deref())?;
             o.settings.forwarding = secret;
             remote.threshold = threshold;
             if !compressions_given {
