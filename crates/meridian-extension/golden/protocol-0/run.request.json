@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "meridian:command/run",
+  "params": {
+    "request": {
+      "player": {"name": "Alex", "uuid": "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c", "auth": "verified"},
+      "server": "lobby",
+      "command": "party",
+      "args": ["invite", "Bob"]
+    }
+  }
+}

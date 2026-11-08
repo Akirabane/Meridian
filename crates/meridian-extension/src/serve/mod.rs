@@ -35,6 +35,7 @@ use crate::decide::{
     NodeAnswers, ServerAnswer, ServerParams, ServerRequest,
 };
 use crate::handshake::Secret;
+use crate::run::{self, Lines, RunAnswer, RunParams, RunRequest};
 use crate::wire::{self, CommandSpec, DiscoverMethod, RpcError, code};
 use serde_json::Value;
 use std::io;
@@ -96,7 +97,14 @@ pub struct Extension {
     pub(crate) commands: Vec<CommandSpec>,
     /// Capabilities the extension asks for besides those of its handlers.
     pub(crate) wanted: Vec<String>,
+    /// The handlers of the extension's own commands, by the words each answers to; one method, `command/run`,
+    /// serves them all.
+    pub(crate) runs: Option<Arc<RunTable>>,
 }
+
+/// What `command/run` finds its handler in: the words of a command, and what runs for it.
+pub(crate) type RunTable = Mutex<Vec<(Vec<String>, Arc<RunHandler>)>>;
+pub(crate) type RunHandler = dyn Fn(&RunRequest) -> Lines + Send + Sync;
 
 impl Extension {
     /// An extension that calls itself `name` and `version` in the proxy's logs, and shares `token` with
@@ -113,6 +121,7 @@ impl Extension {
             handlers: Vec::new(),
             commands: Vec::new(),
             wanted: Vec::new(),
+            runs: None,
         }
     }
 
@@ -227,6 +236,69 @@ impl Extension {
                 Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
             },
         )
+    }
+
+    /// Declares a command of the extension's own and answers it (docs/EXTENSIONS.md, 4.3). The extension
+    /// declares `commands` and the command in its hello; the proxy takes the command from the player only if
+    /// the operator granted `commands`. The handler runs on a thread of its own, with the request (the
+    /// command's declared name, its arguments as the player typed them, so **not to be trusted**, and who the
+    /// player is), and answers the [`Lines`] the player reads. They are plain text: [`Lines::new`] cuts and
+    /// cleans what the proxy would refuse. The player waits for the answer, so keep it quick.
+    ///
+    /// A command is declared once with all its words (`spec.name` and `spec.aliases`), and may be given
+    /// any number of commands. A word that is not valid (`CommandSpec::check`) or is declared twice is a
+    /// mistake of the program, and panics, as registering any method twice does. Whether a word is also a
+    /// command of the proxy or of another extension is for the proxy to say, when it reads the hello.
+    pub fn command(
+        mut self,
+        spec: CommandSpec,
+        handler: impl Fn(&RunRequest) -> Lines + Send + Sync + 'static,
+    ) -> Self {
+        if let Err(why) = spec.check() {
+            panic!("the command is not valid: {why}");
+        }
+        for word in spec.words() {
+            assert!(
+                !self.commands.iter().any(|c| c.words().any(|w| w == word)),
+                "the command word {word} is declared twice"
+            );
+        }
+        let table = match &self.runs {
+            Some(table) => Arc::clone(table),
+            None => {
+                let table = Arc::new(RunTable::default());
+                let served = Arc::clone(&table);
+                self = self.register(
+                    run::RUN,
+                    "commands",
+                    DiscoverMethod::with_request(run::RUN, "object"),
+                    move |params| {
+                        let params: RunParams = wire::decode(params.as_ref())
+                            .map_err(|why| RpcError::new(code::INVALID_PARAMS, why))?;
+                        let handler = served
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .iter()
+                            .find(|(words, _)| words.contains(&params.request.command))
+                            .map(|(_, handler)| Arc::clone(handler));
+                        let Some(handler) = handler else {
+                            return Err(RpcError::new(code::INVALID_PARAMS, "no such command"));
+                        };
+                        let answer = RunAnswer::from(&handler(&params.request));
+                        Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
+                    },
+                );
+                self.runs = Some(Arc::clone(&table));
+                table
+            }
+        };
+        let handler: Arc<RunHandler> = Arc::new(handler);
+        table
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((spec.words().map(str::to_owned).collect(), handler));
+        self.commands.push(spec);
+        self
     }
 
     /// Asks for a capability that no handler implies, such as `addresses`, which gives the extension

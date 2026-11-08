@@ -534,7 +534,7 @@ extension is down and the policy is `default`. The operator decided it so (decis
 (`commands::hook_with`), through `extension/command.rs` in the proxy and `meridian_extension::decide`
 (`CommandRequest`, `NodeAnswers`, `parse_command_answer`) for both sides. The golden files are
 `golden/protocol-0/command.*.json`, and the SDK registers it with `Extension::on_command`. The own commands
-of an extension (the `commands` capability and `command/run`) are not built; this is the permission only.
+of an extension are built in part, as the last paragraph of this section says; this is the permission only.
 What the specification above leaves open:
 
 - **The rule is one function, `merge`:** `allow` is a permission **even if `permissions.toml` or the
@@ -615,6 +615,20 @@ commands in its `hello`:
 - The commands are offered to the client's completion only if the proxy changes the command tree
   the server sends. It does not today (`README.md:284`: `/server` is not offered by Tab
   completion). Version 1 does not add it.
+
+**As built, so far, for the extension's own commands:** the wire and the SDK, and the relay's side.
+`meridian_extension::run` has the request (`RunRequest`: the player, the server, the command's **declared
+name** (an alias resolved), and the arguments, at most 32 of 256 characters as in `decide/command`), the
+answer (`Lines`, `parse_run_answer`) and the one check of a line (`check_line`: at most 256 characters, no
+control character) that the SDK makes its lines with, so that an extension cannot send one the proxy would
+refuse. `wire::CommandSpec::check` is the one check of a declaration: a name and aliases of 1 to 32 characters
+among `a-z`, `0-9`, `-` and `_`, none given twice. The golden files are `golden/protocol-0/run.*.json`.
+The SDK declares a command with `Extension::command` (one method, `command/run`, serves all of an extension's
+commands; a word declared twice or not valid panics, as a method registered twice does), and
+`examples/command_party.rs` is a small one. The relay's hook can take a command and answer it later
+(`meridian_net::relay::TAKEN`). **The proxy does not yet read the declaration of the hello nor route a
+command: a declared command still goes to the server.** What is left open there is the rest of the list above:
+the clash checks, the node `ext.<extension>.<command>`, the run and its time limit.
 
 ### 4.4 The choice of server
 
