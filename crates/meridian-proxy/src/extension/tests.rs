@@ -1971,7 +1971,7 @@ mod the_orders {
     }
 
     impl Facts for Stub {
-        fn players(&self) -> Vec<PlayerInfo> {
+        fn players(&self, with_addresses: bool) -> Vec<PlayerInfo> {
             self.entered.fetch_add(1, Ordering::SeqCst);
             let limit = Instant::now() + Duration::from_secs(20);
             while self.hold.load(Ordering::SeqCst) && Instant::now() < limit {
@@ -1989,7 +1989,7 @@ mod the_orders {
                     },
                     server: "lobby".into(),
                     seconds: 60 * n,
-                    address: Some(format!("203.0.113.{n}")),
+                    address: with_addresses.then(|| format!("203.0.113.{n}")),
                 })
                 .collect()
         }
@@ -2231,6 +2231,56 @@ mod the_orders {
             (true, 2, 2)
         );
         assert_eq!(queue.waiting[0].name, "Dave");
+    }
+
+    /// The two orders that take no parameters refuse any: a program that thinks it is filtering finds out.
+    #[test]
+    fn the_orders_that_take_no_parameters_refuse_any_and_take_none_as_none() {
+        let (fake, _registry, link, _folder) = reading(&["orders.read"], &Stub::new(), |_| {});
+        for (n, method) in [shapes::SERVERS_LIST, shapes::QUEUE_LIST]
+            .into_iter()
+            .enumerate()
+        {
+            let n = n as u64 * 10;
+            for (k, params) in [r#"{"x":1}"#, "[1]", r#""all""#, "7"]
+                .into_iter()
+                .enumerate()
+            {
+                let id = json!(5000 + n + k as u64);
+                order(&fake, &id, method, params);
+                let reply = answer(&fake, &id);
+                assert_eq!(code_of(&reply), -32602, "{method} {params}");
+                assert_eq!(reply["error"]["message"], "this order takes no parameters");
+            }
+            for (k, params) in ["{}", "null"].into_iter().enumerate() {
+                let id = json!(5100 + n + k as u64);
+                order(&fake, &id, method, params);
+                assert!(
+                    answer(&fake, &id).get("result").is_some(),
+                    "{method} {params}"
+                );
+            }
+            // And none at all.
+            let id = json!(5200 + n);
+            fake.send(&format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}"}}"#
+            ));
+            assert!(answer(&fake, &id).get("result").is_some(), "{method}");
+            assert_eq!(link.stats().orders(method, Ended::Invalid), 4, "{method}");
+        }
+    }
+
+    /// A limit and a cursor that are null are the first page, as if they were left out.
+    #[test]
+    fn a_page_with_a_null_limit_and_cursor_is_the_first_page() {
+        let (fake, _registry, _link, _folder) = reading(&["orders.read"], &Stub::new(), |_| {});
+        order(
+            &fake,
+            &json!(5300),
+            shapes::PLAYERS_LIST,
+            r#"{"limit":null,"cursor":null}"#,
+        );
+        assert_eq!(page(&answer(&fake, &json!(5300))).players.len(), 7);
     }
 
     #[test]

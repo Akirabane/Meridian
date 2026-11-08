@@ -3024,7 +3024,7 @@ mod reading {
         let sessions = Arc::new(Sessions::default());
         let config = balanced();
         let facts = facts_of(&sessions, &config);
-        assert!(facts.players().is_empty());
+        assert!(facts.players(true).is_empty());
         let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
         let _notch = connected(
             &sessions,
@@ -3032,7 +3032,7 @@ mod reading {
             Identity::Verified(offline_uuid("Notch").to_be_bytes()),
         );
         // The players, with how each was proven, where they are, and their address (the order takes it out).
-        let mut players = facts.players();
+        let mut players = facts.players(true);
         players.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(players.len(), 2);
         assert_eq!(
@@ -3052,6 +3052,10 @@ mod reading {
                 .iter()
                 .all(|p| p.server == "lobby" && p.address.is_some())
         );
+        // A caller that did not ask for the addresses is not given them: the facts do not hand them out.
+        let without = facts.players(false);
+        assert_eq!(without.len(), 2);
+        assert!(without.iter().all(|p| p.address.is_none()), "{without:?}");
         // The servers: the three of the configuration, `lobby` the default and balanced, the others with no role.
         let servers = facts.servers();
         let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
@@ -3087,7 +3091,7 @@ mod reading {
         let sessions = Arc::new(Sessions::default());
         let facts = facts_of(&sessions, &balanced());
         drop(sessions);
-        assert!(facts.players().is_empty() && facts.servers().is_empty());
+        assert!(facts.players(true).is_empty() && facts.servers().is_empty());
         assert_eq!(facts.queue().total, 0);
     }
 

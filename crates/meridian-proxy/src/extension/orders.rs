@@ -30,11 +30,12 @@ use std::time::Instant;
 /// what the balancer makes of them, and who waits in the queue. Given to the registry once the proxy is built
 /// ([`super::Registry::serve_facts`]), which is `extension/facts.rs` for the proxy and a stand-in in the tests.
 ///
-/// **A player's `address` is filled in here and taken out by the order unless the extension was granted `addresses`**: a
-/// source of facts does not know who asks. No server address is told.
+/// **A player's `address` is given only when `with_addresses` says the extension was granted `addresses`**: the source of
+/// facts does not hand an address to a caller that did not ask for it, so that a mistake of a caller cannot tell it.
+/// No server address is told.
 pub trait Facts: Send + Sync {
-    /// Every player online, in any order.
-    fn players(&self) -> Vec<PlayerInfo>;
+    /// Every player online, in any order, each with an address if `with_addresses`.
+    fn players(&self, with_addresses: bool) -> Vec<PlayerInfo>;
     /// The servers, in the order of the configuration.
     fn servers(&self) -> Vec<ServerInfo>;
     /// The queue, with at most [`orders::MAX_PAGE`] of those who wait.
@@ -72,13 +73,7 @@ impl Ctx<'_> {
 
     /// The players, with an address only if the extension was granted `addresses`.
     fn players(&self) -> Result<Vec<PlayerInfo>, RpcError> {
-        let mut players = self.facts()?.players();
-        if !self.link.is_granted(ADDRESSES) {
-            for player in &mut players {
-                player.address = None;
-            }
-        }
-        Ok(players)
+        Ok(self.facts()?.players(self.link.is_granted(ADDRESSES)))
     }
 }
 
@@ -293,14 +288,16 @@ fn players_find(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError
 }
 
 /// `servers/list`: the servers, with their players and what the balancer makes of them.
-fn servers_list(ctx: &Ctx<'_>, _: Option<&Value>) -> Result<Value, RpcError> {
+fn servers_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    orders::parse_no_params(params).map_err(invalid)?;
     done(serde_json::to_value(&ServersList {
         servers: ctx.facts()?.servers(),
     }))
 }
 
 /// `queue/list`: whether the queue is on, and who waits.
-fn queue_list(ctx: &Ctx<'_>, _: Option<&Value>) -> Result<Value, RpcError> {
+fn queue_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    orders::parse_no_params(params).map_err(invalid)?;
     done(serde_json::to_value(ctx.facts()?.queue()))
 }
 

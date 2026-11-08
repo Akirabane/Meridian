@@ -340,9 +340,10 @@ impl Proxy {
         };
         let cursor = match cursor {
             None => None,
-            Some(cursor) => Some(orders::canonical_uuid(cursor).ok_or_else(|| {
-                OrderError::Invalid("\"cursor\" is not one that a page gave".into())
-            })?),
+            Some(cursor) => Some(
+                orders::canonical_uuid(cursor)
+                    .ok_or_else(|| OrderError::Invalid("\"cursor\" is not a unique id".into()))?,
+            ),
         };
         self.0.read(
             orders::PLAYERS_LIST,

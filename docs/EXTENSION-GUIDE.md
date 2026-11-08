@@ -449,7 +449,10 @@ let queue = proxy.queue()?;                          // enabled, total, and the 
 ```
 
 `players_page(limit, cursor)` is one page, for a program that does not want them all at once; the cursor is the `next`
-of the page before. Players who join or leave between two pages make nobody skipped or told twice. **A player's
+of the page before. Players who join or leave between two pages make nobody skipped or told twice among the players who are there at the cursor. **`players()` is several orders, and an error in the
+middle of it** (a refusal for the budget, `-32001`, on a large network) **loses the pages already read: ask again, from the
+beginning.** `find_player` by name, when two players have names that differ only in case, tells one of them (which one is not
+defined): ask by unique id. **A player's
 `address` is None unless your program also asked for `addresses` and the operator granted it**; no server address is ever
 told. Each of these is an order against the proxy's budget (one each, so `players()` on a large network is a few), with
 the limits and the errors above.

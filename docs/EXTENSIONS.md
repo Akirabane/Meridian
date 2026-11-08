@@ -987,16 +987,23 @@ configuration in force, the balancer, the queue); until the proxy has given the 
 - **`players/list`**: params `{"limit": 1..500 (100 by default), "cursor": "<id>"}`, all optional. It answers
   `{"players": [...], "total": N, "next": "<id>"}`. The players are told **in the order of their unique ids**, and the
   `next` of a page, which is present only when more follow, is the id of the last player of it: players who join or
-  leave between two pages make nobody skipped or told twice (a place number would). A `limit` over 500, 0 or not a number, a
+  leave between two pages make nobody skipped or told twice **among the players who are there at the cursor** (a place number would); a player who joins with an id before the cursor is not in the pages that follow. A `limit` over 500, 0 or not a number, a
   cursor that is not an id and a key nobody knows are `-32602`. 500 players of the longest the game allows, with an address,
   are a little over 100 KiB: inside the 256 KiB of a message (decision Q4: pages, the limit stays 256 KiB everywhere).
 - **A player** is `{name, uuid, auth, server, seconds}`: the name, the unique id in lower case with its hyphens, how the
   proxy knows them (`auth`: `verified` or `unverified`: **for an unverified player the name and the id prove nothing**), the
   server they are on and how long they have been connected. **Their `address` is there only if the extension was asked for
   `addresses` and the operator granted it** (decision Q9); without it the key is absent.
+- **Orders that take none.** `servers/list` and `queue/list` take no params: none, `null` and `{}` are fine, and anything
+  else is `-32602 this order takes no parameters`, so that a program that thinks it is filtering finds out. `players/list`
+  reads a `limit` or a `cursor` that is `null` as if it were left out.
 - **`players/find`**: params `{"player": "<name or id>"}`. A text that is a unique id (with or without hyphens, in any
   case) is looked up by id, any other that is 1 to 32 characters with no control character by name, whatever its case.
   It answers `{"player": {...}}`, or `{"player": null}` when nobody online is that: not an error. Anything else is `-32602`.
+  **Two players whose names differ only in case** (offline mode allows it) are not told apart by a name: the first the
+  proxy finds is answered, and which is the first is not defined; the unique id is.
+- **The address is given by the facts only when asked for**: the source of facts takes `with_addresses` and leaves the key out
+  otherwise, so that a caller's mistake cannot tell an address to an extension that was not granted `addresses`.
 - **`servers/list`** answers `{"servers": [...]}` in the order of the configuration. A server is
   `{name, default, players, role?, soft_cap?, hard_cap?, state?, ping_ms?}`: `role`, the caps and `state` (`open`,
   `closed`, `draining`, `not_offered`) only for a server the balancer places players on, `ping_ms` when its sidecar has been

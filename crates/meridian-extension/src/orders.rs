@@ -195,11 +195,20 @@ pub fn parse_list(params: Option<&Value>) -> Result<Page, String> {
     let after = match params.cursor {
         None => None,
         Some(cursor) => Some(
-            canonical_uuid(&cursor)
-                .ok_or_else(|| "\"cursor\" is not one that a page gave".to_owned())?,
+            canonical_uuid(&cursor).ok_or_else(|| "\"cursor\" is not a unique id".to_owned())?,
         ),
     };
     Ok(Page { limit, after })
+}
+
+/// Reads the `params` of an order that takes none ([`SERVERS_LIST`], [`QUEUE_LIST`]): none, `null` and `{}` are what it
+/// takes, and anything else is refused, in fixed words, so that a program that thinks it is filtering finds out.
+pub fn parse_no_params(params: Option<&Value>) -> Result<(), String> {
+    match params {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Object(map)) if map.is_empty() => Ok(()),
+        Some(_) => Err("this order takes no parameters".into()),
+    }
 }
 
 /// One player, as `players/list` and `players/find` tell them. The `address` is there only for an extension that was
@@ -230,7 +239,8 @@ pub struct PlayersPage {
 
 /// The page `page` asks for among `players`, in any order. The players are told in the order of their unique ids, and
 /// the cursor is the unique id of the last of a page: players who join or leave between two pages do not make one
-/// that stays skipped or told twice.
+/// that stays skipped or told twice among the players who are there at the cursor (one that joins with an id before it is not in the
+/// pages that follow).
 pub fn page_of(mut players: Vec<PlayerInfo>, page: &Page) -> PlayersPage {
     players.sort_by(|a, b| a.uuid.cmp(&b.uuid));
     let total = players.len();
@@ -599,6 +609,37 @@ mod tests {
         ] {
             let why = parse_list(Some(&bad)).unwrap_err();
             assert!(!why.contains("ZZZ") && !why.is_empty(), "{bad}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_limit_and_a_cursor_that_are_null_are_the_first_page_and_an_order_with_no_params_takes_none()
+     {
+        let first = Page {
+            limit: DEFAULT_PAGE,
+            after: None,
+        };
+        assert_eq!(
+            parse_list(Some(&json!({"limit": null, "cursor": null}))),
+            Ok(first.clone())
+        );
+        assert_eq!(parse_list(Some(&json!({"limit": null}))), Ok(first));
+        for ok in [None, Some(&Value::Null), Some(&json!({}))] {
+            assert_eq!(parse_no_params(ok), Ok(()));
+        }
+        for bad in [
+            json!({"x": 1}),
+            json!([]),
+            json!([1]),
+            json!("x"),
+            json!(0),
+            json!(false),
+        ] {
+            assert_eq!(
+                parse_no_params(Some(&bad)),
+                Err("this order takes no parameters".to_owned()),
+                "{bad}"
+            );
         }
     }
 

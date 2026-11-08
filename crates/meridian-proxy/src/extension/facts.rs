@@ -3,7 +3,7 @@
 //! server and the queue. They are the facts the console's `list`, `servers` and `queue` print, as data and not as text.
 //!
 //! **No address of a server is told** (the extension is told what the specification lists: the servers, their roles,
-//! caps, counts and states). A player's address is filled in here and taken out by the order unless the extension
+//! caps, counts and states). A player's address is given only to a caller that says (`with_addresses`) the extension
 //! was granted `addresses`.
 
 use super::orders::Facts;
@@ -36,7 +36,7 @@ impl ProxyFacts {
 }
 
 impl Facts for ProxyFacts {
-    fn players(&self) -> Vec<PlayerInfo> {
+    fn players(&self, with_addresses: bool) -> Vec<PlayerInfo> {
         let Some(sessions) = self.sessions.upgrade() else {
             return Vec::new();
         };
@@ -53,7 +53,7 @@ impl Facts for ProxyFacts {
                 },
                 server: player.backend,
                 seconds: player.joined.elapsed().as_secs(),
-                address: Some(player.address.ip().to_string()),
+                address: with_addresses.then(|| player.address.ip().to_string()),
             })
             .collect()
     }
