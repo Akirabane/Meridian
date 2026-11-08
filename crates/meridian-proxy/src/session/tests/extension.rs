@@ -1883,6 +1883,57 @@ groups = ["nobody"]
         assert_eq!(ranker.asked(), 3);
     }
 
+    /// The refusals of the real dispatcher, as the SDK of the extension tells them: the capability the operator did not
+    /// grant is the real `-32601`, and a spent budget is the real `-32001`, which a moment later is not any more.
+    #[test]
+    fn what_the_dispatcher_refuses_reaches_the_sdk_as_what_it_is() {
+        // The extension asks for `decide.command` (it has a handler for it) and the operator grants it `orders.read`
+        // only: its order is not one it may give.
+        let ranker = ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow));
+        let mut ungranted = ranker.extension(OnError::Default, 1000, 300);
+        ungranted.grant = vec!["orders.read".into()];
+        let config = config_with(ungranted);
+        let sessions = sessions_for(&config);
+        let proxy = ranker.running.proxy();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !proxy.is_connected() {
+            assert!(Instant::now() < limit, "the extension never connected");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let refused = proxy.invalidate_all().unwrap_err();
+        assert!(refused.is_not_granted(), "{refused}");
+        assert!(
+            !refused.retry_later() && !refused.may_have_run(),
+            "{refused}"
+        );
+        drop(sessions);
+
+        // Granted, with a budget of one order and a rate of one a second: the second is over it.
+        let ranker = self::ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow));
+        let mut tight = ranker.extension(OnError::Default, 1000, 300);
+        tight.orders = meridian_config::Orders {
+            rate_per_second: 1,
+            burst: 1,
+            max_running: 8,
+        };
+        let config = config_with(tight);
+        let sessions = sessions_for(&config);
+        let proxy = ranker.running.proxy();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !proxy.is_connected() {
+            assert!(Instant::now() < limit, "the extension never connected");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(proxy.invalidate_all(), Ok(()));
+        let over = proxy.invalidate_all().unwrap_err();
+        assert!(over.retry_later() && !over.may_have_run(), "{over}");
+        assert!(over.to_string().contains("-32001"), "{over}");
+        // A moment later the budget has a token again.
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(proxy.invalidate_all(), Ok(()));
+        drop(sessions);
+    }
+
     #[test]
     fn an_answer_that_was_on_its_way_when_the_extension_asked_to_forget_the_player_is_not_kept() {
         let ranker = ranker_after(Duration::from_millis(300), |request| {

@@ -1000,8 +1000,16 @@ is connected its orders end with `NotConnected`.
   retried by the SDK: after `Timeout` or `Disconnected` the order may or may not have been done.
 - **Errors.** `Refused(RpcError)` carries what the proxy answered, with `is_not_granted()` (`-32601`: the capability
   was not granted or not asked for) and `retry_later()` (`-32001` budget spent, `-32002` places taken, or too many
-  waiting). **A refused order did not run**: an extension that must have it done (a rights change that is to be
-  forgotten, 5) asks again until it is answered.
+  waiting). **In `-32601`, `-32602`, `-32001` and `-32002` the order did not run**, so asking again is always safe.
+  **`-32603` ("the order failed") is not like them**: the proxy's handler panicked or its thread could not start
+  while the order ran, so it **may have been done**. `may_have_run()` is true for it, for a timeout, for a
+  connection that ended or broke while the order waited, for a write that failed and for an answer that is not
+  what the order defines. Asking again after these is harmless for an order that has the same effect when done
+  twice (`permissions/invalidate`: forgetting twice is forgetting once), and for another order it is for the
+  extension to look first. With no proxy connected (`NotConnected`) nothing was sent: ask again when it has
+  connected. An extension that must have a rights change forgotten (5) asks again until it is answered, a
+  bounded number of times. What the proxy said in a refusal is its own text (up to 256 KiB): `Display` cleans it
+  of line breaks and control characters and cuts it to 200 characters.
 
 - Each method runs on one of the SDK's threads. The SDK keeps the deadline. An answer that would
   arrive after the proxy's timeout is not sent, and the SDK logs that it was late.

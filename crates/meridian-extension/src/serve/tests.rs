@@ -1697,26 +1697,37 @@ mod orders {
     #[test]
     fn what_the_proxy_refuses_is_told_with_what_to_do_about_it() {
         let (_running, handle, mut proxy) = up(Duration::from_secs(10));
-        for (error, retry, not_granted) in [
+        for (error, retry, not_granted, ran) in [
             (
                 RpcError::new(code::OVER_BUDGET, "over the budget of orders"),
                 true,
+                false,
                 false,
             ),
             (
                 RpcError::new(code::TOO_MANY_RUNNING, "too many orders running"),
                 true,
                 false,
+                false,
             ),
             (
                 RpcError::new(code::METHOD_NOT_FOUND, "method not found"),
                 false,
                 true,
+                false,
             ),
             (
                 RpcError::new(code::INVALID_PARAMS, "give \"player\" or \"all\""),
                 false,
                 false,
+                false,
+            ),
+            // It failed while it ran: it may have been done, and it is not "a moment's" refusal.
+            (
+                RpcError::new(code::INTERNAL_ERROR, "the order failed"),
+                false,
+                false,
+                true,
             ),
         ] {
             let order = all_in_a_thread(&handle);
@@ -1725,8 +1736,12 @@ mod orders {
             let failed = order.join().unwrap().unwrap_err();
             assert_eq!(failed, OrderError::Refused(error.clone()));
             assert_eq!(
-                (failed.retry_later(), failed.is_not_granted()),
-                (retry, not_granted),
+                (
+                    failed.retry_later(),
+                    failed.is_not_granted(),
+                    failed.may_have_run()
+                ),
+                (retry, not_granted, ran),
                 "{error:?}"
             );
             assert!(failed.to_string().contains(&error.message), "{failed}");
@@ -1896,5 +1911,47 @@ mod orders {
             } => assert!(error.message.contains("over the budget"), "{error:?}"),
             other => panic!("not the handler's error: {other:?}"),
         }
+    }
+
+    /// The text the proxy sends in a refusal is its own, up to 256 KiB, and an error may be written to a log: what is
+    /// shown is cut and has no line break and no control character.
+    #[test]
+    fn what_the_proxy_said_in_a_refusal_is_cleaned_and_cut_when_it_is_shown() {
+        let said = format!("first line\nsecond\r\u{1b}[31m{}", "x".repeat(100_000));
+        let shown = OrderError::Refused(RpcError::new(code::INVALID_PARAMS, said)).to_string();
+        assert!(shown.len() < 400, "{} bytes", shown.len());
+        assert!(
+            !shown.chars().any(char::is_control) && shown.contains("first line"),
+            "{shown:?}"
+        );
+        assert!(shown.ends_with("(-32602)"), "{shown:?}");
+    }
+
+    /// The places of the orders that wait are given back when an order ends however it ends: 64 that time out leave
+    /// none taken, and 64 more are accepted.
+    #[test]
+    fn the_places_of_the_orders_that_timed_out_are_given_back() {
+        let (_running, handle, mut proxy) = up(Duration::from_millis(100));
+        for round in 0..2 {
+            let waiting: Vec<_> = (0..MAX_WAITING).map(|_| all_in_a_thread(&handle)).collect();
+            // All sent, none answered: they time out.
+            for _ in 0..MAX_WAITING {
+                let _ = read_order(&mut proxy);
+            }
+            for order in waiting {
+                assert_eq!(
+                    order.join().unwrap(),
+                    Err(OrderError::Timeout),
+                    "round {round}"
+                );
+            }
+            assert_eq!(handle.0.waiting(), 0, "round {round}");
+        }
+        // And one more is accepted: it is sent.
+        let order = all_in_a_thread(&handle);
+        let (id, _) = read_order(&mut proxy);
+        answer(&mut proxy, &id, Ok(json!({"ok": true})));
+        assert_eq!(order.join().unwrap(), Ok(()));
+        assert_eq!(handle.0.waiting(), 0);
     }
 }

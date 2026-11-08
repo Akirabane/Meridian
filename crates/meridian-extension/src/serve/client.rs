@@ -34,6 +34,9 @@ use std::time::Duration;
 /// The most requests to the proxy that wait for their answers at once.
 pub const MAX_WAITING: usize = 64;
 
+/// The most characters of what the proxy said that an [`OrderError`] shows when it is displayed.
+const MAX_SHOWN: usize = 200;
+
 /// How long a request waits for its answer, unless [`Extension::order_timeout`](super::Extension::order_timeout)
 /// says otherwise.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,25 +58,44 @@ pub enum OrderError {
     Timeout,
     /// The connection ended while the order waited. **The order may or may not have been done.**
     Disconnected,
-    /// The proxy answered an error: it did not run the order. `-32601` is a capability that was not granted (or an
-    /// order this proxy does not have), `-32602` parameters it did not take, `-32001` the budget of orders spent
-    /// and `-32002` as many orders running as the proxy allows.
+    /// The proxy answered an error. `-32601` is a capability that was not granted (or an order this proxy does not
+    /// have), `-32602` parameters it did not take, `-32001` the budget of orders spent and `-32002` as many orders
+    /// running as the proxy allows: **in these four the order did not run**. `-32603` is an order that failed
+    /// while it ran (the proxy's handler panicked, or its thread could not start): **it may have been done**
+    /// ([`OrderError::may_have_run`]).
     Refused(RpcError),
     /// The proxy answered, and not with what the order defines.
     BadAnswer(String),
 }
 
 impl OrderError {
-    /// Whether asking again a moment later can work: the proxy's budget or its places were spent
-    /// ([`wire::code::OVER_BUDGET`], [`wire::code::TOO_MANY_RUNNING`]), or too many of the extension's own
-    /// requests wait. **An order that is refused did not run**, so an extension that must have its order done, such as
-    /// one that takes someone's rights back with [`Proxy::invalidate_player`], asks again until it is answered.
+    /// Whether asking again a moment later can work **and the order did not run**: the proxy's budget or its places
+    /// were spent ([`wire::code::OVER_BUDGET`], [`wire::code::TOO_MANY_RUNNING`]), or too many of the extension's
+    /// own requests wait. Asking again is always safe, whatever the order is. (An order that failed while it ran,
+    /// `-32603`, or whose outcome is not known, is [`OrderError::may_have_run`]: asking again is safe only for an
+    /// order that does the same when it is done twice, as the orders of this SDK do.)
     pub fn retry_later(&self) -> bool {
         match self {
             OrderError::TooManyWaiting => true,
             OrderError::Refused(error) => {
                 error.code == code::OVER_BUDGET || error.code == code::TOO_MANY_RUNNING
             }
+            _ => false,
+        }
+    }
+
+    /// Whether the order **may have been done** although it ended in an error: the proxy did not answer in time, the
+    /// connection ended or broke while it waited, the proxy answered `-32603` (it failed while it ran) or answered
+    /// something that is not what the order defines. Asking again is harmless for an order that has the same effect
+    /// when it is done twice, such as [`Proxy::invalidate_player`] and [`Proxy::invalidate_all`]; for another it is for
+    /// the extension to look first.
+    pub fn may_have_run(&self) -> bool {
+        match self {
+            OrderError::Timeout
+            | OrderError::Disconnected
+            | OrderError::Send(_)
+            | OrderError::BadAnswer(_) => true,
+            OrderError::Refused(error) => error.code == code::INTERNAL_ERROR,
             _ => false,
         }
     }
@@ -94,10 +116,12 @@ impl fmt::Display for OrderError {
             OrderError::Send(why) => write!(f, "cannot send the order: {why}"),
             OrderError::Timeout => f.write_str("the proxy did not answer in time"),
             OrderError::Disconnected => f.write_str("the connection ended before the answer"),
+            // The proxy's own words, cleaned: a line break or a control character in them must not reach a log.
             OrderError::Refused(error) => write!(
                 f,
                 "the proxy refused the order: {} ({})",
-                error.message, error.code
+                crate::text::clean(&error.message, MAX_SHOWN),
+                error.code
             ),
             OrderError::BadAnswer(why) => {
                 write!(f, "the answer is not what the order defines: {why}")
@@ -173,6 +197,12 @@ impl Client {
         }
     }
 
+    /// How many requests wait for their answers (for the tests).
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.state().waiting.len()
+    }
+
     /// Sends `method` with `params` and waits for the answer's `result`, or says why there is none.
     fn order(&self, method: &str, params: Option<&impl Serialize>) -> Result<Value, OrderError> {
         let (id, writer, replies) = {
@@ -189,11 +219,10 @@ impl Client {
             state.waiting.insert(id, sender);
             (id, writer, replies)
         };
-        let forget = |id: u64| {
-            self.state().waiting.remove(&id);
-        };
+        // The entry goes when this goes, however the order ends: an answer (which took it already), a timeout, a
+        // failed write, or a panic of a thread that waited.
+        let _entry = Entry { client: self, id };
         if let Err(e) = writer.send_text(&wire::request(id, method, params)) {
-            forget(id);
             // A frame may be half written, or the request was too long to be a message: only the first closes.
             if e.kind() != std::io::ErrorKind::InvalidInput
                 && e.kind() != std::io::ErrorKind::InvalidData
@@ -206,12 +235,21 @@ impl Client {
         match replies.recv_timeout(timeout) {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(error)) => Err(OrderError::Refused(error)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                forget(id);
-                Err(OrderError::Timeout)
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(OrderError::Timeout),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(OrderError::Disconnected),
         }
+    }
+}
+
+/// The place of a request in the table of those that wait: it is given back when this is dropped.
+struct Entry<'a> {
+    client: &'a Client,
+    id: u64,
+}
+
+impl Drop for Entry<'_> {
+    fn drop(&mut self) {
+        self.client.state().waiting.remove(&self.id);
     }
 }
 
@@ -243,7 +281,10 @@ impl Proxy {
     /// **It does nothing if it is refused**, and a refusal for a spent budget or a full set of places
     /// ([`OrderError::retry_later`]) is a moment's: an extension that has just taken someone's rights back must ask
     /// again until it is answered, because the right it took back is kept for the `cache_seconds` it said otherwise.
-    /// A timeout or an end of the connection leaves it unknown whether the proxy did it: asking again is harmless.
+    /// A timeout, an end of the connection or a `-32603` ([`OrderError::may_have_run`]) leaves it unknown whether the
+    /// proxy did it: asking again is harmless, since doing it twice is doing it once. With no proxy connected
+    /// ([`OrderError::NotConnected`]) it has not been asked: ask again when the proxy has connected. Bound the
+    /// number of times, as the example of the guide does.
     pub fn invalidate_player(&self, uuid: &str) -> Result<(), OrderError> {
         // The same spelling for both sides, and a refusal before anything is sent for a text that is not an id.
         let uuid = orders::canonical_uuid(uuid)
