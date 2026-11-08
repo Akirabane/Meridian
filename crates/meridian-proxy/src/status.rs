@@ -6,9 +6,13 @@
 //!
 //! Nothing here is needed unless `[balancing] enabled` is on, and a backend that has
 //! never answered is treated as accepting players, as it is without balancing.
+use crate::extension::Registry;
+use crate::extension::events::Kind;
 use crate::log::{info, warning};
+use crate::restart::Detector;
 use crate::state::Proxy;
 use meridian_config::{Config, Sidecar};
+use meridian_extension::events::DownCause;
 use meridian_sidecar::{client::SidecarClient, request::ServerStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -43,6 +47,18 @@ struct State {
     /// The backends that answered that they do not know the request, so that it is said
     /// once.
     unreported: HashSet<String>,
+    /// Whether each backend answered at the last round: what the extensions are told a
+    /// change of. A backend is in it from the first round that read it, which sets the
+    /// state it starts from and is not a change.
+    answering: HashMap<String, bool>,
+}
+
+/// A backend that did not answer after it did, or answers after it did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub backend: String,
+    /// What it does now.
+    pub answers: bool,
 }
 
 impl Statuses {
@@ -93,6 +109,16 @@ impl Statuses {
         self.lock().failing.insert(backend.to_owned())
     }
 
+    /// `backend` answered (or did not) at this round. The change, if that is **not** what it did at the
+    /// last round: the first round that reads a backend sets the state it starts from, and is not a change.
+    fn saw(&self, backend: &str, answers: bool) -> Option<Change> {
+        let before = self.lock().answering.insert(backend.to_owned(), answers)?;
+        (before != answers).then(|| Change {
+            backend: backend.to_owned(),
+            answers,
+        })
+    }
+
     /// Whether `backend` was failing before this success, which is worth saying.
     fn recovered(&self, backend: &str) -> bool {
         self.failing(backend)
@@ -109,6 +135,7 @@ impl Statuses {
         state.reported.retain(|b, _| keep(b));
         state.pings.retain(|b, _| keep(b));
         state.failing.retain(|b| keep(b));
+        state.answering.retain(|b, _| keep(b));
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -127,48 +154,101 @@ fn ask_sidecar(sidecar: &Sidecar, timeout: Duration) -> Result<ServerStatus, Str
 /// One round: every sidecar of a backend that has a role is asked at once, each with
 /// its own timeout, so that one that hangs does not hold the others back. An answer
 /// is recorded; a failure keeps the last answer, which then grows old.
+///
+/// Gives back the backends whose state changed since the round before ([`tell`] tells it to the
+/// extensions): one that answers is up, one that does not is down, and one that says it does not
+/// know the request is alive, so it is up.
 pub fn poll(
     config: &Config,
     ask: &(impl Fn(&Sidecar, Duration) -> Result<ServerStatus, String> + Sync),
     statuses: &Statuses,
-) {
+) -> Vec<Change> {
     let timeout = Duration::from_millis(config.sidecar_timeout_ms);
     statuses.retain(|b| config.balanced(b).is_some());
+    let changes = Mutex::new(Vec::new());
+    let changed = &changes;
     std::thread::scope(|scope| {
         for sidecar in config
             .sidecars
             .iter()
             .filter(|s| config.balanced(&s.backend).is_some())
         {
-            scope.spawn(move || match ask(sidecar, timeout) {
-                Ok(status) => {
-                    if statuses.recovered(&sidecar.backend) {
-                        info!("backend \"{}\" reports its state again", sidecar.backend);
-                    }
-                    statuses.record(&sidecar.backend, status, Instant::now());
+            scope.spawn(move || {
+                let result = ask(sidecar, timeout);
+                // A backend that says it does not know the request is alive: it answers.
+                let answers = match &result {
+                    Ok(_) => true,
+                    Err(why) => no_such_request(why),
+                };
+                if let Some(change) = statuses.saw(&sidecar.backend, answers) {
+                    changed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(change);
                 }
-                // The backend answered, with "unknown request": a Horizon build from before
-                // `transfer-status` has no state to report. It is alive; it is treated as
-                // accepting players.
-                Err(why) if no_such_request(&why) => {
-                    if statuses.unreported(&sidecar.backend) {
-                        warning!(
-                            "backend \"{}\" does not answer the state request: its state is unknown, so it is treated as accepting players",
-                            sidecar.backend
-                        );
-                    }
-                }
-                Err(why) => {
-                    if statuses.failed(&sidecar.backend) {
-                        warning!(
-                            "cannot read the state of backend \"{}\": {why}",
-                            sidecar.backend
-                        );
-                    }
-                }
+                record(statuses, sidecar, result);
             });
         }
     });
+    changes.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Keeps what `sidecar` answered: a state is recorded; a backend that does not know the request is alive but has
+/// none; any other failure is said once.
+fn record(statuses: &Statuses, sidecar: &Sidecar, result: Result<ServerStatus, String>) {
+    match result {
+        Ok(status) => {
+            if statuses.recovered(&sidecar.backend) {
+                info!("backend \"{}\" reports its state again", sidecar.backend);
+            }
+            statuses.record(&sidecar.backend, status, Instant::now());
+        }
+        // The backend answered, with "unknown request": a Horizon build from before
+        // `transfer-status` has no state to report. It is alive; it is treated as
+        // accepting players.
+        Err(why) if no_such_request(&why) => {
+            if statuses.unreported(&sidecar.backend) {
+                warning!(
+                    "backend \"{}\" does not answer the state request: its state is unknown, so it is treated as accepting players",
+                    sidecar.backend
+                );
+            }
+        }
+        Err(why) => {
+            if statuses.failed(&sidecar.backend) {
+                warning!(
+                    "cannot read the state of backend \"{}\": {why}",
+                    sidecar.backend
+                );
+            }
+        }
+    }
+}
+
+/// Tells the extensions that listen which backends changed state: `servers/up` for one that answers
+/// again and `servers/down` for one that stopped answering, with the cause `restart` if the detector
+/// believes it is going down for a restart (it announced its stop, or it was silent for rounds), and
+/// `unreachable` if not.
+pub fn tell(extensions: &Registry, detector: &Detector, changes: Vec<Change>) {
+    for change in changes {
+        extensions.emit(|| {
+            if change.answers {
+                Kind::ServerUp {
+                    server: change.backend,
+                }
+            } else {
+                let restarting = detector.is_restarting(&change.backend);
+                Kind::ServerDown {
+                    server: change.backend,
+                    cause: Some(if restarting {
+                        DownCause::Restart
+                    } else {
+                        DownCause::Unreachable
+                    }),
+                }
+            }
+        });
+    }
 }
 
 /// Whether `why`, the error of a state request, is the backend saying it does not know
@@ -218,13 +298,15 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
                 let round = Instant::now();
                 let config = proxy.config();
                 if config.balancing.enabled {
-                    poll(&config, &ask_sidecar, &proxy.sessions.statuses);
+                    let changes = poll(&config, &ask_sidecar, &proxy.sessions.statuses);
                     crate::restart::observe_round(
                         &config,
                         &proxy.sessions.statuses,
                         &proxy.restarts,
                         Instant::now(),
                     );
+                    // After the detector read the round: a stop it announced or deduced is the cause.
+                    tell(&proxy.sessions.extensions, &proxy.restarts, changes);
                     if config.balancing.tie_break == meridian_config::TieBreak::Ping {
                         measure(&config, &*proxy.probe, &proxy.sessions.statuses);
                     }

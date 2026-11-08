@@ -585,7 +585,7 @@ it said after.
 
 ## 9. Listening to events
 
-With `events` (ask for it with `.on_event(...)`, which asks for you, and the operator grants it in `grant`), the proxy tells your program when a player joins or leaves:
+With `events` (ask for it with `.on_event(...)`, which asks for you, and the operator grants it in `grant`), the proxy tells your program when a player joins, leaves or is moved, when a server stops or starts answering, and when a player waits in the queue:
 
 ```rust
 let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match event {
@@ -593,6 +593,10 @@ let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match
     Event::Left(l) => println!("{} left {}: {:?}", l.player.name, l.server, l.reason),
     Event::Moved(m) => println!("{}: {} to {}: {:?} {:?}", m.player.name, m.from, m.to, m.outcome, m.reason),
     Event::Fallback(f) => println!("{} lost {} ({:?}), now {:?}", f.player.name, f.from, f.loss, f.to),
+    Event::ServerDown(d) => println!("{} is down: {:?}", d.server, d.cause),
+    Event::ServerUp(u) => println!("{} answers again", u.server),
+    Event::QueueEntered(q) => println!("{} waits at {}", q.player.name, q.position),
+    Event::QueueLeft(q) => println!("{} left the queue: {:?}", q.player.name, q.cause),
     Event::Dropped(d) => resync_with_players_list(d.count),   // some events were lost: ask `players()` again
     _ => {}
 });
@@ -611,9 +615,13 @@ let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match
 - **`Moved`** says that the proxy tried to move a player from a server to another, whoever asked (the console, `/server`, your own `players/send`...): `outcome` is `Seamless` or `Failed`, and a
   failure has a `reason`, the step it failed at (`Check`, `Prepare`, `Freeze`, `HandOver` or `Commit`); nothing the servers said is in it. **`Fallback`** says that a server was lost for a player
   (`Crashed` or `Kicked`) and which server the proxy chose for them (`to`; none if nobody could take them): the player follows once their client acknowledges. **A follow that succeeds is told by no event**
-  (no `Moved`, no `Left`): count them on `to` unless a `Left` comes, which is what a client that does not follow ends with. In a `Moved`, `player.auth` is read when the switch ends, so a player who disconnected
+  (no `Moved`, no `Left`): count them on `to` unless a `Left` comes (what a client that does not follow ends with) or a new `Fallback` of the same player does (the server they arrived on was lost in its turn: `from` is that server). In a `Moved`, `player.auth` is read when the switch ends, so a player who disconnected
   during it is `Unverified`.
-- **`Event` is not `#[non_exhaustive]`**: each version of the SDK that adds an event adds a variant (`Moved` and `Fallback` came after `Joined`, `Left` and `Dropped`), so a `match` on `Event` with no `_` arm stops
+- **`ServerDown`** and **`ServerUp`** say that a server stopped answering the proxy, or answers again. They are told **only when the state changes** (the first time the proxy reads a server it
+  tells nothing), `ServerDown::cause` is `Restart` (the proxy already knew it was a restart, usually because the server announced its stop) or `Unreachable` (it does not answer and nothing said why: a restart that was not announced is also told this way, once), and a server is only watched if it has a role and a sidecar and `[balancing]` is on.
+  **`QueueEntered`** gives the place a player took when they entered the line (`position`, 1 first; it is not told again as the line moves), and **`QueueLeft`** says why they left it: `Served`, `Left`, `Timeout`,
+  `Shutdown` or `Refused` (their turn came and no session followed). A player who finds a place at once is in neither.
+- **`Event` is not `#[non_exhaustive]`**: each version of the SDK that adds an event adds a variant (`Moved`, `Fallback`, `ServerDown`, `ServerUp`, `QueueEntered` and `QueueLeft` came after `Joined`, `Left` and `Dropped`), so a `match` on `Event` with no `_` arm stops
   compiling when you upgrade. The protocol does not change when an event is added (an extension that does not know it ignores it), so give your `match` a `_` arm.
 - An event is **never a decision**: you cannot answer it or refuse anything with it. To refuse a login use `on_login`.
 

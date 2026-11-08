@@ -1,4 +1,5 @@
 use super::*;
+use crate::extension::events::told_events;
 use meridian_config::{BalancedServer, Role};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener};
@@ -194,6 +195,155 @@ fn a_backend_removed_by_a_reload_is_forgotten() {
         statuses.report("lobby", AGE, Instant::now()),
         Report::Fresh(_)
     ));
+}
+
+// ---- The states the extensions are told of ----
+
+/// What `poll` says changed, by backend name (the sidecars are asked at once, so the order is not fixed).
+fn changed(
+    ask: &(impl Fn(&Sidecar, Duration) -> Result<ServerStatus, String> + Sync),
+    statuses: &Statuses,
+) -> Vec<(String, bool)> {
+    let mut changes: Vec<(String, bool)> = poll(&config(), ask, statuses)
+        .into_iter()
+        .map(|c| (c.backend, c.answers))
+        .collect();
+    changes.sort();
+    changes
+}
+
+/// A state is told only when it **changes**: the first round that reads a backend sets the state it starts from (a backend that is
+/// down at that round is not a news, and nor is one that is up), a backend that stays as it is is not told again, and one that answers
+/// "unknown request" answers.
+#[test]
+fn only_a_change_of_state_is_a_change_and_the_first_reading_is_not() {
+    let statuses = Statuses::default();
+    let lobby_answers = AtomicBool::new(true);
+    let east = Mutex::new(Ok(status(1)));
+    let ask = |sidecar: &Sidecar, _: Duration| {
+        if sidecar.backend == "lobby" {
+            if lobby_answers.load(Ordering::Relaxed) {
+                Ok(status(3))
+            } else {
+                Err("no answer".to_owned())
+            }
+        } else {
+            east.lock().unwrap().clone()
+        }
+    };
+    assert!(
+        changed(&ask, &statuses).is_empty(),
+        "the first reading is the base"
+    );
+    assert!(changed(&ask, &statuses).is_empty(), "nothing changed");
+    lobby_answers.store(false, Ordering::Relaxed);
+    assert_eq!(changed(&ask, &statuses), [("lobby".to_owned(), false)]);
+    assert!(changed(&ask, &statuses).is_empty(), "down is told once");
+    lobby_answers.store(true, Ordering::Relaxed);
+    assert_eq!(changed(&ask, &statuses), [("lobby".to_owned(), true)]);
+    // A backend that does not know the request is alive: it is not a change, and it stays up.
+    *east.lock().unwrap() =
+        Err("the sidecar refused: unknown request \"transfer-status\"".to_owned());
+    assert!(changed(&ask, &statuses).is_empty());
+    // Another refusal is a silence.
+    *east.lock().unwrap() =
+        Err("the sidecar refused: the sidecar closed the connection".to_owned());
+    assert_eq!(changed(&ask, &statuses), [("east".to_owned(), false)]);
+}
+
+/// A backend that is down at the first round is the base too: it is told when it comes up, and not before.
+#[test]
+fn a_backend_that_is_down_at_the_first_reading_is_told_when_it_comes_up() {
+    let statuses = Statuses::default();
+    let up = AtomicBool::new(false);
+    let ask = |_: &Sidecar, _: Duration| {
+        if up.load(Ordering::Relaxed) {
+            Ok(status(0))
+        } else {
+            Err("no answer".to_owned())
+        }
+    };
+    assert!(changed(&ask, &statuses).is_empty());
+    assert!(changed(&ask, &statuses).is_empty());
+    up.store(true, Ordering::Relaxed);
+    assert_eq!(
+        changed(&ask, &statuses),
+        [("east".to_owned(), true), ("lobby".to_owned(), true)]
+    );
+}
+
+/// A backend a reload removed is forgotten, and when it comes back the first reading is its base again.
+#[test]
+fn a_backend_a_reload_removed_starts_again_from_its_first_reading() {
+    let statuses = Statuses::default();
+    assert_eq!(statuses.saw("gone", true), None);
+    let ask = |_: &Sidecar, _: Duration| Ok(status(1));
+    // `gone` is not in the configuration, so the round forgets it.
+    poll(&config(), &ask, &statuses);
+    assert_eq!(statuses.saw("gone", false), None, "its base was forgotten");
+    assert_eq!(
+        statuses.saw("gone", true),
+        Some(Change {
+            backend: "gone".into(),
+            answers: true
+        })
+    );
+}
+
+/// An evacuation that moves nobody: the detector is only asked whether a backend is going down.
+struct Nobody;
+
+impl crate::restart::Evacuate for Nobody {
+    fn evacuate(&self, _: &str, _: crate::restart::Cause) {}
+}
+
+/// The extensions that listen are told `servers/down` for a backend that stopped answering, with `restart` as the cause when the detector
+/// believes it is going down for one and `unreachable` when it does not, and `servers/up` (with no cause) for one that answers again.
+/// Nothing but the name of the server is in it.
+#[test]
+fn the_extensions_are_told_a_server_that_went_down_with_why_and_one_that_came_back() {
+    let registry = Registry::default();
+    let told = registry.bus().recording(false);
+    let detector = Detector::new(
+        Arc::new(crate::balance::Balancer::default()),
+        Arc::new(Nobody),
+        crate::restart::Settings::default(),
+    );
+    let change = |backend: &str, answers| Change {
+        backend: backend.to_owned(),
+        answers,
+    };
+    // It was not announced: it does not answer, and that is all that is known.
+    tell(&registry, &detector, vec![change("lobby", false)]);
+    // It announced its stop, and then stopped answering.
+    detector.announce("east", crate::restart::Cause::Announced, Instant::now());
+    tell(&registry, &detector, vec![change("east", false)]);
+    tell(&registry, &detector, vec![change("lobby", true)]);
+    let events = told_events(&told, 3);
+    assert_eq!(events[0].0, "meridian:notification/servers/down");
+    assert_eq!(
+        (
+            events[0].1["server"].as_str(),
+            events[0].1["cause"].as_str()
+        ),
+        (Some("lobby"), Some("unreachable"))
+    );
+    assert_eq!(events[1].0, "meridian:notification/servers/down");
+    assert_eq!(
+        (
+            events[1].1["server"].as_str(),
+            events[1].1["cause"].as_str()
+        ),
+        (Some("east"), Some("restart"))
+    );
+    assert_eq!(events[2].0, "meridian:notification/servers/up");
+    assert_eq!(events[2].1["server"], "lobby");
+    assert!(events[2].1.get("cause").is_none(), "an up has no cause");
+    let seqs: Vec<_> = events
+        .iter()
+        .map(|e| e.1["seq"].as_u64().unwrap())
+        .collect();
+    assert_eq!(seqs, [1, 2, 3]);
 }
 
 // ---- The whole way: the proxy, a sidecar over a socket, and a backend's endpoint ----

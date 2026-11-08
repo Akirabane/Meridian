@@ -2714,7 +2714,7 @@ mod the_events {
             &json!({"at": 7, "count": 9}),
         ));
         proxy.send(&wire::notification(
-            "meridian:notification/servers/up",
+            "meridian:notification/worlds/created",
             &json!({"server": "east"}),
         ));
         // A known method whose params are not its shape is `Unknown` too, and never an error or a crash.
@@ -2746,9 +2746,60 @@ mod the_events {
         assert_eq!(seen[3], Event::Dropped(shapes::Dropped { at: 7, count: 9 }));
         assert_eq!(
             seen[4],
-            Event::Unknown("meridian:notification/servers/up".into())
+            Event::Unknown("meridian:notification/worlds/created".into())
         );
         assert_eq!(seen[5], Event::Unknown(shapes::PLAYERS_JOINED.into()));
+    }
+
+    /// What the proxy tells of the servers and of the line is read in its shape, with the word of the cause.
+    #[test]
+    fn the_servers_and_the_line_reach_the_handler_in_their_shape() {
+        let (extension, seen) = listening();
+        let running = start(extension);
+        let mut proxy = Proxy::connect(running.local_addr());
+        let (_, outcome) = proxy.hello(&token());
+        assert_eq!(outcome.unwrap(), json!({}));
+        let player = json!({"name": "Alex", "uuid": "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c", "auth": "verified"});
+        proxy.send(&wire::notification(
+            shapes::SERVERS_DOWN,
+            &json!({"seq": 1, "at": 5, "server": "east", "cause": "restart"}),
+        ));
+        proxy.send(&wire::notification(
+            shapes::SERVERS_UP,
+            &json!({"seq": 2, "at": 6, "server": "east"}),
+        ));
+        proxy.send(&wire::notification(
+            shapes::QUEUE_ENTERED,
+            &json!({"seq": 3, "at": 7, "player": player, "position": 4}),
+        ));
+        proxy.send(&wire::notification(
+            shapes::QUEUE_LEFT,
+            &json!({"seq": 4, "at": 8, "player": player, "cause": "from-the-future"}),
+        ));
+        until("the four events", || seen.lock().unwrap().len() == 4);
+        let seen = seen.lock().unwrap();
+        let Event::ServerDown(down) = &seen[0] else {
+            panic!("{:?}", seen[0]);
+        };
+        assert_eq!(
+            (down.server.as_str(), down.cause),
+            ("east", Some(shapes::DownCause::Restart))
+        );
+        let Event::ServerUp(up) = &seen[1] else {
+            panic!("{:?}", seen[1]);
+        };
+        assert_eq!((up.seq, up.server.as_str()), (2, "east"));
+        let Event::QueueEntered(entered) = &seen[2] else {
+            panic!("{:?}", seen[2]);
+        };
+        assert_eq!(
+            (entered.player.name.as_str(), entered.position),
+            ("Alex", 4)
+        );
+        let Event::QueueLeft(left) = &seen[3] else {
+            panic!("{:?}", seen[3]);
+        };
+        assert_eq!(left.cause, shapes::QueueCause::Other);
     }
 
     /// The handler never runs on the thread that reads: it is stuck, and the extension goes on answering the proxy; the queue is

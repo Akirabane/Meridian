@@ -24,6 +24,14 @@ pub const PLAYERS_LEFT: &str = "meridian:notification/players/left";
 pub const PLAYERS_MOVED: &str = "meridian:notification/players/moved";
 /// A player was moved off a server that was lost (it crashed or disconnected them).
 pub const PLAYERS_FALLBACK: &str = "meridian:notification/players/fallback";
+/// The proxy saw that a server stopped answering.
+pub const SERVERS_DOWN: &str = "meridian:notification/servers/down";
+/// The proxy saw that a server answers again.
+pub const SERVERS_UP: &str = "meridian:notification/servers/up";
+/// A player entered the line that waits for a place.
+pub const QUEUE_ENTERED: &str = "meridian:notification/queue/entered";
+/// A player left the line that waits for a place.
+pub const QUEUE_LEFT: &str = "meridian:notification/queue/left";
 /// The proxy dropped events for want of room in the queue of this connection (the newest are the ones dropped).
 pub const EVENTS_DROPPED: &str = "meridian:notification/events/dropped";
 
@@ -136,6 +144,76 @@ pub struct Fallback {
     pub loss: Loss,
 }
 
+/// `servers/up`: the server answers again after it did not. It is told only when the state **changes**: the first time the proxy sees a server
+/// sets the state it starts from, and nothing is told.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerUp {
+    pub seq: u64,
+    pub at: u64,
+    pub server: String,
+}
+
+/// Why the proxy believes a server is down, in one of a few words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownCause {
+    /// The restart detector had the server going down for a restart when it was told, usually because the server had announced its stop.
+    Restart,
+    /// It did not answer, and nothing says it is a restart.
+    Unreachable,
+    /// A word that this version does not know.
+    #[serde(other)]
+    Other,
+}
+
+/// `servers/down`: the server did not answer after it did. `cause` is there when the proxy can tell.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerDown {
+    pub seq: u64,
+    pub at: u64,
+    pub server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<DownCause>,
+}
+
+/// `queue/entered`: a player entered the line, at `position` (1 is the first to be served) when they entered. A player who finds a place
+/// at once never enters the line, and is not told.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueEntered {
+    pub seq: u64,
+    pub at: u64,
+    pub player: Player,
+    pub position: u64,
+}
+
+/// Why a player left the line, in one of a few words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueueCause {
+    /// They got a place and a server: the session opened.
+    Served,
+    /// They closed the connection while they waited.
+    Left,
+    /// They waited as long as they could.
+    Timeout,
+    /// Their turn came and they did not get a session: the login was refused or failed after the wait.
+    Refused,
+    /// The proxy was stopping.
+    Shutdown,
+    /// A word that this version does not know.
+    #[serde(other)]
+    Other,
+}
+
+/// `queue/left`: a player left the line, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueLeft {
+    pub seq: u64,
+    pub at: u64,
+    pub player: Player,
+    pub cause: QueueCause,
+}
+
 /// `events/dropped`: how many events the proxy dropped since the last it told. The SDK also makes one of these when its own queue
 /// overflowed (`at` is then the SDK's clock). An extension that needs to be exact asks `players/list` again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +233,10 @@ pub enum Event {
     Left(Left),
     Moved(Moved),
     Fallback(Fallback),
+    ServerUp(ServerUp),
+    ServerDown(ServerDown),
+    QueueEntered(QueueEntered),
+    QueueLeft(QueueLeft),
     Dropped(Dropped),
     /// A method this SDK does not know, or one whose parameters are not the shape it knows.
     Unknown(String),
@@ -171,6 +253,10 @@ impl Event {
             PLAYERS_LEFT => read(params).map(Event::Left),
             PLAYERS_MOVED => read(params).map(Event::Moved),
             PLAYERS_FALLBACK => read(params).map(Event::Fallback),
+            SERVERS_UP => read(params).map(Event::ServerUp),
+            SERVERS_DOWN => read(params).map(Event::ServerDown),
+            QUEUE_ENTERED => read(params).map(Event::QueueEntered),
+            QUEUE_LEFT => read(params).map(Event::QueueLeft),
             EVENTS_DROPPED => read(params).map(Event::Dropped),
             _ => None,
         };
@@ -266,7 +352,10 @@ mod tests {
         for (method, params) in [
             (PLAYERS_JOINED, Some(&bad)),
             (PLAYERS_LEFT, None),
-            ("meridian:notification/servers/up", Some(&bad)),
+            (SERVERS_UP, Some(&bad)),
+            (SERVERS_DOWN, None),
+            (QUEUE_ENTERED, Some(&bad)),
+            (QUEUE_LEFT, Some(&bad)),
             ("", None),
         ] {
             assert_eq!(
@@ -369,6 +458,99 @@ mod tests {
         assert_eq!(
             Event::parse(PLAYERS_FALLBACK, Some(&written)),
             Event::Fallback(nowhere)
+        );
+    }
+
+    #[test]
+    fn a_server_and_the_line_are_read_in_their_shape_and_their_words_are_fixed() {
+        let up = ServerUp {
+            seq: 1,
+            at: 2,
+            server: "east".into(),
+        };
+        let written = serde_json::to_value(&up).unwrap();
+        assert_eq!(written, json!({"seq": 1, "at": 2, "server": "east"}));
+        assert_eq!(
+            Event::parse(SERVERS_UP, Some(&written)),
+            Event::ServerUp(up)
+        );
+        let down = ServerDown {
+            seq: 3,
+            at: 4,
+            server: "east".into(),
+            cause: Some(DownCause::Restart),
+        };
+        let written = serde_json::to_value(&down).unwrap();
+        assert_eq!(written["cause"], "restart");
+        assert_eq!(
+            Event::parse(SERVERS_DOWN, Some(&written)),
+            Event::ServerDown(down.clone())
+        );
+        let unexplained = ServerDown {
+            cause: None,
+            ..down
+        };
+        let written = serde_json::to_value(&unexplained).unwrap();
+        assert!(written.get("cause").is_none(), "no cause: no word");
+        assert_eq!(
+            Event::parse(SERVERS_DOWN, Some(&written)),
+            Event::ServerDown(unexplained)
+        );
+        for (cause, word) in [
+            (DownCause::Restart, "restart"),
+            (DownCause::Unreachable, "unreachable"),
+        ] {
+            assert_eq!(serde_json::to_value(cause).unwrap(), json!(word));
+            assert_eq!(
+                serde_json::from_value::<DownCause>(json!(word)).unwrap(),
+                cause
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<DownCause>(json!("sunk")).unwrap(),
+            DownCause::Other
+        );
+
+        let entered = QueueEntered {
+            seq: 5,
+            at: 6,
+            player: player(),
+            position: 3,
+        };
+        let written = serde_json::to_value(&entered).unwrap();
+        assert_eq!(written["position"], 3);
+        assert_eq!(
+            Event::parse(QUEUE_ENTERED, Some(&written)),
+            Event::QueueEntered(entered)
+        );
+        let left = QueueLeft {
+            seq: 7,
+            at: 8,
+            player: player(),
+            cause: QueueCause::Timeout,
+        };
+        let written = serde_json::to_value(&left).unwrap();
+        assert_eq!(written["cause"], "timeout");
+        assert_eq!(
+            Event::parse(QUEUE_LEFT, Some(&written)),
+            Event::QueueLeft(left)
+        );
+        for (cause, word) in [
+            (QueueCause::Served, "served"),
+            (QueueCause::Left, "left"),
+            (QueueCause::Timeout, "timeout"),
+            (QueueCause::Refused, "refused"),
+            (QueueCause::Shutdown, "shutdown"),
+        ] {
+            assert_eq!(serde_json::to_value(cause).unwrap(), json!(word));
+            assert_eq!(
+                serde_json::from_value::<QueueCause>(json!(word)).unwrap(),
+                cause
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<QueueCause>(json!("vanished")).unwrap(),
+            QueueCause::Other
         );
     }
 }

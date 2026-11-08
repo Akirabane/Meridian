@@ -9,6 +9,8 @@
 //! Who waits has passed the throttle, the ban list and the whitelist, and has logged in:
 //! all of that comes before the line.
 use crate::console::{Commands, Reply, usage};
+use crate::extension::Registry;
+use crate::extension::events::Kind;
 use crate::log::info;
 use crate::metrics::{LoginFailure, Metrics};
 use crate::route::Full;
@@ -16,6 +18,7 @@ use crate::session::{Sessions, hyphenated, refuse};
 use crate::state::Proxy;
 use horizon_protocol::connection::Connection;
 use meridian_config::QueueSettings;
+use meridian_extension::events::QueueCause;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -87,6 +90,14 @@ pub enum Watch {
     Stopping,
 }
 
+/// Whom the extensions that listen are told of: the player's id and how their account was checked, with the registry that tells
+/// them (the name is the line's own).
+struct Told<'q> {
+    extensions: &'q Registry,
+    uuid: [u8; 16],
+    verified: bool,
+}
+
 /// A player's own part of the line: whether they are in it, and since when. It leaves
 /// the line when dropped.
 pub struct Line<'q> {
@@ -99,6 +110,8 @@ pub struct Line<'q> {
     retries: u32,
     /// What the player sent while they waited, to be passed to the backend they end on.
     early: Vec<(i32, Vec<u8>)>,
+    /// Who is told that the player entered the line and left it, if anybody is (`Line::telling`).
+    told: Option<Told<'q>>,
 }
 
 impl<'q> Line<'q> {
@@ -117,7 +130,42 @@ impl<'q> Line<'q> {
             deadline: None,
             retries: 0,
             early: Vec::new(),
+            told: None,
         }
+    }
+
+    /// The extensions that listen are told when the player enters the line (`queue/entered`) and when they leave it
+    /// (`queue/left`, with why). A player who never waits is not told of.
+    pub fn telling(mut self, extensions: &'q Registry, uuid: [u8; 16], verified: bool) -> Self {
+        self.told = Some(Told {
+            extensions,
+            uuid,
+            verified,
+        });
+        self
+    }
+
+    /// Tells the extensions that listen that the player entered the line, at `position`. Never called with the lock of the line
+    /// held: an event is handed over without waiting, but nothing is told under a lock that every waiting player needs.
+    fn tell_entered(&self, position: usize) {
+        let Some(told) = &self.told else {
+            return;
+        };
+        told.extensions.emit(|| Kind::QueueEntered {
+            player: Kind::player(&self.name, told.uuid, told.verified),
+            position: u64::try_from(position).unwrap_or(u64::MAX),
+        });
+    }
+
+    /// Tells the extensions that listen that the player left the line, and why.
+    fn tell_left(&self, cause: QueueCause) {
+        let Some(told) = &self.told else {
+            return;
+        };
+        told.extensions.emit(|| Kind::QueueLeft {
+            player: Kind::player(&self.name, told.uuid, told.verified),
+            cause,
+        });
     }
 
     /// Whether the queue is on for this player.
@@ -156,7 +204,10 @@ impl<'q> Line<'q> {
                     return Ok(taken);
                 }
             }
-            self.enter(&mut state)?;
+            let position = self.enter(&mut state)?;
+            drop(state);
+            self.tell_entered(position);
+            state = queue.lock();
         }
         loop {
             let me = self.id.expect("the player is in the line");
@@ -178,12 +229,15 @@ impl<'q> Line<'q> {
         }
         let mut state = self.queue.lock();
         if self.id.is_none() {
-            self.enter(&mut state)?;
+            let position = self.enter(&mut state)?;
+            drop(state);
+            self.tell_entered(position);
+            state = self.queue.lock();
         }
         self.retries += 1;
         if self.retries > MAX_RETRIES {
             drop(state);
-            self.leave(Left::TimedOut);
+            self.leave(Left::TimedOut, QueueCause::Timeout);
             return Err(Refused::TimedOut);
         }
         // One sleep, ended by a signal or by the tick: either way the caller tries
@@ -193,8 +247,8 @@ impl<'q> Line<'q> {
         Ok(())
     }
 
-    /// Puts the player in the line, if there is room in it.
-    fn enter(&mut self, state: &mut State) -> Result<(), Refused> {
+    /// Puts the player in the line, if there is room in it. Gives their position, 1 for the first.
+    fn enter(&mut self, state: &mut State) -> Result<usize, Refused> {
         if state.line.len() >= self.settings.max_length as usize {
             self.metrics.queue_refused();
             return Err(Refused::Full);
@@ -210,7 +264,7 @@ impl<'q> Line<'q> {
         self.id = Some(id);
         self.deadline = Some(now + Duration::from_secs(self.settings.wait_seconds));
         self.metrics.queue_entered();
-        Ok(())
+        Ok(state.line.len())
     }
 
     /// Sleeps until something is signalled or a tick passes, then looks at the player.
@@ -224,7 +278,7 @@ impl<'q> Line<'q> {
         let now = Instant::now();
         if now >= deadline {
             drop(state);
-            self.leave(Left::TimedOut);
+            self.leave(Left::TimedOut, QueueCause::Timeout);
             return Err(Refused::TimedOut);
         }
         let slice = TICK.min(deadline - now);
@@ -239,11 +293,11 @@ impl<'q> Line<'q> {
         match who.look(&mut self.early) {
             Watch::Waiting => Ok(self.queue.lock()),
             Watch::Gone => {
-                self.leave(Left::Gone);
+                self.leave(Left::Gone, QueueCause::Left);
                 Err(Refused::Gone)
             }
             Watch::Stopping => {
-                self.leave(Left::Gone);
+                self.leave(Left::Gone, QueueCause::Shutdown);
                 Err(Refused::Stopping)
             }
         }
@@ -251,10 +305,12 @@ impl<'q> Line<'q> {
 
     /// The player got their place and their backend: they leave the line.
     pub fn served(&mut self) {
-        self.leave(Left::Served);
+        self.leave(Left::Served, QueueCause::Served);
     }
 
-    fn leave(&mut self, cause: Left) {
+    /// The player leaves the line, for `cause` as the metrics count it and `told` as the extensions are told. Once: a player who
+    /// is not in the line any more is not told of again.
+    fn leave(&mut self, cause: Left, told: QueueCause) {
         let Some(id) = self.id.take() else {
             return;
         };
@@ -268,6 +324,7 @@ impl<'q> Line<'q> {
         self.queue.changed.notify_all();
         self.metrics
             .queue_left(cause, since.map(|s| s.elapsed()).unwrap_or_default());
+        self.tell_left(told);
     }
 
     /// Passes to `backend` what the player sent while they waited.
@@ -286,8 +343,9 @@ impl<'q> Line<'q> {
 
 impl Drop for Line<'_> {
     fn drop(&mut self) {
-        // Whatever ended the login, the player is not in the line any more.
-        self.leave(Left::Gone);
+        // Whatever ended the login, the player is not in the line any more. It is only here when their turn came and they were not
+        // served: the login was refused or failed after the wait.
+        self.leave(Left::Gone, QueueCause::Refused);
     }
 }
 

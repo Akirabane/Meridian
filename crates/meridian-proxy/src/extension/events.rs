@@ -21,8 +21,10 @@ use super::stats::Stats;
 use crate::log::warning;
 use meridian_extension::decide::{Auth, Player};
 use meridian_extension::events::{
-    Dropped, EVENTS_DROPPED, FailedStep, Fallback, Joined, Left, LeftReason, Loss, MoveOutcome,
-    Moved, PLAYERS_FALLBACK, PLAYERS_JOINED, PLAYERS_LEFT, PLAYERS_MOVED,
+    DownCause, Dropped, EVENTS_DROPPED, FailedStep, Fallback, Joined, Left, LeftReason, Loss,
+    MoveOutcome, Moved, PLAYERS_FALLBACK, PLAYERS_JOINED, PLAYERS_LEFT, PLAYERS_MOVED,
+    QUEUE_ENTERED, QUEUE_LEFT, QueueCause, QueueEntered, QueueLeft, SERVERS_DOWN, SERVERS_UP,
+    ServerDown, ServerUp,
 };
 use meridian_extension::wire;
 use meridian_websocket::Writer;
@@ -61,6 +63,17 @@ pub enum Kind {
         to: Option<String>,
         loss: Loss,
     },
+    /// The server answers again after it did not.
+    ServerUp { server: String },
+    /// The server did not answer after it did.
+    ServerDown {
+        server: String,
+        cause: Option<DownCause>,
+    },
+    /// The player entered the line that waits for a place, at `position` (1 is the first).
+    QueueEntered { player: Player, position: u64 },
+    /// The player left the line.
+    QueueLeft { player: Player, cause: QueueCause },
 }
 
 impl Kind {
@@ -84,6 +97,10 @@ impl Kind {
             Kind::Left { .. } => "players/left",
             Kind::Moved { .. } => "players/moved",
             Kind::Fallback { .. } => "players/fallback",
+            Kind::ServerUp { .. } => "servers/up",
+            Kind::ServerDown { .. } => "servers/down",
+            Kind::QueueEntered { .. } => "queue/entered",
+            Kind::QueueLeft { .. } => "queue/left",
         }
     }
 
@@ -150,6 +167,41 @@ impl Kind {
                     from: from.clone(),
                     to: to.clone(),
                     loss: *loss,
+                },
+            ),
+            Kind::ServerUp { server } => wire::notification(
+                SERVERS_UP,
+                &ServerUp {
+                    seq,
+                    at,
+                    server: server.clone(),
+                },
+            ),
+            Kind::ServerDown { server, cause } => wire::notification(
+                SERVERS_DOWN,
+                &ServerDown {
+                    seq,
+                    at,
+                    server: server.clone(),
+                    cause: *cause,
+                },
+            ),
+            Kind::QueueEntered { player, position } => wire::notification(
+                QUEUE_ENTERED,
+                &QueueEntered {
+                    seq,
+                    at,
+                    player: player.clone(),
+                    position: *position,
+                },
+            ),
+            Kind::QueueLeft { player, cause } => wire::notification(
+                QUEUE_LEFT,
+                &QueueLeft {
+                    seq,
+                    at,
+                    player: player.clone(),
+                    cause: *cause,
                 },
             ),
         }
@@ -271,6 +323,48 @@ impl Bus {
     #[cfg(test)]
     pub(super) fn listeners(&self) -> usize {
         self.sinks.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// For the tests: what a listener made by [`Bus::recording`] was told, as (method, params), once it has `count` events.
+#[cfg(test)]
+pub(crate) fn told_events(
+    told: &Mutex<Vec<String>>,
+    count: usize,
+) -> Vec<(String, serde_json::Value)> {
+    told_matching(told, "", count)
+}
+
+/// For the tests: the events a recording listener was told whose method starts with `prefix`, once it has `count` of them.
+#[cfg(test)]
+pub(crate) fn told_matching(
+    told: &Mutex<Vec<String>>,
+    prefix: &str,
+    count: usize,
+) -> Vec<(String, serde_json::Value)> {
+    let limit = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let found: Vec<(String, serde_json::Value)> = told
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|text| {
+                let message: serde_json::Value = serde_json::from_str(text).unwrap();
+                (
+                    message["method"].as_str().unwrap().to_owned(),
+                    message["params"].clone(),
+                )
+            })
+            .filter(|(method, _)| method.starts_with(prefix))
+            .collect();
+        if found.len() >= count {
+            return found;
+        }
+        assert!(
+            std::time::Instant::now() < limit,
+            "gave up waiting for {count} events, got {found:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
