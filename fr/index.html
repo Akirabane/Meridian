@@ -10,7 +10,7 @@
 <link rel="alternate" hreflang="en" href="https://meridian.akirabanelabs.fr/">
 <link rel="alternate" hreflang="fr" href="https://meridian.akirabanelabs.fr/fr/">
 <link rel="alternate" hreflang="x-default" href="https://meridian.akirabanelabs.fr/">
-<link rel="stylesheet" href="../style.css?v=2c435676">
+<link rel="stylesheet" href="../style.css?v=4425db18">
 </head>
 <body>
 <header class="top">
@@ -20,7 +20,7 @@
   </div>
 </header>
 <nav class="tabbar" id="tabs" aria-label="Sections">
-  <div class="wrap tabrow"><div class="tablist"><a href="#overview">Vue d’ensemble</a><a href="#compare">Avant et après</a><a href="#players">Combien de joueurs ?</a><a href="#real">Tests sur réseau réel</a><a href="#roadmap">Feuille de route</a><a href="#not-tested">Pas encore testé</a><a href="#links">Code</a></div><span class="lang" role="group" aria-label="Langue"><a href="../" hreflang="en" lang="en">English</a> <span aria-hidden="true">|</span> <a href="./" hreflang="fr" lang="fr" aria-current="page">Français</a></span></div>
+  <div class="wrap tabrow"><div class="tablist"><a href="#overview">Vue d’ensemble</a><a href="#compare">Avant et après</a><a href="#players">Combien de joueurs ?</a><a href="#real">Tests sur réseau réel</a><a href="#roadmap">Feuille de route</a><a href="#not-tested">Pas encore testé</a><a href="#links">Code</a></div><span class="lang" role="group" aria-label="Langue"><a href="../" hreflang="en" lang="en" data-short="EN">English</a> <span aria-hidden="true">|</span> <a href="./" hreflang="fr" lang="fr" data-short="FR" aria-current="page">Français</a></span></div>
 </nav>
 <main class="wrap">
 <section id="overview"><h2>Où en est le projet</h2><div class="keys"><div class="key"><span class="knum">2,5 ×</span><span class="klabel">moins de processeur pour le proxy avec l’optimisation (pull request #160)</span><span class="badge good"><span aria-hidden="true">&#10004;</span> Mesuré</span><span class="small">Mesuré avant et après sur le même banc : 2,6 fois à 500 joueurs typiques, 2,3 fois à 1 000.</span></div><div class="key"><span class="knum">1 000</span><span class="klabel">bots-joueurs typiques tenus par un seul proxy sur un seul PC</span><span class="badge good"><span aria-hidden="true">&#10004;</span> Mesuré</span><span class="small">Avec des bots et des serveurs de jeu synthétiques ; avec de vrais serveurs Horizon, les tests sont en cours.</span></div><div class="key"><span class="knum">0</span><span class="klabel">joueur perdu dans ce test</span><span class="badge good"><span aria-hidden="true">&#10004;</span> Mesuré</span><span class="small">Une heure à 1 000 joueurs typiques.</span></div></div><p class="lead">Meridian est un proxy qui fonctionne : il dirige les joueurs, répartit la charge et les déplace d’un serveur à l’autre sans écran de chargement. Il a tenu 1 000 bots-joueurs typiques sur un seul PC, avec 0 joueur perdu. Une optimisation qui réduit l’usage du processeur d’environ 2,5 fois a été fusionnée (pull request #160).</p><ul class="plain open"><li>Testé avec de vrais serveurs de jeu et de vrais clients sur un vrai réseau (3 joueurs), puis avec jusqu’à 1 500 bots.</li><li>Pas encore mesuré : la vitesse propre du serveur de jeu (le TPS, c’est-à-dire le nombre de ticks, ou pas de calcul, par seconde) avec beaucoup de joueurs. Voir « Pas encore testé ».</li></ul><p class="small">Meridian est un proxy (un intermédiaire placé entre les joueurs et les serveurs) pour <a href="https://github.com/horizon-rust/horizon">Horizon</a>, une version de Minecraft Java Edition écrite en Rust. Les joueurs se connectent au proxy, qui envoie chacun vers l’un des serveurs placés derrière lui, et peut déplacer un joueur vers un autre serveur sans écran de chargement.</p><h3 class="sub">Avec l’équipe Horizon</h3><div class="context"><p>Meridian est développé en public, comme un projet distinct de Horizon. L’équipe Horizon, les mainteneurs de Horizon, a donné des indications sur la façon de s’y prendre, et c’est elle qui décide de ce qui entre dans Horizon lui-même. Ses demandes sont sur un ticket public de Horizon : de petites pull requests, une à la fois. Ces indications ne valent pas approbation de Meridian.</p><p>Voir <a href="https://github.com/horizon-rust/horizon/issues/7484">ticket #7484 de Horizon</a>.</p><p class="small">Ce qui a été demandé et ce qui est fait : <a href="#horizon">Feuille de route</a>.</p></div></section>
@@ -32,9 +32,9 @@
 <section id="links"><h2>Code et documents</h2><ul class="plain open"><li><a href="https://github.com/Akirabane/Meridian">Meridian sur GitHub</a> : le code, les tickets et les pull requests.</li><li><a href="https://github.com/Akirabane/Meridian/tree/main/docs">Les documents</a> : comment le lancer, la conception, les bancs d’essai.</li><li><a href="https://github.com/Akirabane/Meridian/blob/main/docs/LOAD-1000.md">Le test à 1 000 joueurs</a> et <a href="https://github.com/Akirabane/Meridian/blob/main/docs/REAL-NETWORK-RUN.md">l’essai sur réseau réel</a>, en détail.</li><li><a href="https://github.com/horizon-rust/horizon">Horizon</a> : le jeu pour lequel Meridian est un proxy.</li></ul></section>
 </main>
 <footer class="wrap foot">
-  <p>Chiffres mis à jour le 8 novembre 2026 à 13:59. Page générée le 8 novembre 2026 à 13:24 UTC.</p>
+  <p>Chiffres mis à jour le 8 novembre 2026 à 13:59. Page générée le 8 novembre 2026 à 13:32 UTC.</p>
   <p>Cette page est statique : pas de cookies, pas de compteur, pas de traceur, et aucune requête vers un autre site.</p>
 </footer>
-<script src="../site.js?v=ac456142"></script>
+<script src="../site.js?v=90c3db50"></script>
 </body>
 </html>

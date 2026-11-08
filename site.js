@@ -62,8 +62,8 @@
     });
     // the active tab stays in sight in a bar that scrolls sideways (a narrow screen)
     var t = tabs[i];
-    if (t.offsetLeft < list.scrollLeft || t.offsetLeft + t.offsetWidth > list.scrollLeft + list.clientWidth) {
-      list.scrollLeft = t.offsetLeft - 16;
+    if (list.scrollWidth > list.clientWidth + 1) {
+      list.scrollLeft = Math.max(0, t.offsetLeft - (list.clientWidth - t.offsetWidth) / 2);
     }
     // the other language opens on the same tab
     langs.forEach(function (a) { a.setAttribute('href', a.getAttribute('data-base') + '#' + panels[i].id); });
