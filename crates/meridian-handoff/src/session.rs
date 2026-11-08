@@ -46,7 +46,7 @@ use meridian_net::{
     Profile, Result,
     backend::BackendLink,
     client::ClientSession,
-    relay::{CommandHook, Flow, Phase, Report},
+    relay::{CommandHook, Flow, Phase, Report, TAKEN},
 };
 use meridian_rewrite::{Swap, Teleports};
 use std::sync::{
@@ -1091,7 +1091,8 @@ fn rewrite(rewritten: horizon_protocol::Result<Vec<u8>>, original: Vec<u8>) -> V
 }
 
 /// When the play packet `id` is a command `hook` answers, sends the player the answer
-/// and returns `true`.
+/// and returns `true`. A command the hook takes ([`TAKEN`]) is not passed on either, and
+/// nothing is written for it now: the hook answers it later, with [`SessionHandle::tell`].
 fn answer_command(id: i32, payload: &[u8], shared: &Shared, hook: &CommandHook) -> bool {
     if id != ids::play::serverbound::CHAT_COMMAND
         && id != ids::play::serverbound::CHAT_COMMAND_SIGNED
@@ -1108,6 +1109,12 @@ fn answer_command(id: i32, payload: &[u8], shared: &Shared, hook: &CommandHook) 
     let Some(reply) = hook(&command) else {
         return false;
     };
+    // Taken: the hook has started its answer, so the command must not also reach the backend,
+    // whatever phase the client is in now. What other threads tell the player meanwhile is
+    // written when `_answering` ends, as for any other command.
+    if reply == TAKEN {
+        return true;
+    }
     let mut down = shared.down();
     if down.phase != Phase::Play {
         return false;
