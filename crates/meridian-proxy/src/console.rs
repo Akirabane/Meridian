@@ -191,12 +191,12 @@ fn command(
     }
 }
 
-/// Reads commands from standard input until it closes, on a thread of its own.
-pub fn start(proxy: Arc<Proxy>) -> std::io::Result<JoinHandle<()>> {
+/// Reads commands from standard input until it closes, on a thread of its own. `commands` is the table the console reads: the same
+/// one the extensions granted `orders.console` run lines in.
+pub fn start(proxy: Arc<Proxy>, commands: Arc<Commands>) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("console".to_owned())
         .spawn(move || {
-            let commands = Commands::builtin();
             for line in std::io::stdin().lock().lines() {
                 let line = match line {
                     Ok(line) => line,
@@ -1277,6 +1277,51 @@ mod tests {
         let before = proxy.config().default_backend.clone();
         ProxyOperate::new(&proxy).reload();
         assert_eq!(proxy.config().default_backend, before);
+    }
+
+    // ---- what an extension runs is the console's own table ---------------------------------------------------
+
+    /// The console of the extensions reads **the table it was given**, the one the operator's console reads: a command registered in
+    /// it is run, `help` lists it, a word that is not in it is refused as the console refuses it, and the commands are the real ones
+    /// (here `list` and `kick`, with the sessions of the proxy).
+    #[test]
+    fn an_extensions_console_runs_exactly_the_table_it_is_given_with_the_real_commands() {
+        use crate::extension::Console;
+        use crate::extension::console::ProxyConsole;
+        let proxy = Arc::new(balanced_proxy());
+        let mut table = Commands::builtin();
+        table
+            .register(Command {
+                name: "ping",
+                usage: "ping",
+                help: "answers pong",
+                run: Box::new(|_, _, _| Ok(vec!["pong".to_owned()])),
+            })
+            .unwrap();
+        let console = ProxyConsole::new(&proxy, Arc::new(table));
+        let alex = join(&proxy, "Alex", "lobby");
+        assert_eq!(console.execute("ping"), ["pong"]);
+        assert!(console.execute("help").iter().any(|l| l.contains("ping")));
+        assert_eq!(
+            console.execute("frobnicate now"),
+            ["unknown command frobnicate; type help for the list"]
+        );
+        assert!(console.execute("").is_empty());
+        let listed = console.execute("list");
+        assert!(listed.iter().any(|l| l.contains("Alex")), "{listed:?}");
+        let kicked = console.execute("kick Alex Spam, again");
+        assert!(
+            kicked[0].starts_with("kicked Alex from lobby: Spam, again"),
+            "{kicked:?}"
+        );
+        assert!(
+            alex.relay.join().unwrap().is_ok(),
+            "the player's session ended"
+        );
+        // `end` is the console's: it stops the proxy, which is the extension's to know when it grants the shell.
+        assert!(!proxy.stopping());
+        assert_eq!(console.execute("end"), ["stopping"]);
+        assert!(proxy.stopping());
     }
 
     #[test]

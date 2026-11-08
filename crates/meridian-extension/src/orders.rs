@@ -682,6 +682,109 @@ pub fn operate_methods() -> Vec<(&'static str, DiscoverMethod)> {
     ]
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The order that runs a console line (capability `orders.console`)
+
+/// The method that runs one line as the operator's console does.
+pub const CONSOLE_EXECUTE: &str = "meridian:console/execute";
+
+/// The most characters of the line [`CONSOLE_EXECUTE`] takes.
+pub const MAX_CONSOLE_LINE: usize = 1024;
+
+/// The most characters of output [`CONSOLE_EXECUTE`] gives back, all lines together (an empty line counts as one). What is past it is
+/// left out, and the answer says so.
+pub const MAX_CONSOLE_OUTPUT: usize = 8192;
+
+/// The last line of an output that was cut.
+pub const OUTPUT_TRUNCATED: &str = "[output truncated]";
+
+/// `params` of [`CONSOLE_EXECUTE`]: the line, as the operator would type it at the console.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecuteParams {
+    pub line: String,
+}
+
+/// `result` of [`CONSOLE_EXECUTE`]: what the console said, one string for each line, as plain text (no control character, no `§`),
+/// and whether it was cut at [`MAX_CONSOLE_OUTPUT`] characters (the last line is then [`OUTPUT_TRUNCATED`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Executed {
+    pub lines: Vec<String>,
+    pub truncated: bool,
+}
+
+/// Reads the `params` of [`CONSOLE_EXECUTE`]: one line, not empty, of [`MAX_CONSOLE_LINE`] characters at most, with no control,
+/// formatting (`§`) or invisible character: a line break would make two commands of one. The error never quotes what was sent.
+pub fn parse_execute(params: Option<&Value>) -> Result<String, String> {
+    const SHAPE: &str = "params must be an object with \"line\" (a string)";
+    let params = params.ok_or("params are missing")?;
+    if !params.is_object() {
+        return Err(SHAPE.into());
+    }
+    let params: ExecuteParams = serde_json::from_value(params.clone()).map_err(|_| SHAPE)?;
+    if params.line.trim().is_empty() {
+        return Err("\"line\" is empty".into());
+    }
+    if params.line.chars().count() > MAX_CONSOLE_LINE {
+        return Err(format!(
+            "\"line\" is longer than {MAX_CONSOLE_LINE} characters"
+        ));
+    }
+    if params.line.chars().any(crate::run::is_refused) {
+        return Err(
+            "\"line\" holds a control, formatting or invisible character: one line, plain text"
+                .into(),
+        );
+    }
+    Ok(params.line)
+}
+
+/// What the console said, as [`CONSOLE_EXECUTE`] gives it back: each line made plain text (what a line may not hold is dropped, see
+/// [`clean_text`]), at most [`MAX_CONSOLE_OUTPUT`] characters in all; past that the line that crosses the limit is cut, the others
+/// are left out, and the last line is [`OUTPUT_TRUNCATED`].
+pub fn console_output(lines: &[String]) -> Executed {
+    let mut kept = Vec::new();
+    let mut room = MAX_CONSOLE_OUTPUT;
+    for line in lines {
+        let line: String = line
+            .chars()
+            .filter(|c| !crate::run::is_refused(*c))
+            .collect();
+        let cost = line.chars().count().max(1);
+        if cost > room {
+            if room > 0 {
+                kept.push(line.chars().take(room).collect());
+            }
+            kept.push(OUTPUT_TRUNCATED.to_owned());
+            return Executed {
+                lines: kept,
+                truncated: true,
+            };
+        }
+        room -= cost;
+        kept.push(line);
+    }
+    Executed {
+        lines: kept,
+        truncated: false,
+    }
+}
+
+/// How `rpc.discover` of the proxy describes the order that runs a console line.
+pub fn console_methods() -> Vec<(&'static str, DiscoverMethod)> {
+    vec![(
+        CONSOLE_EXECUTE,
+        DiscoverMethod::with_params(
+            CONSOLE_EXECUTE,
+            &[(
+                "line",
+                true,
+                json!({ "type": "string", "maxLength": MAX_CONSOLE_LINE }),
+            )],
+        ),
+    )]
+}
+
 /// The longest name of a server [`parse_broadcast`] takes.
 pub const MAX_SERVER: usize = 64;
 
@@ -1597,5 +1700,107 @@ mod tests {
         let methods = operate_methods();
         let names: Vec<_> = methods.iter().map(|(_, m)| m.name.as_str()).collect();
         assert_eq!(names, [SERVERS_DRAIN, SERVERS_UNDRAIN, RELOAD]);
+    }
+
+    // ---- the order that runs a console line ----------------------------------------------------------
+
+    #[test]
+    fn a_console_line_is_one_plain_line_and_the_error_never_quotes_it() {
+        let line = |v: Value| parse_execute(Some(&v));
+        assert_eq!(line(json!({"line": "list"})), Ok("list".into()));
+        assert_eq!(
+            line(json!({"line": "kick Steve  Spam, again"})),
+            Ok("kick Steve  Spam, again".into())
+        );
+        assert_eq!(
+            line(json!({"line": "x".repeat(MAX_CONSOLE_LINE)})).map(|l| l.len()),
+            Ok(MAX_CONSOLE_LINE)
+        );
+        let secret = "ZZZ-must-not-come-back";
+        for bad in [
+            json!({"line": ""}),
+            json!({"line": "   "}),
+            json!({"line": "x".repeat(MAX_CONSOLE_LINE + 1)}),
+            json!({"line": format!("{secret}\nend")}),
+            json!({"line": format!("{secret}\r")}),
+            json!({"line": format!("{secret}\t")}),
+            json!({"line": format!("{secret}\u{a7}4")}),
+            json!({"line": format!("{secret}\u{202e}")}),
+            json!({"line": format!("{secret}\0")}),
+            json!({"line": 5}),
+            json!({"command": "list"}),
+            json!({"line": "list", "more": 1}),
+            json!(["list"]),
+            json!("list"),
+            json!(null),
+        ] {
+            let why = line(bad.clone()).unwrap_err();
+            assert!(!why.contains("ZZZ") && !why.is_empty(), "{bad}: {why}");
+        }
+        assert!(parse_execute(None).is_err());
+    }
+
+    #[test]
+    fn the_output_is_plain_lines_and_is_cut_where_the_limit_says_with_a_mark() {
+        let said = |lines: &[&str]| {
+            console_output(&lines.iter().map(|l| (*l).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            said(&[]),
+            Executed {
+                lines: vec![],
+                truncated: false
+            }
+        );
+        // What a line may not hold is dropped; the line breaks end nothing: a line is a line.
+        assert_eq!(
+            said(&["a\u{a7}4b\x1b[0m", "", "c\nd"]),
+            Executed {
+                lines: vec!["a4b[0m".into(), "".into(), "cd".into()],
+                truncated: false
+            }
+        );
+        // Exactly the limit is not cut; one more is.
+        let full = "x".repeat(MAX_CONSOLE_OUTPUT);
+        assert!(!said(&[&full]).truncated);
+        let over = said(&[&full, "more"]);
+        assert_eq!(
+            (
+                over.truncated,
+                over.lines.len(),
+                over.lines.last().map(String::as_str)
+            ),
+            (true, 2, Some(OUTPUT_TRUNCATED))
+        );
+        assert_eq!(over.lines[0].chars().count(), MAX_CONSOLE_OUTPUT);
+        let cut = said(&[&"y".repeat(MAX_CONSOLE_OUTPUT - 3), "abcdef", "never"]);
+        assert_eq!(cut.lines[1], "abc");
+        assert_eq!(cut.lines.len(), 3);
+        assert!(cut.truncated);
+        // Empty lines count, so many of them are bounded too.
+        let many = said(&vec![""; MAX_CONSOLE_OUTPUT + 5]);
+        assert!(many.truncated && many.lines.len() <= MAX_CONSOLE_OUTPUT + 2);
+        assert!(!said(&vec![""; MAX_CONSOLE_OUTPUT]).truncated);
+    }
+
+    #[test]
+    fn what_the_sdk_writes_for_the_order_that_runs_a_console_line_is_what_the_proxy_reads() {
+        let written = serde_json::to_value(ExecuteParams {
+            line: "alert hello".into(),
+        })
+        .unwrap();
+        assert_eq!(written, json!({"line": "alert hello"}));
+        assert_eq!(parse_execute(Some(&written)), Ok("alert hello".into()));
+        assert_eq!(
+            serde_json::to_value(Executed {
+                lines: vec!["sent".into()],
+                truncated: false
+            })
+            .unwrap(),
+            json!({"lines": ["sent"], "truncated": false})
+        );
+        let methods = console_methods();
+        assert_eq!((methods.len(), methods[0].0), (1, CONSOLE_EXECUTE));
+        assert!(methods[0].1.params[0].required);
     }
 }

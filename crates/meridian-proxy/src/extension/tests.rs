@@ -1880,6 +1880,7 @@ mod the_orders {
                 "meridian:reload"
             ]
         );
+        assert_eq!(methods(&["orders.console"]), ["meridian:console/execute"]);
         assert!(methods(&["decide.login", "events"]).is_empty());
     }
 
@@ -3911,5 +3912,407 @@ mod the_orders {
             link.reload_lot().is_some(),
             "the place for a reload was let go"
         );
+    }
+
+    // ---- the order that runs a console line -----------------------------------------------------------------
+
+    use crate::extension::orders::Console;
+    use meridian_extension::orders::Executed;
+
+    /// A `Console` that is made up. It records what happens, in order (`journal: <entry>`, `execute: <line>`); a line says what it
+    /// does by its first word: `slow` and `reload` wait while `hold` is set, `loud` says much, `dirty` says what a line may not
+    /// hold, `quiet` says nothing, anything else says `ran <word>`.
+    struct Consoled {
+        events: StdMutex<Vec<String>>,
+        hold: AtomicBool,
+        begun: AtomicUsize,
+        ended: AtomicUsize,
+    }
+
+    impl Consoled {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                events: StdMutex::new(Vec::new()),
+                hold: AtomicBool::new(false),
+                begun: AtomicUsize::new(0),
+                ended: AtomicUsize::new(0),
+            })
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+
+        fn executed(&self) -> Vec<String> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| e.strip_prefix("execute: ").map(str::to_owned))
+                .collect()
+        }
+    }
+
+    struct ConsoledArc(Arc<Consoled>);
+
+    impl Console for ConsoledArc {
+        fn execute(&self, line: &str) -> Vec<String> {
+            self.0
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("execute: {line}"));
+            let word = line
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            match word.as_str() {
+                "slow" | "reload" => {
+                    self.0.begun.fetch_add(1, Ordering::SeqCst);
+                    let limit = Instant::now() + Duration::from_secs(20);
+                    while self.0.hold.load(Ordering::SeqCst) && Instant::now() < limit {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    self.0.ended.fetch_add(1, Ordering::SeqCst);
+                    vec![format!("{word} done")]
+                }
+                "loud" => (0..2_000)
+                    .map(|n| format!("line {n} {}", "x".repeat(20)))
+                    .collect(),
+                "dirty" => vec!["a\u{a7}4b\u{1b}[0m".to_owned(), "c\nd".to_owned()],
+                "quiet" => Vec::new(),
+                "boom" => panic!("a command that fails"),
+                other => vec![format!("ran {other}")],
+            }
+        }
+
+        fn journal(&self, entry: &str) {
+            self.0
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("journal: {entry}"));
+        }
+    }
+
+    /// `orderly`, with the console served.
+    fn consoling_with(
+        grant: &[&str],
+        consoled: &Arc<Consoled>,
+        change: impl FnOnce(&mut Settings),
+    ) -> (Fake, Registry, Arc<Link>, Folder) {
+        // A line costs half the burst: a burst of two makes a line cost one token, refilled fast, so that the tests that are not about
+        // the price are about what they test.
+        let (fake, registry, link, folder) = orderly(grant, |settings| {
+            settings.order_burst = 2;
+            settings.order_rate = 1_000;
+            change(settings);
+        });
+        registry.serve_console(Arc::new(ConsoledArc(Arc::clone(consoled))) as Arc<dyn Console>);
+        (fake, registry, link, folder)
+    }
+
+    fn executed_of(reply: &Value) -> Executed {
+        serde_json::from_value(reply["result"].clone()).unwrap_or_else(|e| panic!("{e}: {reply}"))
+    }
+
+    fn run_line(fake: &Fake, id: u64, line: &str) -> Value {
+        let params = serde_json::to_string(&json!({ "line": line })).unwrap();
+        order(fake, &json!(id), shapes::CONSOLE_EXECUTE, &params);
+        answer(fake, &json!(id))
+    }
+
+    /// The operator's shell is granted by its name: every other power over the network, and the right to be asked for permissions,
+    /// do not give it; it is refused as if the method did not exist, and nothing runs.
+    #[test]
+    fn the_order_that_runs_a_console_line_needs_orders_console_by_its_name_and_nothing_else_gives_it()
+     {
+        let consoled = Consoled::new();
+        let everything_else = [
+            "orders.read",
+            "orders.message",
+            "orders.move",
+            "orders.moderate",
+            "orders.operate",
+            "decide.login",
+            "decide.command",
+            "decide.server",
+            "commands",
+            "events",
+            "addresses",
+        ];
+        let (fake, _registry, link, _folder) = consoling_with(&everything_else, &consoled, |_| {});
+        let reply = run_line(&fake, 11_000, "list");
+        assert_eq!(code_of(&reply), -32601);
+        assert_eq!(reply["error"]["message"], "method not found");
+        assert!(consoled.events().is_empty(), "nothing was journaled or run");
+        assert_eq!(
+            link.stats().orders(shapes::CONSOLE_EXECUTE, Ended::Refused),
+            1
+        );
+        let (fake, _registry, _link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |_| {});
+        assert_eq!(
+            executed_of(&run_line(&fake, 11_001, "list")),
+            Executed {
+                lines: vec!["ran list".into()],
+                truncated: false
+            }
+        );
+    }
+
+    /// The line is written in the log **before** it runs, with the extension and the whole line, and what it said in one line after.
+    #[test]
+    fn a_line_is_journaled_before_it_runs_and_what_it_said_after() {
+        let consoled = Consoled::new();
+        let (fake, _registry, link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |_| {});
+        let name = link.name().to_owned();
+        run_line(&fake, 11_100, "kick  Steve   Spam, again");
+        assert_eq!(
+            consoled.events(),
+            [
+                format!("journal: extension \"{name}\" runs: kick  Steve   Spam, again"),
+                "execute: kick  Steve   Spam, again".to_owned(),
+                format!(
+                    "journal: extension \"{name}\" ran: kick  Steve   Spam, again: said: ran kick"
+                ),
+            ]
+        );
+        // Many lines, and none, in one line.
+        run_line(&fake, 11_101, "loud");
+        run_line(&fake, 11_102, "quiet");
+        let events = consoled.events();
+        assert!(
+            events[events.len() - 4..]
+                .iter()
+                .any(|e| e.ends_with("said: line 0 xxxxxxxxxxxxxxxxxxxx (and 1 more lines)"))
+                || events.iter().any(|e| e.contains("loud: said: line 0 ")),
+            "{events:?}"
+        );
+        assert!(events.last().unwrap().ends_with("quiet: no output"));
+    }
+
+    /// What it says is plain text and bounded: what a line may not hold is dropped, and past the limit it is cut and says so.
+    #[test]
+    fn the_output_is_plain_lines_and_is_cut_at_the_limit_with_a_mark() {
+        let consoled = Consoled::new();
+        let (fake, _registry, _link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |_| {});
+        assert_eq!(
+            executed_of(&run_line(&fake, 11_200, "dirty")),
+            Executed {
+                lines: vec!["a4b[0m".into(), "cd".into()],
+                truncated: false
+            }
+        );
+        assert_eq!(
+            executed_of(&run_line(&fake, 11_201, "quiet")),
+            Executed {
+                lines: vec![],
+                truncated: false
+            }
+        );
+        let loud = executed_of(&run_line(&fake, 11_202, "loud"));
+        assert!(loud.truncated);
+        assert_eq!(
+            loud.lines.last().map(String::as_str),
+            Some(shapes::OUTPUT_TRUNCATED)
+        );
+        let chars: usize = loud.lines.iter().map(|l| l.chars().count()).sum();
+        assert!(
+            chars <= shapes::MAX_CONSOLE_OUTPUT + shapes::OUTPUT_TRUNCATED.len(),
+            "{chars}"
+        );
+    }
+
+    /// A line that is not one line of plain text is refused with fixed words, and nothing is journaled or run.
+    #[test]
+    fn a_line_that_is_not_one_plain_line_is_refused_and_nothing_is_run() {
+        let consoled = Consoled::new();
+        let (fake, _registry, link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |_| {});
+        let secret = "secret-line";
+        let cases = [
+            serde_json::to_string(&json!({"line": ""})).unwrap(),
+            serde_json::to_string(&json!({"line": "   "})).unwrap(),
+            serde_json::to_string(&json!({"line": format!("{secret}\nend")})).unwrap(),
+            serde_json::to_string(&json!({"line": format!("{secret}\u{a7}4")})).unwrap(),
+            serde_json::to_string(&json!({"line": "x".repeat(shapes::MAX_CONSOLE_LINE + 1)}))
+                .unwrap(),
+            r#"{"command":"list"}"#.to_owned(),
+            r#"["list"]"#.to_owned(),
+        ];
+        for (n, params) in cases.iter().enumerate() {
+            let id = json!(11_300 + n);
+            order(&fake, &id, shapes::CONSOLE_EXECUTE, params);
+            let reply = answer(&fake, &id);
+            assert_eq!(code_of(&reply), -32602, "{params}");
+            assert!(!reply.to_string().contains(secret), "{reply}");
+        }
+        assert!(consoled.events().is_empty());
+        assert_eq!(
+            link.stats().orders(shapes::CONSOLE_EXECUTE, Ended::Invalid),
+            cases.len() as u64
+        );
+    }
+
+    /// One line at a time for an extension. A line that does not end in time is answered `did not finish`, **goes on running**, and
+    /// holds the place until it ends.
+    #[test]
+    fn one_line_runs_at_a_time_and_one_that_does_not_end_in_time_goes_on_and_holds_the_place() {
+        let consoled = Consoled::new();
+        consoled.hold.store(true, Ordering::SeqCst);
+        let (fake, _registry, _link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |settings| {
+                settings.console_timeout = Duration::from_millis(150);
+            });
+        let reply = run_line(&fake, 11_400, "slow");
+        assert_eq!(code_of(&reply), -32603);
+        assert_eq!(reply["error"]["message"], "did not finish");
+        assert_eq!(consoled.begun.load(Ordering::SeqCst), 1);
+        assert_eq!(consoled.ended.load(Ordering::SeqCst), 0, "it goes on");
+        // The place is held until the line ends: another is refused, and runs nothing.
+        let busy = run_line(&fake, 11_401, "list");
+        assert_eq!(code_of(&busy), -32002);
+        assert_eq!(busy["error"]["message"], "a command is already running");
+        assert_eq!(consoled.executed(), ["slow"]);
+        consoled.hold.store(false, Ordering::SeqCst);
+        until("the line to end", || {
+            consoled.ended.load(Ordering::SeqCst) == 1
+        });
+        let mut again = 0;
+        until("the place to be let go", || {
+            again += 1;
+            run_line(&fake, 11_410 + again, "list")
+                .get("result")
+                .is_some()
+        });
+    }
+
+    /// A line that panics is `-32603` and lets the place go.
+    #[test]
+    fn a_line_that_fails_is_an_error_and_lets_the_place_go() {
+        let consoled = Consoled::new();
+        let (fake, _registry, link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |_| {});
+        let reply = run_line(&fake, 11_500, "boom");
+        assert_eq!(code_of(&reply), -32603);
+        assert_eq!(
+            link.stats().orders(shapes::CONSOLE_EXECUTE, Ended::Failed),
+            1
+        );
+        let mut again = 0;
+        until("the place to be let go", || {
+            again += 1;
+            run_line(&fake, 11_510 + again, "list")
+                .get("result")
+                .is_some()
+        });
+    }
+
+    /// `reload` (the whole line) answers first and runs after, as the order `reload` does: the answer comes while it still runs,
+    /// the line is journaled before, and nothing else runs meanwhile. A `reload` with words after it is not that: it runs now.
+    #[test]
+    fn a_reload_line_is_answered_first_and_run_after_and_one_with_arguments_runs_now() {
+        let consoled = Consoled::new();
+        consoled.hold.store(true, Ordering::SeqCst);
+        let (fake, _registry, link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |_| {});
+        let name = link.name().to_owned();
+        let reply = run_line(&fake, 11_600, "RELOAD");
+        let said = executed_of(&reply);
+        assert_eq!(said.lines.len(), 1);
+        assert!(said.lines[0].starts_with("reload asked:"), "{said:?}");
+        until("the reload to begin", || {
+            consoled.begun.load(Ordering::SeqCst) == 1
+        });
+        assert_eq!(
+            consoled.ended.load(Ordering::SeqCst),
+            0,
+            "the reload was still running when it was answered"
+        );
+        assert_eq!(
+            consoled.events()[0],
+            format!("journal: extension \"{name}\" runs: RELOAD")
+        );
+        // While it runs, no other line runs.
+        let busy = run_line(&fake, 11_601, "list");
+        assert_eq!(code_of(&busy), -32002);
+        assert_eq!(busy["error"]["message"], "a command is already running");
+        consoled.hold.store(false, Ordering::SeqCst);
+        until("the reload to end", || {
+            consoled.ended.load(Ordering::SeqCst) == 1
+        });
+        let mut again = 0;
+        until("the places to be let go", || {
+            again += 1;
+            run_line(&fake, 11_610 + again, "list")
+                .get("result")
+                .is_some()
+        });
+        // With words after it, the line is the console's to refuse, and it runs before the answer: nothing is deferred.
+        let reply = run_line(&fake, 11_700, "reload now");
+        assert_eq!(executed_of(&reply).lines, ["reload done"]);
+        assert_eq!(consoled.ended.load(Ordering::SeqCst), 2);
+    }
+
+    /// Every line costs half the burst, whatever it says (the budget limits how often, not what): two close lines are too many for a
+    /// burst of three, the second is refused for budget and nothing is journaled or run for it.
+    #[test]
+    fn every_line_costs_half_the_burst_and_a_second_close_one_is_refused_for_budget() {
+        let consoled = Consoled::new();
+        let (fake, _registry, link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |settings| {
+                settings.order_burst = 3;
+                settings.order_rate = 1;
+            });
+        assert!(run_line(&fake, 11_800, "list").get("result").is_some());
+        until("the place to be let go", || link.console_lot().is_some());
+        // Whatever the line: `send all` is not cheaper than `list`.
+        let refused = run_line(&fake, 11_801, "send all east");
+        assert_eq!(code_of(&refused), -32001, "{refused}");
+        assert_eq!(consoled.executed(), ["list"], "the refused one ran nothing");
+        assert_eq!(
+            consoled.events().len(),
+            3,
+            "and was not even journaled: {:?}",
+            consoled.events()
+        );
+    }
+
+    #[test]
+    fn with_no_console_given_the_order_says_it_is_not_available() {
+        let (fake, _registry, _link, _folder) = orderly(&["orders.console"], |_| {});
+        let reply = run_line(&fake, 11_900, "list");
+        assert_eq!(
+            (code_of(&reply), reply["error"]["message"].as_str()),
+            (-32603, Some("not available"))
+        );
+    }
+
+    /// A `reload` line pays the price of a line once, which is the price of the order `reload`: it does not pay twice.
+    #[test]
+    fn a_reload_line_pays_the_half_burst_once_and_not_twice() {
+        let consoled = Consoled::new();
+        let (fake, _registry, link, _folder) =
+            consoling_with(&["orders.console"], &consoled, |settings| {
+                settings.order_burst = 4;
+                settings.order_rate = 1;
+            });
+        let reply = run_line(&fake, 11_950, "reload");
+        assert!(
+            executed_of(&reply).lines[0].starts_with("reload asked:"),
+            "{reply}"
+        );
+        until("the reload to end", || {
+            consoled.ended.load(Ordering::SeqCst) == 1
+        });
+        until("the places to be let go", || link.console_lot().is_some());
+        // Two of the four went to the reload line (half the burst): two are left, which pay for exactly one more line. Had the
+        // reload paid twice, this one would be refused.
+        assert!(run_line(&fake, 11_960, "list").get("result").is_some());
+        until("the place to be let go", || link.console_lot().is_some());
+        assert_eq!(code_of(&run_line(&fake, 11_961, "list")), -32001);
+        assert_eq!(consoled.executed(), ["reload", "list"]);
     }
 }

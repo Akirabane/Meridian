@@ -16,8 +16,8 @@
 use super::link::{Link, OrderPlace, SendLot};
 use crate::log::debug;
 use meridian_config::{
-    ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE, ORDERS_OPERATE,
-    ORDERS_READ,
+    ADDRESSES, DECIDE_COMMAND, ORDERS_CONSOLE, ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE,
+    ORDERS_OPERATE, ORDERS_READ,
 };
 use meridian_extension::orders::{
     self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
@@ -137,9 +137,20 @@ pub trait Operate: Send + Sync {
     fn reload(&self);
 }
 
+/// What the order that runs a console line uses: the proxy's console, **the same table of commands that the operator's console
+/// reads**, and the proxy's log. Given to the registry once the proxy is built ([`super::Registry::serve_console`]):
+/// `extension/console.rs` for the proxy and a stand-in in the tests.
+pub trait Console: Send + Sync {
+    /// Runs the line as the console does (`Commands::execute`) and returns what it says.
+    fn execute(&self, line: &str) -> Vec<String>;
+    /// Writes one line in the proxy's log. The order writes `runs` **before** it runs a line and `ran` after it.
+    fn journal(&self, entry: &str);
+}
+
 /// What the orders share with the rest of the proxy.
 #[derive(Default)]
 pub struct Services {
+    console: Mutex<Option<Arc<dyn Console>>>,
     operate: Mutex<Option<Arc<dyn Operate>>>,
     facts: Mutex<Option<Arc<dyn Facts>>>,
     actions: Mutex<Option<Arc<dyn Actions>>>,
@@ -152,6 +163,17 @@ impl Services {
 
     pub(super) fn set_facts(&self, facts: Arc<dyn Facts>) {
         *self.facts.lock().unwrap_or_else(|e| e.into_inner()) = Some(facts);
+    }
+
+    pub(super) fn console(&self) -> Option<Arc<dyn Console>> {
+        self.console
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(super) fn set_console(&self, console: Arc<dyn Console>) {
+        *self.console.lock().unwrap_or_else(|e| e.into_inner()) = Some(console);
     }
 
     pub(super) fn operate(&self) -> Option<Arc<dyn Operate>> {
@@ -183,6 +205,7 @@ pub(super) struct Ctx<'a> {
     installed: Option<Arc<dyn Facts>>,
     acting: Option<Arc<dyn Actions>>,
     operating: Option<Arc<dyn Operate>>,
+    consoling: Option<Arc<dyn Console>>,
     /// What an order does once its answer has been written (a reload may close the connection that asked for it).
     after: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -196,6 +219,12 @@ impl Ctx<'_> {
 
     fn actions(&self) -> Result<&Arc<dyn Actions>, RpcError> {
         self.acting
+            .as_ref()
+            .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
+    }
+
+    fn console(&self) -> Result<&Arc<dyn Console>, RpcError> {
+        self.consoling
             .as_ref()
             .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
     }
@@ -227,6 +256,14 @@ impl Ctx<'_> {
                 "over the budget of orders",
             ))
         }
+    }
+
+    /// Half the burst (rounded up), charged at once: what a reload costs, as it reads, checks and applies the whole configuration,
+    /// and what **every line of the console** costs. The budget limits how often, not what: the order `reload` and a `reload`
+    /// line pay the same, once.
+    fn charge_half_burst(&self) -> Result<Paid, RpcError> {
+        let burst = self.link.settings.order_burst.max(1);
+        self.charge(usize::try_from(burst.div_ceil(2)).unwrap_or(usize::MAX))
     }
 
     /// The players, with an address only if the extension was granted `addresses`.
@@ -356,6 +393,14 @@ const RELOAD: Order = Order {
     counted: true,
 };
 
+const CONSOLE_EXECUTE: Order = Order {
+    method: orders::CONSOLE_EXECUTE,
+    capability: ORDERS_CONSOLE,
+    run: console_execute,
+    describe: || orders::console_methods().swap_remove(0).1,
+    counted: true,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
 pub(super) const ORDERS: &[Order] = &[
@@ -371,6 +416,7 @@ pub(super) const ORDERS: &[Order] = &[
     SERVERS_DRAIN,
     SERVERS_UNDRAIN,
     RELOAD,
+    CONSOLE_EXECUTE,
 ];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
@@ -389,6 +435,7 @@ pub(super) const ORDERS: &[Order] = &[
     SERVERS_DRAIN,
     SERVERS_UNDRAIN,
     RELOAD,
+    CONSOLE_EXECUTE,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -736,14 +783,122 @@ fn reload(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     };
     // A reload reads, checks and applies the whole configuration: it costs half the burst, charged at once, so that a program
     // cannot ask for it over and over. A reload the budget cannot pay is refused here, before anything is read.
-    let burst = ctx.link.settings.order_burst.max(1);
-    ctx.charge(usize::try_from(burst.div_ceil(2)).unwrap_or(usize::MAX))?;
+    ctx.charge_half_burst()?;
     crate::log::info!("extension \"{}\" asked for a reload", ctx.link.name());
     ctx.after_reply(move || {
         let _lot = lot;
         operate.reload();
     });
     done(serde_json::to_value(Ack::done()))
+}
+
+/// What a line of the console that ran is told as in the log, in one line: how many lines it said and the first, cut.
+fn summary(said: &orders::Executed) -> String {
+    match said.lines.as_slice() {
+        [] => "no output".to_owned(),
+        [first, rest @ ..] => {
+            let first: String = first.chars().take(120).collect();
+            match rest.len() {
+                0 => format!("said: {first}"),
+                n => format!("said: {first} (and {n} more lines)"),
+            }
+        }
+    }
+}
+
+/// `console/execute`: runs one line **as the operator's console does** (the same table of commands, `Commands::execute`): this is
+/// the operator's shell, which is why `orders.console` is granted by its name only. The line is written in the log **before** it
+/// runs, and what it said in one line after. **Every line costs half the burst**, charged at once (the budget limits how often,
+/// not what). One line at a time for an extension (`-32002`); it runs on a thread of its own, and if
+/// it has not ended after the wait of the link the answer is `-32603 did not finish`: **the line goes on running** and the place
+/// stays held until it ends. A `reload` (the whole line) answers first and applies after, as the order `reload` does.
+fn console_execute(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let line = orders::parse_execute(params).map_err(invalid)?;
+    let console = Arc::clone(ctx.console()?);
+    let name = ctx.link.name().to_owned();
+    let mut words = line.split_whitespace();
+    let reloading = words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("reload"))
+        && words.next().is_none();
+    // The places first (a refusal for a place costs one token), then the price: half the burst for any line, charged at once, so
+    // that a line the budget cannot pay is refused here and nothing is journaled or run. A `reload` line pays this price once.
+    let Some(lot) = ctx.link.console_lot() else {
+        let _ = ctx.link.charge_order(1);
+        return Err(RpcError::new(
+            code::TOO_MANY_RUNNING,
+            "a command is already running",
+        ));
+    };
+    let reload_lot = if reloading {
+        let Some(reload_lot) = ctx.link.reload_lot() else {
+            let _ = ctx.link.charge_order(1);
+            return Err(RpcError::new(
+                code::TOO_MANY_RUNNING,
+                "a reload is already running",
+            ));
+        };
+        Some(reload_lot)
+    } else {
+        None
+    };
+    ctx.charge_half_burst()?;
+    if let Some(reload_lot) = reload_lot {
+        // The reload of the configuration can change this extension's entry and close the connection the answer goes on: it is
+        // done after the answer, and holds the extension's place for a reload as the order `reload` does.
+        console.journal(&format!("extension \"{name}\" runs: {line}"));
+        ctx.after_reply(move || {
+            let (_lot, _reload_lot) = (lot, reload_lot);
+            let said = orders::console_output(&console.execute(&line));
+            console.journal(&format!(
+                "extension \"{name}\" ran: {line}: {}",
+                summary(&said)
+            ));
+        });
+        return done(serde_json::to_value(orders::Executed {
+            lines: vec![
+                "reload asked: the proxy applies it after this answer; its log says what it did"
+                    .to_owned(),
+            ],
+            truncated: false,
+        }));
+    }
+    console.journal(&format!("extension \"{name}\" runs: {line}"));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = {
+        let (console, name) = (Arc::clone(&console), name.clone());
+        std::thread::Builder::new()
+            .name(format!("extension-{name}-console"))
+            .spawn(move || {
+                // The place is held until the line has ended, whatever the order answered, and let go however it ends: a panic of
+                // the line drops it too. It is let go **before** the answer goes out, so that an extension that sends its next line
+                // when it reads the answer finds it free.
+                let lot = lot;
+                let said = orders::console_output(&console.execute(&line));
+                console.journal(&format!(
+                    "extension \"{name}\" ran: {line}: {}",
+                    summary(&said)
+                ));
+                drop(lot);
+                let _ = sender.send(said);
+            })
+    };
+    if let Err(e) = worker {
+        crate::log::warning!("extension \"{name}\": cannot start a thread for a console line: {e}");
+        return Err(RpcError::new(code::INTERNAL_ERROR, "cannot run the order"));
+    }
+    match receiver.recv_timeout(ctx.link.settings.console_timeout) {
+        Ok(said) => done(serde_json::to_value(said)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            crate::log::warning!(
+                "extension \"{name}\": a console line did not finish in time: it goes on"
+            );
+            Err(RpcError::new(code::INTERNAL_ERROR, "did not finish"))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(RpcError::new(code::INTERNAL_ERROR, "the order failed"))
+        }
+    }
 }
 
 /// `queue/list`: whether the queue is on, and who waits.
@@ -857,6 +1012,7 @@ fn run(
         installed: link.facts(),
         acting: link.actions(),
         operating: link.operate(),
+        consoling: link.console(),
         after: Mutex::new(None),
     };
     let (outcome, reply) = match catch_unwind(AssertUnwindSafe(|| (order.run)(&ctx, params))) {

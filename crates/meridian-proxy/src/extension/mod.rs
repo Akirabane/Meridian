@@ -15,6 +15,7 @@ pub(crate) mod actions;
 mod breaker;
 pub(crate) mod command;
 mod connection;
+pub(crate) mod console;
 pub(crate) mod facts;
 mod link;
 pub(crate) mod login;
@@ -36,7 +37,7 @@ pub(crate) use orders::KickRefusal;
 pub(crate) use orders::Paid;
 #[cfg(test)]
 pub(crate) use orders::Refusal;
-pub use orders::{Actions, Facts, MovePlan, Operate, Services};
+pub use orders::{Actions, Console, Facts, MovePlan, Operate, Services};
 #[cfg(test)]
 pub(crate) use stats::Outcome as RequestOutcome;
 
@@ -158,6 +159,11 @@ impl Registry {
     /// answer that they are not available.
     pub fn serve_facts(&self, facts: Arc<dyn Facts>) {
         self.services.set_facts(facts);
+    }
+
+    /// Gives the order that runs a console line the proxy's console. Until it is called it answers that it is not available.
+    pub fn serve_console(&self, console: Arc<dyn Console>) {
+        self.services.set_console(console);
     }
 
     /// Gives the orders that operate the network what they operate (drain, undrain, reload). Until it is called they answer

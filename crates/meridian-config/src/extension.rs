@@ -26,6 +26,9 @@ pub const ORDERS_MOVE: &str = "orders.move";
 pub const ORDERS_MODERATE: &str = "orders.moderate";
 /// The capability of the orders that operate the network: drain, undrain, reload (docs/EXTENSIONS.md, section 5).
 pub const ORDERS_OPERATE: &str = "orders.operate";
+/// The capability of the order that runs a line of the proxy's console (docs/EXTENSIONS.md, section 5): the operator's shell, granted
+/// by its name only (`grant` takes no pattern) and by no other capability.
+pub const ORDERS_CONSOLE: &str = "orders.console";
 /// The capability that gives the players' addresses in what an extension is told (docs/EXTENSIONS.md, section 7).
 pub const ADDRESSES: &str = "addresses";
 
@@ -40,7 +43,7 @@ pub const CAPABILITIES: [&str; 12] = [
     "orders.move",
     "orders.moderate",
     "orders.operate",
-    "orders.console",
+    ORDERS_CONSOLE,
     "events",
     "addresses",
 ];
