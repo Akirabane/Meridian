@@ -79,6 +79,8 @@ pub struct Settings {
     pub order_burst: u32,
     /// The orders that may run at once.
     pub orders_running: usize,
+    /// The players it may kick in a minute; 0 is no limit.
+    pub kicks_per_minute: u32,
     pub timings: Timings,
 }
 
@@ -102,6 +104,7 @@ impl Settings {
             order_rate: 20,
             order_burst: 50,
             orders_running: 8,
+            kicks_per_minute: 0,
             timings: Timings::default(),
         }
     }
@@ -123,6 +126,7 @@ impl From<&meridian_config::Extension> for Settings {
             order_rate: e.orders.rate_per_second,
             order_burst: e.orders.burst,
             orders_running: e.orders.max_running as usize,
+            kicks_per_minute: e.orders.max_kicks_per_minute,
             timings: Timings::default(),
         }
     }
@@ -231,6 +235,10 @@ impl Lot {
     }
 }
 
+/// A place among the kicks of the last minute (see [`Link::reserve_kick`]).
+#[derive(Debug)]
+pub(super) struct KickSlot(Option<Instant>);
+
 /// One order of the extension is running; the place is free again when this goes.
 pub(super) struct OrderPlace(Arc<Link>);
 
@@ -308,6 +316,8 @@ pub struct Link {
     order_threads: AtomicUsize,
     /// What is left of its budget of orders.
     budget: Mutex<Budget>,
+    /// When it kicked the players of the last minute, and those that orders now running are about to kick.
+    kicks: Mutex<Vec<Instant>>,
     forgotten: Mutex<Forgotten>,
     /// What the orders need of the rest of the proxy.
     services: Arc<Services>,
@@ -332,6 +342,7 @@ impl Link {
             reloading: Arc::new(AtomicBool::new(false)),
             order_threads: AtomicUsize::new(0),
             budget: Mutex::new(budget),
+            kicks: Mutex::new(Vec::new()),
             forgotten: Mutex::new(Forgotten::default()),
             services,
         })
@@ -400,6 +411,34 @@ impl Link {
     /// What the orders that operate the network use, if the proxy has given it.
     pub(super) fn operate(&self) -> Option<Arc<dyn Operate>> {
         self.services.operate()
+    }
+
+    /// A place among the kicks of the last minute, taken **before** the player is looked for so that two orders at once cannot
+    /// both pass the limit; `None` when `max-kicks-per-minute` were kicked (or are being) in the last minute. Without a limit (0)
+    /// it is always given and nothing is counted. [`Link::give_back_kick`] puts it back when nobody was kicked.
+    pub(super) fn reserve_kick(&self, now: Instant) -> Option<KickSlot> {
+        let most = self.settings.kicks_per_minute as usize;
+        if most == 0 {
+            return Some(KickSlot(None));
+        }
+        let mut kicks = self.kicks.lock().unwrap_or_else(|e| e.into_inner());
+        kicks.retain(|at| now.saturating_duration_since(*at) < Duration::from_secs(60));
+        if kicks.len() >= most {
+            return None;
+        }
+        kicks.push(now);
+        Some(KickSlot(Some(now)))
+    }
+
+    /// Gives back the place of a kick that kicked nobody (the player was not online, was protected, or the name was ambiguous):
+    /// only a kick that ended a session counts against the limit.
+    pub(super) fn give_back_kick(&self, slot: KickSlot) {
+        if let Some(at) = slot.0 {
+            let mut kicks = self.kicks.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = kicks.iter().position(|k| *k == at) {
+                kicks.swap_remove(i);
+            }
+        }
     }
 
     /// What the orders that act act on, if the proxy has given it.

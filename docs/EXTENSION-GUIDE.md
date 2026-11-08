@@ -516,9 +516,19 @@ The player's session ends and they read the reason **as plain text, exactly as y
 hover): 1 to 256 characters with no line break, no `§` and no invisible character, or the call is refused
 (`OrderError::Invalid`) before anything is sent. **This power reaches any player, an operator's included**, so grant
 `orders.moderate` only to a program you would trust with the console's `kick`; the proxy logs every kick with the player and
-the reason. It costs one order of the proxy's budget, and nothing else limits how many players a program kicks in a second:
-only that budget does. After a timeout or an end of the connection (`may_have_run()`) asking again is harmless (a player who
-was kicked is no longer online, and the answer is `0`).
+the reason. It costs one order of the proxy's budget, and unless the operator wrote `max-kicks-per-minute` only that budget
+limits how many players a program kicks in a second (`-32002 too many kicks`, `retry_later()`, when the operator's limit is
+reached).
+
+- **`1` means a session was found and closed by your order**, a player who was already leaving included; a kick is not always
+  instant when the player is being transferred. **Asking `kick` whether someone is online kicks them if they are**: only `0` is
+  harmless.
+- **A name two accounts have is refused** (`-32602 more than one player has that name: use the unique id`): nobody is kicked;
+  kick by the unique id.
+- **Some players cannot be kicked by an extension**: those the operator gave `meridian.kick.exempt`. You get `-32602 that
+  player cannot be kicked by an extension`, and nothing says more of them.
+- After a timeout or an end of the connection (`may_have_run()`) asking again is harmless (a player who was kicked is no longer
+  online, and the answer is `0`).
 
 ### Operating the network
 

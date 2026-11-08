@@ -859,8 +859,8 @@ capability, and a request without it is answered `-32601`, as if the method did 
 - **Counted** in `meridian_extension_orders_total{extension,method,outcome}`, where the outcome is
   `done`, `invalid`, `failed`, `budget`, `busy` or `refused`. A method the proxy does not have is
   counted under `method="unknown"`, never under the name the extension gave.
-- **Configuration.** `[extension.orders]` with `rate-per-second` (20), `burst` (50) and `max-running`
-  (8), accepted when `grant` holds an `orders.*` or `decide.command`. Changing them closes the
+- **Configuration.** `[extension.orders]` with `rate-per-second` (20), `burst` (50), `max-running`
+  (8) and `max-kicks-per-minute` (0, no limit), accepted when `grant` holds an `orders.*` or `decide.command`. Changing them closes the
   connection and opens it again, as changing any setting of the connection does.
 
 ## 6. Events: the proxy tells the extension (version 1.1, optional)
@@ -1048,15 +1048,29 @@ the same calls, so what an operator can do at the console an extension granted `
 - **Params**: `{"player": "<name or id>", "reason": "<text>"}`, `reason` optional ("Kicked by an extension" when left out). It
   ends the session of the player, as the console's `kick` does (`Sessions::kick`), and answers `{"kicked": 1}`, or
   `{"kicked": 0}` when nobody online is that (not an error). The player is found as `players/find` finds them (a unique id with
-  or without hyphens, or a name in any case).
+  or without hyphens, or a name in any case). **`kicked: 1` says that a session was found and closed by the order**: a player
+  who was already leaving counts as well, and a kick is not always instant (during a transfer the proxy may wait for the
+  session's lock to end it). **Probing with `kicked` kicks the player if they are online**: only `0` is harmless.
+- **A name two accounts have is refused.** If more than one player has that name without regard to case (a verified `alex`
+  beside an unverified `Alex`, which can happen in `hybrid` mode: `on-duplicate = "refuse"` refuses a second login of the *same
+  sort* of account, so it does not make names unique across the two), nobody is kicked and the answer is `-32602 more than one
+  player has that name: use the unique id`; the unique id names one account. (During `on-duplicate = "replace"` the old session
+  is listed until it ends, but it is the same account and both are ended.) The console's own `kick` is not changed by this.
 - **The reason is shown as a literal**, exactly as written, never as a JSON text component: no click event, colour or hover. It
   is valid as the line of an extension's own command is (4.3): 1 to 256 characters with no control, formatting (`§`) or
   invisible character; anything else is `-32602` and nobody is kicked. A session that has not finished its configuration is
   ended too: the player reads the reason in the phase their client reads.
-- **It costs one order**, and there is no other limit: not per player, not per second beyond the budget (20 a second with
-  bursts of 50 by default). **`orders.moderate` lets the extension expel any player, an operator's included**: grant it to a
-  program that is as trusted as an operator with the console's `kick`. Each kick is logged: `extension "<name>" kicked
-  <player>: <reason>`.
+- **It costs one order**, and by default there is no other limit: not per player, not per second beyond the budget (20 a
+  second with bursts of 50). **`orders.moderate` lets the extension expel any player, an operator's included, unless they are
+  protected** (below): grant it to a program that is as trusted as an operator with the console's `kick`. Each kick is logged:
+  `extension "<name>" kicked <player>: <reason>`.
+- **Protecting players, off by default.** (a) A player who has the permission `meridian.kick.exempt` (by a group, a rank of their
+  own, or by being an operator of the server they are on, as for any node) **cannot be kicked by an extension**: `-32602 that
+  player cannot be kicked by an extension`, and nothing else is said. It is read at each kick, not when the player joined, and
+  nothing gives it by default (a group that allows `*` has it). The console's `kick` is not affected. (b) `[extension.orders]
+  max-kicks-per-minute` (0, no limit, by default): once an extension has kicked that many players in the last minute another
+  kick is `-32002 too many kicks` and kicks nobody. Only a kick that closed a session counts: a player who is not online, one
+  who is protected or a name that is refused does not use a place.
 - Not the same twice, in a mild way: a player who was kicked is not online to be kicked again (the answer is `0`), unless they
   came back in the meantime. `orders.moderate` also tells the extension whether a name is online, as `orders.message` does.
 - Until the proxy has given the registry its actions it answers `-32603 not available`.
