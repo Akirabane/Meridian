@@ -628,6 +628,29 @@ pub fn render(proxy: &Proxy) -> String {
         "meridian_status_round_duration_seconds {}",
         get(&m.last_status_round_micros) as f64 / 1_000_000.0
     );
+    // What the relays sent the players, and in how many writes: their ratio is how many packets
+    // a write carries (one, when the server writes each packet on its own).
+    let (packets, writes) = meridian_handoff::relayed_to_players();
+    family(
+        &mut out,
+        "meridian_relay_packets_total",
+        "counter",
+        "Packets the relays sent to the players.",
+    );
+    let _ = writeln!(
+        out,
+        "meridian_relay_packets_total{{direction=\"to_player\"}} {packets}"
+    );
+    family(
+        &mut out,
+        "meridian_relay_writes_total",
+        "counter",
+        "Writes the relays made to the players' connections to send those packets.",
+    );
+    let _ = writeln!(
+        out,
+        "meridian_relay_writes_total{{direction=\"to_player\"}} {writes}"
+    );
     // The extensions, if any were started: nothing is added to the page without one.
     proxy.extensions.render(&mut out);
     out

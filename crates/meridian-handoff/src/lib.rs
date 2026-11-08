@@ -149,7 +149,9 @@ pub use control::{
     uuid_text,
 };
 pub use reason::{Notice, Reason};
-pub use session::{Fallback, Loss, Replacement, Session, SessionHandle, sessions_alive};
+pub use session::{
+    Fallback, Loss, Replacement, Session, SessionHandle, relayed_to_players, sessions_alive,
+};
 pub use switch::{
     After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,
 };

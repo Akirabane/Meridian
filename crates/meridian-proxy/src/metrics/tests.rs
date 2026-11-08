@@ -93,6 +93,15 @@ fn counters_follow_what_happens() {
     m.restart_detected(Cause::Unreachable);
     m.status_round(Duration::from_millis(250));
     let page = render(&proxy);
+    // Process-wide counts, which other tests' relays move too: they are on the page, as numbers.
+    for series in [
+        "meridian_relay_packets_total{direction=\"to_player\"}",
+        "meridian_relay_writes_total{direction=\"to_player\"}",
+    ] {
+        value(&page, series)
+            .parse::<u64>()
+            .unwrap_or_else(|e| panic!("{series}: {e}"));
+    }
     assert_eq!(value(&page, "meridian_connections_total"), "2");
     assert_eq!(value(&page, "meridian_connections_throttled_total"), "1");
     assert_eq!(value(&page, "meridian_logins_total"), "1");
@@ -302,8 +311,16 @@ fn the_page_names_no_player() {
             let key = key.split('=').next().unwrap();
             assert!(
                 [
-                    "backend", "state", "reason", "step", "phase", "le", "result", "cause",
-                    "version"
+                    "backend",
+                    "state",
+                    "reason",
+                    "step",
+                    "phase",
+                    "le",
+                    "result",
+                    "cause",
+                    "version",
+                    "direction"
                 ]
                 .contains(&key),
                 "{line}"

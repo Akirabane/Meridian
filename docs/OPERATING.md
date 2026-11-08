@@ -983,6 +983,7 @@ the gauges are worked out when the page is read.
 | `meridian_fallbacks_total{cause,result}` | Players whose server was lost in the game: `cause` is `kick` or `crash`, `result` is `moved` or `failed` (section 5.11) |
 | `meridian_restarts_detected_total{cause}` | Servers found to be going down: `announced`, `panel`, `unreachable` |
 | `meridian_status_rounds_total`, `meridian_status_round_duration_seconds` | Rounds of questions to the sidecars (with `[balancing] enabled`), and how long the last took |
+| `meridian_relay_packets_total{direction}`, `meridian_relay_writes_total{direction}` | The packets the relays sent the players, counted one by one as they were framed, and the writes they took; `direction="to_player"` is the only direction. The relay writes the packets that one read of a server brought in one write, so the first over the second is how many packets a write carries (about one when a server writes each packet on its own, more when it writes a tick's at once). Only the relay's own writes are counted: not a transfer's delta, nor the proxy's messages to a player, nor the answers to commands. Both count every session of the proxy since it started |
 
 No label carries a player's name, address or unique id. The counters start at zero when
 the proxy starts. A monitor that reads `/healthz` tells that the proxy is up and not

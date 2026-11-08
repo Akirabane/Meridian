@@ -4,6 +4,7 @@ use super::*;
 use crate::Notice;
 use horizon_protocol::{packets::configuration::Disconnect, text};
 use horizon_world::nbt::Tag;
+use meridian_testkit::body;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
@@ -678,4 +679,90 @@ fn without_a_fallback_a_source_lost_during_a_switch_ends_the_session_at_once() {
     drop(player);
     let _ = run.join().unwrap();
     assert!(losses.try_recv().is_err());
+}
+
+/// T4: the replacement sends its Login and the next packet in one write. The relay writes them
+/// together, and the line that says why the player was moved still comes right after the Login.
+#[test]
+fn the_notice_follows_the_login_in_a_batch() {
+    let Moved {
+        run,
+        mut player,
+        mut source,
+        mut second,
+        losses,
+        ..
+    } = moved(BOTH, true);
+    kick(&mut source, "Server closed");
+    expect(&mut player, pc::START_CONFIGURATION).unwrap();
+    send(&mut player, ps::CONFIGURATION_ACKNOWLEDGED, &[]);
+    send(
+        &mut player,
+        cfg::serverbound::CLIENT_INFORMATION,
+        &INFORMATION,
+    );
+    expect(&mut second, cfg::serverbound::CLIENT_INFORMATION).unwrap();
+    send(&mut second, cfg::clientbound::REGISTRY_DATA, &REGISTRY);
+    send(&mut second, cfg::clientbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut player, cfg::clientbound::REGISTRY_DATA).unwrap();
+    expect(&mut player, cfg::clientbound::FINISH_CONFIGURATION).unwrap();
+    send(&mut player, cfg::serverbound::FINISH_CONFIGURATION, &[]);
+    expect(&mut second, cfg::serverbound::FINISH_CONFIGURATION).unwrap();
+    // The Login and a keep-alive, written together.
+    let mut out = Vec::new();
+    let (id, payload) = packet(&login(TARGET_ID, OVERWORLD));
+    crate::session::frame(&mut second.writer, &body(id, &payload), &mut out).unwrap();
+    crate::session::frame(
+        &mut second.writer,
+        &body(pc::KEEP_ALIVE, &9u64.to_be_bytes()),
+        &mut out,
+    )
+    .unwrap();
+    second.writer.write_raw(&out).unwrap();
+    expect(&mut player, pc::LOGIN).unwrap();
+    assert_eq!(says(&mut player), SAYING);
+    assert_eq!(
+        expect(&mut player, pc::KEEP_ALIVE).unwrap(),
+        9u64.to_be_bytes()
+    );
+    assert_eq!(losses.recv().unwrap(), Loss::Kicked("Server closed".into()));
+    drop(second);
+    drop(source);
+    let _ = run.join();
+}
+
+/// T5: the source's kick comes in the same write as a packet before it. That packet reaches the
+/// client, the kick is not shown, and the player is moved.
+#[test]
+fn a_kick_in_a_batch_comes_after_what_was_before_it() {
+    let Moved {
+        run,
+        mut player,
+        mut source,
+        mut second,
+        losses,
+        ..
+    } = moved(BOTH, true);
+    let mut out = Vec::new();
+    crate::session::frame(
+        &mut source.writer,
+        &body(pc::KEEP_ALIVE, &7u64.to_be_bytes()),
+        &mut out,
+    )
+    .unwrap();
+    let kick = play::Clientbound::Disconnect(Disconnect {
+        reason: text::literal("Server closed"),
+    });
+    crate::session::frame(&mut source.writer, &kick.encode(), &mut out).unwrap();
+    source.writer.write_raw(&out).unwrap();
+    assert_eq!(
+        expect(&mut player, pc::KEEP_ALIVE).unwrap(),
+        7u64.to_be_bytes()
+    );
+    arrive(&mut player, &mut second);
+    assert_eq!(says(&mut player), SAYING);
+    assert_eq!(losses.recv().unwrap(), Loss::Kicked("Server closed".into()));
+    drop(second);
+    drop(source);
+    let _ = run.join();
 }
