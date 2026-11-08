@@ -570,6 +570,44 @@ fn a_capability_exists_and_is_granted_once() {
     let all = format!("grant = {CAPABILITIES:?}");
     assert!(load(&dir, "", &extension("x", 25590, "a.token", &all)).is_ok());
     assert_eq!(CAPABILITIES.len(), 12);
+    // `orders.console` is the operator's shell: it is granted by its name only. No pattern, and no other capability, gives it.
+    assert!(CAPABILITIES.contains(&crate::ORDERS_CONSOLE));
+    for pattern in [
+        "orders.*",
+        "orders",
+        "*",
+        "all",
+        "orders.console.",
+        "Orders.Console",
+    ] {
+        let e = load(
+            &dir,
+            "",
+            &extension("x", 25590, "a.token", &format!("grant = [\"{pattern}\"]")),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, ConfigError::UnknownCapability { .. }),
+            "{pattern}: {e}"
+        );
+    }
+    let without: Vec<&str> = CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|c| *c != crate::ORDERS_CONSOLE)
+        .collect();
+    let config = load(
+        &dir,
+        "",
+        &extension("x", 25590, "a.token", &format!("grant = {without:?}")),
+    )
+    .unwrap();
+    assert!(
+        !config.extensions[0]
+            .grant
+            .iter()
+            .any(|c| c == crate::ORDERS_CONSOLE)
+    );
 }
 
 #[test]

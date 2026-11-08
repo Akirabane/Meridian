@@ -9,7 +9,7 @@
 //! on-error policy.
 
 use super::breaker::{Breaker, Change, Permit};
-use super::orders::{Actions, Budget, Facts, Operate, Services};
+use super::orders::{Actions, Budget, Console, Facts, Operate, Services};
 use super::stats::{Outcome, Stats};
 use meridian_extension::wire::{self, CommandSpec, Id, RpcError};
 use meridian_websocket::Writer;
@@ -81,8 +81,14 @@ pub struct Settings {
     pub orders_running: usize,
     /// The players it may kick in a minute; 0 is no limit.
     pub kicks_per_minute: u32,
+    /// How long an order that runs a console line waits for the line to end before it answers that it did not finish.
+    pub console_timeout: Duration,
     pub timings: Timings,
 }
+
+/// How long `console/execute` waits for a line of the console: less than the five seconds an SDK waits for an answer by default, so
+/// that it reads the proxy's own answer and not its timeout.
+pub const CONSOLE_TIMEOUT: Duration = Duration::from_secs(4);
 
 impl Settings {
     /// The defaults of the specification: 64 in flight, 5 failures, 30 seconds. The proxy builds its
@@ -105,6 +111,7 @@ impl Settings {
             order_burst: 50,
             orders_running: 8,
             kicks_per_minute: 0,
+            console_timeout: CONSOLE_TIMEOUT,
             timings: Timings::default(),
         }
     }
@@ -127,6 +134,7 @@ impl From<&meridian_config::Extension> for Settings {
             order_burst: e.orders.burst,
             orders_running: e.orders.max_running as usize,
             kicks_per_minute: e.orders.max_kicks_per_minute,
+            console_timeout: CONSOLE_TIMEOUT,
             timings: Timings::default(),
         }
     }
@@ -214,6 +222,10 @@ pub type SendLot = Lot;
 
 /// The extension's place for a reload of the configuration.
 pub type ReloadLot = Lot;
+
+/// The extension's place for a line of the console: one runs at a time, and it is held until the line has ended, even when the
+/// order answered that it did not finish.
+pub type ConsoleLot = Lot;
 
 impl Drop for Lot {
     fn drop(&mut self) {
@@ -312,6 +324,8 @@ pub struct Link {
     sending: Arc<AtomicBool>,
     /// Whether a reload that the extension asked for is running.
     reloading: Arc<AtomicBool>,
+    /// Whether a line of the console that the extension asked for is running.
+    consoling: Arc<AtomicBool>,
     /// How many threads of its orders are alive, whether they run or wait to write (`order_thread`).
     order_threads: AtomicUsize,
     /// What is left of its budget of orders.
@@ -340,6 +354,7 @@ impl Link {
             orders_running: AtomicUsize::new(0),
             sending: Arc::new(AtomicBool::new(false)),
             reloading: Arc::new(AtomicBool::new(false)),
+            consoling: Arc::new(AtomicBool::new(false)),
             order_threads: AtomicUsize::new(0),
             budget: Mutex::new(budget),
             kicks: Mutex::new(Vec::new()),
@@ -406,6 +421,19 @@ impl Link {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
             .then(|| Lot(Arc::clone(&self.reloading)))
+    }
+
+    /// The place for a line of the console, or `None` while one that the extension asked for is running.
+    pub(super) fn console_lot(&self) -> Option<ConsoleLot> {
+        self.consoling
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            .then(|| Lot(Arc::clone(&self.consoling)))
+    }
+
+    /// What the order that runs a console line uses, if the proxy has given it.
+    pub(super) fn console(&self) -> Option<Arc<dyn Console>> {
+        self.services.console()
     }
 
     /// What the orders that operate the network use, if the proxy has given it.

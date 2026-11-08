@@ -145,6 +145,14 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
     proxy
         .extensions
         .serve_operate(Arc::new(extension::operate::ProxyOperate::new(&proxy)));
+    // The table of commands the console reads, built once: the extensions granted `orders.console` run lines in the same one.
+    let commands = Arc::new(console::Commands::builtin());
+    proxy
+        .extensions
+        .serve_console(Arc::new(extension::console::ProxyConsole::new(
+            &proxy,
+            Arc::clone(&commands),
+        )));
     // Installed before the signals are watched and before the line below, so that a SIGHUP
     // never finds the lists missing.
     if let Some(access) = access {
@@ -175,7 +183,7 @@ fn run(config: Config, path: PathBuf) -> ExitCode {
         env!("CARGO_PKG_VERSION"),
     );
     // Without a console the proxy still runs: it then stops on Ctrl+C alone.
-    if let Err(e) = console::start(Arc::clone(&proxy)) {
+    if let Err(e) = console::start(Arc::clone(&proxy), commands) {
         warning!("cannot start the console: {e}");
     }
     // Asks the sidecars for the state of the backends while balancing is on.

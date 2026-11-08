@@ -21,7 +21,7 @@
 //! [`OrderError::retry_later`]).
 
 use crate::orders::{
-    self, Ack, Drained, Found, Kicked, PlayerInfo, PlayersPage, QueueState, ServerInfo,
+    self, Ack, Drained, Executed, Found, Kicked, PlayerInfo, PlayersPage, QueueState, ServerInfo,
     ServersList, Started, Told, Undrained,
 };
 use crate::wire::{self, RpcError, code};
@@ -495,6 +495,26 @@ impl Proxy {
             .map_err(OrderError::Invalid)?;
         let kicked: Kicked = self.0.read(orders::PLAYERS_KICK, Some(&params))?;
         Ok(kicked.kicked)
+    }
+
+    /// Runs one line **as the operator's console does** and returns what it said: `Executed { lines, truncated }`, plain text
+    /// (no control character, no `§`), at most [`orders::MAX_CONSOLE_OUTPUT`] characters in all (past it the output is cut, the
+    /// last line is [`orders::OUTPUT_TRUNCATED`] and `truncated` is true). Needs `orders.console`, which the extension asks for with
+    /// [`Extension::wants`](super::Extension::wants) and the operator grants **by its name, as the operator's shell: it can run
+    /// any line the console can, `end` (it stops the proxy) and `reload` included**.
+    ///
+    /// The line is one line of at most [`orders::MAX_CONSOLE_LINE`] characters with no control, formatting or invisible
+    /// character, or the call is [`OrderError::Invalid`] and nothing is sent. The proxy logs it before it runs it. One line at a
+    /// time for an extension: another is refused with `-32002` ([`OrderError::retry_later`]). A line that does not end within
+    /// four seconds is answered `-32603 did not finish` ([`OrderError::may_have_run`]): **it goes on running**, and the next one
+    /// waits for it. `reload` is answered first and applied after, as [`Proxy::reload`] does, with a line that says so.
+    pub fn console(&self, line: &str) -> Result<Executed, OrderError> {
+        let params = orders::ExecuteParams {
+            line: line.to_owned(),
+        };
+        orders::parse_execute(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        self.0.read(orders::CONSOLE_EXECUTE, Some(&params))
     }
 
     /// Stops offering the server `server` to new players, as the proxy's console `drain` does: the proxy tells whether it was

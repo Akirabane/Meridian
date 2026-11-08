@@ -2568,4 +2568,86 @@ mod orders {
             Err(OrderError::BadAnswer(_))
         ));
     }
+
+    // ---- the order that runs a console line ----------------------------------------------------------------
+
+    #[test]
+    fn a_console_line_is_run_and_what_it_said_comes_back_as_lines() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.console("alert [Maintenance] in five minutes"))
+        };
+        let (method, params) = serve_one(&mut proxy, |_, _| {
+            Ok(json!({"lines": ["sent to 12 players"], "truncated": false}))
+        });
+        assert_eq!(method, shapes::CONSOLE_EXECUTE);
+        assert_eq!(
+            params.unwrap(),
+            json!({"line": "alert [Maintenance] in five minutes"})
+        );
+        assert_eq!(
+            asked.join().unwrap(),
+            Ok(shapes::Executed {
+                lines: vec!["sent to 12 players".into()],
+                truncated: false
+            })
+        );
+        // An output that was cut says so.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.console("list"))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Ok(json!({"lines": ["Alex", "[output truncated]"], "truncated": true}))
+        });
+        assert!(asked.join().unwrap().unwrap().truncated);
+    }
+
+    #[test]
+    fn a_line_that_is_not_one_plain_line_does_not_leave_the_sdk_and_what_the_proxy_refuses_is_told()
+    {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let long = "x".repeat(shapes::MAX_CONSOLE_LINE + 1);
+        for bad in ["", "   ", "list\nend", "alert \u{a7}4red", long.as_str()] {
+            assert!(
+                matches!(handle.console(bad), Err(OrderError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 7}))).unwrap(),
+            json!({"k": 7})
+        );
+        // Not granted: as if the order did not exist.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.console("list"))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(code::METHOD_NOT_FOUND, "method not found"))
+        });
+        assert!(asked.join().unwrap().unwrap_err().is_not_granted());
+        // One line at a time: try again later.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.console("list"))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(
+                code::TOO_MANY_RUNNING,
+                "a command is already running",
+            ))
+        });
+        assert!(asked.join().unwrap().unwrap_err().retry_later());
+        // A line that did not finish may have run, and goes on.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.console("slow"))
+        };
+        serve_one(&mut proxy, |_, _| {
+            Err(RpcError::new(code::INTERNAL_ERROR, "did not finish"))
+        });
+        assert!(asked.join().unwrap().unwrap_err().may_have_run());
+    }
 }

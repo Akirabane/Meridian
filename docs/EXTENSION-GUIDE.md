@@ -554,6 +554,30 @@ proxy.reload()?;                                // the proxy took the order: rea
 - **This is the operator's console.** `orders.operate` lets a program take servers out of rotation and reload the proxy: grant it only to one
   you would trust with the console.
 
+### Running a console line
+
+> **`orders.console` is the operator's console.** Ask for it with `.wants("orders.console")`; the operator must write that name in
+> your `grant` (no pattern gives it) and should do so only for a program they would give the proxy's keyboard to.
+
+```rust
+let said = proxy.console("alert Restart in five minutes")?;   // Executed { lines: ["sent to 12 players"], truncated: false }
+for line in said.lines { println!("{line}"); }
+```
+
+You can run **exactly the lines the operator can type at the proxy's console**, with the console's rights: `list`, `servers`,
+`kick`, `ban`, `perm`, `whitelist`, `drain`, `send`, `alert`, `reload`, `end` and the others, and no other line (a word the console does
+not know comes back as the console's own `unknown command` line). The proxy writes your line in its log **before** it runs it, and what
+it said after.
+
+- **One plain line**, 1 to 1024 characters, with no line break, no `§` and no control or invisible character, or the call is
+  `OrderError::Invalid` and nothing is sent.
+- **One line at a time** (`-32002`, `retry_later()`); a line that has not ended after four seconds is answered `-32603 did not
+  finish` (`may_have_run()`): **it goes on running**, and the next line waits for it. Look before you ask again.
+- **The output is plain text and bounded**: at most 8192 characters, then `[output truncated]` and `truncated: true`.
+- **`end` stops the proxy** (your connection closes with it; the answer, `stopping`, usually gets out first). **`reload` answers
+  first and applies after**, as `proxy.reload()` does, and costs the same: half the budget's burst. A reload can remove your own
+  `[[extension]]` entry, and then your program reconnects, or not, as the file says.
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told

@@ -6,8 +6,8 @@ they go to. Part of it is built, and the pull requests of section 10 follow the 
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
-orders (8.1), with the orders that read, those that message, the one that moves, the one that expels and those that operate (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
-leaves a choice open. Not built: the order that runs console lines (5) and the events the proxy sends the extension (6).
+orders (8.1), with the orders that read, those that message, the one that moves, the one that expels, those that operate and the one that runs console lines (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
+leaves a choice open. Not built: the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -810,10 +810,11 @@ capability, and a request without it is answered `-32601`, as if the method did 
   the moves have started, with the number of players. Each move's end comes as an event in
   version 1.1. Until then, `players/find` tells where a player is.
 - **`console/execute` is the remote console.** It returns the lines the console would print. It
-  is logged as `extension "<name>" ran: <line>`, as an operator's command would be, except for
-  the lines that carry a secret, which the console does not have today and must not gain. With
-  this capability an extension can ban, change permissions and stop the proxy: grant it only to a
-  program as trusted as the operator's shell.
+  is logged **before** it runs (`extension "<name>" runs: <line>`) and what it said after (`ran: <line>: ...`), as an
+  operator's command would be, except for the lines that carry a secret, which the console does not have today and must
+  not gain. With this capability an extension can ban, change permissions and stop the proxy: grant it only to a
+  program as trusted as the operator's shell. How it is built, and what it cannot do, is in the "As built" paragraph of
+  section 5, for the order that runs console lines.
 - **Rates.** Each extension has a budget of orders: 20 a second, with bursts of 50 (settings).
   An order over it is answered with a JSON-RPC error and is not run. `players/send` and
   `broadcast` count for each player they reach, **at most the burst**: a `send all` to 500 players
@@ -1049,6 +1050,45 @@ the same calls, so what an operator can do at the console an extension granted `
   servers out of rotation and make the proxy read another configuration** (the file on disk, not one the extension sends): grant it to a
   program as trusted as the operator's console.
 
+**As built, for the order that runs console lines** (`extension/orders.rs`, `extension/console.rs`, `meridian-extension/src/orders.rs`):
+`console/execute`, capability `orders.console`.
+
+> **Granting `orders.console` is giving the operator's console.** The extension can run any line the operator can type: ban and
+> pardon, change permissions and the whitelist, kick (the `meridian.kick.exempt` node does not apply to the console), drain,
+> send, reload, and `end`, which stops the proxy. Grant it only to a program you would give the keyboard of the proxy to.
+
+- **Params and answer**: `{"line": "<a console line>"}` answers `{"lines": ["..."], "truncated": false}`: what the console said,
+  one string for each line. The line is one line of 1 to 1024 characters with no control, formatting (`§`) or invisible character
+  (a line break would make two commands of one): anything else is `-32602` in fixed words, and nothing is logged or run.
+- **Exactly the commands of the real console.** `main.rs` builds the table of commands once (`Commands::builtin()`) and gives
+  **the same table** to the console that reads standard input and to the extensions: `Commands::execute`, with the same
+  functions. There is no command more and none less: `help`, `list`, `servers`, `drain`, `undrain`, `switch`, `send`, `kick`,
+  `ban`, `pardon`, `banlist`, `whitelist`, `alert`, `perm`, `queue`, `reload` and `end`, as they are at the time, and a word that
+  is not in the table is refused as the console refuses it (`unknown command ...; type help for the list`; that is an answer, not
+  an error). The console has no permission check of its own: it is the operator's, and so is this.
+- **Granted by its name, never implied.** `grant` takes the names of the table of capabilities and nothing else: no pattern
+  (`orders.*`, `*`), no abbreviation, and no other capability gives it (`orders.operate` does not, nor `decide.command`). It is off
+  unless the operator writes `orders.console` in the `grant` of that extension **and** the extension asks for it in its hello. Without it
+  the method is refused as if it did not exist (`-32601`), and nothing is logged or run.
+- **Logged before, and after.** The proxy writes `extension "<name>" runs: <line>` in its log **before** it runs the line (the whole
+  line: it cannot hold a line break or a control character), and, when it has ended, `extension "<name>" ran: <line>: said: <the
+  first line> (and N more lines)` or `no output`. A line that never ends is in the log as `runs` only.
+- **It costs one order, and one runs at a time.** While one line runs, another from the same extension is `-32002 a command is
+  already running` (and costs its token). The line runs on a thread of its own; if it has not ended after **four seconds** (less than
+  the five an SDK waits by default) the answer is `-32603 did not finish`: **the line goes on running**, the place for a line stays held
+  until it ends, and the log says `ran` when it does. A program reads that as "it may have run" (`may_have_run()`) and looks before it
+  asks again.
+- **The output is plain and bounded.** What a line may not hold (control characters, `§`, the invisible marks) is dropped from each
+  line of output; at most **8192 characters in all** are given back (an empty line counts as one); past that the line that crosses
+  the limit is cut, the next ones are left out, the last line is `[output truncated]` and `truncated` is `true`.
+- **`end` and `reload`, which can cut the branch the extension sits on.** `end` stops the proxy, as Ctrl+C does: the line answers
+  `stopping`, the proxy then closes the connections as it stops, and the answer is usually, not always, written before that. `reload`
+  (the whole line, in any case) is answered **first**, as the order `reload` is (decision Q6): the answer says `reload asked: the proxy
+  applies it after this answer; its log says what it did`, and the proxy reads its file once it is written, because a reload can change
+  or remove this very extension's entry and close the connection. It holds the extension's place for a reload and costs half the burst on top
+  of the token of the line, like the order `reload`. A `reload` with words after it is the console's usage refusal, and runs at once.
+- Until the proxy has given the registry its console it answers `-32603 not available`.
+
 **As built, for the order that expels** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):
 `players/kick`, capability `orders.moderate`.
 
@@ -1154,7 +1194,9 @@ and keep their signatures, so the handle is made apart and given to the closures
 `let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
 is connected its orders end with `NotConnected`.
 
-- **Methods.** `Proxy::drain(server, move_players)`, `undrain(server)` and `reload()` for the orders that operate (they need
+- **Methods.** `Proxy::console(line)` for the order that runs console lines (it needs `orders.console`: the operator's console; the
+  line is checked as the proxy checks it and nothing is sent if it is not valid; the answer is `Executed { lines, truncated }`);
+  `Proxy::drain(server, move_players)`, `undrain(server)` and `reload()` for the orders that operate (they need
   `orders.operate`; a server that is not a name is `Invalid` and nothing is sent; `reload`'s `Ok(())` is that the proxy took the
   order); `Proxy::kick(player, reason)` for the order that expels (it needs `orders.moderate`; a reason that is not valid is
   `Invalid` and nothing is sent); `Proxy::send_player(player, to)`, `send_all(to)` and `send_server(from, to)` for the order that moves (they need
@@ -1318,7 +1360,8 @@ Windows.
 - **A port taken by another program.** Mitigation: the proofs both ways, so nothing is sent to
   it.
 - **The extension as an attack path.** `orders.console` is as strong as the operator's shell.
-  Mitigation: capabilities granted one by one, and `console/execute` logged.
+  Mitigation: capabilities granted one by one and by name only, off by default, and `console/execute` logged before it runs,
+  one line at a time, with a time limit and a bounded output.
 - **Scope creep.** Each new request is weighed against the rule of section 1.2. A request that
   makes the proxy own a server's matter is refused, and the extension is the answer.
 - **A WebSocket server in the SDK.** It is more code than the sidecar's client. If it costs too
