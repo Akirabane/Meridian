@@ -377,6 +377,41 @@ let extension = Extension::new("parties", env!("CARGO_PKG_VERSION"), token)
   chat, as the proxy. Keep its file readable by the proxy and your program only, and grant `commands` only
   to a program you trust that much.
 
+## 8. Giving orders to the proxy
+
+Your program can also ask the proxy for things, on the same connection. The first order is the one that
+matters for section 6: when your program changes someone's rights, the proxy may still hold the answers it
+kept for them (`cache_seconds`), and it can be told to forget:
+
+```rust
+let mut extension = Extension::new("ranks", "1.0.0", token);
+let proxy = extension.proxy();            // a handle: clone it, use it from any thread
+extension = extension.on_command(decide);
+
+// later, when Alex is taken off the staff list:
+loop {
+    match proxy.invalidate_player("0a2ea4ba-bced-39d2-80e1-1ad51a0e925c") {
+        Ok(()) => break,
+        Err(e) if e.retry_later() => std::thread::sleep(std::time::Duration::from_millis(200)),
+        Err(e) => { eprintln!("could not tell the proxy: {e}"); break }
+    }
+}
+```
+
+`invalidate_all()` is the same for every player. The order needs the capability `decide.command` (your program
+has asked for it as soon as it has `on_command`) and the operator's grant of it. An order the proxy does not
+serve to you is answered `-32601`, and `e.is_not_granted()` says so. The proxy limits the orders a program
+may give: 20 a second with bursts of 50, and 8 at a time (`[extension.orders]` in the proxy's configuration).
+
+- **A refused order did not happen.** `retry_later()` is true when the proxy's budget or its places were
+  spent, or too many of your own orders wait: ask again. **Do ask again for a rights change**, since the right
+  you took back stays kept for the `cache_seconds` you gave until the proxy has been told.
+- **An order that timed out or whose connection ended may or may not have been done.** Asking again is
+  harmless for this order.
+- An order waits for its answer on the thread that gave it (5 seconds at most, `Extension::order_timeout`), so
+  a handler can give one. At most 64 wait at once.
+- With no proxy connected, an order ends at once with `NotConnected`.
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told

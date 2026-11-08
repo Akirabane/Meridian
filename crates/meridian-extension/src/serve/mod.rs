@@ -21,13 +21,19 @@
 //!
 //! What it never does: serve a request before both proofs of the hello are checked, say anything to a
 //! proxy that proved a wrong token but the close (code 1008), log a message whole, or log the token.
+//!
+//! The extension can also **give orders** to the proxy on the same connection (docs/EXTENSIONS.md, section 5): the
+//! handle for that is a [`Proxy`], made by [`Extension::proxy`] and given to the handlers that need it. It is
+//! described in [`client`].
 
+pub mod client;
 mod connection;
 mod log;
 
 #[cfg(test)]
 mod tests;
 
+pub use client::{MAX_WAITING, OrderError, Proxy};
 pub use log::{Log, Stderr};
 
 use crate::decide::{
@@ -100,6 +106,8 @@ pub struct Extension {
     /// The handlers of the extension's own commands, by the words each answers to; one method, `command/run`,
     /// serves them all.
     pub(crate) runs: Option<Arc<RunTable>>,
+    /// The extension's requests to the proxy (its orders), shared with the [`Proxy`] handles.
+    pub(crate) client: Arc<client::Client>,
 }
 
 /// What `command/run` finds its handler in: the words of a command, and what runs for it.
@@ -122,7 +130,26 @@ impl Extension {
             commands: Vec::new(),
             wanted: Vec::new(),
             runs: None,
+            client: Arc::new(client::Client::new()),
         }
+    }
+
+    /// The handle that gives orders to the proxy that is connected (docs/EXTENSIONS.md, section 5), to be used from
+    /// any thread, a handler's included. It can be made, and given to the handlers, before the extension
+    /// listens: until a proxy is connected its orders end with [`OrderError::NotConnected`]. The proxy serves an
+    /// order only if the extension asked for its capability in the hello (an order that needs `decide.command`
+    /// is served to an extension that registered [`Extension::on_command`], or asked for it with
+    /// [`Extension::wants`]) and the operator granted it.
+    pub fn proxy(&self) -> Proxy {
+        Proxy(Arc::clone(&self.client))
+    }
+
+    /// How long an order waits for the proxy's answer (5 seconds by default, and at least 1 ms). It counts
+    /// from the send to the answer's arrival; after it the order ends with [`OrderError::Timeout`].
+    pub fn order_timeout(self, timeout: Duration) -> Self {
+        self.client
+            .set_timeout(timeout.max(Duration::from_millis(1)));
+        self
     }
 
     /// Where the SDK writes its lines. The default is [`Stderr`].
@@ -412,6 +439,11 @@ impl Running {
     /// The address it listens on.
     pub fn local_addr(&self) -> SocketAddr {
         self.address
+    }
+
+    /// The handle that gives orders to the proxy, as [`Extension::proxy`] makes it before the extension listens.
+    pub fn proxy(&self) -> Proxy {
+        Proxy(Arc::clone(&self.shared.extension.client))
     }
 
     /// A handle that stops it from another thread.

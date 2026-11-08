@@ -1856,6 +1856,33 @@ groups = ["nobody"]
         assert_eq!(ranker.asked(), 2);
     }
 
+    /// The whole way, with the SDK: the extension gives the order with its `Proxy` handle, over the real
+    /// connection, and the proxy forgets.
+    #[test]
+    fn an_extension_that_gives_the_order_with_its_sdk_makes_the_proxy_forget() {
+        let (ranker, _sessions, hook, _link) = kept_for_a_minute();
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 1);
+        let proxy = ranker.running.proxy();
+        // One player, then everyone; each time the proxy asks again, once.
+        assert_eq!(proxy.invalidate_player(ALEX), Ok(()));
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 2);
+        assert_eq!(proxy.invalidate_all(), Ok(()));
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 3);
+        // Someone else: what is kept for Alex stays.
+        assert_eq!(
+            proxy.invalidate_player("02020202-0202-0202-0202-020202020202"),
+            Ok(())
+        );
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 3);
+    }
+
     #[test]
     fn an_answer_that_was_on_its_way_when_the_extension_asked_to_forget_the_player_is_not_kept() {
         let ranker = ranker_after(Duration::from_millis(300), |request| {
