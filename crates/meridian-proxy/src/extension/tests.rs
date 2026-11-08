@@ -1880,4 +1880,58 @@ mod the_orders {
             "{page}"
         );
     }
+
+    /// An extension that does not read its answers holds the threads of the orders it gave, each for the time of a
+    /// write, and no place: the places count the orders that run, so they cannot bound those threads; the threads
+    /// themselves are bounded, to twice `max-running`. The writes are blocked here for three seconds; everything
+    /// the test looks at is looked at in the first one.
+    #[test]
+    fn an_order_that_waits_to_write_holds_no_place_and_the_threads_that_wait_are_bounded() {
+        let fake = Fake::start(Script {
+            capabilities: vec!["decide.command".into()],
+            deaf: Some(Duration::from_secs(60)),
+            ..Script::default()
+        });
+        let (_registry, link, _folder) = connect_with(&fake, |settings| {
+            settings.grant = vec!["decide.command".into()];
+            settings.orders_running = 4;
+            settings.order_rate = 1000;
+            settings.order_burst = 1000;
+            settings.timings.write = Duration::from_secs(3);
+        });
+        until("the connection", || link.is_connected());
+        // Fill the socket until a write blocks, with a thread that holds the writer while it does: the answers of
+        // the orders wait behind it, as they would wait for the socket.
+        let writer = link.lock().writer.clone().expect("a connection");
+        let filler = std::thread::spawn(move || {
+            let big = "x".repeat(200 << 10);
+            while writer.send_text(&big).is_ok() {}
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !filler.is_finished(),
+            "the socket never filled: this system takes more than the test sends before a write blocks"
+        );
+        for n in 0..12 {
+            order(&fake, &json!(1000 + n), INVALIDATE, r#"{"all":true}"#);
+            // Each order has run and given its place back before the next comes: only the threads are a limit.
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let first_second = Instant::now() + Duration::from_secs(1);
+        until("an order to be refused for want of a thread", || {
+            link.stats().orders(INVALIDATE, Ended::Busy) >= 1
+        });
+        // The threads that wait to write are at most twice the places: 8 of the 12 got one, and the ninth was refused.
+        assert_eq!(link.stats().orders(INVALIDATE, Ended::Done), 8);
+        // Their places are free: they gave them back before they wrote. (Were they kept until the write
+        // ended, this would only come true when the writes give up, in three seconds.)
+        let mut places = Vec::new();
+        until("the places of the orders that wait to write", || {
+            places.extend(link.order_place());
+            places.len() == 4
+        });
+        assert!(Instant::now() < first_second, "the places came back late");
+        // A fifth is not given: the places are the limit of what runs.
+        assert!(link.order_place().is_none());
+    }
 }

@@ -392,7 +392,7 @@ extension, `ext.<name>.<command>`, is lower case.
 | `commands` `timeout-ms` | `2000` | How long the proxy waits for the lines a command of the extension's own answers. It waits on a thread of its own, not on the one that copies the player's packets; after this the player reads `That command did not answer.` The commands of an extension use at most half of its `max-in-flight` places, and a player has one running at a time. **While the extension is down its commands stay its own and answer that line** | 1 to 10000. An extension granted `commands` needs `max-in-flight` of at least 2 |
 | `orders` `rate-per-second` | `20` | The orders the extension may give the proxy each second, once its burst is used. An order over the budget is answered with an error and is not run ([EXTENSIONS.md](EXTENSIONS.md), section 5). Changing it closes the connection and opens it again | 1 to 1000 |
 | `orders` `burst` | `50` | The orders it may give at once, from a rested budget. An order that reaches many players costs at most this | 1 to 10000 |
-| `orders` `max-running` | `8` | The orders that may run at once, each on a thread of its own. One that finds no place is answered with an error and is not run | 1 to 64 |
+| `orders` `max-running` | `8` | The orders that may run at once, each on a thread of its own; as many again may wait to write their answers to an extension that does not read. One that finds no place is answered with an error and is not run | 1 to 64 |
 
 **The time a player waits in silence.** The player's client gives up after 30 seconds without a
 packet, and the proxy sends it nothing while it decides, so the extensions' time counts with the

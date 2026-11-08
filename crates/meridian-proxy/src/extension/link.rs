@@ -210,6 +210,16 @@ impl Drop for OrderPlace {
     }
 }
 
+/// One thread of an order of the extension is alive, running the order or waiting to write its answer; it goes
+/// when the thread does.
+pub(super) struct OrderThread(Arc<Link>);
+
+impl Drop for OrderThread {
+    fn drop(&mut self) {
+        self.0.order_threads.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Takes one of `most` places counted in `running`, if there is one.
 fn acquire(running: &AtomicUsize, most: usize) -> bool {
     let mut now = running.load(Ordering::SeqCst);
@@ -260,6 +270,8 @@ pub struct Link {
     runs: AtomicUsize,
     /// How many of its orders are running (`order_place`).
     orders_running: AtomicUsize,
+    /// How many threads of its orders are alive, whether they run or wait to write (`order_thread`).
+    order_threads: AtomicUsize,
     /// What is left of its budget of orders.
     budget: Mutex<Budget>,
     forgotten: Mutex<Forgotten>,
@@ -280,6 +292,7 @@ impl Link {
             epoch: AtomicU64::new(0),
             runs: AtomicUsize::new(0),
             orders_running: AtomicUsize::new(0),
+            order_threads: AtomicUsize::new(0),
             budget: Mutex::new(budget),
             forgotten: Mutex::new(Forgotten::default()),
         })
@@ -321,6 +334,18 @@ impl Link {
     pub(super) fn order_place(self: &Arc<Self>) -> Option<OrderPlace> {
         acquire(&self.orders_running, self.settings.orders_running)
             .then(|| OrderPlace(Arc::clone(self)))
+    }
+
+    /// A thread for one order, or `None` when `2 x max-running` of them are alive. An order gives its place back
+    /// when it has run, **before** it writes its answer, and a write that blocks (an extension that does not
+    /// read) holds its thread for the write timeout: so the places bound the orders that run, and this bounds the
+    /// threads that wait to write, to as many again.
+    pub(super) fn order_thread(self: &Arc<Self>) -> Option<OrderThread> {
+        acquire(
+            &self.order_threads,
+            self.settings.orders_running.saturating_mul(2),
+        )
+        .then(|| OrderThread(Arc::clone(self)))
     }
 
     /// Spends `cost` of the extension's budget of orders, or says there is not enough left.

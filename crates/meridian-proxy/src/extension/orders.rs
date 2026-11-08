@@ -189,12 +189,19 @@ pub(super) fn dispatch(
             RpcError::new(code::METHOD_NOT_FOUND, "method not found"),
         );
     }
-    let Some(place) = link.order_place() else {
-        return refuse(
+    // The threads first: those that wait to write an answer are not running, and are bounded here.
+    let busy = || {
+        refuse(
             order.method,
             Outcome::Busy,
             RpcError::new(code::TOO_MANY_RUNNING, "too many orders running"),
-        );
+        )
+    };
+    let Some(thread) = link.order_thread() else {
+        return busy();
+    };
+    let Some(place) = link.order_place() else {
+        return busy();
     };
     if !link.take_order(1) {
         return refuse(
@@ -207,7 +214,11 @@ pub(super) fn dispatch(
         let (link, writer, id) = (Arc::clone(link), writer.clone(), id.clone());
         std::thread::Builder::new()
             .name(format!("extension-{}-order", link.name()))
-            .spawn(move || run(order, &link, &writer, &id, params.as_ref(), place))
+            .spawn(move || {
+                run(order, &link, &writer, &id, params.as_ref(), place);
+                // After the write: the thread is alive until its answer is out or has failed.
+                drop(thread);
+            })
     };
     match started {
         Ok(_) => Ok(()),

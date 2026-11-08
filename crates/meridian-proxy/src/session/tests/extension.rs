@@ -1822,6 +1822,40 @@ groups = ["nobody"]
         assert_eq!(ranker.asked(), 3);
     }
 
+    /// One extension's word is not another's: the orders of an extension that does not decide the permissions
+    /// are refused, and what an extension that has no say forgets is not what the one that has kept.
+    #[test]
+    fn what_another_extension_forgets_is_not_what_the_one_that_decides_has_kept() {
+        let ranker =
+            ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60));
+        let other = gate();
+        let mut other_config = other.extension(&["decide.login"], OnError::Default, 1000);
+        other_config.name = "other".into();
+        let mut config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        config.extensions.push(other_config);
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 1);
+        // The other extension forgets everyone, and Alex: what the first kept is kept.
+        let theirs = sessions.extensions.link("other").unwrap();
+        theirs.forget_all();
+        theirs.forget_player(ALEX.into());
+        for _ in 0..300 {
+            theirs.forget_player("02020202-0202-0202-0202-020202020202".into());
+        }
+        let _ = hook("send all east");
+        assert_eq!(
+            ranker.asked(),
+            1,
+            "the verdicts of the extension that decides were kept"
+        );
+        // And the one that decides forgetting is what makes the proxy ask again.
+        sessions.extensions.link("gate").unwrap().forget_all();
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 2);
+    }
+
     #[test]
     fn an_answer_that_was_on_its_way_when_the_extension_asked_to_forget_the_player_is_not_kept() {
         let ranker = ranker_after(Duration::from_millis(300), |request| {
