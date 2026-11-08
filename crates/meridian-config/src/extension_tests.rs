@@ -81,6 +81,7 @@ fn an_extension_takes_the_defaults_of_the_specification() {
                 max_running: 8,
                 max_kicks_per_minute: 0,
             },
+            events: Events { queue: 256 },
         }]
     );
 }
@@ -901,4 +902,68 @@ fn allow_is_refused_for_the_permission_of_a_command_and_accepted_for_the_others(
         "grant = [\"decide.server\"]\n[extension.decide-server]\non-error = \"allow\"",
     );
     assert!(load(&dir, "", &server).is_err());
+}
+
+#[test]
+fn the_events_of_an_extension_wait_in_a_queue_that_can_be_set_within_bounds_and_need_their_capability()
+ {
+    let dir = folder("events");
+    let granted = |grant: &str, more: &str| {
+        extension("x", 25590, "a.token", &format!("grant = [{grant}]\n{more}"))
+    };
+    let queue = |config: &Config| config.extensions[0].events.queue;
+    // 256 events by default, with or without the table.
+    let config = load(&dir, "", &granted("\"events\"", "")).unwrap();
+    assert_eq!(queue(&config), 256);
+    assert_eq!(Events::default().queue, 256);
+    let config = load(&dir, "", &granted("\"events\"", "[extension.events]")).unwrap();
+    assert_eq!(queue(&config), 256);
+    let config = load(
+        &dir,
+        "",
+        &granted("\"events\"", "[extension.events]\nqueue = 1000"),
+    )
+    .unwrap();
+    assert_eq!(queue(&config), 1000);
+    // The ends are in, and one past them is not.
+    for ok in [1, 10_000] {
+        let table = format!("[extension.events]\nqueue = {ok}");
+        assert_eq!(
+            queue(&load(&dir, "", &granted("\"events\"", &table)).unwrap()),
+            ok
+        );
+    }
+    let e = load(
+        &dir,
+        "",
+        &granted("\"events\"", "[extension.events]\nqueue = 0"),
+    )
+    .unwrap_err();
+    assert!(matches!(e, ConfigError::ZeroExtensionSetting { .. }), "{e}");
+    assert!(e.to_string().contains("events queue"), "{e}");
+    let e = load(
+        &dir,
+        "",
+        &granted("\"events\"", "[extension.events]\nqueue = 10001"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, ConfigError::ExtensionSettingAbove { .. }),
+        "{e}"
+    );
+    // A key nobody knows is refused, as everywhere.
+    assert!(
+        load(
+            &dir,
+            "",
+            &granted("\"events\"", "[extension.events]\nsize = 5")
+        )
+        .is_err()
+    );
+    // Not granted `events`, the table would be read and never used: whatever else is granted.
+    for grant in ["", "\"orders.read\", \"addresses\", \"decide.login\""] {
+        let e = load(&dir, "", &granted(grant, "[extension.events]\nqueue = 5")).unwrap_err();
+        assert!(matches!(e, ConfigError::EventsWithoutGrant { .. }), "{e}");
+        assert!(e.to_string().contains("[extension.events]"), "{e}");
+    }
 }

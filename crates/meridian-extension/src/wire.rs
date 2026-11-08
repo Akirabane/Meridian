@@ -418,6 +418,16 @@ pub fn request(id: impl Into<Id>, method: &str, params: Option<&impl Serialize>)
     message.to_string()
 }
 
+/// A notification: a request with no id, which gets no answer.
+pub fn notification(method: &str, params: &impl Serialize) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": serde_json::to_value(params).unwrap_or(Value::Null),
+    })
+    .to_string()
+}
+
 /// The answer to request `id`.
 pub fn result(id: &Id, result: &impl Serialize) -> String {
     json!({

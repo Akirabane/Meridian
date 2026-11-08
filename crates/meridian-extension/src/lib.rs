@@ -11,6 +11,7 @@
 //! **Protocol 0 is experimental** (section 3): anything in it may change between two releases.
 
 pub mod decide;
+pub mod events;
 pub mod handshake;
 pub mod orders;
 pub mod run;

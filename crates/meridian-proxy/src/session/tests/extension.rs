@@ -132,6 +132,7 @@ fn extension_config(
         decide_server: Default::default(),
         own_commands: Default::default(),
         orders: Default::default(),
+        events: Default::default(),
     }
 }
 
@@ -3620,6 +3621,195 @@ mod reading {
         assert_eq!(
             actions.plan_send(&Target::All, "nowhere").err(),
             Some(Refusal::UnknownDestination)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The events of real sessions (docs/EXTENSIONS.md, section 6): through `serve`, the real connection, and the SDK's handler
+
+mod events {
+    use super::*;
+    use meridian_extension::events::{Event, LeftReason};
+
+    /// An extension that collects the events it is told.
+    struct Watcher {
+        running: Running,
+        folder: Folder,
+        seen: Arc<Mutex<Vec<Event>>>,
+    }
+
+    /// An extension that collects the events, and asks for `wants` besides `events`.
+    fn watcher(wants: &[&str]) -> Watcher {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut extension = Sdk::new("gate", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_event({
+                let seen = Arc::clone(&seen);
+                move |event| seen.lock().unwrap().push(event.clone())
+            });
+        for capability in wants {
+            extension = extension.wants(capability);
+        }
+        let running = extension.bind("127.0.0.1:0").unwrap();
+        Watcher {
+            running,
+            folder: Folder::new(),
+            seen,
+        }
+    }
+
+    impl Watcher {
+        fn config(&self, grant: &[&str]) -> Config {
+            Gate::config(extension_config(
+                self.running.local_addr().to_string(),
+                self.folder.token(),
+                grant,
+                OnError::Default,
+                1000,
+            ))
+        }
+
+        fn wait_for(&self, count: usize) -> Vec<Event> {
+            let limit = Instant::now() + Duration::from_secs(10);
+            loop {
+                let seen = self.seen.lock().unwrap().clone();
+                if seen.len() >= count {
+                    return seen;
+                }
+                assert!(
+                    Instant::now() < limit,
+                    "gave up waiting for {count} events, got {seen:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// A player who goes in and stays until the proxy ends their session: the backend waits to be closed, and the player reads the
+    /// disconnect.
+    fn stays_until_ended(config: &Config, sessions: &Sessions, name: &str) {
+        let (connect, backends) =
+            reachable_after(vec![("127.0.0.1:25601", true)], vec![Step::ExpectClose]);
+        route_one(
+            config,
+            sessions,
+            &*connect,
+            &backends,
+            logged_in(name, offline(), None),
+            refused(),
+        );
+    }
+
+    /// A real login and a real departure are told, with who, where and why; the address only to an extension granted `addresses`.
+    #[test]
+    fn a_real_login_and_departure_are_told_with_who_where_and_why_and_the_address_only_with_addresses()
+     {
+        for (grant, address) in [
+            (&["events"][..], false),
+            (&["events", "addresses"][..], true),
+        ] {
+            let watcher = watcher(&["addresses"]);
+            let config = watcher.config(grant);
+            let sessions = sessions_for(&config);
+            goes_in(&config, &sessions, "Notch");
+            let seen = watcher.wait_for(2);
+            let Event::Joined(joined) = &seen[0] else {
+                panic!("{:?}", seen[0]);
+            };
+            assert_eq!(
+                (joined.player.name.as_str(), joined.server.as_str()),
+                ("Notch", "lobby")
+            );
+            assert_eq!(joined.player.auth, Auth::Unverified);
+            assert_eq!(joined.seq, 1);
+            assert_eq!(
+                joined.address,
+                address.then(|| peer().ip().to_string()),
+                "{grant:?}"
+            );
+            let Event::Left(left) = &seen[1] else {
+                panic!("{:?}", seen[1]);
+            };
+            assert_eq!(
+                (
+                    left.player.name.as_str(),
+                    left.server.as_str(),
+                    left.reason,
+                    left.seq
+                ),
+                ("Notch", "lobby", LeftReason::Left, 2)
+            );
+            // The player is gone from the list by the time the extension is told.
+            assert!(sessions.find("Notch").is_none());
+        }
+    }
+
+    /// Why a session ended, when the proxy ended it: a kick, a stop.
+    #[test]
+    fn a_session_the_proxy_ended_says_why_a_kick_and_a_stop() {
+        for (n, why) in [LeftReason::Kicked, LeftReason::Shutdown]
+            .into_iter()
+            .enumerate()
+        {
+            let watcher = watcher(&[]);
+            let config = watcher.config(&["events"]);
+            let sessions = sessions_for(&config);
+            std::thread::scope(|scope| {
+                scope.spawn(|| stays_until_ended(&config, &sessions, "Notch"));
+                let limit = Instant::now() + Duration::from_secs(10);
+                while sessions.find("Notch").is_none() {
+                    assert!(Instant::now() < limit, "the session never opened");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if n == 0 {
+                    assert!(sessions.kick("notch", "bye").is_some());
+                } else {
+                    assert_eq!(sessions.close_all(), 1);
+                }
+            });
+            let seen = watcher.wait_for(2);
+            let Event::Left(left) = &seen[1] else {
+                panic!("{:?}", seen[1]);
+            };
+            assert_eq!(left.reason, why);
+        }
+    }
+
+    /// A second login that replaces the first ends it with `replaced`.
+    #[test]
+    fn a_session_that_a_second_login_replaced_says_replaced() {
+        let watcher = watcher(&[]);
+        let mut config = watcher.config(&["events"]);
+        config.on_duplicate = OnDuplicate::Replace;
+        let sessions = sessions_for(&config);
+        std::thread::scope(|scope| {
+            scope.spawn(|| stays_until_ended(&config, &sessions, "Notch"));
+            let limit = Instant::now() + Duration::from_secs(10);
+            while sessions.find("Notch").is_none() {
+                assert!(Instant::now() < limit, "the session never opened");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            scope.spawn(|| stays_until_ended(&config, &sessions, "Notch"));
+            // The first ends because the second replaced it; then the second is ended, as an operator would.
+            let seen = watcher.wait_for(3);
+            assert!(
+                seen.iter()
+                    .any(|e| matches!(e, Event::Left(l) if l.reason == LeftReason::Replaced)),
+                "{seen:?}"
+            );
+            assert!(sessions.kick("notch", "bye").is_some());
+        });
+        let seen = watcher.wait_for(4);
+        let kinds = |wanted: LeftReason| {
+            seen.iter()
+                .filter(|e| matches!(e, Event::Left(l) if l.reason == wanted))
+                .count()
+        };
+        assert_eq!(
+            (kinds(LeftReason::Replaced), kinds(LeftReason::Kicked)),
+            (1, 1),
+            "{seen:?}"
         );
     }
 }
