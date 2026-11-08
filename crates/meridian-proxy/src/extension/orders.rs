@@ -15,11 +15,13 @@
 
 use super::link::{Link, OrderPlace};
 use crate::log::debug;
-use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MOVE, ORDERS_READ};
+use meridian_config::{
+    ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_MODERATE, ORDERS_MOVE, ORDERS_READ,
+};
 use meridian_extension::orders::{
     self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
 };
-use meridian_extension::orders::{Started, Target, Told};
+use meridian_extension::orders::{Kicked, Started, Target, Told};
 use meridian_extension::wire::{self, Discover, DiscoverMethod, Id, RpcError, code};
 use meridian_websocket::Writer;
 use serde_json::Value;
@@ -53,6 +55,9 @@ pub trait Actions: Send + Sync {
     fn audience(&self, server: Option<&str>) -> Result<usize, String>;
     /// Shows `text` to them, as `/alert` does, and tells how many were told.
     fn broadcast(&self, server: Option<&str>, text: &str) -> Result<usize, String>;
+    /// Ends the session of the player `who` is, telling them `reason`: the name of the player kicked, or `None` if nobody
+    /// online is that.
+    fn kick(&self, who: &Who, reason: &str) -> Option<String>;
     /// Plans sending `target` to the server `to`: nobody is moved until the plan is started.
     fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal>;
 }
@@ -239,6 +244,14 @@ const PLAYERS_SEND: Order = Order {
     counted: true,
 };
 
+const PLAYERS_KICK: Order = Order {
+    method: orders::PLAYERS_KICK,
+    capability: ORDERS_MODERATE,
+    run: players_kick,
+    describe: || orders::moderate_methods().swap_remove(0).1,
+    counted: false,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
 pub(super) const ORDERS: &[Order] = &[
@@ -250,6 +263,7 @@ pub(super) const ORDERS: &[Order] = &[
     PLAYERS_TELL,
     BROADCAST,
     PLAYERS_SEND,
+    PLAYERS_KICK,
 ];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
@@ -264,6 +278,7 @@ pub(super) const ORDERS: &[Order] = &[
     PLAYERS_TELL,
     BROADCAST,
     PLAYERS_SEND,
+    PLAYERS_KICK,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -481,6 +496,19 @@ fn players_send(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError
         ctx.link.name()
     );
     done(serde_json::to_value(Started { started }))
+}
+
+/// `players/kick`: ends one player's session, telling them the reason as a literal. A player who is not online is not an
+/// error: `{"kicked": 0}`. It costs one order, and is logged with the player and the reason.
+fn players_kick(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let (who, reason) = orders::parse_kick(params).map_err(invalid)?;
+    let kicked = ctx.actions()?.kick(&who, &reason);
+    if let Some(name) = &kicked {
+        crate::log::info!("extension \"{}\" kicked {name}: {reason}", ctx.link.name());
+    }
+    done(serde_json::to_value(Kicked {
+        kicked: usize::from(kicked.is_some()),
+    }))
 }
 
 /// `queue/list`: whether the queue is on, and who waits.

@@ -1871,6 +1871,7 @@ mod the_orders {
             ["meridian:players/tell", "meridian:broadcast"]
         );
         assert_eq!(methods(&["orders.move"]), ["meridian:players/send"]);
+        assert_eq!(methods(&["orders.moderate"]), ["meridian:players/kick"]);
         assert!(methods(&["decide.login", "events"]).is_empty());
     }
 
@@ -2356,6 +2357,8 @@ mod the_orders {
         cast: StdMutex<Vec<(Option<String>, String)>>,
         /// The plans that were started: whom, and where to.
         started: StdMutex<Vec<(Target, String)>>,
+        /// Who was kicked, and the reason they were given.
+        kicked: StdMutex<Vec<(Who, String)>>,
         everyone: AtomicUsize,
     }
 
@@ -2393,8 +2396,13 @@ mod the_orders {
                 told: StdMutex::new(Vec::new()),
                 cast: StdMutex::new(Vec::new()),
                 started: StdMutex::new(Vec::new()),
+                kicked: StdMutex::new(Vec::new()),
                 everyone: AtomicUsize::new(everyone),
             })
+        }
+
+        fn kicked(&self) -> Vec<(Who, String)> {
+            self.kicked.lock().unwrap().clone()
         }
 
         fn started(&self) -> Vec<(Target, String)> {
@@ -2411,6 +2419,19 @@ mod the_orders {
     }
 
     impl Actions for ActingArc {
+        /// `Nobody` is not online: the others are kicked, and named as they were asked for.
+        fn kick(&self, who: &Who, reason: &str) -> Option<String> {
+            self.kicked
+                .lock()
+                .unwrap()
+                .push((who.clone(), reason.to_owned()));
+            match who {
+                Who::Name(name) if name.eq_ignore_ascii_case("Nobody") => None,
+                Who::Name(name) => Some(name.clone()),
+                Who::Id(_) => Some("ById".to_owned()),
+            }
+        }
+
         /// `nowhere` is a server nobody has; `Nobody` is not online; a server's players are two; all are `everyone`.
         fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal> {
             if to == "nowhere" {
@@ -2963,5 +2984,149 @@ mod the_orders {
         );
         assert_eq!(link.stats().orders(shapes::PLAYERS_SEND, Ended::Failed), 1);
         assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
+    }
+
+    // ---- the order that expels -------------------------------------------------------------------------
+
+    fn kicked_of(reply: &Value) -> usize {
+        serde_json::from_value::<meridian_extension::orders::Kicked>(reply["result"].clone())
+            .unwrap_or_else(|e| panic!("{e}: {reply}"))
+            .kicked
+    }
+
+    #[test]
+    fn the_order_that_expels_needs_orders_moderate_and_is_refused_as_if_it_did_not_exist_without_it()
+     {
+        let acting = Acting::new(5);
+        // The two other powers over players are granted, this one is not.
+        let (fake, _registry, link, _folder) =
+            acting_with(&["orders.move", "orders.message"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(9000),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"Alex"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(9000))), -32601);
+        assert!(acting.kicked().is_empty());
+        assert_eq!(link.stats().orders(shapes::PLAYERS_KICK, Ended::Refused), 1);
+        let (fake, _registry, _link, _folder) = acting_with(&["orders.moderate"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(9100),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"Alex"}"#,
+        );
+        assert_eq!(kicked_of(&answer(&fake, &json!(9100))), 1);
+    }
+
+    #[test]
+    fn a_player_is_kicked_by_name_or_id_with_a_reason_as_written_or_the_default_and_nobody_is_zero()
+    {
+        let acting = Acting::new(5);
+        let (fake, _registry, _link, _folder) = acting_with(&["orders.moderate"], &acting, |_| {});
+        let line = r#"Spam <b>again</b> & {"clickEvent":1}"#;
+        let params = serde_json::to_string(&json!({"player": "alex", "reason": line})).unwrap();
+        order(&fake, &json!(9200), shapes::PLAYERS_KICK, &params);
+        assert_eq!(kicked_of(&answer(&fake, &json!(9200))), 1);
+        order(
+            &fake,
+            &json!(9201),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"0A2EA4BABCED39D280E11AD51A0E925C"}"#,
+        );
+        assert_eq!(kicked_of(&answer(&fake, &json!(9201))), 1);
+        order(
+            &fake,
+            &json!(9202),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"Nobody","reason":"hello?"}"#,
+        );
+        assert_eq!(kicked_of(&answer(&fake, &json!(9202))), 0);
+        let kicked = acting.kicked();
+        assert_eq!(kicked[0], (Who::Name("alex".into()), line.to_owned()));
+        assert_eq!(
+            kicked[1],
+            (
+                Who::Id("0a2ea4ba-bced-39d2-80e1-1ad51a0e925c".into()),
+                shapes::DEFAULT_KICK_REASON.to_owned()
+            )
+        );
+        assert_eq!(kicked.len(), 3);
+    }
+
+    #[test]
+    fn a_reason_that_is_not_valid_is_refused_with_32602_and_nobody_is_kicked() {
+        let acting = Acting::new(5);
+        let (fake, _registry, link, _folder) = acting_with(&["orders.moderate"], &acting, |_| {});
+        let secret = "reason-that-must-not-come-back";
+        let long = "x".repeat(shapes::MAX_TEXT + 1);
+        let cases = [
+            serde_json::to_string(&json!({"player": "Alex", "reason": ""})).unwrap(),
+            serde_json::to_string(&json!({"player": "Alex", "reason": long})).unwrap(),
+            serde_json::to_string(&json!({"player": "Alex", "reason": format!("{secret}\n")}))
+                .unwrap(),
+            serde_json::to_string(&json!({"player": "Alex", "reason": format!("{secret}\u{a7}4")}))
+                .unwrap(),
+            r#"{"reason":"Spam."}"#.to_owned(),
+            r#"["Alex","Spam."]"#.to_owned(),
+        ];
+        for (n, params) in cases.iter().enumerate() {
+            let id = json!(9300 + n);
+            order(&fake, &id, shapes::PLAYERS_KICK, params);
+            let reply = answer(&fake, &id);
+            assert_eq!(code_of(&reply), -32602, "{params}");
+            assert!(!reply.to_string().contains(secret), "{reply}");
+        }
+        assert!(acting.kicked().is_empty());
+        assert_eq!(
+            link.stats().orders(shapes::PLAYERS_KICK, Ended::Invalid),
+            cases.len() as u64
+        );
+    }
+
+    /// A kick costs one order, like any: there is no other limit, and a budget that is spent refuses it.
+    #[test]
+    fn a_kick_costs_one_order_and_a_spent_budget_refuses_it() {
+        let acting = Acting::new(5);
+        let (fake, _registry, _link, _folder) =
+            acting_with(&["orders.moderate"], &acting, |settings| {
+                settings.order_burst = 2;
+                settings.order_rate = 1;
+            });
+        for n in 0..2 {
+            order(
+                &fake,
+                &json!(9400 + n),
+                shapes::PLAYERS_KICK,
+                r#"{"player":"Alex"}"#,
+            );
+            assert_eq!(kicked_of(&answer(&fake, &json!(9400 + n))), 1);
+        }
+        order(
+            &fake,
+            &json!(9410),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"Alex"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(9410))), -32001);
+        assert_eq!(acting.kicked().len(), 2, "the refused one kicked nobody");
+    }
+
+    #[test]
+    fn with_no_actions_given_the_order_that_expels_says_it_is_not_available() {
+        let (fake, _registry, link, _folder) = orderly(&["orders.moderate"], |_| {});
+        order(
+            &fake,
+            &json!(9500),
+            shapes::PLAYERS_KICK,
+            r#"{"player":"Alex"}"#,
+        );
+        let reply = answer(&fake, &json!(9500));
+        assert_eq!(
+            (code_of(&reply), reply["error"]["message"].as_str()),
+            (-32603, Some("not available"))
+        );
+        assert_eq!(link.stats().orders(shapes::PLAYERS_KICK, Ended::Failed), 1);
     }
 }

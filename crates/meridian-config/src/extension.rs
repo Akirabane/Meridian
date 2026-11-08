@@ -22,6 +22,8 @@ pub const ORDERS_READ: &str = "orders.read";
 pub const ORDERS_MESSAGE: &str = "orders.message";
 /// The capability of the order that moves players to a server (docs/EXTENSIONS.md, section 5).
 pub const ORDERS_MOVE: &str = "orders.move";
+/// The capability of the order that kicks a player (docs/EXTENSIONS.md, section 5).
+pub const ORDERS_MODERATE: &str = "orders.moderate";
 /// The capability that gives the players' addresses in what an extension is told (docs/EXTENSIONS.md, section 7).
 pub const ADDRESSES: &str = "addresses";
 

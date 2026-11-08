@@ -424,6 +424,19 @@ impl Sessions {
         Some(player)
     }
 
+    /// Ends the session of the first player for whom `is` holds, telling them `reason`; the player, or `None`.
+    pub fn kick_matching(&self, reason: &str, is: impl Fn(&Player) -> bool) -> Option<Player> {
+        let (player, handle) = self
+            .lock()
+            .values()
+            .find(|e| is(&e.player))
+            .map(|e| (e.player(), e.handle.clone()))?;
+        handle.disconnect(configuration::Disconnect {
+            reason: text::literal(reason),
+        });
+        Some(player)
+    }
+
     /// Ends every session, telling each player that the server closed, and refuses
     /// new ones. Returns how many sessions were ended.
     pub fn close_all(&self) -> usize {

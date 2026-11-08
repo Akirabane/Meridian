@@ -6,8 +6,8 @@ they go to. Part of it is built, and the pull requests of section 10 follow the 
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
-orders (8.1), with the orders that read, those that message and the one that moves (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
-leaves a choice open. Not built: the orders that expel, drain, reload and run console lines (5) and the events the proxy sends the extension (6).
+orders (8.1), with the orders that read, those that message, the one that moves and the one that expels (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
+leaves a choice open. Not built: the orders that drain, reload and run console lines (5) and the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -1015,6 +1015,25 @@ configuration in force, the balancer, the queue); until the proxy has given the 
   500, not one for each player. **The SDK's `Proxy::players()` does this**, page after page, and gives up (`BadAnswer`) on a
   proxy whose cursors do not go forward or whose pages do not end.
 
+**As built, for the order that expels** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):
+`players/kick`, capability `orders.moderate`.
+
+- **Params**: `{"player": "<name or id>", "reason": "<text>"}`, `reason` optional ("Kicked by an extension" when left out). It
+  ends the session of the player, as the console's `kick` does (`Sessions::kick`), and answers `{"kicked": 1}`, or
+  `{"kicked": 0}` when nobody online is that (not an error). The player is found as `players/find` finds them (a unique id with
+  or without hyphens, or a name in any case).
+- **The reason is shown as a literal**, exactly as written, never as a JSON text component: no click event, colour or hover. It
+  is valid as the line of an extension's own command is (4.3): 1 to 256 characters with no control, formatting (`§`) or
+  invisible character; anything else is `-32602` and nobody is kicked. A session that has not finished its configuration is
+  ended too: the player reads the reason in the phase their client reads.
+- **It costs one order**, and there is no other limit: not per player, not per second beyond the budget (20 a second with
+  bursts of 50 by default). **`orders.moderate` lets the extension expel any player, an operator's included**: grant it to a
+  program that is as trusted as an operator with the console's `kick`. Each kick is logged: `extension "<name>" kicked
+  <player>: <reason>`.
+- Not the same twice, in a mild way: a player who was kicked is not online to be kicked again (the answer is `0`), unless they
+  came back in the meantime. `orders.moderate` also tells the extension whether a name is online, as `orders.message` does.
+- Until the proxy has given the registry its actions it answers `-32603 not available`.
+
 **As built, for the order that moves** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):
 `players/send`, capability `orders.move`.
 
@@ -1075,7 +1094,8 @@ and keep their signatures, so the handle is made apart and given to the closures
 `let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
 is connected its orders end with `NotConnected`.
 
-- **Methods.** `Proxy::send_player(player, to)`, `send_all(to)` and `send_server(from, to)` for the order that moves (they need
+- **Methods.** `Proxy::kick(player, reason)` for the order that expels (it needs `orders.moderate`; a reason that is not valid is
+  `Invalid` and nothing is sent); `Proxy::send_player(player, to)`, `send_all(to)` and `send_server(from, to)` for the order that moves (they need
   `orders.move`; a name that is not one is `Invalid` and nothing is sent); `Proxy::tell(player, text)` and `Proxy::broadcast(server, text)` for the orders that message (they need
   `orders.message`: `Extension::wants("orders.message")` and the operator's grant; a line that is not valid is `Invalid` and
   nothing is sent); `Proxy::players_page(limit, cursor)`, `players()`, `find_player(&str)`, `servers()` and `queue()` for the orders

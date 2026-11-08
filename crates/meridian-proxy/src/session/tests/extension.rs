@@ -3400,4 +3400,72 @@ mod reading {
             );
         }
     }
+
+    // ---- the order that expels ---------------------------------------------------------------------------
+
+    #[test]
+    fn the_actions_of_the_proxy_kick_the_player_who_is_there_by_name_or_id_and_name_who_was_kicked()
+    {
+        let sessions = Arc::new(Sessions::default());
+        let actions = actions_of(&sessions, &balanced());
+        assert_eq!(actions.kick(&Who::Name("Alex".into()), "bye"), None);
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let _notch = connected(
+            &sessions,
+            "Notch",
+            Identity::Verified(offline_uuid("Notch").to_be_bytes()),
+        );
+        // Nobody of that name or id.
+        assert_eq!(actions.kick(&Who::Name("Nobody".into()), "bye"), None);
+        assert_eq!(
+            actions.kick(
+                &Who::Id("99999999-0000-0000-0000-000000000000".into()),
+                "bye"
+            ),
+            None
+        );
+        // By name in any case, and by unique id: the player kicked is named as the proxy knows them.
+        assert_eq!(
+            actions.kick(&Who::Name("ALEX".into()), "Spam."),
+            Some("Alex".to_owned())
+        );
+        let notch = hyphenated(offline_uuid("Notch").to_be_bytes()).to_ascii_lowercase();
+        assert_eq!(
+            actions.kick(&Who::Id(notch), "Spam."),
+            Some("Notch".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_sdk_kicks_over_the_real_connection_and_a_player_who_is_not_online_is_zero() {
+        let folder = Folder::new();
+        let running = Sdk::new("warden", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .wants("orders.moderate")
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let config = Config {
+            extensions: vec![extension_config(
+                running.local_addr().to_string(),
+                folder.token(),
+                &["orders.moderate"],
+                OnError::Default,
+                1000,
+            )],
+            ..routed()
+        };
+        let sessions = Arc::new(sessions_for(&config));
+        sessions
+            .extensions
+            .serve_actions(Arc::new(actions_of(&sessions, &config)));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let proxy = running.proxy();
+        assert_eq!(proxy.kick("Nobody", Some("hello?")), Ok(0));
+        assert_eq!(proxy.kick("alex", Some("Spam.")), Ok(1));
+        // A reason that is not valid does not leave the SDK.
+        assert!(matches!(
+            proxy.kick("Alex", Some("two\nlines")),
+            Err(meridian_extension::serve::OrderError::Invalid(_))
+        ));
+    }
 }

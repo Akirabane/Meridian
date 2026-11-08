@@ -74,6 +74,17 @@ impl Actions for ProxyActions {
         staff::alert_shown(&sessions.shared(), &self.config(), server, text)
     }
 
+    fn kick(&self, who: &Who, reason: &str) -> Option<String> {
+        let sessions = self.sessions.upgrade()?;
+        let kicked = match who {
+            Who::Name(name) => sessions.kick(name, reason),
+            Who::Id(id) => sessions.kick_matching(reason, |player| {
+                hyphenated(player.uuid).eq_ignore_ascii_case(id)
+            }),
+        };
+        kicked.map(|player| player.name)
+    }
+
     fn plan_send(&self, target: &Target, to: &str) -> Result<Box<dyn MovePlan>, Refusal> {
         let config = self.config();
         let backend = config.backend(to).ok_or(Refusal::UnknownDestination)?;
