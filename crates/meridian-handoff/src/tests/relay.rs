@@ -87,6 +87,22 @@ fn packets_written_together_are_the_same_bytes() {
     }
 }
 
+/// What a batch's buffers keep between batches stays small after a large one (a join): a
+/// buffer kept at its largest for the whole connection cost each player tens of KiB.
+#[test]
+fn a_large_batch_does_not_stay_in_memory() {
+    let mut out: Vec<u8> = Vec::with_capacity(128 << 10);
+    crate::session::keep_small(&mut out, 16 << 10);
+    assert!(out.capacity() <= 16 << 10, "{}", out.capacity());
+    // A buffer that a tick's batch fits in is left as it is: no allocation each tick.
+    let mut small: Vec<u8> = Vec::with_capacity(8 << 10);
+    crate::session::keep_small(&mut small, 16 << 10);
+    assert!(small.capacity() >= 8 << 10);
+    let mut batch: Vec<(i32, Vec<u8>)> = Vec::with_capacity(5_000);
+    crate::session::keep_small(&mut batch, 256);
+    assert!(batch.capacity() <= 256, "{}", batch.capacity());
+}
+
 /// The writes the session made to its client so far.
 fn writes(bench: &Bench) -> u64 {
     bench.handle.0.down().writes

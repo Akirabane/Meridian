@@ -919,6 +919,20 @@ pub(crate) fn frame(
     Ok(())
 }
 
+/// What a session keeps between batches. A join's world comes 64 KiB a read, many packets each,
+/// and a buffer grown for it, kept for the whole connection, cost each player as much again as
+/// the rest of its session (the A/B of 8 November: +47 to +87 KiB a player, even with no
+/// batching). Past these sizes a buffer goes back to a quarter of them; a tick's batch fits.
+const OUT_KEPT: usize = 16 << 10;
+const BATCH_KEPT: usize = 256;
+
+/// Gives back what an empty `buffer` holds beyond `kept`, down to a quarter of it.
+pub(crate) fn keep_small<T>(buffer: &mut Vec<T>, kept: usize) {
+    if buffer.capacity() > kept {
+        buffer.shrink_to(kept / 4);
+    }
+}
+
 /// Writes what a batch framed, in one write: false when the client is gone.
 fn flush(down: &mut Down, out: &mut Vec<u8>) -> bool {
     if out.is_empty() {
@@ -930,10 +944,7 @@ fn flush(down: &mut Down, out: &mut Vec<u8>) -> bool {
     down.writes += 1;
     TO_PLAYERS_WRITES.fetch_add(1, Ordering::Relaxed);
     out.clear();
-    // A join's world can make a batch large; what it took is not kept for the quiet afterwards.
-    if out.capacity() > 1 << 20 {
-        out.shrink_to(64 << 10);
-    }
+    keep_small(out, OUT_KEPT);
     true
 }
 
@@ -984,11 +995,7 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
             }
         }
         batch.clear();
-        // A join brings a batch of hundreds of packets; the quiet afterwards needs a few. What the
-        // large one took is not kept for the rest of the connection.
-        if batch.capacity() > 4096 {
-            batch.shrink_to(256);
-        }
+        keep_small(&mut batch, BATCH_KEPT);
         if let Some(end) = after {
             return end;
         }
