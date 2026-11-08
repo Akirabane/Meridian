@@ -26,7 +26,7 @@ merged but it is not usable yet. "Planned" means only designed, in
 | Relay between a player and a Horizon server | Done | Both directions, with compression and encryption on each side. The packets that one read of a server brought are written to the player in one write (at most 64 packets or 32 KiB of payload at a time), with the same bytes as one write each ([#160](https://github.com/Akirabane/Meridian/pull/160)). In a loopback bench with servers that write once a tick, the proxy's processor for a relayed packet went from about 20 µs to about 8 µs at 500 and at 1,000 typical players, and nothing changed where a server writes each packet alone ([docs/LOAD-1000.md](docs/LOAD-1000.md), section 5): the bench is on one machine over the loopback; section 5 adds one test on a real network, where a real game server's packets went about 15.5 to a write (three players, one run) |
 | Player information forwarding | Done | Horizon's Velocity-style forwarding with a shared secret |
 | Named servers and a default server | Done | |
-| Login modes: online, offline, hybrid | Done | See [Login modes](#login-modes). The hybrid lookup has not been tried against the real account service |
+| Login modes: online, offline, hybrid | Done | See [Login modes](#login-modes). The online mode's account check was run once with real clients ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 5); the hybrid lookup has not been tried against the real account service |
 | Routing | Done | Forced hosts, groups of servers per kind of player, and a fallback list (`try`) at login |
 | Player limit and duplicate logins | Done | `max-players`; a second login is refused or replaces the first |
 | Waiting for a place when the network is full | Done (first level), off by default | `[queue]`: a player who finds `max-players` or every lobby at its cap waits for a place (`wait-seconds`, at most 20), first come first served, instead of being refused ([docs/OPERATING.md](docs/OPERATING.md), section 5.10). The client is told nothing while it waits, and no real client was tried. Keeping the player in the configuration phase with a message of their place is not built |
@@ -142,7 +142,9 @@ Still not verified on a real Horizon:
 - the queue, as a real client sees it while it waits;
 - the commands and chat that the scripted player of the test kit types, and what a real server
   answers to them;
-- the hybrid mode's name lookup and the online mode's account check, against the real services.
+- the hybrid mode's name lookup against the real account service, several accounts at once, a long
+  session in online mode, an account with no licence and the queue in online mode (the online mode's
+  account check itself was run once: [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 5).
 
 Besides that run, the relay with one scripted player at a time was run against a real Horizon
 server on an earlier commit and not repeated since ([docs/RUNNING.md](docs/RUNNING.md), section 5).
@@ -336,8 +338,10 @@ player for their own copy of the game, and Meridian carries no game content. Sec
 - The queue holds the login only: the player is told nothing about their place while they
   wait, and the wait is at most 20 seconds, because the client gives up after 30 seconds of
   silence ([docs/OPERATING.md](docs/OPERATING.md), section 5.10).
-- The hybrid mode's name lookup and the online mode's account check have not been
-  tried against the real services in a recorded run.
+- The online mode's account check was run once against the real account service, with a real
+  Horizon client and a real Java client and one account ([docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md), section 5). The hybrid
+  mode's name lookup, several accounts at once, long sessions, an account with no licence and the
+  queue in online mode have not been tried.
 - Signed chat is not supported across the proxy: servers behind it should not enforce
   secure chat.
 - `/server` is not offered by Tab completion.

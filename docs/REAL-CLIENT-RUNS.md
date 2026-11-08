@@ -67,7 +67,8 @@ UTC. No conclusion is drawn from them here.
 - **A stock Horizon server.** No transfer module, so no seamless switch, no `/server` move and no
   evacuation was tried in this run. See section 2 for the moves made earlier.
 - **One route.** A home line to a rented machine, one provider, one evening.
-- **An offline account.** The online login and the hybrid mode were not exercised.
+- **An offline account.** The online login and the hybrid mode were not exercised (the online login was run
+  on 8 November 2026: section 5).
 
 ## 2. The four earlier runs, from the comment of 4 November 2026
 
@@ -193,5 +194,29 @@ Since then (6 and 7 November 2026), the first three items above were run with re
 real network, in that page: the seamless switch, `drain --move` and the evacuation of a restarting
 server (runs 1 to 6; run 7 for a stop with a wait for the evacuation, which Horizon's pull
 request #11713 added, merged on 8 November 2026). It was three real clients on one PC, one session each. The queue as a
-real client sees it, the sync of bans and whitelist with a real client, the hybrid and online modes
-and long sessions are still not run with a real client.
+real client sees it, the sync of bans and whitelist with a real client, the hybrid mode and long sessions
+are still not run with a real client. The online mode's account check was run once, on 8 November 2026
+(section 5).
+
+## 5. The online mode: 8 November 2026
+
+One run of the account check of the online mode (`auth-mode = "online"`, the default) against the real
+account service, with real clients.
+
+| | |
+| --- | --- |
+| Clients | A Horizon client and a Java client of the original game, one real account, one login for each. |
+| Proxy | Meridian at the commit `059efaf` of main (it has the fix #146), in online mode, with the forwarding of the player's address to the server on. |
+| Server | Horizon Nightly 2026-11-08 (`fdc87ae`, Minecraft 26.3) behind the proxy. |
+
+What was seen:
+
+- The proxy's log has `<name> (<unique id>) joined backend "smp"` for the player, with a unique id of **version 4**. In
+  offline mode the same name would have an id of version 3 (computed from the name), so the id came from the account
+  service.
+- No `WARN` and no `ERROR` in the proxy's log.
+- The server saw the player's real address, not the proxy's, through the forwarding.
+- The proxy's counter `logins_total` was 2, and no login failed.
+
+Not covered: the hybrid mode, more than one account at the same time, a long session, an account with no
+licence, and the queue in online mode. One account, one run; the logs are not kept in this repository.

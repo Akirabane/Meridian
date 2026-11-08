@@ -1150,8 +1150,10 @@ switch, and keep the proxy's log and both servers' logs.
   ([REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)), and before that with a real client on one machine (a public comment,
   [REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 2). Many players and long sessions were
   not tried against a real server (the 250 bots of [LOAD-VPS-250.md](LOAD-VPS-250.md) went to
-  stand-in servers). The hybrid mode's name lookup and the online mode's account check have not been
-  tried against the real services in a recorded run.
+  stand-in servers). The online mode's account check was run once against the real account service, with a real
+  Horizon client and a real Java client and one account ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 5). The
+  hybrid mode's name lookup, several accounts at once, long sessions, an account with no licence and the queue in online
+  mode have not been tried.
 - A server that stops without warning, or disconnects a player, moves them to another server
   (section 5.11) as a new arrival, with a loading screen, and what was unsaved on the lost server
   is lost. This ran with a real client over the Internet, once each for a killed server, a kick
