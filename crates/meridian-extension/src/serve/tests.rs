@@ -2754,7 +2754,7 @@ mod the_events {
     /// The handler never runs on the thread that reads: it is stuck, and the extension goes on answering the proxy; the queue is
     /// bounded, and what it could not keep is told to the handler as `Dropped` before the next event.
     #[test]
-    fn a_slow_handler_does_not_stop_the_reader_and_is_told_what_was_dropped() {
+    fn a_slow_handler_does_not_stop_the_reader_and_the_gap_is_told_where_it_is() {
         let handled = Arc::new(Mutex::new(Vec::new()));
         let stuck = Arc::new(AtomicBool::new(true));
         let extension = echoing(&Arc::default()).on_event({
@@ -2778,44 +2778,35 @@ mod the_events {
             json!({"k": 1})
         );
         stuck.store(false, Ordering::SeqCst);
+        // The queue holds 1024, and the handler took one more before it stuck (or not yet): what was kept is the oldest, in order, and
+        // nothing is told yet: the gap is told by the first event after it.
         until("the handler to have caught up", || {
+            let kept = handled.lock().unwrap().len() as u64;
+            kept == 1024 || kept == 1025
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let kept = handled.lock().unwrap().len() as u64;
+        {
             let handled = handled.lock().unwrap();
-            let joined = handled
-                .iter()
-                .filter(|e| matches!(e, Event::Joined(_)))
-                .count() as u64;
-            let lost: u64 = handled
-                .iter()
-                .map(|e| {
-                    if let Event::Dropped(d) = e {
-                        d.count
-                    } else {
-                        0
-                    }
-                })
-                .sum();
-            joined + lost == sent
+            for (n, event) in handled.iter().enumerate() {
+                assert!(
+                    matches!(event, Event::Joined(j) if j.seq == n as u64 + 1),
+                    "{n}: {event:?}"
+                );
+            }
+        }
+        // One more event: the notice comes exactly between the last event kept and it, with the size of the gap.
+        proxy.send(&joined(sent + 1, "Alex"));
+        until("the event after the gap", || {
+            handled.lock().unwrap().len() as u64 == kept + 2
         });
         let handled = handled.lock().unwrap();
-        let lost: u64 = handled
-            .iter()
-            .map(|e| {
-                if let Event::Dropped(d) = e {
-                    d.count
-                } else {
-                    0
-                }
-            })
-            .sum();
         assert!(
-            lost > 0 && lost <= sent - 1024,
-            "the queue holds 1024: {lost} dropped"
+            matches!(&handled[kept as usize], Event::Dropped(d) if d.count == sent - kept),
+            "{:?}",
+            handled[kept as usize]
         );
-        // The first event handled is the first sent: the oldest are kept, the newest dropped.
-        assert!(
-            matches!(&handled[0], Event::Joined(j) if j.seq == 1)
-                || matches!(&handled[1], Event::Joined(j) if j.seq == 1)
-        );
+        assert!(matches!(&handled[kept as usize + 1], Event::Joined(j) if j.seq == sent + 1));
     }
 
     /// A handler that panics loses that event, not the thread.

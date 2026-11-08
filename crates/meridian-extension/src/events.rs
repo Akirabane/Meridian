@@ -71,6 +71,9 @@ pub struct Dropped {
     pub count: u64,
 }
 
+/// The most characters of the name of a method [`Event::Unknown`] keeps.
+pub const MAX_UNKNOWN_METHOD: usize = 64;
+
 /// An event, as an extension reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -93,7 +96,8 @@ impl Event {
             EVENTS_DROPPED => read(params).map(Event::Dropped),
             _ => None,
         };
-        event.unwrap_or_else(|| Event::Unknown(method.to_owned()))
+        // A method this SDK does not know is cleaned and cut: it is a name a reader may log.
+        event.unwrap_or_else(|| Event::Unknown(crate::text::clean(method, MAX_UNKNOWN_METHOD)))
     }
 }
 
@@ -162,6 +166,20 @@ mod tests {
             serde_json::from_value::<LeftReason>(json!("exploded")).unwrap(),
             LeftReason::Other
         );
+    }
+
+    #[test]
+    fn the_name_of_an_unknown_method_is_clean_and_short() {
+        let dirty = format!(
+            "meridian:notification/\u{1b}[31m\n{}\u{202e}",
+            "y".repeat(200)
+        );
+        let Event::Unknown(name) = Event::parse(&dirty, None) else {
+            panic!("not unknown");
+        };
+        assert_eq!(name.chars().count(), MAX_UNKNOWN_METHOD);
+        assert!(name.starts_with("meridian:notification/[31m"), "{name}");
+        assert!(!name.chars().any(|c| c.is_control() || c == '\u{202e}'));
     }
 
     #[test]

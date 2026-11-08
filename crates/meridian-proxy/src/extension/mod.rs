@@ -162,6 +162,12 @@ impl Registry {
         self.services.set_facts(facts);
     }
 
+    /// The bus, for the tests that listen without a connection.
+    #[cfg(test)]
+    pub(crate) fn bus(&self) -> &events::Bus {
+        &self.services.bus
+    }
+
     /// Gives the order that runs a console line the proxy's console. Until it is called it answers that it is not available.
     pub fn serve_console(&self, console: Arc<dyn Console>) {
         self.services.set_console(console);

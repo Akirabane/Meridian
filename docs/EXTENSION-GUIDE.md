@@ -599,7 +599,8 @@ let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match
 - **The handler does not run on the thread that reads the connection**: events wait in a queue of 1024 and a thread of its own, so a slow handler never delays what the
   proxy asks of you. Keep it quick anyway: when the queue is full you lose events.
 - **Events are at most once, in order, and never replayed**: when the proxy's queue for your connection is full it drops the **newest** event and tells you with
-  `Event::Dropped { count }` before the next one; the SDK does the same for its own queue. **After a `Dropped`, and each time your program connects, ask `players()` for who is on
+  `Event::Dropped { count }`, which comes **between the last event you got and the first after the loss** (the proxy writes it when it sees the gap in `seq`; if no event follows the loss you
+  are not told); the SDK does the same for its own queue. An extension that reads nothing at all holds up the proxy's decisions and answers for at most 5 seconds, and then loses its connection. **After a `Dropped`, and each time your program connects, ask `players()` for who is on
   now** (it needs `orders.read`): nothing from before the connection is replayed.
 - **`seq` is the number of the event on this connection** (it starts at 1 and goes up by one for each event the proxy tried to send, the dropped ones included): a gap is a loss.
   `at` is the time in milliseconds since the epoch by the proxy's clock.

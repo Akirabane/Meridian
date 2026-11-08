@@ -929,6 +929,15 @@ fn place(
             server: backend.name.clone(),
             address: peer.ip().to_string(),
         });
+    let mut leaving = Leaving {
+        sessions,
+        open: Some(open),
+        name: name.clone(),
+        uuid,
+        verified,
+        handle: handle.clone(),
+        broke: false,
+    };
     let started = Instant::now();
     let policy = sessions.current_config(config).fallback.clone();
     let mut replace = crate::fallback::replacer(crate::fallback::Context {
@@ -945,20 +954,18 @@ fn place(
         on_kick: policy.on_kick,
         on_crash: policy.on_crash,
     };
-    let broke = match relay.run_with(fallback, &mut replace) {
-        Ok(report) => {
-            info!(
-                "{peer}: {name} ({}) left backend \"{}\" after {:.1} s:                  {} packets, {} bytes to the player; {} packets, {} bytes to the backend",
-                hyphenated(uuid),
-                backend.name,
-                started.elapsed().as_secs_f64(),
-                report.to_client.packets,
-                report.to_client.bytes,
-                report.to_backend.packets,
-                report.to_backend.bytes
-            );
-            false
-        }
+    match relay.run_with(fallback, &mut replace) {
+        Ok(report) => info!(
+            "{peer}: {name} ({}) left backend \"{}\" after {:.1} s: \
+             {} packets, {} bytes to the player; {} packets, {} bytes to the backend",
+            hyphenated(uuid),
+            backend.name,
+            started.elapsed().as_secs_f64(),
+            report.to_client.packets,
+            report.to_client.bytes,
+            report.to_backend.packets,
+            report.to_backend.bytes
+        ),
         Err(e) => {
             warning!(
                 "{peer}: {name} ({}) on backend \"{}\": the session broke after {:.1} s: {e}",
@@ -966,27 +973,52 @@ fn place(
                 backend.name,
                 started.elapsed().as_secs_f64()
             );
-            true
+            leaving.broke = true;
         }
-    };
-    // The session is let go of first, and only then are the extensions told: one that asks who is online finds the player gone. The
-    // reason is the proxy's own when it ended the session (a kick, a replacement, a stop), else the connection's.
-    let ended = open.ended();
-    drop(open);
-    let reason = match ended {
-        Some(EndReason::Kicked) => meridian_extension::events::LeftReason::Kicked,
-        Some(EndReason::Replaced) => meridian_extension::events::LeftReason::Replaced,
-        Some(EndReason::Shutdown) => meridian_extension::events::LeftReason::Shutdown,
-        None if broke => meridian_extension::events::LeftReason::Error,
-        None => meridian_extension::events::LeftReason::Left,
-    };
-    sessions
-        .extensions
-        .emit(|| crate::extension::events::Kind::Left {
-            player: crate::extension::events::Kind::player(&name, uuid, verified),
-            server: handle.backend(),
-            reason,
-        });
+    }
+    // `leaving` goes here: the session is let go of, and the extensions are told.
+}
+
+/// A session's end, told to the extensions that listen **however it ends**: it is the guard of the session, so that "joined, then left"
+/// holds even if the relay panics. The session is let go of first, and only then are the extensions told: one that asks who is online finds
+/// the player gone. The reason is the proxy's own when it ended the session (a kick, a replacement, a stop), else `error` if the relay broke
+/// or panicked, else `left`.
+struct Leaving<'a> {
+    sessions: &'a Sessions,
+    open: Option<Open<'a>>,
+    name: String,
+    uuid: [u8; 16],
+    verified: bool,
+    handle: Handle,
+    /// The relay ended with an error.
+    broke: bool,
+}
+
+impl Drop for Leaving<'_> {
+    fn drop(&mut self) {
+        let ended = self.open.as_ref().and_then(Open::ended);
+        drop(self.open.take());
+        let reason = match ended {
+            Some(EndReason::Kicked) => meridian_extension::events::LeftReason::Kicked,
+            Some(EndReason::Replaced) => meridian_extension::events::LeftReason::Replaced,
+            Some(EndReason::Shutdown) => meridian_extension::events::LeftReason::Shutdown,
+            None if self.broke || std::thread::panicking() => {
+                meridian_extension::events::LeftReason::Error
+            }
+            None => meridian_extension::events::LeftReason::Left,
+        };
+        self.sessions
+            .extensions
+            .emit(|| crate::extension::events::Kind::Left {
+                player: crate::extension::events::Kind::player(
+                    &self.name,
+                    self.uuid,
+                    self.verified,
+                ),
+                server: self.handle.backend(),
+                reason,
+            });
+    }
 }
 
 /// The commands the proxy answers in game for the player of `handle`: a move
@@ -1555,6 +1587,87 @@ pub(crate) mod tests {
         assert_eq!(herobrine.0.ended(), Some(EndReason::Shutdown));
         assert_eq!(alex.0.ended(), Some(EndReason::Kicked));
         assert_eq!(notch.0.ended(), Some(EndReason::Replaced));
+    }
+
+    /// "Joined, then left" holds even when the relay panics: the guard of the session tells the end when it is dropped by the unwinding, once,
+    /// with the reason `error`, and the player is out of the list by then.
+    #[test]
+    fn a_session_whose_relay_panics_is_still_told_to_the_extensions_as_left_with_error() {
+        use meridian_extension::events::{Event, LeftReason};
+        let sessions = Sessions::default();
+        let told_list = sessions.extensions.bus().recording(false);
+        let told = &told_list;
+        let open = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let (_, handle) = sessions.session("Alex").unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _leaving = Leaving {
+                sessions: &sessions,
+                open: Some(open.0),
+                name: "Alex".into(),
+                uuid: offline_uuid("Alex").to_be_bytes(),
+                verified: false,
+                handle,
+                broke: false,
+            };
+            panic!("a relay that fails");
+        }));
+        assert!(outcome.is_err());
+        let limit = Instant::now() + Duration::from_secs(5);
+        while told.lock().unwrap().is_empty() {
+            assert!(Instant::now() < limit, "the end was never told");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let told = told.lock().unwrap().clone();
+        assert_eq!(told.len(), 1, "once: {told:?}");
+        let message: serde_json::Value = serde_json::from_str(&told[0]).unwrap();
+        let Event::Left(left) = Event::parse(
+            message["method"].as_str().unwrap(),
+            Some(&message["params"]),
+        ) else {
+            panic!("{told:?}");
+        };
+        assert_eq!(
+            (left.player.name.as_str(), left.reason),
+            ("Alex", LeftReason::Error)
+        );
+        assert!(
+            sessions.find("Alex").is_none(),
+            "the player is out of the list when it is told"
+        );
+        // Without a panic: `error` when the relay broke, `left` when it did not.
+        for (name, broke, want) in [
+            ("Steve", true, LeftReason::Error),
+            ("Notch", false, LeftReason::Left),
+        ] {
+            let open = connected(&sessions, name, Identity::Unverified(name.to_lowercase()));
+            let (_, handle) = sessions.session(name).unwrap();
+            drop(Leaving {
+                sessions: &sessions,
+                open: Some(open.0),
+                name: name.into(),
+                uuid: offline_uuid(name).to_be_bytes(),
+                verified: false,
+                handle,
+                broke,
+            });
+            let limit = Instant::now() + Duration::from_secs(5);
+            let mut reason = None;
+            while reason.is_none() {
+                assert!(Instant::now() < limit, "{name}'s end was never told");
+                std::thread::sleep(Duration::from_millis(5));
+                reason = told_list.lock().unwrap().iter().find_map(|text| {
+                    let message: serde_json::Value = serde_json::from_str(text).ok()?;
+                    let Event::Left(left) =
+                        Event::parse(message["method"].as_str()?, Some(&message["params"]))
+                    else {
+                        return None;
+                    };
+                    (left.player.name == name).then_some(left.reason)
+                });
+            }
+            assert_eq!(reason, Some(want), "{name}");
+        }
     }
 
     /// The registry lists players in the order they joined, finds them whatever

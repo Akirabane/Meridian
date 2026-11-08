@@ -883,9 +883,9 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
   thread waits on a slow extension. Horizon's management protocol does the same for its
   notifications: a queue and a thread, so that no caller waits on a slow client (Horizon
   `crates/horizon-server/src/management.rs:27-31`, `Clients`).
-- When the queue is full, the newest are dropped and counted, and the next event to go out is
-  `meridian:notification/events/dropped` with the count. An extension that needs to be exact
-  asks `players/list` again.
+- When the queue is full, the newest are dropped and counted, and the first event to go out after the
+  loss is preceded by `meridian:notification/events/dropped` with the size of the gap. An extension that
+  needs to be exact asks `players/list` again.
 - Events are never a decision. An extension that wants to refuse something uses a decision
   point.
 
@@ -906,21 +906,27 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
     it disconnects the player; the others are `left` or `error` by how the relay ended. A reason this version of the SDK does not know is read as `other`.
   - `meridian:notification/events/dropped`: `{at, count}`, with no `seq`.
   The proxy tells an event **after** the session is listed (`joined`) and **after** it is let go of (`left`): an extension that asks `players/list` on `left`
-  finds the player gone. Fields are optional and a reader ignores one it does not know: **protocol 0, no change of version** when one is added.
+  finds the player gone. `left` is told by the session's guard, so it is told once **even if the relay panics** (the reason is then `error`). Fields are optional and a reader ignores one it does not know: **protocol 0, no change of version** when one is added.
 - **What is guaranteed.** At most once, in order for one connection, **never replayed**. Each connection has a queue of its own (`[extension.events] queue`, 256
   by default, 1 to 10 000; an event is under 1 KiB) and **a thread of its own** that writes it, so that an extension that does not read holds that thread and nothing
-  else: no thread of a player and no decision waits for it. When the queue is full **the newest event is dropped**, counted
-  (`meridian_extension_events_dropped_total{extension}`), and the **next event written is preceded by `events/dropped` with the count**. If no event follows, the extension does not
-  learn of the loss: **it asks `players/list` again** (`orders.read`) after an `events/dropped`, and after each connection, because **nothing is replayed**: what was queued is thrown
-  away with its connection, and nothing is queued while the extension is not connected. An extension that does not read at all has its connection closed by the write timeout, as any
-  other write does. Two events about different players have no order between them; for one player `joined` comes first and `left` last, with one known exception: a move that ends at the
+  else: **no thread of a player and no queue of the decisions waits for it** (but see the socket, below). When the queue is full **the newest event is dropped**, counted
+  (`meridian_extension_events_dropped_total{extension}`), and the gap is told **where it is**: the writer keeps the `seq` of the last event it wrote, and before it writes an event whose `seq` is not
+  the one after it, it writes `events/dropped` with `count` = the size of the gap, so the notice comes exactly between the last event kept and the first one after the loss (`seq` is taken for every
+  event offered, the dropped ones included). If no event follows the loss, the extension does not learn of it: **it asks `players/list` again** (`orders.read`) after an `events/dropped`, and after
+  each connection, because **nothing is replayed**: what was queued is thrown away with its connection, and nothing is queued while the extension is not connected.
+  **The events and the decisions share one socket and its write lock.** The events have a queue and a thread of their own, but a write that blocks (an extension that does not read) holds that lock for
+  the write timeout, **5 seconds**, and a decision or an answer to an order that wants to write waits for it; at the timeout the connection is closed (as any write that fails closes it). So an extension
+  that reads nothing holds up the decisions it is asked for, for at most 5 seconds, and then loses its connection; the on-error policies of the decisions apply meanwhile. Two events about different players have no order between them; for one player `joined` comes first and `left` last, with one known exception: a move that ends at the
   very moment the player leaves can be told after `left` (it will be a `players/moved` event, not yet built).
 - **The cost.** An event is a change of state of a session, never traffic: **nothing is on the path of the packets**. With no extension listening, an emission is **one relaxed
   atomic load** and the event is not even built (it is described by a closure that is not called). With listeners it is made once and handed to each queue with a `try_send`, which never
   waits, **outside any lock of the sessions**. `cargo test -p meridian-proxy -- --ignored --nocapture the_cost_of_an_event` measures an emission with and without a listener.
 - **On the SDK's side** (`Extension::on_event`): the handler **never runs on the thread that reads the connection**. Events go through a queue of 1024 and a thread of their own; a slow handler
   delays nothing the proxy asks. When that queue is full the newest event is dropped and the handler gets an `Event::Dropped` before the next one (the same event as the proxy's own, with the
-  SDK's clock in `at`). A handler that panics loses that event and not the thread. `Event::parse` never fails: a method the SDK does not know, or params that are not its shape, is `Event::Unknown`.
+  SDK's clock in `at`). The SDK numbers each event as it offers it to its queue, and the thread tells the gap the same way the proxy does: before an event whose number is not the one after the last it
+  handed over, a local `Event::Dropped` with the size of the gap (so, again, where the loss is, and only once an event follows it). A handler that panics loses that event and not the thread. `Event::parse` never
+  fails: a method the SDK does not know, or params that are not its shape, is `Event::Unknown`, **with the name of the method cleaned of control and direction characters and cut to 64 characters**, since a
+  program may log it.
 - **Metrics**: `meridian_extension_events_total{extension,event}` (written) and `meridian_extension_events_dropped_total{extension}`.
 
 ## 7. Security, data and logs

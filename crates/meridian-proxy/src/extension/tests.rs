@@ -4491,7 +4491,7 @@ mod the_events {
     /// A queue that is full drops the **newest**, counts it, the number is taken all the same (a gap is a loss), and the next event out is
     /// preceded by `events/dropped`.
     #[test]
-    fn a_full_queue_drops_the_newest_counts_them_and_tells_before_the_next_event() {
+    fn a_full_queue_drops_the_newest_counts_them_and_tells_the_gap_where_it_is() {
         let (fake, registry, link, _folder) = listening(ASKED, ASKED, |settings| {
             settings.events_queue = 2;
         });
@@ -4507,37 +4507,71 @@ mod the_events {
         }
         assert_eq!(link.stats().events_dropped(), 7);
         link.event_hold.on.store(false, Ordering::SeqCst);
-        let told = wait_for(&fake, 4);
-        // `dropped` first (the writer tells before the next event that goes out), then what was kept: 1, 2 and 3.
-        assert_eq!(told[0].0, "meridian:notification/events/dropped");
-        assert_eq!(told[0].1["count"], 7);
-        assert!(
-            told[0].1.get("seq").is_none(),
-            "it has no number: the next event's shows the gap"
-        );
-        let seqs: Vec<u64> = told[1..]
+        let told = wait_for(&fake, 3);
+        // What was kept is written as it was, with no notice among them: the oldest are kept and the newest dropped (4 to 10 are lost).
+        let seqs: Vec<u64> = told
             .iter()
             .map(|(_, p)| p["seq"].as_u64().unwrap())
             .collect();
-        assert_eq!(
-            seqs,
-            [1, 2, 3],
-            "the oldest are kept and the newest dropped: 4 to 10 are lost"
-        );
-        // The next event after that has the number that follows the lost ones: the gap is the loss.
+        assert_eq!(seqs, [1, 2, 3], "{told:?}");
+        assert!(told.iter().all(|(m, _)| m.ends_with("players/joined")));
+        // The next event is the first after the gap: the notice comes **exactly between** the last event kept and it, with the size of the
+        // gap, and the event after it has the number that follows the lost ones.
         registry.emit(|| joined("later"));
         let told = wait_for(&fake, 5);
-        assert_eq!(told[4].1["seq"], 11);
-        assert_eq!(told.len(), 5, "and `dropped` was told once");
-        assert_eq!(link.stats().events_sent("players/joined"), 4);
+        assert_eq!(
+            told[3].0, "meridian:notification/events/dropped",
+            "{told:?}"
+        );
+        assert_eq!(told[3].1["count"], 7);
+        assert!(
+            told[3].1.get("seq").is_none(),
+            "it has no number: the next event's shows the gap"
+        );
+        assert_eq!(
+            (told[4].0.as_str(), told[4].1["seq"].as_u64()),
+            ("meridian:notification/players/joined", Some(11))
+        );
+        assert_eq!(told.len(), 5, "and the notice was told once");
+        // Told once: more events with no gap tell nothing more.
+        registry.emit(|| joined("again"));
+        let told = wait_for(&fake, 6);
+        assert_eq!(told[5].1["seq"], 12);
+        assert_eq!(link.stats().events_sent("players/joined"), 5);
         let mut page = String::new();
         registry.render(&mut page);
         for line in [
-            "meridian_extension_events_total{extension=\"perms\",event=\"players/joined\"} 4",
+            "meridian_extension_events_total{extension=\"perms\",event=\"players/joined\"} 5",
             "meridian_extension_events_dropped_total{extension=\"perms\"} 7",
         ] {
             assert!(page.contains(line), "{line}\n{page}");
         }
+    }
+
+    /// With nobody listening an emission does not even look at the list of listeners: a thread that holds that list does not hold the one
+    /// that emits (the flag is what spares it the lock).
+    #[test]
+    fn with_nobody_listening_an_emission_does_not_wait_for_the_list_of_listeners() {
+        let registry = Arc::new(Registry::default());
+        let held = registry.services.bus.hold_the_list();
+        let done = Arc::new(AtomicBool::new(false));
+        let emitter = {
+            let (registry, done) = (Arc::clone(&registry), Arc::clone(&done));
+            std::thread::spawn(move || {
+                registry.emit(|| joined("Alex"));
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let limit = Instant::now() + Duration::from_secs(2);
+        while !done.load(Ordering::SeqCst) && Instant::now() < limit {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            done.load(Ordering::SeqCst),
+            "the emission waited for the list while nobody listened"
+        );
+        drop(held);
+        emitter.join().unwrap();
     }
 
     /// An extension that does not read never holds the thread that makes the events: a hundred thousand of them are made, and

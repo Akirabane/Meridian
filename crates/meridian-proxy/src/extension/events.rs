@@ -8,8 +8,13 @@
 //!
 //! What is promised, and what is not: at most once, in order for one connection, never replayed (a queue is emptied when its
 //! connection ends, and nothing is queued for an extension that is not connected). When the queue of a connection is full the **newest**
-//! event is dropped and counted, and the next event written is preceded by `events/dropped` with the count. `seq` is taken for every event
-//! offered to a connection, the dropped ones included, so the extension sees a loss as a gap.
+//! event is dropped and counted. `seq` is taken for every event offered to a connection, the dropped ones included, so the extension sees a
+//! loss as a gap, and **the writer tells the gap where it is**: before it writes an event whose `seq` is not the one after the last it wrote, it
+//! writes `events/dropped` with the size of the gap, so the notice comes exactly between the last event kept and the first one after the loss.
+//!
+//! The events and the decisions share the connection's socket and its write lock: the events have a queue and a thread of their own, but a
+//! write that blocks (an extension that does not read) holds that lock for the write timeout (5 seconds), and a decision that wants to write
+//! waits for it. At the timeout the connection is closed.
 
 use super::link::Link;
 use super::stats::Stats;
@@ -20,7 +25,7 @@ use meridian_extension::events::{
 };
 use meridian_extension::wire;
 use meridian_websocket::Writer;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,13 +112,12 @@ struct Queued {
 }
 
 /// One connection that is told events.
-struct Sink {
+pub(super) struct Sink {
     /// The number of the last event offered, taken and handed to the queue under one lock so that the numbers go up in the order of
     /// the queue.
     seq: Mutex<u64>,
     sender: SyncSender<Queued>,
-    /// How many events were dropped since the writer told the extension.
-    dropped: Arc<AtomicU64>,
+    /// Counts the events dropped for the metric: the extension is told by the gap of `seq`, not by this.
     stats: Arc<Stats>,
 }
 
@@ -130,7 +134,6 @@ impl Sink {
         match self.sender.try_send(queued) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
                 self.stats.event_dropped();
             }
             // The thread that writes ended: the connection is closing, and there is nobody to tell.
@@ -182,6 +185,36 @@ impl Bus {
         self.listening.store(!sinks.is_empty(), Ordering::Relaxed);
     }
 
+    /// For the tests: a listener that is not a connection. What it is told is written as the text of the notifications (the address
+    /// only if `with_address`), in the order it came, in the returned list.
+    #[cfg(test)]
+    pub(crate) fn recording(&self, with_address: bool) -> Arc<Mutex<Vec<String>>> {
+        let (sender, inbox) = mpsc::sync_channel::<Queued>(10_000);
+        let told = Arc::new(Mutex::new(Vec::new()));
+        {
+            let told = Arc::clone(&told);
+            std::thread::spawn(move || {
+                for queued in inbox {
+                    let text = queued.kind.render(queued.seq, queued.at, with_address);
+                    told.lock().unwrap_or_else(|e| e.into_inner()).push(text);
+                }
+            });
+        }
+        let sink = Arc::new(Sink {
+            seq: Mutex::new(0),
+            sender,
+            stats: Arc::default(),
+        });
+        self.add(&sink);
+        told
+    }
+
+    /// For the tests: the bus's list held, so that whoever wants it waits.
+    #[cfg(test)]
+    pub(super) fn hold_the_list(&self) -> std::sync::MutexGuard<'_, Vec<Arc<Sink>>> {
+        self.sinks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// How many connections listen (for the tests).
     #[cfg(test)]
     pub(super) fn listeners(&self) -> usize {
@@ -230,33 +263,33 @@ impl Subscription {
     /// a link granted `events`.
     pub(super) fn start(link: &Arc<Link>, writer: Writer) -> std::io::Result<Self> {
         let (sender, inbox) = mpsc::sync_channel::<Queued>(link.settings.events_queue.max(1));
-        let dropped = Arc::new(AtomicU64::new(0));
         let with_address = link.is_granted(meridian_config::ADDRESSES);
         let (name, stats) = (link.name().to_owned(), Arc::clone(link.stats()));
         #[cfg(test)]
         let hold = Arc::clone(&link.event_hold);
         {
-            let (dropped, stats, name) = (Arc::clone(&dropped), Arc::clone(&stats), name.clone());
+            let (stats, name) = (Arc::clone(&stats), name.clone());
             std::thread::Builder::new()
                 .name(format!("extension-{name}-events"))
                 .spawn(move || {
+                    // The number of the last event written: the first event after a gap is the one that tells it.
+                    let mut last = 0;
                     for queued in inbox {
                         #[cfg(test)]
                         hold.pause();
-                        // The events that were dropped are told before the next one that goes out.
-                        let lost = dropped.swap(0, Ordering::Relaxed);
-                        if lost > 0 {
+                        if queued.seq != last + 1 {
                             let text = wire::notification(
                                 EVENTS_DROPPED,
                                 &Dropped {
                                     at: queued.at,
-                                    count: lost,
+                                    count: queued.seq - last - 1,
                                 },
                             );
                             if write(&writer, &name, &text).is_err() {
                                 break;
                             }
                         }
+                        last = queued.seq;
                         let text = queued.kind.render(queued.seq, queued.at, with_address);
                         if write(&writer, &name, &text).is_err() {
                             break;
@@ -268,7 +301,6 @@ impl Subscription {
         let sink = Arc::new(Sink {
             seq: Mutex::new(0),
             sender,
-            dropped,
             stats,
         });
         link.events().add(&sink);
