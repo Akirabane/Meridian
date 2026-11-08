@@ -1595,3 +1595,363 @@ mod own_commands {
         drop(extension);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The extension's orders to the proxy (docs/EXTENSIONS.md, section 5): the client half
+
+mod orders {
+    use super::*;
+    use crate::orders::PERMISSIONS_INVALIDATE;
+    use client::{MAX_WAITING, OrderError};
+    use std::thread::JoinHandle;
+
+    const ALEX: &str = "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c";
+    const REVOKE: &str = "meridian:test/revoke";
+
+    /// An extension whose orders wait `timeout`, running, with a stand-in proxy that has done the hello.
+    fn up(timeout: Duration) -> (Running, client::Proxy, Proxy) {
+        let lines = Arc::new(Lines::default());
+        let extension = echoing(&lines).order_timeout(timeout);
+        let handle = extension.proxy();
+        let running = start(extension);
+        let proxy = Proxy::up(running.local_addr());
+        until("the connection", || handle.is_connected());
+        (running, handle, proxy)
+    }
+
+    /// The order the extension sent, as the stand-in proxy reads it: its id and its params.
+    fn read_order(proxy: &mut Proxy) -> (Id, Option<Value>) {
+        match message(&mut proxy.socket) {
+            Message::Request {
+                id: Some(id),
+                method,
+                params,
+            } => {
+                assert_eq!(method, PERMISSIONS_INVALIDATE);
+                (id, params)
+            }
+            other => panic!("not an order: {other:?}"),
+        }
+    }
+
+    fn answer(proxy: &mut Proxy, id: &Id, outcome: Result<Value, RpcError>) {
+        proxy.send(&match outcome {
+            Ok(result) => wire::result(id, &result),
+            Err(error) => wire::error(Some(id), &error),
+        });
+    }
+
+    /// `invalidate_all` on a thread of its own, so that the stand-in proxy can read it and answer.
+    fn all_in_a_thread(handle: &client::Proxy) -> JoinHandle<Result<(), OrderError>> {
+        let handle = handle.clone();
+        std::thread::spawn(move || handle.invalidate_all())
+    }
+
+    #[test]
+    fn an_order_goes_on_the_connection_with_an_id_of_its_own_and_the_answer_goes_to_the_caller() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let order = {
+            let handle = handle.clone();
+            // In capitals and with no hyphens, as a program may have it: the proxy gets the one spelling.
+            let written = ALEX.replace('-', "").to_ascii_uppercase();
+            std::thread::spawn(move || handle.invalidate_player(&written))
+        };
+        let (id, params) = read_order(&mut proxy);
+        assert_eq!(id, Id::Number(1));
+        // The bytes of the golden file, as a value: what the proxy reads is what the SDK writes.
+        let golden: Value = serde_json::from_str(&golden("invalidate.request.json")).unwrap();
+        assert_eq!(params.unwrap(), golden["params"]);
+        answer(&mut proxy, &id, Ok(json!({"ok": true})));
+        assert_eq!(order.join().unwrap(), Ok(()));
+        // The next has the next number, and `all` is `{"all": true}`.
+        let order = all_in_a_thread(&handle);
+        let (id, params) = read_order(&mut proxy);
+        assert_eq!(id, Id::Number(2));
+        assert_eq!(params.unwrap(), json!({"all": true}));
+        answer(&mut proxy, &id, Ok(json!({"ok": true})));
+        assert_eq!(order.join().unwrap(), Ok(()));
+    }
+
+    /// The ids of the two directions are independent: the proxy's request 1 and the extension's order 1 are two
+    /// requests, and an answer is told from a request by what it holds.
+    #[test]
+    fn an_id_the_proxy_uses_for_its_own_request_is_not_the_one_of_an_order() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let order = all_in_a_thread(&handle);
+        let (order_id, _) = read_order(&mut proxy);
+        assert_eq!(order_id, Id::Number(1));
+        // The proxy asks the extension for something with the same number, while the order waits.
+        let sent = json!({"n": 1});
+        proxy.send(&wire::request(1, ECHO, Some(&sent)));
+        match message(&mut proxy.socket) {
+            Message::Response { id, outcome } => {
+                assert_eq!((id, outcome), (Some(Id::Number(1)), Ok(sent)));
+            }
+            other => panic!("not the answer to the proxy's request: {other:?}"),
+        }
+        // The order is still waiting, and is answered by its own answer.
+        answer(&mut proxy, &order_id, Ok(json!({"ok": true})));
+        assert_eq!(order.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn what_the_proxy_refuses_is_told_with_what_to_do_about_it() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        for (error, retry, not_granted, ran) in [
+            (
+                RpcError::new(code::OVER_BUDGET, "over the budget of orders"),
+                true,
+                false,
+                false,
+            ),
+            (
+                RpcError::new(code::TOO_MANY_RUNNING, "too many orders running"),
+                true,
+                false,
+                false,
+            ),
+            (
+                RpcError::new(code::METHOD_NOT_FOUND, "method not found"),
+                false,
+                true,
+                false,
+            ),
+            (
+                RpcError::new(code::INVALID_PARAMS, "give \"player\" or \"all\""),
+                false,
+                false,
+                false,
+            ),
+            // It failed while it ran: it may have been done, and it is not "a moment's" refusal.
+            (
+                RpcError::new(code::INTERNAL_ERROR, "the order failed"),
+                false,
+                false,
+                true,
+            ),
+        ] {
+            let order = all_in_a_thread(&handle);
+            let (id, _) = read_order(&mut proxy);
+            answer(&mut proxy, &id, Err(error.clone()));
+            let failed = order.join().unwrap().unwrap_err();
+            assert_eq!(failed, OrderError::Refused(error.clone()));
+            assert_eq!(
+                (
+                    failed.retry_later(),
+                    failed.is_not_granted(),
+                    failed.may_have_run()
+                ),
+                (retry, not_granted, ran),
+                "{error:?}"
+            );
+            assert!(failed.to_string().contains(&error.message), "{failed}");
+        }
+        // An answer that is not `{"ok": true}` is not what the order defines.
+        for result in [json!({"ok": false}), json!({}), json!("done"), json!(null)] {
+            let order = all_in_a_thread(&handle);
+            let (id, _) = read_order(&mut proxy);
+            answer(&mut proxy, &id, Ok(result));
+            assert!(matches!(
+                order.join().unwrap(),
+                Err(OrderError::BadAnswer(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn an_order_that_is_not_valid_is_refused_before_anything_is_sent() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        for bad in ["", "not an id", "0a2ea4ba-bced-39d2-80e1-1ad51a0e925g"] {
+            assert!(matches!(
+                handle.invalidate_player(bad),
+                Err(OrderError::Invalid(_))
+            ));
+        }
+        // Nothing was written: the next thing the stand-in proxy reads is the answer to its own request.
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 1}))).unwrap(),
+            json!({"k": 1})
+        );
+    }
+
+    #[test]
+    fn an_order_that_gets_no_answer_ends_at_its_time_and_a_late_answer_is_dropped() {
+        let (_running, handle, mut proxy) = up(Duration::from_millis(150));
+        let began = Instant::now();
+        let order = all_in_a_thread(&handle);
+        let (late, _) = read_order(&mut proxy);
+        assert_eq!(order.join().unwrap(), Err(OrderError::Timeout));
+        assert!(began.elapsed() < Duration::from_secs(3));
+        // The answer comes after all: nobody waits for it, and nothing breaks. Nor does an answer for an id nobody
+        // used, or for an id that is a string.
+        answer(&mut proxy, &late, Ok(json!({"ok": true})));
+        answer(&mut proxy, &Id::Number(999), Ok(json!({"ok": true})));
+        answer(&mut proxy, &Id::Text("x".into()), Ok(json!({"ok": true})));
+        assert_eq!(proxy.call(ECHO, Some(&json!({}))).unwrap(), json!({}));
+        // The next order is a new request, and is answered.
+        let order = all_in_a_thread(&handle);
+        let (id, _) = read_order(&mut proxy);
+        assert_eq!(id, Id::Number(2));
+        answer(&mut proxy, &id, Ok(json!({"ok": true})));
+        assert_eq!(order.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn with_no_proxy_connected_an_order_ends_at_once_and_does_not_wait() {
+        let extension = echoing(&Arc::new(Lines::default()));
+        let handle = extension.proxy();
+        // The extension does not listen yet.
+        let began = Instant::now();
+        assert_eq!(handle.invalidate_all(), Err(OrderError::NotConnected));
+        assert!(!handle.is_connected());
+        let running = start(extension);
+        // It listens, and no proxy has connected.
+        assert_eq!(handle.invalidate_all(), Err(OrderError::NotConnected));
+        assert!(began.elapsed() < Duration::from_secs(1));
+        // The handle of the running extension is the same one.
+        let _proxy = Proxy::up(running.local_addr());
+        until("the connection", || running.proxy().is_connected());
+        assert!(handle.is_connected());
+    }
+
+    /// The connection ends while an order waits for its answer: it ends then, not at its time (30 seconds here), the
+    /// next find no proxy, and when a proxy connects again the orders go and the numbers go on.
+    #[test]
+    fn when_the_connection_ends_the_orders_that_wait_end_at_once_and_the_next_find_no_proxy() {
+        let (running, handle, mut proxy) = up(Duration::from_secs(30));
+        let began = Instant::now();
+        let order = all_in_a_thread(&handle);
+        let (first, _) = read_order(&mut proxy);
+        assert_eq!(first, Id::Number(1));
+        drop(proxy);
+        assert_eq!(order.join().unwrap(), Err(OrderError::Disconnected));
+        assert!(began.elapsed() < Duration::from_secs(5));
+        until("the connection to be seen ended", || !handle.is_connected());
+        assert_eq!(handle.invalidate_all(), Err(OrderError::NotConnected));
+        // The proxy connects again.
+        let mut proxy = Proxy::up(running.local_addr());
+        until("the connection again", || handle.is_connected());
+        let order = all_in_a_thread(&handle);
+        let (id, _) = read_order(&mut proxy);
+        // The count goes on, so that an answer of the connection before can never be taken for this one's.
+        assert_eq!(id, Id::Number(2));
+        answer(&mut proxy, &id, Ok(json!({"ok": true})));
+        assert_eq!(order.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn at_most_the_orders_there_are_places_for_wait_and_one_more_is_refused_at_once() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(30));
+        let waiting: Vec<_> = (0..MAX_WAITING).map(|_| all_in_a_thread(&handle)).collect();
+        // All of them are written: they are all in the table of those that wait.
+        for _ in 0..MAX_WAITING {
+            let _ = read_order(&mut proxy);
+        }
+        let began = Instant::now();
+        let refused = handle.invalidate_all().unwrap_err();
+        assert_eq!(refused, OrderError::TooManyWaiting);
+        assert!(refused.retry_later());
+        assert!(began.elapsed() < Duration::from_secs(1));
+        // The connection ends, and every one of them is told.
+        drop(proxy);
+        for order in waiting {
+            assert_eq!(order.join().unwrap(), Err(OrderError::Disconnected));
+        }
+    }
+
+    /// A handler can give an order and wait for the answer: the thread that reads the connection is not the one that
+    /// waits, so it is free to hand the answer over.
+    #[test]
+    fn a_handler_can_give_an_order_and_wait_for_its_answer() {
+        let lines = Arc::new(Lines::default());
+        let extension = echoing(&lines).order_timeout(Duration::from_secs(10));
+        let handle = extension.proxy();
+        let extension = extension.register(
+            REVOKE,
+            "decide.command",
+            DiscoverMethod::new(REVOKE),
+            move |_| {
+                handle
+                    .invalidate_player(ALEX)
+                    .map(|()| json!({"revoked": true}))
+                    .map_err(|e| RpcError::new(code::INTERNAL_ERROR, e.to_string()))
+            },
+        );
+        let running = start(extension);
+        let mut proxy = Proxy::up(running.local_addr());
+        proxy.send(&wire::request(5, REVOKE, None::<&Value>));
+        // The handler gives its order while the proxy's request waits for its answer.
+        let (id, params) = read_order(&mut proxy);
+        assert_eq!(params.unwrap(), json!({"player": ALEX}));
+        answer(&mut proxy, &id, Ok(json!({"ok": true})));
+        match message(&mut proxy.socket) {
+            Message::Response { id, outcome } => {
+                assert_eq!(
+                    (id, outcome),
+                    (Some(Id::Number(5)), Ok(json!({"revoked": true})))
+                );
+            }
+            other => panic!("not the handler's answer: {other:?}"),
+        }
+        // And when the proxy refuses, the handler knows, and says so in its answer.
+        proxy.send(&wire::request(6, REVOKE, None::<&Value>));
+        let (id, _) = read_order(&mut proxy);
+        answer(
+            &mut proxy,
+            &id,
+            Err(RpcError::new(
+                code::OVER_BUDGET,
+                "over the budget of orders",
+            )),
+        );
+        match message(&mut proxy.socket) {
+            Message::Response {
+                outcome: Err(error),
+                ..
+            } => assert!(error.message.contains("over the budget"), "{error:?}"),
+            other => panic!("not the handler's error: {other:?}"),
+        }
+    }
+
+    /// The text the proxy sends in a refusal is its own, up to 256 KiB, and an error may be written to a log: what is
+    /// shown is cut and has no line break and no control character.
+    #[test]
+    fn what_the_proxy_said_in_a_refusal_is_cleaned_and_cut_when_it_is_shown() {
+        let said = format!("first line\nsecond\r\u{1b}[31m{}", "x".repeat(100_000));
+        let shown = OrderError::Refused(RpcError::new(code::INVALID_PARAMS, said)).to_string();
+        assert!(shown.len() < 400, "{} bytes", shown.len());
+        assert!(
+            !shown.chars().any(char::is_control) && shown.contains("first line"),
+            "{shown:?}"
+        );
+        assert!(shown.ends_with("(-32602)"), "{shown:?}");
+    }
+
+    /// The places of the orders that wait are given back when an order ends however it ends: 64 that time out leave
+    /// none taken, and 64 more are accepted.
+    #[test]
+    fn the_places_of_the_orders_that_timed_out_are_given_back() {
+        let (_running, handle, mut proxy) = up(Duration::from_millis(100));
+        for round in 0..2 {
+            let waiting: Vec<_> = (0..MAX_WAITING).map(|_| all_in_a_thread(&handle)).collect();
+            // All sent, none answered: they time out.
+            for _ in 0..MAX_WAITING {
+                let _ = read_order(&mut proxy);
+            }
+            for order in waiting {
+                assert_eq!(
+                    order.join().unwrap(),
+                    Err(OrderError::Timeout),
+                    "round {round}"
+                );
+            }
+            assert_eq!(handle.0.waiting(), 0, "round {round}");
+        }
+        // And one more is accepted: it is sent.
+        let order = all_in_a_thread(&handle);
+        let (id, _) = read_order(&mut proxy);
+        answer(&mut proxy, &id, Ok(json!({"ok": true})));
+        assert_eq!(order.join().unwrap(), Ok(()));
+        assert_eq!(handle.0.waiting(), 0);
+    }
+}

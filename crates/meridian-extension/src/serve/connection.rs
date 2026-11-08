@@ -143,7 +143,10 @@ fn connection(stream: TcpStream, shared: &Arc<Shared>) {
         text::clean(&proxy, 64),
         SUPPORTED[SUPPORTED.len() - 1]
     ));
+    shared.extension.client.connected(writer.clone());
     let ended = read_requests(&mut reader, &writer, shared);
+    // Before anything else: the orders that wait for an answer that will not come end now, not at their time.
+    shared.extension.client.disconnected();
     match ended {
         Ok(()) => log.info("the proxy is disconnected"),
         Err(why) => log.warn(&format!("the connection ended: {why}")),
@@ -467,8 +470,12 @@ fn dispatch(text: &str, writer: &Writer, shared: &Arc<Shared>) {
                 ),
             );
         }
-        // The extension asks the proxy nothing yet, and version 0 has no notification.
-        Ok(Message::Response { .. } | Message::Request { id: None, .. }) => {}
+        // The answer to an order of the extension's, for the request that waits for it (if one still does).
+        Ok(Message::Response { id, outcome }) => {
+            shared.extension.client.answered(id.as_ref(), outcome)
+        }
+        // Version 0 has no notification from the proxy.
+        Ok(Message::Request { id: None, .. }) => {}
         Ok(Message::Request {
             id: Some(id),
             method: name,

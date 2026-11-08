@@ -1856,6 +1856,84 @@ groups = ["nobody"]
         assert_eq!(ranker.asked(), 2);
     }
 
+    /// The whole way, with the SDK: the extension gives the order with its `Proxy` handle, over the real
+    /// connection, and the proxy forgets.
+    #[test]
+    fn an_extension_that_gives_the_order_with_its_sdk_makes_the_proxy_forget() {
+        let (ranker, _sessions, hook, _link) = kept_for_a_minute();
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 1);
+        let proxy = ranker.running.proxy();
+        // One player, then everyone; each time the proxy asks again, once.
+        assert_eq!(proxy.invalidate_player(ALEX), Ok(()));
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 2);
+        assert_eq!(proxy.invalidate_all(), Ok(()));
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 3);
+        // Someone else: what is kept for Alex stays.
+        assert_eq!(
+            proxy.invalidate_player("02020202-0202-0202-0202-020202020202"),
+            Ok(())
+        );
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 3);
+    }
+
+    /// The refusals of the real dispatcher, as the SDK of the extension tells them: the capability the operator did not
+    /// grant is the real `-32601`, and a spent budget is the real `-32001`, which a moment later is not any more.
+    #[test]
+    fn what_the_dispatcher_refuses_reaches_the_sdk_as_what_it_is() {
+        // The extension asks for `decide.command` (it has a handler for it) and the operator grants it `orders.read`
+        // only: its order is not one it may give.
+        let ranker = ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow));
+        let mut ungranted = ranker.extension(OnError::Default, 1000, 300);
+        ungranted.grant = vec!["orders.read".into()];
+        let config = config_with(ungranted);
+        let sessions = sessions_for(&config);
+        let proxy = ranker.running.proxy();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !proxy.is_connected() {
+            assert!(Instant::now() < limit, "the extension never connected");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let refused = proxy.invalidate_all().unwrap_err();
+        assert!(refused.is_not_granted(), "{refused}");
+        assert!(
+            !refused.retry_later() && !refused.may_have_run(),
+            "{refused}"
+        );
+        drop(sessions);
+
+        // Granted, with a budget of one order and a rate of one a second: the second is over it.
+        let ranker = self::ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow));
+        let mut tight = ranker.extension(OnError::Default, 1000, 300);
+        tight.orders = meridian_config::Orders {
+            rate_per_second: 1,
+            burst: 1,
+            max_running: 8,
+        };
+        let config = config_with(tight);
+        let sessions = sessions_for(&config);
+        let proxy = ranker.running.proxy();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !proxy.is_connected() {
+            assert!(Instant::now() < limit, "the extension never connected");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(proxy.invalidate_all(), Ok(()));
+        let over = proxy.invalidate_all().unwrap_err();
+        assert!(over.retry_later() && !over.may_have_run(), "{over}");
+        assert!(over.to_string().contains("-32001"), "{over}");
+        // A moment later the budget has a token again.
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(proxy.invalidate_all(), Ok(()));
+        drop(sessions);
+    }
+
     #[test]
     fn an_answer_that_was_on_its_way_when_the_extension_asked_to_forget_the_player_is_not_kept() {
         let ranker = ranker_after(Duration::from_millis(300), |request| {

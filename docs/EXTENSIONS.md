@@ -5,9 +5,9 @@ decides: whether a player may enter, whether they may use a proxy command, and w
 they go to. Part of it is built, and the pull requests of section 10 follow the rest. Built: the
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
-dispatcher of the orders with the first one, `permissions/invalidate` (5); the "As built" paragraphs of 4.3, 4.4
-and 5 say what the code does where this page leaves a choice open. Not built: the other orders (5), the client
-half of the SDK that sends them, and the events the proxy sends the extension (6).
+dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
+orders (8.1); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page leaves a
+choice open. Not built: the other orders (5) and the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -847,7 +847,7 @@ capability, and a request without it is answered `-32601`, as if the method did 
   budget is a token bucket per extension, kept while the proxy runs (a new connection does not refill
   it); `rate-per-second` tokens come back each second, up to `burst`.
 - **`rpc.discover`** of the proxy lists the orders the connection was granted the capability of, and
-  nothing for the ones it was not.
+  nothing for the ones it was not. The SDK sends them with a `Proxy` handle (8.1).
 - **`meridian:permissions/invalidate`** (capability `decide.command`) takes exactly one of
   `{"player": "<unique id>"}` (with or without hyphens, in either case) or `{"all": true}`, and answers
   `{"ok": true}`. It makes the proxy forget the permissions it kept of the extension's answers
@@ -977,6 +977,39 @@ pub enum Auth         { Verified, Unverified }
 pub struct Player     { pub name: String, pub uuid: Uuid, pub auth: Auth, pub server: Option<String>,
                         pub address: Option<IpAddr> }
 ```
+
+**As built, for the orders** (`meridian-extension/src/serve/client.rs`). The trait sketch above puts a `&Proxy` in
+the argument of each method; the SDK's handlers are closures registered one by one (`on_login`, `on_command`...)
+and keep their signatures, so the handle is made apart and given to the closures that need it:
+`let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
+is connected its orders end with `NotConnected`.
+
+- **Methods.** `Proxy::invalidate_player(&str)` and `Proxy::invalidate_all()`, for `permissions/invalidate`; the
+  unique id is checked and given its one spelling before anything is sent (a text that is not an id is
+  `Invalid`, and nothing goes out). The other orders come with their PRs.
+- **Ids.** Each order has a number of its own, counted up for as long as the extension runs (**not** started
+  again at a new connection, so that no answer of an older connection can be taken for a newer order). The
+  proxy's numbers and the extension's are two sequences, as 2.1 says: an answer is told from a request by what
+  it holds, and the proxy's request 1 and the extension's order 1 do not meet.
+- **Waiting.** An order waits for its answer on the thread that gave it, up to `order_timeout` (5 s by
+  default), and a handler may give an order: the thread that reads the connection is another, and is free to hand
+  the answer over. At most 64 orders wait at once; one more is `TooManyWaiting` at once, not queued. An answer
+  that comes after its order gave up, or for a number nobody used, is dropped.
+- **End of the connection.** The orders that wait end with `Disconnected` **at once**, before the SDK waits
+  for the requests that are running, and the next are `NotConnected` until a proxy connects again. Nothing is
+  retried by the SDK: after `Timeout` or `Disconnected` the order may or may not have been done.
+- **Errors.** `Refused(RpcError)` carries what the proxy answered, with `is_not_granted()` (`-32601`: the capability
+  was not granted or not asked for) and `retry_later()` (`-32001` budget spent, `-32002` places taken, or too many
+  waiting). **In `-32601`, `-32602`, `-32001` and `-32002` the order did not run**, so asking again is always safe.
+  **`-32603` ("the order failed") is not like them**: the proxy's handler panicked or its thread could not start
+  while the order ran, so it **may have been done**. `may_have_run()` is true for it, for a timeout, for a
+  connection that ended or broke while the order waited, for a write that failed and for an answer that is not
+  what the order defines. Asking again after these is harmless for an order that has the same effect when done
+  twice (`permissions/invalidate`: forgetting twice is forgetting once), and for another order it is for the
+  extension to look first. With no proxy connected (`NotConnected`) nothing was sent: ask again when it has
+  connected. An extension that must have a rights change forgotten (5) asks again until it is answered, a
+  bounded number of times. What the proxy said in a refusal is its own text (up to 256 KiB): `Display` cleans it
+  of line breaks and control characters and cuts it to 200 characters.
 
 - Each method runs on one of the SDK's threads. The SDK keeps the deadline. An answer that would
   arrive after the proxy's timeout is not sent, and the SDK logs that it was late.

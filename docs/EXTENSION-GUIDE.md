@@ -377,6 +377,61 @@ let extension = Extension::new("parties", env!("CARGO_PKG_VERSION"), token)
   chat, as the proxy. Keep its file readable by the proxy and your program only, and grant `commands` only
   to a program you trust that much.
 
+## 8. Giving orders to the proxy
+
+Your program can also ask the proxy for things, on the same connection. The first order is the one that
+matters for section 6: when your program changes someone's rights, the proxy may still hold the answers it
+kept for them (`cache_seconds`), and it can be told to forget:
+
+```rust
+use meridian_extension::serve::{OrderError, Proxy};
+use std::time::Duration;
+
+let mut extension = Extension::new("ranks", "1.0.0", token);
+let proxy = extension.proxy();            // a handle: clone it, use it from any thread
+extension = extension.on_command(decide);
+
+/// Tells the proxy to forget what it kept for a player, and asks again, up to ten times, until it is done.
+fn forget(proxy: &Proxy, uuid: &str) -> Result<(), OrderError> {
+    let mut last = OrderError::NotConnected;
+    for attempt in 1..=10 {
+        match proxy.invalidate_player(uuid) {
+            Ok(()) => return Ok(()),
+            // Not done (the budget or the places were spent), or not known to be done (a timeout, a connection
+            // that ended, a failure while it ran), or no proxy yet: asking again is harmless for this order.
+            Err(e) if e.retry_later() || e.may_have_run() || e == OrderError::NotConnected => {
+                last = e;
+                std::thread::sleep(Duration::from_millis(200 * attempt));
+            }
+            // Not granted, not a valid id: asking again will not change it.
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
+// later, when Alex is taken off the staff list:
+// forget(&proxy, "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c")
+```
+
+`invalidate_all()` is the same for every player. The order needs the capability `decide.command` (your program
+has asked for it as soon as it has `on_command`) and the operator's grant of it. An order the proxy does not
+serve to you is answered `-32601`, and `e.is_not_granted()` says so. The proxy limits the orders a program
+may give: 20 a second with bursts of 50, and 8 at a time (`[extension.orders]` in the proxy's configuration).
+
+- **A refused order did not happen**, with one exception. `retry_later()` is true when the proxy's budget or its
+  places were spent, or too many of your own orders wait: ask again. **Do ask again for a rights change**, since
+  the right you took back stays kept for the `cache_seconds` you gave until the proxy has been told. The
+  exception is `-32603` ("the order failed"): the proxy's handler failed while it ran, so it **may have been
+  done**; `may_have_run()` says so.
+- **An order that timed out, whose connection ended, or that failed while it ran (`may_have_run()`) may or may
+  not have been done.** Asking again is harmless for this order, as in the example. With no proxy connected
+  (`NotConnected`) nothing was sent: ask again when it has connected. Bound the number of attempts, as the
+  example does.
+- An order waits for its answer on the thread that gave it (5 seconds at most, `Extension::order_timeout`), so
+  a handler can give one. At most 64 wait at once.
+- With no proxy connected, an order ends at once with `NotConnected`.
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told
