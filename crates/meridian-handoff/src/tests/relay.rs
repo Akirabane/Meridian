@@ -103,6 +103,102 @@ fn a_large_batch_does_not_stay_in_memory() {
     assert!(batch.capacity() <= 256, "{}", batch.capacity());
 }
 
+/// The bound keeps the grouping of a game tick: a typical player's tick, 30 packets (small ones
+/// and a chunk's worth), written by the server at once, still reaches the client in one write.
+#[test]
+fn a_tick_of_packets_is_still_one_write() {
+    let mut bench = bench();
+    let before = writes(&bench);
+    let mut out = Vec::new();
+    for i in 0..29u64 {
+        frame(
+            &mut bench.source.writer,
+            &body(pc::KEEP_ALIVE, &i.to_be_bytes()),
+            &mut out,
+        )
+        .unwrap();
+    }
+    let chunk: Vec<u8> = (0..8_000u32).map(|i| (i % 13) as u8).collect();
+    frame(
+        &mut bench.source.writer,
+        &body(pc::CUSTOM_PAYLOAD, &chunk),
+        &mut out,
+    )
+    .unwrap();
+    bench.source.writer.write_raw(&out).unwrap();
+    for i in 0..29u64 {
+        assert_eq!(
+            expect(&mut bench.player, pc::KEEP_ALIVE).unwrap(),
+            i.to_be_bytes()
+        );
+    }
+    assert_eq!(
+        expect(&mut bench.player, pc::CUSTOM_PAYLOAD).unwrap(),
+        chunk
+    );
+    assert_eq!(
+        writes(&bench) - before,
+        1,
+        "30 packets of a tick, one write"
+    );
+}
+
+/// A read that brings many packets (a join's world) is written in bounded batches: at most
+/// `BATCH_PACKETS` packets, or about `BATCH_BYTES` of payload, each, so that a session never
+/// holds a whole read's inflated packets at once. Every packet still arrives, in order.
+#[test]
+fn a_large_read_is_written_in_bounded_batches() {
+    use crate::session::{BATCH_BYTES, BATCH_PACKETS};
+    let mut bench = bench();
+    // 5,000 small packets, written by the backend at once.
+    let before = writes(&bench);
+    let mut out = Vec::new();
+    for i in 0..5_000u64 {
+        frame(
+            &mut bench.source.writer,
+            &body(pc::KEEP_ALIVE, &i.to_be_bytes()),
+            &mut out,
+        )
+        .unwrap();
+    }
+    bench.source.writer.write_raw(&out).unwrap();
+    for i in 0..5_000u64 {
+        assert_eq!(
+            expect(&mut bench.player, pc::KEEP_ALIVE).unwrap(),
+            i.to_be_bytes()
+        );
+    }
+    let made = writes(&bench) - before;
+    assert!(
+        made >= 5_000u64.div_ceil(BATCH_PACKETS as u64),
+        "{made} writes for 5,000 packets: a batch took more than {BATCH_PACKETS}"
+    );
+    // Ten large packets at once: no batch holds much more than the byte bound.
+    let large = BATCH_BYTES * 3 / 5;
+    let before = writes(&bench);
+    out.clear();
+    for i in 0..10u8 {
+        let payload = vec![i; large];
+        frame(
+            &mut bench.source.writer,
+            &body(pc::CUSTOM_PAYLOAD, &payload),
+            &mut out,
+        )
+        .unwrap();
+    }
+    bench.source.writer.write_raw(&out).unwrap();
+    for i in 0..10u8 {
+        let payload = expect(&mut bench.player, pc::CUSTOM_PAYLOAD).unwrap();
+        assert_eq!(payload.len(), large);
+        assert_eq!(payload[0], i);
+    }
+    let made = writes(&bench) - before;
+    assert!(
+        made >= 5,
+        "{made} writes for 10 packets of {large} bytes: a batch held more than two"
+    );
+}
+
 /// The writes the session made to its client so far.
 fn writes(bench: &Bench) -> u64 {
     bench.handle.0.down().writes

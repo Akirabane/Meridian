@@ -925,6 +925,11 @@ pub(crate) fn frame(
 /// batching). Past these sizes a buffer goes back to a quarter of them; a tick's batch fits.
 const OUT_KEPT: usize = 16 << 10;
 const BATCH_KEPT: usize = 256;
+/// The most a batch takes before it is written: packets, and bytes of their payloads (inflated).
+/// A tick of a typical player is 12 to 35 packets of a few KiB; a join's read is cut into
+/// several batches.
+pub(crate) const BATCH_PACKETS: usize = 64;
+pub(crate) const BATCH_BYTES: usize = 32 << 10;
 
 /// Gives back what an empty `buffer` holds beyond `kept`, down to a quarter of it.
 pub(crate) fn keep_small<T>(buffer: &mut Vec<T>, kept: usize) {
@@ -967,12 +972,21 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
             Err(e) if e.is_end_of_stream() => return End::Closed,
             Err(e) => return End::Broken(e),
         }
-        // The packets the same read brought, without another system call. A version adapter
-        // would be skipped here: Meridian sets none on a backend's connection.
+        // The packets the same read brought, without another system call, up to a bound: each
+        // compressed packet is inflated into a payload of its own, and a read of a join's world
+        // holds many, so an unbounded batch keeps hundreds of KiB alive at once in each session
+        // that joins or waits on a slow client. Past the bound the batch is written, and the
+        // rest of the read makes the next one (`recv` takes a whole packet from the buffer with
+        // no system call). A version adapter would be skipped here: Meridian sets none on a
+        // backend's connection.
         let mut after = None;
-        loop {
+        let mut payload = batch.first().map_or(0, |(_, p)| p.len());
+        while batch.len() < BATCH_PACKETS && payload < BATCH_BYTES {
             match from.buffered() {
-                Ok(Some(packet)) => batch.push(packet),
+                Ok(Some(packet)) => {
+                    payload += packet.1.len();
+                    batch.push(packet);
+                }
                 Ok(None) => break,
                 Err(e) => {
                     after = Some(End::Broken(e));
