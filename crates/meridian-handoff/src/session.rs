@@ -212,6 +212,9 @@ pub(crate) struct Down {
     /// Packets the ghost could not read, for the log of the next switch.
     pub unreadable: Vec<String>,
     pub flow: Flow,
+    /// The writes the active lane's relay made to the client: one for each read of the backend
+    /// that brought packets for the client, however many it brought.
+    pub writes: u64,
     /// While the reader thread answers a command the player typed: its id, and the messages other
     /// threads told the player meanwhile, written after the answer (see [`Answering`]).
     pub answering: Option<(std::thread::ThreadId, Vec<Vec<u8>>)>,
@@ -297,6 +300,7 @@ impl Session {
                 config_summary: None,
                 unreadable: Vec::new(),
                 flow: Flow::default(),
+                writes: 0,
                 answering: None,
                 notice: None,
             }),
@@ -887,22 +891,122 @@ pub(crate) fn spawn_lane(shared: &Arc<Shared>, lane: Arc<Lane>, reader: ConnRead
     Ok(())
 }
 
+/// Packets and writes of every relay to the players since the program started, for the metrics
+/// page: the first over the second is how many packets a write carries.
+static TO_PLAYERS_PACKETS: AtomicU64 = AtomicU64::new(0);
+static TO_PLAYERS_WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// The packets the relays sent the players, and the writes they took, since the start.
+pub fn relayed_to_players() -> (u64, u64) {
+    (
+        TO_PLAYERS_PACKETS.load(Ordering::Relaxed),
+        TO_PLAYERS_WRITES.load(Ordering::Relaxed),
+    )
+}
+
+/// Frames `body` for `writer`'s client into `out`, as [`ConnWriter::send`] would write it:
+/// compressed by the writer's threshold and encrypted in turn, the bytes in the same order.
+pub(crate) fn frame(
+    writer: &mut ConnWriter,
+    body: &[u8],
+    out: &mut Vec<u8>,
+) -> horizon_protocol::Result<()> {
+    // A client of an older release would be renumbered; Meridian serves none.
+    if let Some(body) = writer.for_client(body)? {
+        let contents = horizon_protocol::frame::contents(&body, writer.threshold)?;
+        writer.frame_into(&contents, out);
+    }
+    Ok(())
+}
+
+/// Writes what a batch framed, in one write: false when the client is gone.
+fn flush(down: &mut Down, out: &mut Vec<u8>) -> bool {
+    if out.is_empty() {
+        return true;
+    }
+    if down.writer.write_raw(out).is_err() {
+        return false;
+    }
+    down.writes += 1;
+    TO_PLAYERS_WRITES.fetch_add(1, Ordering::Relaxed);
+    out.clear();
+    // A join's world can make a batch large; what it took is not kept for the quiet afterwards.
+    if out.capacity() > 1 << 20 {
+        out.shrink_to(64 << 10);
+    }
+    true
+}
+
 /// Copies a lane's packets: to the switch's target view while it prepares, to the
 /// client while it is the active lane, nowhere otherwise.
+///
+/// A server writes a tick's packets together, so one read brings several: they are relayed
+/// together, framed one after the other and written in one write, the bytes the same as one
+/// write each. The batch is only what one read already brought (nothing waits for more), and
+/// `down` is held from the first packet to the write, as it was held for each packet: a switch,
+/// which writes its delta and changes the active lane under `down`, never comes in between.
 fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End {
     let mut body = Vec::new();
+    let mut out = Vec::new();
+    let mut batch: Vec<(i32, Vec<u8>)> = Vec::new();
     loop {
-        let (id, payload) = match from.recv() {
-            Ok(packet) => packet,
+        // The only wait: for the backend's next packet.
+        match from.recv() {
+            Ok(packet) => batch.push(packet),
             Err(e) if e.is_end_of_stream() => return End::Closed,
             Err(e) => return End::Broken(e),
-        };
-        if let Some(target) = &lane.target
-            && target.take(&lane.writer, id, &payload)
-        {
-            continue;
         }
-        let mut down = shared.down();
+        // The packets the same read brought, without another system call. A version adapter
+        // would be skipped here: Meridian sets none on a backend's connection.
+        let mut after = None;
+        loop {
+            match from.buffered() {
+                Ok(Some(packet)) => batch.push(packet),
+                Ok(None) => break,
+                Err(e) => {
+                    after = Some(End::Broken(e));
+                    break;
+                }
+            }
+        }
+        // A switch's target view takes its packets before `down` is taken: the hand-over takes
+        // the view's lock, then `down`.
+        if let Some(target) = &lane.target {
+            batch.retain(|(id, payload)| !target.take(&lane.writer, *id, payload));
+        }
+        if !batch.is_empty() {
+            let mut down = shared.down();
+            if let Err(end) = relay(&mut batch, &mut down, &mut body, &mut out, lane, shared) {
+                return end;
+            }
+            if !flush(&mut down, &mut out) {
+                return End::ClientGone;
+            }
+        }
+        batch.clear();
+        // A join brings a batch of hundreds of packets; the quiet afterwards needs a few. What the
+        // large one took is not kept for the rest of the connection.
+        if batch.capacity() > 4096 {
+            batch.shrink_to(256);
+        }
+        if let Some(end) = after {
+            return end;
+        }
+    }
+}
+
+/// Relays a batch of packets to the client under `down`, framing them into `out`: the work
+/// that was done for each packet, in the same order. `Err` ends the lane, after what came
+/// before in the batch is written.
+fn relay(
+    batch: &mut Vec<(i32, Vec<u8>)>,
+    down: &mut Down,
+    body: &mut Vec<u8>,
+    out: &mut Vec<u8>,
+    lane: &Lane,
+    shared: &Shared,
+) -> std::result::Result<(), End> {
+    for (id, payload) in batch.drain(..) {
         if down.active != lane.id {
             continue;
         }
@@ -917,7 +1021,11 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
             && !shared.client_gone.load(Ordering::SeqCst)
             && let Ok(play::Clientbound::Disconnect(d)) = play::Clientbound::decode(id, &payload)
         {
-            return End::Kicked(Reason::of(&d));
+            // What the backend sent before its kick reaches the client first.
+            if !flush(down, out) {
+                return Err(End::ClientGone);
+            }
+            return Err(End::Kicked(Reason::of(&d)));
         }
         if id == ids::play::clientbound::DISCONNECT && down.phase == Phase::Play {
             shared.disconnected.store(true, Ordering::SeqCst);
@@ -930,11 +1038,14 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
         } else {
             payload
         };
-        encode(&mut body, id, &payload);
-        if down.writer.send(&body).is_err() {
-            return End::ClientGone;
+        encode(body, id, &payload);
+        if frame(&mut down.writer, body, out).is_err() {
+            // As a failed write was: what came before is written, and the lane ends.
+            flush(down, out);
+            return Err(End::ClientGone);
         }
-        add(&mut down.flow, &body);
+        add(&mut down.flow, body);
+        TO_PLAYERS_PACKETS.fetch_add(1, Ordering::Relaxed);
         match down.phase {
             Phase::Configuration => {
                 if down.config_digest.is_none() {
@@ -953,13 +1064,14 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
                     down.phase = Phase::Configuration;
                     continue;
                 }
-                follow(&mut down, id, &payload);
-                // Why the player was moved, once the new world has begun.
+                follow(down, id, &payload);
+                // Why the player was moved, once the new world has begun: right after the
+                // Login, in the same write.
                 if id == ids::play::clientbound::LOGIN
                     && let Some(notice) = down.notice.take()
                 {
                     let chat = play::Clientbound::SystemChat(notice.chat());
-                    let _ = down.writer.send(&chat.encode());
+                    let _ = frame(&mut down.writer, &chat.encode(), out);
                 }
                 let packet = Packet { id, payload };
                 // A packet the ghost cannot read leaves it as it was; it is noted
@@ -975,6 +1087,7 @@ fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End 
             }
         }
     }
+    Ok(())
 }
 
 /// Notes what a switch checks from the active backend's Login and Respawn.
