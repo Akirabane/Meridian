@@ -34,25 +34,46 @@ a delay to a loopback path; it is not a lab network.
 | `--log FILE` | one JSON line for each event, and a summary line at the end |
 | `--seconds N`, `--stop-file FILE` | stop after N seconds, or as soon as the file exists (Ctrl+C also works from a console) |
 
+The options have bounds, and a value outside them is refused when the command line is read, with the
+name of the option: a delay or jitter from 0 to 60,000 ms, a rate from 1 to 100,000,000 kbit a second, a
+stall of up to 600,000 ms every up to 86,400 s, up to 100,000 resets a minute, `--seconds` from 1 to
+604,800, `--seed` a whole number. (`--rate 0` is not "no limit": leave the option out.)
+
 ## How
 
-For each connection there are a reader and a writer thread a direction, so 4 threads. The reader stamps
+For each connection there is a thread that serves it and, for each direction, a reader and a writer: 5
+threads, and 2 descriptors (the two sockets, shared by the threads: nothing is cloned). The reader stamps
 each chunk it reads with its arrival time and hands it to the writer, which waits until
 `arrival + delay + jitter` (never before the chunk before it) and writes it. A rate limit lengthens
 that wait by the time the chunk takes on the pipe; a stall makes the reader stop reading. On Windows the
 relay asks the system for a 1 ms timer (the default is 15.6 ms), and the log records by how much each
 write missed its time.
 
-The relay is meant for **up to 600 connections** (2,400 threads). It says so at the start, and once more
-on the screen and in the log if it goes over, instead of slowing down without a word.
+**Backpressure.** The reader and the writer share a queue of 64 chunks (16 KiB at most each: about 1 MiB).
+When it is full the reader stops reading, as a sender stops on a full TCP window: memory stays bounded
+whatever `--rate` is, and a sender that is faster than the rate is slowed down, not buffered. The same
+queue means a direction carries at most about 1 MiB per delay (50 MB/s at 20 ms, 10 MB/s at 100 ms): a limit
+of the relay, not of the link it stands for.
+
+**Stop.** A stop (Ctrl+C, `--seconds`, `--stop-file`) ends a stall at once, shuts every live connection and
+waits up to 5 seconds for their threads to finish; each writes its `close` event, and only then is the
+summary counted. The readers look at the stop flag every 200 ms (a read on a socket has that timeout),
+because a shutdown does not wake a blocked read on every system.
+
+The relay is meant for **up to 600 connections**: 1,200 descriptors and 3,000 threads. On Linux raise
+`ulimit -n` to at least 1,300 first. It says so at the start, and once more on the screen and in the log
+if it goes over, instead of slowing down without a word. A connection whose threads the system will not
+start is cut and logged (`refused`), without a panic.
 
 ## The log
 
 One JSON line for each event, with the time since the relay started (`t_ms`): `start` (the options),
 `open` and `close` of a connection, `stall` (the way and its length), `reset` (`fin` or `rst`),
-`target-refused`, `over-soft-limit`, and at the end `summary`: connections, peak, bytes each way, stalls,
-resets, and for each way how long a chunk was held (mean, p99, microseconds) and by how much its write
-missed the plan. Nothing of what the connections carry is written.
+`target-refused`, `refused`, `over-soft-limit`, `stop-timeout`, and at the end `summary`: connections, peak,
+bytes each way, stalls, resets, and for each way how long a chunk was held (mean, p99, microseconds) and by
+how much its write missed the plan. Each line is written to the file at once, but **a relay that is killed
+writes no summary** (and no `close` for the connections it had): only a stop does. Nothing of what the
+connections carry is written.
 
 ## Use
 
@@ -60,8 +81,6 @@ missed the plan. Nothing of what the connections carry is written.
   players, from 127.0.0.1.
 - Between the proxy and a server: the proxy's `address` for that backend is the relay's, and the relay's
   `--to` is the server's. Several relays can run at once, each with its own degradation.
-- In `load-1000/scripts/run-step.ps1`: `-RelayArgs "--delay 20"` puts a relay between the bench's bots and
-  the proxy for a step.
 
 ## Measured (8 November 2026)
 

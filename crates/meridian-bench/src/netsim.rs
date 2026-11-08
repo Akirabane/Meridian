@@ -14,8 +14,12 @@
 //! How: for each connection, one reader and one writer thread a direction. The reader stamps every
 //! chunk it reads with its arrival time and hands it to the writer, which waits until `arrival + delay
 //! + jitter` (never before the chunk before it: TCP keeps the order) and writes it. The rate limit
-//! lengthens that wait the same way; a stall makes the reader stop reading. That is 4 threads a
-//! connection: the relay is meant for up to [`SOFT_LIMIT`] connections and says so when it goes over.
+//! lengthens that wait the same way; a stall makes the reader stop reading. The reader and the writer
+//! share a queue of [`QUEUE_CHUNKS`] chunks (a pipe that holds about 1 MiB): when it is full the reader
+//! stops reading, as a sender stops on a full TCP window, so memory stays bounded whatever `--rate` is.
+//! A connection costs 2 descriptors (its two sockets, shared by the threads) and 5 threads (one that
+//! serves it and a reader and a writer for each way): the relay is meant for up to [`SOFT_LIMIT`]
+//! connections and says so when it goes over. On Linux, raise `ulimit -n` to at least twice that.
 //!
 //! The pure parts (the generator of random numbers, the delivery times, the stalls) take their times as
 //! arguments, so that their tests need no clock.
@@ -34,9 +38,27 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// The connections the relay is meant for: 4 threads each. Past it, it says so (once, on the screen
-/// and in the log) instead of slowing down without a word.
+/// The connections the relay is meant for: 2 descriptors and 5 threads each (1,200 descriptors and
+/// 3,000 threads at the limit). Past it, it says so (once, on the screen and in the log) instead of
+/// slowing down without a word.
 pub const SOFT_LIMIT: usize = 600;
+/// The chunks a way holds between its reader and its writer (16 KiB at most each: about 1 MiB). A full
+/// queue stops the reader, as a full window stops a TCP sender; it also means a way carries at most
+/// about 1 MiB per delay (50 MB/s at 20 ms): a limit of the relay, not of the link it stands for.
+pub const QUEUE_CHUNKS: usize = 64;
+/// How long a read on a socket waits before the reader looks at the stop flag again: 5 wake-ups a
+/// second for each reader, the price of a stop and a reset that work the same on every system.
+const READ_TICK: Duration = Duration::from_millis(200);
+/// How long a stop waits for the connections' threads to finish.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+/// The bounds of the options: what the relay refuses beyond, at the reading of the command line.
+const MAX_DELAY_MS: f64 = 60_000.0;
+const MAX_STALL_MS: f64 = 600_000.0;
+const MAX_STALL_EVERY_S: f64 = 86_400.0;
+const MIN_RATE_KBIT: f64 = 1.0;
+const MAX_RATE_KBIT: f64 = 100_000_000.0;
+const MAX_RESETS_PER_MIN: f64 = 100_000.0;
+const MAX_SECONDS: u64 = 7 * 86_400;
 /// The most a reader takes from a socket at once.
 const CHUNK: usize = 16 * 1024;
 /// The most delivery measurements kept for the summary, a direction each.
@@ -60,7 +82,7 @@ Options (a direction is `up`, from the client to the target, or `down`, back):
   --delay MS           a fixed delay each way (default 0); --delay-up MS and --delay-down MS for one way
   --jitter MS          a spread around it: each chunk waits delay +- jitter, in order (default 0);
                        --jitter-up and --jitter-down
-  --rate KBIT          the most a connection carries each way, in kilobits a second (default none);
+  --rate KBIT          the most a connection carries each way, in kilobits a second, from 1 (default none);
                        --rate-up and --rate-down
   --stall-every S      on average every S seconds, a connection stalls (default never)
   --stall-for MS       for how long (default 200); the stalls of the two ways are drawn apart
@@ -72,7 +94,10 @@ Options (a direction is `up`, from the client to the target, or `down`, back):
   --stop-file FILE     stop as soon as this file exists (for a script that cannot send Ctrl+C)
   -h, --help           show this help
 
-The relay is meant for up to 600 connections (4 threads each) and says so when it goes over.";
+The relay is meant for up to 600 connections (2 descriptors and 5 threads each; on Linux raise `ulimit -n`)
+and says so when it goes over. A way holds at most 64 chunks (about 1 MiB) in flight: past that the reader
+stops, as a sender does on a full TCP window. The options have bounds: a delay or jitter up to 60,000 ms, a
+rate from 1 kbit a second, a stall up to 600,000 ms.";
 
 /// What one way of a connection does to what passes.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -130,7 +155,12 @@ impl Rng {
 }
 
 fn secs(s: f64) -> Duration {
-    Duration::from_secs_f64(s.max(0.0))
+    // Never a panic, whatever the number: not finite is nothing, and a very long time is cut at 115 days.
+    if s.is_finite() {
+        Duration::from_secs_f64(s.clamp(0.0, 1.0e7))
+    } else {
+        Duration::ZERO
+    }
 }
 
 /// When each chunk of one way is handed on: the delay and jitter, the order kept, the rate limit.
@@ -426,8 +456,11 @@ impl Summary {
 /// The two ends of a live connection, so that the chaos thread can close it.
 struct Live {
     id: u64,
-    client: TcpStream,
-    target: TcpStream,
+    client: Arc<TcpStream>,
+    target: Arc<TcpStream>,
+    /// Set by the chaos thread: the readers of this connection see it within a read timeout and end.
+    /// (A shutdown does not wake a blocked read everywhere: on Windows it may not, until the peer closes.)
+    dead: Arc<AtomicBool>,
 }
 
 struct Shared {
@@ -439,30 +472,59 @@ struct Shared {
     stop: Arc<AtomicBool>,
 }
 
-/// Sleeps until `due` (a time since `started`), to the millisecond.
-fn wait_until(started: Instant, due: Duration) {
+/// Sleeps until `due` (a time since `started`), to the millisecond. It looks at the stop flag at
+/// least every 10 ms: false when the relay was told to stop meanwhile, true when `due` has come.
+fn wait_until(started: Instant, due: Duration, stop: &AtomicBool) -> bool {
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
         let now = started.elapsed();
         if now >= due {
-            return;
+            return true;
         }
         let left = due - now;
         if left > Duration::from_micros(1500) {
-            thread::sleep(left - Duration::from_millis(1));
+            thread::sleep((left - Duration::from_millis(1)).min(Duration::from_millis(10)));
         } else {
             thread::yield_now();
         }
     }
 }
 
-/// One way of one connection: a reader and a writer. Returns when both are done.
+/// A chunk on its way from a reader to a writer: when it arrived, and what it holds.
+type Chunk = (Duration, Vec<u8>);
+
+/// Hands a chunk to the writer. While the queue is full it waits (as a sender does on a full window),
+/// looking at the stop flag. False when the writer is gone or the relay is stopping.
+fn hand_over(tx: &mpsc::SyncSender<Chunk>, mut item: Chunk, stop: &AtomicBool) -> bool {
+    loop {
+        match tx.try_send(item) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(back)) => {
+                if stop.load(Ordering::Relaxed) {
+                    return false;
+                }
+                item = back;
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+/// One way of one connection: a reader and a writer that share a bounded queue. The two sockets are
+/// shared (`&TcpStream` reads and writes), so nothing is cloned and nothing can fail on a descriptor
+/// here. The threads are added to `handles`; an error (a thread that cannot be started) is returned.
 fn pump(
     shared: &Arc<Shared>,
     id: u64,
     way_index: usize,
-    from: TcpStream,
-    mut to: TcpStream,
-) -> Vec<thread::JoinHandle<()>> {
+    from: Arc<TcpStream>,
+    to: Arc<TcpStream>,
+    dead: &Arc<AtomicBool>,
+    handles: &mut Vec<thread::JoinHandle<()>>,
+) -> std::io::Result<()> {
     let way = if way_index == 0 {
         shared.settings.up.clone()
     } else {
@@ -470,18 +532,19 @@ fn pump(
     };
     let name = if way_index == 0 { "up" } else { "down" };
     let salt = id * 4 + way_index as u64;
-    let (tx, rx) = mpsc::channel::<(Duration, Vec<u8>)>();
+    let (tx, rx) = mpsc::sync_channel::<Chunk>(QUEUE_CHUNKS);
     let reader = {
         let shared = Arc::clone(shared);
-        let way = way.clone();
+        let from = Arc::clone(&from);
+        let dead = Arc::clone(dead);
         let mut plan = StallPlan::new(&way, shared.settings.seed, salt + 2);
-        let mut from = from.try_clone().expect("a socket can be cloned");
         thread::Builder::new()
             .stack_size(128 * 1024)
             .spawn(move || {
                 let mut buffer = vec![0u8; CHUNK];
+                let mut source: &TcpStream = &from;
                 loop {
-                    if shared.stop.load(Ordering::Relaxed) {
+                    if shared.stop.load(Ordering::Relaxed) || dead.load(Ordering::Relaxed) {
                         break;
                     }
                     if let Some(plan) = plan.as_mut() {
@@ -492,10 +555,22 @@ fn pump(
                                 "event": "stall", "id": id, "way": name,
                                 "ms": (end - now).as_millis() as u64,
                             }));
-                            wait_until(shared.started, end);
+                            // A stop ends a stall at once.
+                            if !wait_until(shared.started, end, &shared.stop) {
+                                break;
+                            }
                         }
                     }
-                    match from.read(&mut buffer) {
+                    match source.read(&mut buffer) {
+                        // The sockets have a read timeout (READ_TICK): nothing came, look at the flags again.
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            continue;
+                        }
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let counter = if way_index == 0 {
@@ -504,28 +579,29 @@ fn pump(
                                 &shared.stats.bytes_down
                             };
                             counter.fetch_add(n as u64, Ordering::Relaxed);
-                            if tx
-                                .send((shared.started.elapsed(), buffer[..n].to_vec()))
-                                .is_err()
-                            {
+                            let chunk = (shared.started.elapsed(), buffer[..n].to_vec());
+                            if !hand_over(&tx, chunk, &shared.stop) {
                                 break;
                             }
                         }
                     }
                 }
                 // The reader is done: the writer finishes what it has, then passes the end on.
-            })
-            .expect("a thread can be started")
+            })?
     };
+    handles.push(reader);
     let writer = {
         let shared = Arc::clone(shared);
         let mut shaper = Shaper::new(way, shared.settings.seed, salt);
         thread::Builder::new()
             .stack_size(128 * 1024)
             .spawn(move || {
+                let mut sink: &TcpStream = &to;
                 for (arrival, data) in rx {
                     let due = shaper.schedule(arrival, data.len());
-                    wait_until(shared.started, due);
+                    if !wait_until(shared.started, due, &shared.stop) {
+                        break;
+                    }
                     let now = shared.started.elapsed();
                     let record = |v: &Mutex<Vec<u32>>, micros: u128| {
                         if let Ok(mut g) = v.lock() {
@@ -542,19 +618,21 @@ fn pump(
                         &shared.stats.error_us[way_index],
                         now.saturating_sub(due).as_micros(),
                     );
-                    if to.write_all(&data).is_err() {
+                    if sink.write_all(&data).is_err() {
                         let _ = from.shutdown(Shutdown::Read);
                         break;
                     }
                 }
                 let _ = to.shutdown(Shutdown::Write);
-            })
-            .expect("a thread can be started")
+            })?
     };
-    vec![reader, writer]
+    handles.push(writer);
+    Ok(())
 }
 
 /// A client has connected: connect to the target, then pump both ways until the connection ends.
+/// Every way out writes its event: `target-refused` (no connection was opened), or `open` and then
+/// `close` (and `refused` between them when the threads could not be started).
 fn serve(shared: Arc<Shared>, client: TcpStream, target_addr: SocketAddr) {
     let id = shared.stats.connections.fetch_add(1, Ordering::Relaxed) + 1;
     let target = match TcpStream::connect_timeout(&target_addr, Duration::from_secs(5)) {
@@ -572,8 +650,8 @@ fn serve(shared: Arc<Shared>, client: TcpStream, target_addr: SocketAddr) {
     shared.stats.peak.fetch_max(live, Ordering::Relaxed);
     if over_limit(live) && !shared.stats.over_limit.swap(true, Ordering::Relaxed) {
         eprintln!(
-            "netsim: {live} connections: over the {SOFT_LIMIT} the relay is meant for (4 threads each); \
-             its own delays may grow from here"
+            "netsim: {live} connections: over the {SOFT_LIMIT} the relay is meant for (2 descriptors and 5 threads \
+             each); its own delays may grow from here"
         );
         shared
             .log
@@ -582,32 +660,66 @@ fn serve(shared: Arc<Shared>, client: TcpStream, target_addr: SocketAddr) {
     shared
         .log
         .event(json!({"event": "open", "id": id, "live": live}));
-    if let (Ok(c), Ok(t)) = (client.try_clone(), target.try_clone()) {
-        if let Ok(mut list) = shared.live.lock() {
-            list.push(Live {
-                id,
-                client: c,
-                target: t,
-            });
-        }
+    // A read that waits no longer than READ_TICK: the readers look at the stop flag and at `dead` between reads.
+    let _ = client.set_read_timeout(Some(READ_TICK));
+    let _ = target.set_read_timeout(Some(READ_TICK));
+    let client = Arc::new(client);
+    let target = Arc::new(target);
+    let dead = Arc::new(AtomicBool::new(false));
+    if let Ok(mut list) = shared.live.lock() {
+        list.push(Live {
+            id,
+            client: Arc::clone(&client),
+            target: Arc::clone(&target),
+            dead: Arc::clone(&dead),
+        });
     }
     let opened = Instant::now();
-    let (c2, t2) = match (client.try_clone(), target.try_clone()) {
-        (Ok(c), Ok(t)) => (c, t),
-        _ => return,
-    };
-    let mut handles = pump(&shared, id, 0, client, t2);
-    handles.extend(pump(&shared, id, 1, target, c2));
+    let mut handles = Vec::new();
+    // A stop that came while this connection was being made closes it at once.
+    if shared.stop.load(Ordering::Relaxed) {
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = target.shutdown(Shutdown::Both);
+    }
+    let started = pump(
+        &shared,
+        id,
+        0,
+        Arc::clone(&client),
+        Arc::clone(&target),
+        &dead,
+        &mut handles,
+    )
+    .and_then(|()| {
+        pump(
+            &shared,
+            id,
+            1,
+            Arc::clone(&target),
+            Arc::clone(&client),
+            &dead,
+            &mut handles,
+        )
+    });
+    if let Err(e) = started {
+        // The system would not give a thread: the connection is cut, and said so, with no panic.
+        shared
+            .log
+            .event(json!({"event": "refused", "id": id, "error": e.to_string()}));
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = target.shutdown(Shutdown::Both);
+    }
     for h in handles {
         let _ = h.join();
     }
     if let Ok(mut list) = shared.live.lock() {
         list.retain(|l| l.id != id);
     }
-    shared.stats.live.fetch_sub(1, Ordering::Relaxed);
     shared.log.event(json!({
         "event": "close", "id": id, "open_ms": opened.elapsed().as_millis() as u64,
     }));
+    // Counted out last: a stop that waits for 0 live connections waits for the `close` line too.
+    shared.stats.live.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// The chaos: at random moments, on average `reset_per_min` a minute, a live connection is closed.
@@ -630,6 +742,7 @@ fn chaos(shared: Arc<Shared>) {
             continue;
         }
         let victim = &list[(rng.next_u64() % list.len() as u64) as usize];
+        victim.dead.store(true, Ordering::Relaxed);
         let kind = if shared.settings.rst
             && os::abortive(&victim.client)
             && os::abortive(&victim.target)
@@ -681,7 +794,7 @@ impl Relay {
             "event": "start", "listen": addr.to_string(), "target": target.to_string(),
             "up": way_json(&settings.up), "down": way_json(&settings.down),
             "reset_per_min": settings.reset_per_min, "rst": settings.rst, "seed": settings.seed,
-            "soft_limit": SOFT_LIMIT,
+            "soft_limit": SOFT_LIMIT, "queue_chunks": QUEUE_CHUNKS,
         }));
         let timer = os::Timer::start();
         let mut threads = Vec::new();
@@ -693,7 +806,9 @@ impl Relay {
                         Ok((client, _)) => {
                             let _ = client.set_nonblocking(false);
                             let shared = Arc::clone(&shared);
-                            thread::spawn(move || serve(shared, client, target));
+                            // A thread that cannot be started drops the client (its socket closes).
+                            let _ =
+                                thread::Builder::new().spawn(move || serve(shared, client, target));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(5));
@@ -715,14 +830,33 @@ impl Relay {
         })
     }
 
-    /// Stops accepting and returns the summary; the log gets it as its last line.
+    /// Stops the relay and returns the summary. It stops accepting, shuts every live connection (their
+    /// threads end at once, a stall too), waits up to [`STOP_WAIT`] for them to finish (each writes its
+    /// `close` event), and only then counts: the summary holds what the queues had in them. The log gets
+    /// it as its last line. (A relay that is killed instead writes no summary.)
     pub fn stop(self) -> Summary {
         let Relay {
             shared, threads, ..
         } = self;
         shared.stop.store(true, Ordering::Relaxed);
+        if let Ok(list) = shared.live.lock() {
+            for l in list.iter() {
+                let _ = l.client.shutdown(Shutdown::Both);
+                let _ = l.target.shutdown(Shutdown::Both);
+            }
+        }
         for t in threads {
             let _ = t.join();
+        }
+        let deadline = Instant::now() + STOP_WAIT;
+        while shared.stats.live.load(Ordering::Relaxed) > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let left = shared.stats.live.load(Ordering::Relaxed);
+        if left > 0 {
+            shared
+                .log
+                .event(json!({"event": "stop-timeout", "connections_left": left}));
         }
         let summary = summary_of(&shared.stats);
         shared.log.event(json!({
@@ -736,6 +870,12 @@ impl Relay {
         }));
         shared.log.flush();
         summary
+    }
+
+    /// The bytes read from the clients so far (for the tests of the queue's bound).
+    #[cfg(test)]
+    fn bytes_up(&self) -> u64 {
+        self.shared.stats.bytes_up.load(Ordering::Relaxed)
     }
 }
 
@@ -802,59 +942,95 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
                 .and_then(|v| v.into_string().ok())
                 .ok_or_else(|| format!("{name} needs a value"))
         };
-        let number = |text: String, name: &str| {
+        // A number from `low` to `high`: anything else (a negative one, one that is not finite, 1e300) is
+        // refused here, with the name of the option, and never reaches the relay.
+        let number = |text: String, name: &str, low: f64, high: f64| {
             text.parse::<f64>()
                 .ok()
-                .filter(|n| n.is_finite() && *n >= 0.0)
-                .ok_or_else(|| format!("{name} takes a number from 0, not {text:?}"))
+                .filter(|n| n.is_finite() && *n >= low && *n <= high)
+                .ok_or_else(|| format!("{name} takes a number from {low} to {high}, not {text:?}"))
+        };
+        let whole = |text: String, name: &str, low: u64, high: u64| {
+            text.parse::<u64>()
+                .ok()
+                .filter(|n| *n >= low && *n <= high)
+                .ok_or_else(|| {
+                    format!("{name} takes a whole number from {low} to {high}, not {text:?}")
+                })
         };
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--listen" => listen = Some(value("--listen")?),
             "--to" => to = Some(value("--to")?),
             "--delay" => {
-                let n = number(value("--delay")?, "--delay")?;
+                let n = number(value("--delay")?, "--delay", 0.0, MAX_DELAY_MS)?;
                 settings.up.delay_ms = n;
                 settings.down.delay_ms = n;
             }
-            "--delay-up" => settings.up.delay_ms = number(value("--delay-up")?, "--delay-up")?,
+            "--delay-up" => {
+                settings.up.delay_ms =
+                    number(value("--delay-up")?, "--delay-up", 0.0, MAX_DELAY_MS)?
+            }
             "--delay-down" => {
-                settings.down.delay_ms = number(value("--delay-down")?, "--delay-down")?;
+                settings.down.delay_ms =
+                    number(value("--delay-down")?, "--delay-down", 0.0, MAX_DELAY_MS)?;
             }
             "--jitter" => {
-                let n = number(value("--jitter")?, "--jitter")?;
+                let n = number(value("--jitter")?, "--jitter", 0.0, MAX_DELAY_MS)?;
                 settings.up.jitter_ms = n;
                 settings.down.jitter_ms = n;
             }
-            "--jitter-up" => settings.up.jitter_ms = number(value("--jitter-up")?, "--jitter-up")?,
+            "--jitter-up" => {
+                settings.up.jitter_ms =
+                    number(value("--jitter-up")?, "--jitter-up", 0.0, MAX_DELAY_MS)?
+            }
             "--jitter-down" => {
-                settings.down.jitter_ms = number(value("--jitter-down")?, "--jitter-down")?;
+                settings.down.jitter_ms =
+                    number(value("--jitter-down")?, "--jitter-down", 0.0, MAX_DELAY_MS)?;
             }
             "--rate" => {
-                let n = number(value("--rate")?, "--rate")?;
-                settings.up.rate_kbit = Some(n).filter(|n| *n > 0.0);
+                let n = number(value("--rate")?, "--rate", MIN_RATE_KBIT, MAX_RATE_KBIT)?;
+                settings.up.rate_kbit = Some(n);
                 settings.down.rate_kbit = settings.up.rate_kbit;
             }
             "--rate-up" => {
-                settings.up.rate_kbit =
-                    Some(number(value("--rate-up")?, "--rate-up")?).filter(|n| *n > 0.0);
+                settings.up.rate_kbit = Some(number(
+                    value("--rate-up")?,
+                    "--rate-up",
+                    MIN_RATE_KBIT,
+                    MAX_RATE_KBIT,
+                )?);
             }
             "--rate-down" => {
-                settings.down.rate_kbit =
-                    Some(number(value("--rate-down")?, "--rate-down")?).filter(|n| *n > 0.0);
+                settings.down.rate_kbit = Some(number(
+                    value("--rate-down")?,
+                    "--rate-down",
+                    MIN_RATE_KBIT,
+                    MAX_RATE_KBIT,
+                )?);
             }
             "--stall-every" => {
-                let n = number(value("--stall-every")?, "--stall-every")?;
+                let n = number(
+                    value("--stall-every")?,
+                    "--stall-every",
+                    0.0,
+                    MAX_STALL_EVERY_S,
+                )?;
                 settings.up.stall_every_s = n;
                 settings.down.stall_every_s = n;
             }
             "--stall-for" => {
-                let n = number(value("--stall-for")?, "--stall-for")?;
+                let n = number(value("--stall-for")?, "--stall-for", 0.0, MAX_STALL_MS)?;
                 settings.up.stall_for_ms = n;
                 settings.down.stall_for_ms = n;
             }
             "--reset-per-min" => {
-                settings.reset_per_min = number(value("--reset-per-min")?, "--reset-per-min")?;
+                settings.reset_per_min = number(
+                    value("--reset-per-min")?,
+                    "--reset-per-min",
+                    0.0,
+                    MAX_RESETS_PER_MIN,
+                )?;
             }
             "--rst" => {
                 if !cfg!(windows) {
@@ -862,10 +1038,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, St
                 }
                 settings.rst = true;
             }
-            "--seed" => settings.seed = number(value("--seed")?, "--seed")? as u64,
+            "--seed" => settings.seed = whole(value("--seed")?, "--seed", 0, u64::MAX)?,
             "--log" => log = Some(PathBuf::from(value("--log")?)),
             "--stop-file" => stop_file = Some(PathBuf::from(value("--stop-file")?)),
-            "--seconds" => seconds = Some(number(value("--seconds")?, "--seconds")? as u64),
+            "--seconds" => seconds = Some(whole(value("--seconds")?, "--seconds", 1, MAX_SECONDS)?),
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -930,7 +1106,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
     let s = &options.settings;
     eprintln!(
         "netsim: listening on {}, relaying to {target}; up {} ms +-{} ms, down {} ms +-{} ms, \
-         {} resets a minute{}; meant for up to {SOFT_LIMIT} connections (4 threads each)",
+         {} resets a minute{}; meant for up to {SOFT_LIMIT} connections ({} descriptors, {} threads), {QUEUE_CHUNKS} chunks a way in flight",
         relay.addr,
         s.up.delay_ms,
         s.up.jitter_ms,
@@ -942,6 +1118,8 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         } else {
             ""
         },
+        SOFT_LIMIT * 2,
+        SOFT_LIMIT * 5,
     );
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -1306,5 +1484,182 @@ mod tests {
         assert!(parse(args(&["--listen", "x"])).is_err(), "--to is needed");
         assert!(parse(args(&["--to", "x", "--listen", "y", "--delay", "-3"])).is_err());
         assert!(parse(args(&["--to", "x", "--listen", "y", "--nope"])).is_err());
+    }
+
+    #[test]
+    fn a_stop_closes_a_live_connection_and_every_thread_ends() {
+        let path = std::env::temp_dir().join(format!("netsim-stop-{}.jsonl", std::process::id()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let settings = Settings {
+            up: way(5.0, 0.0),
+            down: way(5.0, 0.0),
+            ..Settings::default()
+        };
+        let relay = Relay::start(listener, echo(), settings, Some(&path)).unwrap();
+        let mut client = TcpStream::connect(relay.addr).unwrap();
+        round_trip(&mut client, 1);
+        // The client stays connected: the stop must close the connection itself.
+        let began = Instant::now();
+        let summary = relay.stop();
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "the stop took {:?}",
+            began.elapsed()
+        );
+        assert_eq!(summary.connections, 1);
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        let ended = client.read(&mut byte);
+        assert!(
+            matches!(ended, Ok(0) | Err(_)),
+            "the read returned {ended:?}"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let kinds: Vec<String> = text
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["event"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let close = kinds
+            .iter()
+            .position(|k| k == "close")
+            .expect("a close line");
+        let last = kinds.len() - 1;
+        assert_eq!(kinds[last], "summary");
+        assert!(
+            close < last,
+            "the close line comes before the summary: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn a_stop_ends_a_long_stall_at_once() {
+        let relay = relay_to(
+            echo(),
+            Settings {
+                up: Way {
+                    stall_every_s: 0.05,
+                    stall_for_ms: 30_000.0,
+                    ..Way::default()
+                },
+                ..Settings::default()
+            },
+        );
+        // The first stall window starts about 50 ms after the relay: a client that comes later finds
+        // its reader stalled at once, for 30 seconds.
+        thread::sleep(ms(400));
+        let mut client = TcpStream::connect(relay.addr).unwrap();
+        client.write_all(&[1]).unwrap();
+        thread::sleep(ms(300));
+        let began = Instant::now();
+        let summary = relay.stop();
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "a stall of 30 s held the stop for {:?}",
+            began.elapsed()
+        );
+        assert!(summary.stalls >= 1, "{} stalls", summary.stalls);
+    }
+
+    #[test]
+    fn a_slow_rate_stops_the_sender_and_the_relay_reads_only_what_its_queue_holds() {
+        // 8 kbit a second: the writer delivers 1 KB a second. The reader must stop when the queue
+        // (64 chunks of 16 KiB) is full, and the client's writes then block on the full buffers: the
+        // relay does not read the 200 MiB the client is trying to send, nor hold it in memory.
+        let relay = relay_to(
+            echo(),
+            Settings {
+                up: Way {
+                    rate_kbit: Some(8.0),
+                    ..Way::default()
+                },
+                ..Settings::default()
+            },
+        );
+        let client = TcpStream::connect(relay.addr).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let mut w = client.try_clone().unwrap();
+            let done = Arc::clone(&done);
+            thread::spawn(move || {
+                let block = vec![7u8; 1 << 20];
+                for _ in 0..200 {
+                    if w.write_all(&block).is_err() {
+                        break;
+                    }
+                }
+                done.store(true, Ordering::Relaxed);
+            })
+        };
+        thread::sleep(Duration::from_millis(1500));
+        let read = relay.bytes_up();
+        assert!(
+            read < 32 * 1024 * 1024,
+            "the relay read {read} bytes of a sender it should have stopped"
+        );
+        assert!(
+            !done.load(Ordering::Relaxed),
+            "the client wrote its 200 MiB: nothing stopped it"
+        );
+        relay.stop();
+        drop(client);
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn the_options_have_bounds_and_huge_or_tiny_values_are_refused() {
+        let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let with = |extra: &[&str]| {
+            let mut v = vec!["--listen", "127.0.0.1:1", "--to", "127.0.0.1:2"];
+            v.extend_from_slice(extra);
+            parse(args(&v))
+        };
+        for bad in [
+            ["--delay", "1e300"],
+            ["--delay", "60001"],
+            ["--delay", "-1"],
+            ["--delay", "nan"],
+            ["--delay", "inf"],
+            ["--jitter", "1e19"],
+            ["--delay-up", "1e300"],
+            ["--rate", "1e-300"],
+            ["--rate", "0"],
+            ["--rate", "0.5"],
+            ["--rate", "1e19"],
+            ["--stall-for", "600001"],
+            ["--stall-for", "1e300"],
+            ["--stall-every", "86401"],
+            ["--reset-per-min", "100001"],
+            ["--seconds", "1e19"],
+            ["--seconds", "0"],
+            ["--seconds", "604801"],
+            ["--seed", "1e19"],
+            ["--seed", "18446744073709551616"],
+        ] {
+            assert!(with(&bad).is_err(), "{bad:?} was accepted");
+        }
+        for good in [
+            ["--delay", "60000"],
+            ["--delay", "1e-300"],
+            ["--rate", "1"],
+            ["--stall-for", "600000"],
+            ["--seed", "18446744073709551615"],
+            ["--seconds", "604800"],
+        ] {
+            assert!(with(&good).is_ok(), "{good:?} was refused");
+        }
+        // A number that is not finite, or very long, is nothing or a long time, never a panic.
+        assert_eq!(secs(f64::NAN), Duration::ZERO);
+        assert_eq!(secs(f64::INFINITY), Duration::ZERO);
+        assert!(secs(1e300) <= Duration::from_secs(10_000_000));
+        let mut shaper = Shaper::new(way(1e-300, 0.0), 1, 0);
+        assert_eq!(shaper.schedule(ms(5), 10), ms(5));
     }
 }
