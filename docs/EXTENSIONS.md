@@ -638,9 +638,9 @@ before the proxy's own are looked at:
   that an extension before has, is refused and logged once for each hello. A name that is refused refuses its
   command; an alias that is refused is dropped. A word is matched as typed, as the proxy's own are. A command
   stays the extension's **also while the extension is down** (its declaration of the last hello is kept): the
-  player reads `That command did not answer.`, and the server never sees the word. **This is provisional: the
-  user has yet to decide what a command does when its extension is absent**; before the first hello after the
-  proxy starts the word is unknown, so it goes to the server.
+  player reads `That command did not answer.`, and the server never sees the word. **This is decided:** the
+  word stays reserved as long as the extension is configured, enabled and granted `commands`; before the first
+  hello after the proxy starts the word is unknown, so it goes to the server.
 - **The permission** is the node `ext.<extension>.<command>` (lower case, the same for every alias), **open to
   everyone** unless a group denies it. `Typist::has` and `merge` decide as for the proxy's own commands, with the
   verdict of the extension that holds `decide.command` **only if it is the extension that owns the command**

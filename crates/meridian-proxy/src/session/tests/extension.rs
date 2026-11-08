@@ -2347,7 +2347,7 @@ groups = ["staff"]
             assert!(Instant::now() < limit, "the connection never ended");
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Provisional (the user has yet to decide): not the server's, and told so.
+        // The word stays reserved while the extension is down: not the server's, and told so.
         assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
         assert_eq!(told_by_now(&told, 2)[1], NO_ANSWER);
         assert_eq!(
