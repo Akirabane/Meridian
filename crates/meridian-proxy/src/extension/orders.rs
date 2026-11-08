@@ -273,16 +273,13 @@ fn invalidate(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> 
         Ok(Forget::Player(uuid)) => ctx.link.forget_player(uuid),
         Err(why) => return Err(invalid(why)),
     }
-    done(serde_json::to_value(&Ack::done()))
+    done(serde_json::to_value(Ack::done()))
 }
 
 /// `players/list`: a page of the players, in the order of their ids.
 fn players_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     let page = orders::parse_list(params).map_err(invalid)?;
-    done(serde_json::to_value(&orders::page_of(
-        ctx.players()?,
-        &page,
-    )))
+    done(serde_json::to_value(orders::page_of(ctx.players()?, &page)))
 }
 
 /// `players/find`: one player, by unique id or by name (whatever its case), or `null`.
@@ -304,7 +301,7 @@ fn servers_list(ctx: &Ctx<'_>, _: Option<&Value>) -> Result<Value, RpcError> {
 
 /// `queue/list`: whether the queue is on, and who waits.
 fn queue_list(ctx: &Ctx<'_>, _: Option<&Value>) -> Result<Value, RpcError> {
-    done(serde_json::to_value(&ctx.facts()?.queue()))
+    done(serde_json::to_value(ctx.facts()?.queue()))
 }
 
 /// Serves one request of the extension that is not `rpc.discover`: answers at once an order it refuses, and

@@ -608,7 +608,9 @@ mod tests {
         let mut told = Vec::new();
         let mut cursor = None;
         let mut pages = 0;
-        loop {
+        let mut ended = false;
+        // Bounded: pages that never end (a cursor that goes nowhere) fail the test instead of keeping it running.
+        for _ in 0..10 {
             let page = Page {
                 limit: 3,
                 after: cursor.clone(),
@@ -624,9 +626,13 @@ mod tests {
                     assert_eq!(Some(&next), got.players.last().map(|p| &p.uuid));
                     cursor = Some(next);
                 }
-                None => break,
+                None => {
+                    ended = true;
+                    break;
+                }
             }
         }
+        assert!(ended, "the pages did not end: {told:?}");
         assert_eq!(told, ["P1", "P2", "P3", "P4", "P5", "P6", "P7"]);
         assert_eq!(pages, 3);
         // A page that holds the rest has no cursor, and neither has one that holds exactly the rest.
