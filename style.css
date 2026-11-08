@@ -118,3 +118,42 @@ ul.legend li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10p
 .lang a { color: var(--link); padding: 4px 2px; }
 .lang a[aria-current="page"] { color: var(--text); font-weight: 600; text-decoration: none; }
 .top .wrap { flex-wrap: wrap; }
+
+/* The bar of tabs: stuck at the top, one line; on a narrow screen its tabs scroll sideways */
+.tabbar { position: sticky; top: 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line); }
+.tabbar .tabrow { display: flex; align-items: center; gap: 12px; }
+.tablist { display: flex; gap: 2px; overflow-x: auto; flex: 1 1 auto; min-width: 0; scrollbar-width: thin; }
+.tablist a { flex: 0 0 auto; white-space: nowrap; text-decoration: none; color: var(--muted); padding: 10px 12px 9px; border-bottom: 3px solid transparent; font-size: 15px; font-weight: 600; }
+.tablist a:hover { color: var(--text); }
+.tablist a[aria-selected="true"] { color: var(--text); border-bottom-color: var(--link); }
+.tabbar .lang { flex: 0 0 auto; white-space: nowrap; font-size: 14px; }
+[id] { scroll-margin-top: 60px; }
+[hidden] { display: none !important; }
+.tabbed main > section { border-bottom: 0; }
+@media (max-width: 640px) { .tablist a { padding: 10px 9px 9px; font-size: 14px; } .tabbar .tabrow { gap: 8px; } }
+
+/* Overview: the three figures to read first, and the work with the Horizon team */
+.keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 14px; margin: 12px 0 18px; }
+.key { background: var(--panel); border: 2px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.knum { font-size: 40px; font-weight: 800; line-height: 1.05; color: var(--good); }
+.klabel { font-weight: 600; }
+.context { background: var(--panel); border-left: 4px solid var(--link); padding: 4px 16px; border-radius: 0 8px 8px 0; }
+
+/* Roadmap */
+.progress { margin: 12px 0 6px; }
+.progress .bar { height: 16px; }
+h3.part { font-size: 21px; margin: 28px 0 4px; padding-top: 14px; border-top: 1px solid var(--line); }
+h5 { font-size: 16px; margin: 0; }
+.inpanel { margin: 8px 0 0; }
+.ritems { display: grid; gap: 10px; margin: 8px 0 4px; }
+.ritem { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--grey); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.ritem.done { border-left-color: var(--good); }
+.ritem.in-progress { border-left-color: var(--warn); }
+.ritem.see { padding: 8px 14px; }
+.ritem p { margin: 6px 0 0; }
+.rhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.rhead h5 { font-size: 17px; }
+ol.steps { margin: 6px 0 0; padding-left: 22px; }
+ol.steps li { margin: 5px 0; }
+h4.sub { margin: 26px 0 4px; font-size: 18px; }
+h4.sub .pill { vertical-align: 2px; }
