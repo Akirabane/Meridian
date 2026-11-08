@@ -457,6 +457,26 @@ defined): ask by unique id. **A player's
 told. Each of these is an order against the proxy's budget (one each, so `players()` on a large network is a few), with
 the limits and the errors above.
 
+### Telling players
+
+With `orders.message` (ask for it with `.wants("orders.message")`, and the operator grants it) your program can write in a
+player's chat, or in everyone's:
+
+```rust
+let told = proxy.tell("Alex", "Your party starts in one minute.")?;   // 1, or 0 if Alex is not online
+let reached = proxy.broadcast(None, "The server restarts in five minutes.")?;     // every player
+let east = proxy.broadcast(Some("east"), "Welcome to the east server.")?;         // the players of one server
+```
+
+The line is shown **as plain text, exactly as you wrote it**: no colour, no click, no hover. It must be 1 to 256
+characters with no line break, no `§` and no invisible character, or the call is refused (`OrderError::Invalid`) before
+anything is sent: `meridian_extension::orders::clean_text(line)` makes one valid. A `broadcast` is shown as the proxy's own
+`/alert` is, and **costs the proxy's budget of orders the number of players it reaches, at most its burst**: with the
+default 20 a second and bursts of 50, a broadcast to a large network uses the whole burst, and one that the budget cannot
+pay is refused before anyone is told (`retry_later()`). **These orders show a line each time they run**, so after a timeout
+or an end of the connection (`may_have_run()`) the line may have been shown already: ask again only if showing it twice
+does no harm.
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told

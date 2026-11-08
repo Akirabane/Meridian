@@ -9,7 +9,7 @@
 //! on-error policy.
 
 use super::breaker::{Breaker, Change, Permit};
-use super::orders::{Budget, Facts, Services};
+use super::orders::{Actions, Budget, Facts, Services};
 use super::stats::{Outcome, Stats};
 use meridian_extension::wire::{self, CommandSpec, Id, RpcError};
 use meridian_websocket::Writer;
@@ -342,6 +342,11 @@ impl Link {
     /// The facts the orders that read tell, if the proxy has given them.
     pub(super) fn facts(&self) -> Option<Arc<dyn Facts>> {
         self.services.facts()
+    }
+
+    /// What the orders that act act on, if the proxy has given it.
+    pub(super) fn actions(&self) -> Option<Arc<dyn Actions>> {
+        self.services.actions()
     }
 
     /// How many threads of orders are alive, running or waiting to write (for the tests).

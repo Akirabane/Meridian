@@ -15,7 +15,8 @@
 
 use super::link::{Link, OrderPlace};
 use crate::log::debug;
-use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_READ};
+use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_MESSAGE, ORDERS_READ};
+use meridian_extension::orders::Told;
 use meridian_extension::orders::{
     self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
 };
@@ -42,10 +43,23 @@ pub trait Facts: Send + Sync {
     fn queue(&self) -> QueueState;
 }
 
+/// What the orders that act on the players use, taken from the rest of the proxy: the sessions, to tell a player, and the
+/// players of a server, to show them a line (`/alert`). Given to the registry once the proxy is built
+/// ([`super::Registry::serve_actions`]): `extension/actions.rs` for the proxy and a stand-in in the tests.
+pub trait Actions: Send + Sync {
+    /// Shows `text` in the chat of the player `who` is, if they are online. How many were told: 0 or 1.
+    fn tell(&self, who: &Who, text: &str) -> usize;
+    /// How many players a line to `server` (every server when `None`) reaches, or why there is no such server.
+    fn audience(&self, server: Option<&str>) -> Result<usize, String>;
+    /// Shows `text` to them, as `/alert` does, and tells how many were told.
+    fn broadcast(&self, server: Option<&str>, text: &str) -> Result<usize, String>;
+}
+
 /// What the orders share with the rest of the proxy.
 #[derive(Default)]
 pub struct Services {
     facts: Mutex<Option<Arc<dyn Facts>>>,
+    actions: Mutex<Option<Arc<dyn Actions>>>,
 }
 
 impl Services {
@@ -56,12 +70,24 @@ impl Services {
     pub(super) fn set_facts(&self, facts: Arc<dyn Facts>) {
         *self.facts.lock().unwrap_or_else(|e| e.into_inner()) = Some(facts);
     }
+
+    pub(super) fn actions(&self) -> Option<Arc<dyn Actions>> {
+        self.actions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(super) fn set_actions(&self, actions: Arc<dyn Actions>) {
+        *self.actions.lock().unwrap_or_else(|e| e.into_inner()) = Some(actions);
+    }
 }
 
 /// What an order is given: the link it came on, and the facts, if the proxy has given them.
 pub(super) struct Ctx<'a> {
     pub link: &'a Arc<Link>,
     installed: Option<Arc<dyn Facts>>,
+    acting: Option<Arc<dyn Actions>>,
 }
 
 impl Ctx<'_> {
@@ -69,6 +95,28 @@ impl Ctx<'_> {
         self.installed
             .as_ref()
             .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
+    }
+
+    fn actions(&self) -> Result<&Arc<dyn Actions>, RpcError> {
+        self.acting
+            .as_ref()
+            .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
+    }
+
+    /// Charges the budget for an order that reaches `reached` players: **the number of players, and at most the burst**
+    /// (the dispatcher took one already). An order that reaches more than the burst holds costs the whole burst, so that
+    /// it can run at all; one that the budget cannot pay is refused here with the code of a spent budget, **before
+    /// anyone is reached**.
+    fn spend_for(&self, reached: usize) -> Result<(), RpcError> {
+        let burst = self.link.settings.order_burst.max(1);
+        let total = u32::try_from(reached).unwrap_or(u32::MAX).clamp(1, burst);
+        if total > 1 && !self.link.take_order(total - 1) {
+            return Err(RpcError::new(
+                code::OVER_BUDGET,
+                "over the budget of orders",
+            ));
+        }
+        Ok(())
     }
 
     /// The players, with an address only if the extension was granted `addresses`.
@@ -134,6 +182,20 @@ const QUEUE_LIST: Order = Order {
     describe: || orders::read_methods().swap_remove(3).1,
 };
 
+const PLAYERS_TELL: Order = Order {
+    method: orders::PLAYERS_TELL,
+    capability: ORDERS_MESSAGE,
+    run: players_tell,
+    describe: || orders::message_methods().swap_remove(0).1,
+};
+
+const BROADCAST: Order = Order {
+    method: orders::BROADCAST,
+    capability: ORDERS_MESSAGE,
+    run: broadcast,
+    describe: || orders::message_methods().swap_remove(1).1,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
 pub(super) const ORDERS: &[Order] = &[
@@ -142,6 +204,8 @@ pub(super) const ORDERS: &[Order] = &[
     PLAYERS_FIND,
     SERVERS_LIST,
     QUEUE_LIST,
+    PLAYERS_TELL,
+    BROADCAST,
 ];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
@@ -153,6 +217,8 @@ pub(super) const ORDERS: &[Order] = &[
     PLAYERS_FIND,
     SERVERS_LIST,
     QUEUE_LIST,
+    PLAYERS_TELL,
+    BROADCAST,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -295,6 +361,37 @@ fn servers_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError
     }))
 }
 
+/// `players/tell`: a line in one player's chat. A player who is not online is not an error: `{"told": 0}`.
+fn players_tell(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let (who, text) = orders::parse_tell(params).map_err(invalid)?;
+    let told = ctx.actions()?.tell(&who, &text);
+    debug!(
+        "extension \"{}\" told {told} player(s) a line",
+        ctx.link.name()
+    );
+    done(serde_json::to_value(Told { told }))
+}
+
+/// `broadcast`: a line to every player, or to those on one server, as `/alert` shows it. It costs the budget the
+/// number of players it reaches, and at most the burst; it is refused for want of budget before anyone is told.
+fn broadcast(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let (server, text) = orders::parse_broadcast(params).map_err(invalid)?;
+    let actions = ctx.actions()?;
+    // The proxy's own words for a server it does not have name it: they are not given back.
+    let no_server = |_: String| invalid("\"server\" is not a server of the proxy".into());
+    let reached = actions.audience(server.as_deref()).map_err(no_server)?;
+    ctx.spend_for(reached)?;
+    let told = actions
+        .broadcast(server.as_deref(), &text)
+        .map_err(no_server)?;
+    crate::log::info!(
+        "extension \"{}\" alerted {} to {told}: {text}",
+        ctx.link.name(),
+        server.as_deref().unwrap_or("every server")
+    );
+    done(serde_json::to_value(Told { told }))
+}
+
 /// `queue/list`: whether the queue is on, and who waits.
 fn queue_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     orders::parse_no_params(params).map_err(invalid)?;
@@ -397,14 +494,16 @@ fn run(
     let ctx = Ctx {
         link,
         installed: link.facts(),
+        acting: link.actions(),
     };
     let (outcome, reply) = match catch_unwind(AssertUnwindSafe(|| (order.run)(&ctx, params))) {
         Ok(Ok(result)) => (Outcome::Done, wire::result(id, &result)),
         Ok(Err(error)) => {
-            let outcome = if error.code == code::INVALID_PARAMS {
-                Outcome::Invalid
-            } else {
-                Outcome::Failed
+            let outcome = match error.code {
+                code::INVALID_PARAMS => Outcome::Invalid,
+                // An order that costs by the players it reaches can find the budget too low once it knows how many.
+                code::OVER_BUDGET => Outcome::OverBudget,
+                _ => Outcome::Failed,
             };
             (outcome, wire::error(Some(id), &error))
         }

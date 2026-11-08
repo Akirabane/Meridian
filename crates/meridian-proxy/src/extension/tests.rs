@@ -1866,6 +1866,10 @@ mod the_orders {
                 "meridian:test/slow-write"
             ]
         );
+        assert_eq!(
+            methods(&["orders.message"]),
+            ["meridian:players/tell", "meridian:broadcast"]
+        );
         assert!(methods(&["decide.login", "events"]).is_empty());
     }
 
@@ -2335,5 +2339,295 @@ mod the_orders {
             link.stats().orders(shapes::QUEUE_LIST, Ended::OverBudget),
             over
         );
+    }
+
+    // ---- the orders that message ----------------------------------------------------------------------
+
+    use crate::extension::orders::Actions;
+    use meridian_extension::orders::{Told, Who};
+    use std::sync::Mutex as StdMutex;
+
+    /// Actions that are made up: they record what they were asked, `Nobody` is not online, `east` has two players, any
+    /// other server is not one, and "every server" reaches `everyone` players.
+    struct Acting {
+        told: StdMutex<Vec<(Who, String)>>,
+        cast: StdMutex<Vec<(Option<String>, String)>>,
+        everyone: AtomicUsize,
+    }
+
+    impl Acting {
+        fn new(everyone: usize) -> Arc<Self> {
+            Arc::new(Self {
+                told: StdMutex::new(Vec::new()),
+                cast: StdMutex::new(Vec::new()),
+                everyone: AtomicUsize::new(everyone),
+            })
+        }
+
+        fn told(&self) -> Vec<(Who, String)> {
+            self.told.lock().unwrap().clone()
+        }
+
+        fn cast(&self) -> Vec<(Option<String>, String)> {
+            self.cast.lock().unwrap().clone()
+        }
+    }
+
+    impl Actions for Acting {
+        fn tell(&self, who: &Who, text: &str) -> usize {
+            self.told
+                .lock()
+                .unwrap()
+                .push((who.clone(), text.to_owned()));
+            usize::from(!matches!(who, Who::Name(name) if name.eq_ignore_ascii_case("Nobody")))
+        }
+
+        fn audience(&self, server: Option<&str>) -> Result<usize, String> {
+            match server {
+                None => Ok(self.everyone.load(Ordering::SeqCst)),
+                Some("east") => Ok(2),
+                Some(other) => Err(format!("there is no server called {other}")),
+            }
+        }
+
+        fn broadcast(&self, server: Option<&str>, text: &str) -> Result<usize, String> {
+            let reached = self.audience(server)?;
+            self.cast
+                .lock()
+                .unwrap()
+                .push((server.map(str::to_owned), text.to_owned()));
+            Ok(reached)
+        }
+    }
+
+    /// `orderly`, with the actions of `acting` served.
+    fn acting_with(
+        grant: &[&str],
+        acting: &Arc<Acting>,
+        change: impl FnOnce(&mut Settings),
+    ) -> (Fake, Registry, Arc<Link>, Folder) {
+        let (fake, registry, link, folder) = orderly(grant, change);
+        registry.serve_actions(Arc::clone(acting) as Arc<dyn Actions>);
+        (fake, registry, link, folder)
+    }
+
+    fn told_of(reply: &Value) -> usize {
+        serde_json::from_value::<Told>(reply["result"].clone())
+            .unwrap_or_else(|e| panic!("{e}: {reply}"))
+            .told
+    }
+
+    #[test]
+    fn the_orders_that_message_need_orders_message_and_are_refused_as_if_they_did_not_exist_without_it()
+     {
+        let acting = Acting::new(5);
+        // `orders.read` is granted, `orders.message` is not.
+        let (fake, _registry, link, _folder) = acting_with(&["orders.read"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(6000),
+            shapes::PLAYERS_TELL,
+            r#"{"player":"Alex","text":"hi"}"#,
+        );
+        order(&fake, &json!(6001), shapes::BROADCAST, r#"{"text":"hi"}"#);
+        for id in [6000, 6001] {
+            assert_eq!(code_of(&answer(&fake, &json!(id))), -32601);
+        }
+        assert!(acting.told().is_empty() && acting.cast().is_empty());
+        assert_eq!(link.stats().orders(shapes::PLAYERS_TELL, Ended::Refused), 1);
+        assert_eq!(link.stats().orders(shapes::BROADCAST, Ended::Refused), 1);
+        // Granted, they act.
+        let (fake, _registry, _link, _folder) = acting_with(&["orders.message"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(6100),
+            shapes::PLAYERS_TELL,
+            r#"{"player":"Alex","text":"hi"}"#,
+        );
+        assert_eq!(told_of(&answer(&fake, &json!(6100))), 1);
+        order(&fake, &json!(6101), shapes::BROADCAST, r#"{"text":"hi"}"#);
+        assert_eq!(told_of(&answer(&fake, &json!(6101))), 5);
+    }
+
+    #[test]
+    fn a_player_is_told_the_line_exactly_as_written_and_one_who_is_not_online_is_told_nothing() {
+        let acting = Acting::new(5);
+        let (fake, _registry, _link, _folder) = acting_with(&["orders.message"], &acting, |_| {});
+        // Characters that would mean something in a JSON text component or in HTML are only characters.
+        let line = r#"Click <b>here</b> & {"text":"x","clickEvent":1} 'quoted'"#;
+        let params = serde_json::to_string(&json!({"player": "alex", "text": line})).unwrap();
+        order(&fake, &json!(6200), shapes::PLAYERS_TELL, &params);
+        assert_eq!(told_of(&answer(&fake, &json!(6200))), 1);
+        order(
+            &fake,
+            &json!(6201),
+            shapes::PLAYERS_TELL,
+            r#"{"player":"0A2EA4BABCED39D280E11AD51A0E925C","text":"by id"}"#,
+        );
+        assert_eq!(told_of(&answer(&fake, &json!(6201))), 1);
+        order(
+            &fake,
+            &json!(6202),
+            shapes::PLAYERS_TELL,
+            r#"{"player":"Nobody","text":"hello?"}"#,
+        );
+        assert_eq!(told_of(&answer(&fake, &json!(6202))), 0);
+        let told = acting.told();
+        assert_eq!(told[0], (Who::Name("alex".into()), line.to_owned()));
+        assert_eq!(
+            told[1].0,
+            Who::Id("0a2ea4ba-bced-39d2-80e1-1ad51a0e925c".into())
+        );
+        assert_eq!(told.len(), 3);
+    }
+
+    #[test]
+    fn a_line_that_is_not_valid_is_refused_with_32602_and_nobody_is_told() {
+        let acting = Acting::new(5);
+        let (fake, _registry, link, _folder) = acting_with(&["orders.message"], &acting, |_| {});
+        let secret = "an-id-that-must-not-come-back";
+        let long = "x".repeat(shapes::MAX_TEXT + 1);
+        let cases = [
+            serde_json::to_string(&json!({"player": "Alex", "text": ""})).unwrap(),
+            serde_json::to_string(&json!({"player": "Alex", "text": long})).unwrap(),
+            serde_json::to_string(&json!({"player": "Alex", "text": format!("{secret}\n")}))
+                .unwrap(),
+            serde_json::to_string(&json!({"player": "Alex", "text": format!("{secret}\u{a7}4")}))
+                .unwrap(),
+            serde_json::to_string(&json!({"player": "Alex", "text": format!("{secret}\u{202e}")}))
+                .unwrap(),
+            serde_json::to_string(&json!({"player": secret.repeat(3), "text": "hi"})).unwrap(),
+            r#"{"player":"Alex"}"#.to_owned(),
+            r#"["Alex","hi"]"#.to_owned(),
+        ];
+        for (n, params) in cases.iter().enumerate() {
+            let id = json!(6300 + n);
+            order(&fake, &id, shapes::PLAYERS_TELL, params);
+            let reply = answer(&fake, &id);
+            assert_eq!(code_of(&reply), -32602, "{params}");
+            assert!(!reply.to_string().contains(secret), "{reply}");
+        }
+        assert!(acting.told().is_empty());
+        assert_eq!(
+            link.stats().orders(shapes::PLAYERS_TELL, Ended::Invalid),
+            cases.len() as u64
+        );
+    }
+
+    #[test]
+    fn a_broadcast_reaches_every_player_or_those_of_one_server_and_a_server_nobody_has_is_refused()
+    {
+        let acting = Acting::new(5);
+        let (fake, _registry, _link, _folder) = acting_with(&["orders.message"], &acting, |_| {});
+        order(
+            &fake,
+            &json!(6400),
+            shapes::BROADCAST,
+            r#"{"text":"Restart in 5 minutes."}"#,
+        );
+        assert_eq!(told_of(&answer(&fake, &json!(6400))), 5);
+        order(
+            &fake,
+            &json!(6401),
+            shapes::BROADCAST,
+            r#"{"server":"east","text":"Hello east."}"#,
+        );
+        assert_eq!(told_of(&answer(&fake, &json!(6401))), 2);
+        let secret = "server-name-that-must-not-come-back";
+        order(
+            &fake,
+            &json!(6402),
+            shapes::BROADCAST,
+            &format!(r#"{{"server":"{secret}","text":"hi"}}"#),
+        );
+        let reply = answer(&fake, &json!(6402));
+        assert_eq!(code_of(&reply), -32602);
+        assert!(!reply.to_string().contains(secret), "{reply}");
+        assert_eq!(
+            acting.cast(),
+            [
+                (None, "Restart in 5 minutes.".to_owned()),
+                (Some("east".to_owned()), "Hello east.".to_owned())
+            ]
+        );
+    }
+
+    /// A broadcast costs the budget the number of players it reaches, and at most the burst (a `send all` of 500 players
+    /// could never run if it cost 500), and one the budget cannot pay is refused before anyone is told.
+    #[test]
+    fn a_broadcast_costs_the_players_it_reaches_up_to_the_burst_and_is_refused_before_anyone_is_told_if_it_cannot_be_paid()
+     {
+        // Two tokens of three are spent by two tells: a broadcast to five (cost: the three of the burst) cannot be paid.
+        let acting = Acting::new(5);
+        let (fake, _registry, link, _folder) =
+            acting_with(&["orders.message"], &acting, |settings| {
+                settings.order_burst = 3;
+                settings.order_rate = 1;
+            });
+        for n in 0..2 {
+            order(
+                &fake,
+                &json!(6500 + n),
+                shapes::PLAYERS_TELL,
+                r#"{"player":"Alex","text":"hi"}"#,
+            );
+            assert_eq!(told_of(&answer(&fake, &json!(6500 + n))), 1);
+        }
+        order(
+            &fake,
+            &json!(6510),
+            shapes::BROADCAST,
+            r#"{"text":"to everyone"}"#,
+        );
+        let reply = answer(&fake, &json!(6510));
+        assert_eq!(code_of(&reply), -32001);
+        assert!(acting.cast().is_empty(), "nobody was told");
+        assert_eq!(link.stats().orders(shapes::BROADCAST, Ended::OverBudget), 1);
+
+        // A rested budget of four, and a broadcast to 500: it costs four (the burst), and it runs.
+        let acting = Acting::new(500);
+        let (fake, _registry, _link, _folder) =
+            acting_with(&["orders.message"], &acting, |settings| {
+                settings.order_burst = 4;
+                settings.order_rate = 1;
+            });
+        order(
+            &fake,
+            &json!(6600),
+            shapes::BROADCAST,
+            r#"{"text":"to 500"}"#,
+        );
+        assert_eq!(told_of(&answer(&fake, &json!(6600))), 500);
+        // It took the whole burst: the next order, at once, is over the budget.
+        order(
+            &fake,
+            &json!(6601),
+            shapes::PLAYERS_TELL,
+            r#"{"player":"Alex","text":"hi"}"#,
+        );
+        assert_eq!(code_of(&answer(&fake, &json!(6601))), -32001);
+        assert_eq!(acting.told().len(), 0);
+    }
+
+    #[test]
+    fn with_no_actions_given_an_order_that_messages_says_it_is_not_available_and_nothing_breaks() {
+        // `orderly` serves none.
+        let (fake, _registry, link, _folder) = orderly(&["orders.message"], |_| {});
+        order(
+            &fake,
+            &json!(6700),
+            shapes::PLAYERS_TELL,
+            r#"{"player":"Alex","text":"hi"}"#,
+        );
+        order(&fake, &json!(6701), shapes::BROADCAST, r#"{"text":"hi"}"#);
+        for id in [6700, 6701] {
+            let reply = answer(&fake, &json!(id));
+            assert_eq!(
+                (code_of(&reply), reply["error"]["message"].as_str()),
+                (-32603, Some("not available"))
+            );
+        }
+        assert_eq!(link.stats().orders(shapes::BROADCAST, Ended::Failed), 1);
+        assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
     }
 }

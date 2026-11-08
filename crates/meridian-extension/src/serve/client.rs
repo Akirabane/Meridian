@@ -21,7 +21,7 @@
 //! [`OrderError::retry_later`]).
 
 use crate::orders::{
-    self, Ack, Found, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList,
+    self, Ack, Found, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList, Told,
 };
 use crate::wire::{self, RpcError, code};
 use meridian_websocket::Writer;
@@ -397,6 +397,43 @@ impl Proxy {
     /// Whether the proxy's queue is on and who waits in it (the first 500). Needs `orders.read`.
     pub fn queue(&self) -> Result<QueueState, OrderError> {
         self.0.read(orders::QUEUE_LIST, None::<&Value>)
+    }
+
+    /// Shows `text` in the chat of the player called `player` (whatever the case) or with that unique id, and tells how many
+    /// were shown it: 1, or 0 if nobody online is (not an error). Needs `orders.message`, which the extension asks for with
+    /// [`Extension::wants`](super::Extension::wants) and the operator grants.
+    ///
+    /// The line is shown **as written, as plain text**, with no formatting and no click event: it must be 1 to
+    /// [`orders::MAX_TEXT`] characters with none that a line may not hold (a control, formatting or invisible character), or
+    /// it is [`OrderError::Invalid`] and nothing is sent ([`orders::clean_text`] makes a line valid). **This order is not
+    /// the same when it is done twice**: after a timeout or an end of the connection ([`OrderError::may_have_run`]) the
+    /// player may have been told, and asking again may tell them twice.
+    pub fn tell(&self, player: &str, text: &str) -> Result<usize, OrderError> {
+        let params = orders::TellParams {
+            player: player.to_owned(),
+            text: text.to_owned(),
+        };
+        orders::parse_tell(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        let told: Told = self.0.read(orders::PLAYERS_TELL, Some(&params))?;
+        Ok(told.told)
+    }
+
+    /// Shows `text` to every player online, or to those on `server`, as the proxy's own `/alert` does, and tells how many
+    /// were shown it. A server the proxy does not have is a refusal (`-32602`). Needs `orders.message`.
+    ///
+    /// **It costs the proxy's budget of orders the number of players it reaches, and at most its burst** (the proxy
+    /// refuses it, before anyone is told, with `-32001` ([`OrderError::retry_later`]) if the budget cannot pay). The line is
+    /// checked as in [`Proxy::tell`], and this order too is not the same when it is done twice.
+    pub fn broadcast(&self, server: Option<&str>, text: &str) -> Result<usize, OrderError> {
+        let params = orders::BroadcastParams {
+            server: server.map(str::to_owned),
+            text: text.to_owned(),
+        };
+        orders::parse_broadcast(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        let told: Told = self.0.read(orders::BROADCAST, Some(&params))?;
+        Ok(told.told)
     }
 
     fn invalidate(&self, params: &orders::InvalidateParams) -> Result<(), OrderError> {

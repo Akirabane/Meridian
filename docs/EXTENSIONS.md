@@ -6,8 +6,8 @@ they go to. Part of it is built, and the pull requests of section 10 follow the 
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
-orders (8.1), with the orders that read (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
-leaves a choice open. Not built: the orders that act (5) and the events the proxy sends the extension (6).
+orders (8.1), with the orders that read and those that message (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
+leaves a choice open. Not built: the orders that move, expel, drain, reload and run console lines (5) and the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -1015,13 +1015,39 @@ configuration in force, the balancer, the queue); until the proxy has given the 
   500, not one for each player. **The SDK's `Proxy::players()` does this**, page after page, and gives up (`BadAnswer`) on a
   proxy whose cursors do not go forward or whose pages do not end.
 
+**As built, for the orders that message** (`extension/orders.rs`, `extension/actions.rs`, `meridian-extension/src/orders.rs`):
+`players/tell` and `broadcast`, capability `orders.message`.
+
+- **`players/tell`**: params `{"player": "<name or id>", "text": "<line>"}`; it answers `{"told": 1}`, or `{"told": 0}` when nobody
+  online is that (not an error). The player is found as `players/find` finds them (a unique id with or without hyphens, or a
+  name in any case). **The line is shown as plain text, exactly as written**: the proxy writes it as a literal, never as a
+  JSON text component, so a click event, a colour or a hover cannot come from it (`<b>`, `&` or `{"clickEvent": ...}` are only
+  characters). It is valid as the line of an extension's own command is (4.3): 1 to 256 characters, none of a control,
+  formatting (`§`) or invisible character (a line break among them, which ends nothing: send another line). Anything else
+  is `-32602`, and nobody is told. `meridian_extension::orders::clean_text` makes a line valid for a program that would
+  rather clean than be refused.
+- **`broadcast`**: params `{"text": "<line>", "server": "<name>"}`, `server` optional (every player when left out). It shows
+  the line as the proxy's own `/alert` does (the same `[Alert] ` start, the same function) and answers `{"told": N}`. A server
+  the proxy does not have is `-32602` in fixed words (the name the extension gave is not given back).
+- **Cost** (decision Q7). `players/tell` costs one order. **`broadcast` costs the number of players it reaches, and at most
+  the burst** (`[extension.orders] burst`): one that reaches 500 players costs the whole burst of 50, not 500, which would
+  have made it impossible to run. The dispatcher takes one order at the start and the rest is taken once the audience is known,
+  **before anyone is told**: a broadcast that the budget cannot pay is `-32001`, and nobody was shown anything (it can be
+  asked again). It is logged as `extension "<name>" alerted <server or every server> to N: <line>`.
+- **Not the same twice.** Unlike `permissions/invalidate`, these orders show a line each time they run: after a timeout or an
+  end of the connection (`may_have_run`) the line may have been shown, and asking again may show it twice. Whether that
+  matters is for the extension.
+- Until the proxy has given the registry its actions they answer `-32603 not available`.
+
 **As built, for the orders** (`meridian-extension/src/serve/client.rs`). The trait sketch above puts a `&Proxy` in
 the argument of each method; the SDK's handlers are closures registered one by one (`on_login`, `on_command`...)
 and keep their signatures, so the handle is made apart and given to the closures that need it:
 `let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
 is connected its orders end with `NotConnected`.
 
-- **Methods.** `Proxy::players_page(limit, cursor)`, `players()`, `find_player(&str)`, `servers()` and `queue()` for the orders
+- **Methods.** `Proxy::tell(player, text)` and `Proxy::broadcast(server, text)` for the orders that message (they need
+  `orders.message`: `Extension::wants("orders.message")` and the operator's grant; a line that is not valid is `Invalid` and
+  nothing is sent); `Proxy::players_page(limit, cursor)`, `players()`, `find_player(&str)`, `servers()` and `queue()` for the orders
   that read (they need `orders.read`: the extension asks for it with `Extension::wants("orders.read")`, and for the addresses
   with `wants("addresses")`; the proxy serves a capability only if the hello asked for it **and** the operator granted
   it); `Proxy::invalidate_player(&str)` and `Proxy::invalidate_all()`, for `permissions/invalidate`; the
