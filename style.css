@@ -128,6 +128,7 @@ ul.legend li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10p
 .tablist a[aria-selected="true"] { color: var(--text); border-bottom-color: var(--link); }
 .tabbar .lang { flex: 0 0 auto; white-space: nowrap; font-size: 14px; }
 [id] { scroll-margin-top: 60px; }
+.tabbed [id] { scroll-margin-top: 0; }
 [hidden] { display: none !important; }
 .tabbed main > section { border-bottom: 0; }
 @media (max-width: 640px) { .tablist a { padding: 10px 9px 9px; font-size: 14px; } .tabbar .tabrow { gap: 8px; } }
@@ -159,7 +160,7 @@ h4.sub { margin: 26px 0 4px; font-size: 18px; }
 h4.sub .pill { vertical-align: 2px; }
 
 /* The bar of tabs, redone: pills (no scrollbar), a segmented language switch, a fade on a narrow screen */
-.tabbar { background: var(--bg); background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.tabbar { background: var(--bg); } /* opaque on purpose: no blur, so it never renders white in a browser that lacks the effect */
 .tabbar .tabrow { padding-top: 8px; padding-bottom: 8px; gap: 10px; }
 .tablist { gap: 6px; scrollbar-width: none; -ms-overflow-style: none; }
 .tablist::-webkit-scrollbar { display: none; width: 0; height: 0; }
@@ -183,3 +184,10 @@ h4.sub .pill { vertical-align: 2px; }
   .tabbar .lang a { font-size: 0; padding: 4px 9px; }
   .tabbar .lang a::after { content: attr(data-short); font-size: 13px; }
 }
+
+/* Real-network tab: bots against a real server, direct and through the proxy */
+.tablewrap { overflow-x: auto; margin: 10px 0; }
+table.lt { border-collapse: collapse; width: 100%; min-width: 480px; font-size: 15px; }
+table.lt th, table.lt td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+table.lt thead th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+table.lt tbody th { font-weight: 600; width: 34%; }

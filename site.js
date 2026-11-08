@@ -32,8 +32,14 @@
   langs.forEach(function (a) { a.setAttribute('data-base', a.getAttribute('href').split('#')[0]); });
 
   setUp();
+  // a link into the page lands below the bar, whatever its height (it may wrap on two lines)
+  function clearBar() {
+    document.documentElement.style.scrollPaddingTop = (bar.offsetHeight + 8) + 'px';
+  }
   function setUp() {
     document.documentElement.classList.add('tabbed');
+    clearBar();
+    window.addEventListener('resize', clearBar);
     list.setAttribute('role', 'tablist');
     tabs.forEach(function (a, i) {
       a.setAttribute('role', 'tab');
