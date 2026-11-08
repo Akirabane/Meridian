@@ -164,6 +164,9 @@ The proxy's own counts at the end of the three runs: fallback by kick, moved: 2;
 - **Two servers and one player.** No scripted player, no load, and the fallback list had a single
   entry.
 - **A shared machine**, as in the reference run, and an offline account.
+- **A stop of that build.** The window of about 80 ms in run 8 is that of a Horizon `stop` before its
+  stop wait (`[transfer] stop_wait_seconds`, Horizon's pull request #11713, merged on 8 November 2026
+  at 01:18 UTC). It is not the behaviour of a Horizon that has it.
 
 ## 4. Where the other pages point here
 
@@ -188,7 +191,7 @@ clients' machine across the Internet. It says what that run did not cover.
 
 Since then (6 and 7 November 2026), the first three items above were run with real clients over a
 real network, in that page: the seamless switch, `drain --move` and the evacuation of a restarting
-server (runs 1 to 6; run 7 for a stop with a wait for the evacuation, which needs Horizon's pull
-request #11713, not merged). It was three real clients on one PC, one session each. The queue as a
+server (runs 1 to 6; run 7 for a stop with a wait for the evacuation, which Horizon's pull
+request #11713 added, merged on 8 November 2026). It was three real clients on one PC, one session each. The queue as a
 real client sees it, the sync of bans and whitelist with a real client, the hybrid and online modes
 and long sessions are still not run with a real client.

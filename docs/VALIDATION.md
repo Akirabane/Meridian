@@ -10,6 +10,11 @@ result" columns and section 7). It was run once, on 2026-11-05, with a proxy bui
 `e2211c5` against the Horizon build `02f05c1` (the #7484 stack): sections 5 and 7 give the result,
 and the three things it found.
 
+**Dated:** the 78 ms measured here is that of the build `02f05c1`, before Horizon's stop wait
+(`[transfer] stop_wait_seconds`, 10 s by default; Horizon's pull request #11713, merged on 8 November
+2026 at 01:18 UTC). A `stop` with players placed now waits for the proxy to move them out. The figures
+and conclusions below are those of that build and of that run.
+
 The steps are manual: commands typed at the consoles of the bench, and files read. The scripts
 that automate them for the bench are kept with the bench, outside this repository.
 
