@@ -17,7 +17,7 @@
 //! that is enabled, or that an earlier extension has, is refused and logged once; a word that is not valid
 //! is too. A command stays an extension's while the extension is configured, enabled and granted
 //! `commands`, **also while it is down**: a player who types it then reads that it did not answer,
-//! and not what a server says of a command it does not know (**provisional**: the user has yet to decide).
+//! and not what a server says of a command it does not know (decided: the word stays reserved).
 
 use super::command::{Gate, Typed, args_of, merge, player_of};
 use super::{Link, Registry};

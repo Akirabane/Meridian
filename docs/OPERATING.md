@@ -619,7 +619,7 @@ everyone** like `/hub`; to close one, deny its node in `permissions.toml`
   never passes it to a server, the extension is told what the player typed after it, and answers what it
   likes. **The token of such an extension is an administrator's credential**; keep its file readable by the
   proxy and the extension only. The proxy has no list of words it keeps from an extension.
-- **While the extension is down, its commands stay its own** (**provisional**: this may change): the player
+- **While the extension is down, its commands stay its own** (decided: the word stays reserved): the player
   who types one reads `That command did not answer.`, and the server does not see it. Before the first hello
   after the proxy starts, the word is not known yet and goes to the server.
 

@@ -4,9 +4,10 @@ This page specifies how a program of the operator's own can take part in what th
 decides: whether a player may enter, whether they may use a proxy command, and which server
 they go to. Part of it is built, and the pull requests of section 10 follow the rest. Built: the
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
-choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`); the
-"As built" paragraphs of 4.3 and 4.4 say what the code does where this page leaves a choice open. Not
-built: the orders the extension gives the proxy (5) and the events the proxy sends it (6).
+choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
+dispatcher of the orders with the first one, `permissions/invalidate` (5); the "As built" paragraphs of 4.3, 4.4
+and 5 say what the code does where this page leaves a choice open. Not built: the other orders (5), the client
+half of the SDK that sends them, and the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -638,9 +639,9 @@ before the proxy's own are looked at:
   that an extension before has, is refused and logged once for each hello. A name that is refused refuses its
   command; an alias that is refused is dropped. A word is matched as typed, as the proxy's own are. A command
   stays the extension's **also while the extension is down** (its declaration of the last hello is kept): the
-  player reads `That command did not answer.`, and the server never sees the word. **This is provisional: the
-  user has yet to decide what a command does when its extension is absent**; before the first hello after the
-  proxy starts the word is unknown, so it goes to the server.
+  player reads `That command did not answer.`, and the server never sees the word. **This is decided:** the
+  word stays reserved as long as the extension is configured, enabled and granted `commands`; before the first
+  hello after the proxy starts the word is unknown, so it goes to the server.
 - **The permission** is the node `ext.<extension>.<command>` (lower case, the same for every alias), **open to
   everyone** unless a group denies it. `Typist::has` and `merge` decide as for the proxy's own commands, with the
   verdict of the extension that holds `decide.command` **only if it is the extension that owns the command**
@@ -815,7 +816,46 @@ capability, and a request without it is answered `-32601`, as if the method did 
   program as trusted as the operator's shell.
 - **Rates.** Each extension has a budget of orders: 20 a second, with bursts of 50 (settings).
   An order over it is answered with a JSON-RPC error and is not run. `players/send` and
-  `broadcast` count for each player they reach.
+  `broadcast` count for each player they reach, **at most the burst**: a `send all` to 500 players
+  costs the whole burst, so that it can run (it would cost more than the budget ever holds
+  otherwise).
+
+**As built, for the dispatcher and `meridian:permissions/invalidate`** (`extension/orders.rs`,
+`meridian-extension/src/orders.rs`):
+
+- **Which method, which capability.** A table gives each order its capability. A method that is not in
+  it, and a method whose capability the connection was not granted (asked for in the hello **and**
+  granted in the configuration), are answered the same way, `-32601 method not found`: an extension
+  cannot tell a method it may not use from one that does not exist. A request with no `id` is a
+  notification: nothing is run for it and nothing is answered.
+- **An order never runs on the thread that reads the connection.** That thread also hands the proxy's
+  own requests their answers, and a slow order must not hold them. The reader takes a place among the
+  extension's `max-running` and one token of its budget, and starts the order on a thread of its own,
+  which writes the answer and gives its place back **before** it writes, so that an extension that
+  sends its next order when it reads the answer finds the place free. A handler that panics is
+  answered `-32603 the order failed`, and the connection goes on.
+- **Errors.** `-32602` for parameters that are not what the order takes (the message says what is
+  wrong in a few words and never quotes what was sent); `-32001 over the budget of orders` when the
+  budget is spent; `-32002 too many orders running` when `max-running` are running. The last two are in
+  the range JSON-RPC keeps for the errors of a server. Neither ran, and asking again later is fine. The
+  budget is a token bucket per extension, kept while the proxy runs (a new connection does not refill
+  it); `rate-per-second` tokens come back each second, up to `burst`.
+- **`rpc.discover`** of the proxy lists the orders the connection was granted the capability of, and
+  nothing for the ones it was not.
+- **`meridian:permissions/invalidate`** (capability `decide.command`) takes exactly one of
+  `{"player": "<unique id>"}` (with or without hyphens, in either case) or `{"all": true}`, and answers
+  `{"ok": true}`. It makes the proxy forget the permissions it kept of the extension's answers
+  (`cache_seconds`, 4.3): for one player, or for everyone. It is for an extension that has just
+  changed someone's rights and does not want to wait for the answers to run out. An answer that was on
+  its way when the request came is not kept. The proxy keeps the last 256 requests for one player;
+  past that, a session that did not see them forgets everything it kept, which errs on the side of
+  asking again.
+- **Counted** in `meridian_extension_orders_total{extension,method,outcome}`, where the outcome is
+  `done`, `invalid`, `failed`, `budget`, `busy` or `refused`. A method the proxy does not have is
+  counted under `method="unknown"`, never under the name the extension gave.
+- **Configuration.** `[extension.orders]` with `rate-per-second` (20), `burst` (50) and `max-running`
+  (8), accepted when `grant` holds an `orders.*` or `decide.command`. Changing them closes the
+  connection and opens it again, as changing any setting of the connection does.
 
 ## 6. Events: the proxy tells the extension (version 1.1, optional)
 

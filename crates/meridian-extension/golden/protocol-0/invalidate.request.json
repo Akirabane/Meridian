@@ -1,0 +1,6 @@
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "meridian:permissions/invalidate",
+  "params": {"player": "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c"}
+}

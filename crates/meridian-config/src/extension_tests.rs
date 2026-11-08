@@ -75,6 +75,11 @@ fn an_extension_takes_the_defaults_of_the_specification() {
                 on_error: ServerOnError::Default,
             },
             own_commands: OwnCommands { timeout_ms: 2000 },
+            orders: Orders {
+                rate_per_second: 20,
+                burst: 50,
+                max_running: 8,
+            },
         }]
     );
 }
@@ -262,6 +267,138 @@ fn a_name_is_plain_and_unique() {
         "{e}"
     );
     assert!(e.to_string().contains("without regard to case"), "{e}");
+}
+
+#[test]
+fn the_orders_of_an_extension_have_a_budget_that_can_be_set_within_bounds_and_need_a_capability_that_opens_them()
+ {
+    let dir = folder("orders");
+    let granted = |grant: &str, more: &str| {
+        extension(
+            "x",
+            25590,
+            "a.token",
+            &format!(
+                "grant = [{grant}]
+{more}"
+            ),
+        )
+    };
+    let orders = |config: &Config| config.extensions[0].orders.clone();
+    // 20 a second, bursts of 50 (docs/EXTENSIONS.md, section 5), and 8 running at once.
+    let config = load(&dir, "", &granted("\"orders.read\"", "")).unwrap();
+    assert_eq!(orders(&config), Orders::default());
+    assert_eq!(
+        (
+            Orders::default().rate_per_second,
+            Orders::default().burst,
+            Orders::default().max_running
+        ),
+        (20, 50, 8)
+    );
+    let table = "[extension.orders]
+rate-per-second = 5
+burst = 7
+max-running = 2";
+    let config = load(&dir, "", &granted("\"orders.read\"", table)).unwrap();
+    assert_eq!(
+        orders(&config),
+        Orders {
+            rate_per_second: 5,
+            burst: 7,
+            max_running: 2
+        }
+    );
+    // A key written alone leaves the others as they are; an empty table is the defaults.
+    let config = load(
+        &dir,
+        "",
+        &granted(
+            "\"orders.move\"",
+            "[extension.orders]
+burst = 9",
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        (orders(&config).rate_per_second, orders(&config).burst),
+        (20, 9)
+    );
+    let config = load(&dir, "", &granted("\"orders.move\"", "[extension.orders]")).unwrap();
+    assert_eq!(orders(&config), Orders::default());
+    // Every capability that opens an order opens the table, and `decide.command` does (its order is the
+    // one that makes the proxy forget what it kept of the permissions).
+    for capability in [
+        "orders.read",
+        "orders.message",
+        "orders.move",
+        "orders.moderate",
+        "orders.operate",
+        "orders.console",
+        "decide.command",
+    ] {
+        assert!(opens_orders(capability), "{capability}");
+        load(&dir, "", &granted(&format!("\"{capability}\""), table)).unwrap();
+    }
+    // Not granted any, the table would be read and never used.
+    for grant in [
+        "",
+        "\"decide.login\", \"commands\", \"events\", \"addresses\"",
+    ] {
+        let e = load(&dir, "", &granted(grant, table)).unwrap_err();
+        assert!(matches!(e, ConfigError::OrdersWithoutGrant { .. }), "{e}");
+        assert!(e.to_string().contains("[extension.orders]"), "{e}");
+    }
+    // Zero is no order at all.
+    for key in ["rate-per-second", "burst", "max-running"] {
+        let e = load(
+            &dir,
+            "",
+            &granted(
+                "\"orders.read\"",
+                &format!(
+                    "[extension.orders]
+{key} = 0"
+                ),
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(e, ConfigError::ZeroExtensionSetting { .. }), "{e}");
+        assert!(e.to_string().contains(&format!("orders {key}")), "{e}");
+    }
+    // Above a ceiling is refused, the ceiling itself is not.
+    for (key, most) in [
+        ("rate-per-second", 1_000),
+        ("burst", 10_000),
+        ("max-running", 64),
+    ] {
+        let table = |n: u32| {
+            format!(
+                "[extension.orders]
+{key} = {n}"
+            )
+        };
+        load(&dir, "", &granted("\"orders.read\"", &table(most))).unwrap();
+        let e = load(&dir, "", &granted("\"orders.read\"", &table(most + 1))).unwrap_err();
+        assert!(
+            matches!(e, ConfigError::ExtensionSettingAbove { .. }),
+            "{e}"
+        );
+        assert!(e.to_string().contains(&format!("orders {key}")), "{e}");
+    }
+    // A key nobody knows is a mistake.
+    assert!(
+        load(
+            &dir,
+            "",
+            &granted(
+                "\"orders.read\"",
+                "[extension.orders]
+timeout-ms = 5"
+            )
+        )
+        .is_err()
+    );
 }
 
 #[test]

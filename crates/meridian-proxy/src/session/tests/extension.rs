@@ -131,6 +131,7 @@ fn extension_config(
         decide_command: Default::default(),
         decide_server: Default::default(),
         own_commands: Default::default(),
+        orders: Default::default(),
     }
 }
 
@@ -1765,6 +1766,87 @@ groups = ["nobody"]
         assert_eq!(greedy.asked(), before + 2, "asked again after the maximum");
     }
 
+    // ---- the extension asks the proxy to forget what it kept ------------------------------------
+
+    const ALEX: &str = "01010101-0101-0101-0101-010101010101";
+
+    /// The three tests below: an extension whose answers are kept for a minute, Alex's hook, the link.
+    fn kept_for_a_minute() -> (
+        Ranker,
+        Sessions,
+        Arc<CommandHook>,
+        Arc<crate::extension::Link>,
+    ) {
+        let ranker =
+            ranker(|request| NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60));
+        let config = config_with(ranker.extension(OnError::Default, 1000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        let link = sessions.extensions.link("gate").unwrap();
+        (ranker, sessions, hook, link)
+    }
+
+    #[test]
+    fn when_the_extension_asks_to_forget_everyone_what_was_kept_is_asked_again() {
+        let (ranker, _sessions, hook, link) = kept_for_a_minute();
+        for _ in 0..3 {
+            let _ = hook("send all east");
+        }
+        assert_eq!(ranker.asked(), 1);
+        link.forget_all();
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 2, "asked again once, then kept again");
+    }
+
+    #[test]
+    fn when_the_extension_asks_to_forget_one_player_only_that_players_answers_go() {
+        let (ranker, _sessions, hook, link) = kept_for_a_minute();
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 1);
+        // Someone else: Alex keeps what was kept.
+        link.forget_player("02020202-0202-0202-0202-020202020202".into());
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 1);
+        // Alex, in capitals as a program may write it: asked again, then kept again.
+        link.forget_player(ALEX.to_ascii_uppercase());
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 2);
+        // More requests than the proxy keeps count of, none of them for Alex: it cannot tell, so it forgets.
+        for n in 0..300 {
+            link.forget_player(format!("{n:08x}-0000-0000-0000-000000000000"));
+        }
+        let _ = hook("send all east");
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 3);
+    }
+
+    #[test]
+    fn an_answer_that_was_on_its_way_when_the_extension_asked_to_forget_the_player_is_not_kept() {
+        let ranker = ranker_after(Duration::from_millis(300), |request| {
+            NodeAnswers::all(request, NodeVerdict::Allow).cache_seconds(60)
+        });
+        let config = config_with(ranker.extension(OnError::Default, 2000, 300));
+        let sessions = sessions_for(&config);
+        let (hook, _) = hook_of(&config, &sessions, "");
+        let link = sessions.extensions.link("gate").unwrap();
+        let asking = {
+            let hook = Arc::clone(&hook);
+            std::thread::spawn(move || hook("send all east"))
+        };
+        let limit = Instant::now() + Duration::from_secs(10);
+        while ranker.asked() == 0 {
+            assert!(Instant::now() < limit, "the extension was never asked");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The extension is deciding; it asks to forget the player before its answer comes.
+        link.forget_player(ALEX.into());
+        assert_eq!(asking.join().unwrap().as_deref(), Some("done"));
+        let _ = hook("send all east");
+        assert_eq!(ranker.asked(), 2, "the answer given before was not kept");
+    }
+
     #[test]
     fn a_failure_is_never_kept_and_a_denial_is_kept_like_an_allow() {
         // Slow once: the policy, not kept; then it answers and the answer is kept.
@@ -2347,7 +2429,7 @@ groups = ["staff"]
             assert!(Instant::now() < limit, "the connection never ended");
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Provisional (the user has yet to decide): not the server's, and told so.
+        // The word stays reserved while the extension is down: not the server's, and told so.
         assert_eq!(hook("party").as_deref(), TAKEN_AT_ONCE);
         assert_eq!(told_by_now(&told, 2)[1], NO_ANSWER);
         assert_eq!(

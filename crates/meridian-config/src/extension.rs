@@ -36,6 +36,20 @@ pub const CAPABILITIES: [&str; 12] = [
 /// The longest `[extension.commands] timeout-ms`: a thread waits that long for the lines of a command.
 pub const MAX_OWN_COMMANDS_TIMEOUT_MS: u64 = 10_000;
 
+/// The highest `[extension.orders] rate-per-second`.
+pub const MAX_ORDERS_RATE: u32 = 1_000;
+/// The highest `[extension.orders] burst`.
+pub const MAX_ORDERS_BURST: u32 = 10_000;
+/// The most orders of one extension that may run at once, `[extension.orders] max-running`: each runs on a
+/// thread of its own.
+pub const MAX_ORDERS_RUNNING: u32 = 64;
+
+/// The capabilities that open an order (docs/EXTENSIONS.md, section 5): the six `orders.*`, and
+/// `decide.command`, which is the right to ask the proxy to forget what it kept of the permissions.
+pub fn opens_orders(capability: &str) -> bool {
+    capability.starts_with("orders.") || capability == DECIDE_COMMAND
+}
+
 /// The longest name of an extension, in characters.
 pub const MAX_EXTENSION_NAME: usize = 32;
 
@@ -138,6 +152,27 @@ impl Default for OwnCommands {
     }
 }
 
+/// `[extension.orders]`: how many orders the extension may give the proxy (docs/EXTENSIONS.md, section 5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Orders {
+    /// The orders it may give each second, once its burst is used.
+    pub rate_per_second: u32,
+    /// The orders it may give at once, from a rested budget.
+    pub burst: u32,
+    /// The orders that may run at once.
+    pub max_running: u32,
+}
+
+impl Default for Orders {
+    fn default() -> Self {
+        Self {
+            rate_per_second: 20,
+            burst: 50,
+            max_running: 8,
+        }
+    }
+}
+
 /// `[extension.decide-server]`: the choice of server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerDecision {
@@ -178,6 +213,7 @@ pub struct Extension {
     pub decide_command: CommandDecision,
     pub decide_server: ServerDecision,
     pub own_commands: OwnCommands,
+    pub orders: Orders,
 }
 
 impl Extension {
@@ -204,6 +240,15 @@ pub(crate) struct FileExtension {
     decide_command: Option<FileCommandDecision>,
     decide_server: Option<FileServerDecision>,
     commands: Option<FileOwnCommands>,
+    orders: Option<FileOrders>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct FileOrders {
+    rate_per_second: Option<u32>,
+    burst: Option<u32>,
+    max_running: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -255,7 +300,18 @@ impl FileExtension {
         )?;
         table(self.decide_server.is_some(), "decide-server", DECIDE_SERVER)?;
         table(self.commands.is_some(), "commands", COMMANDS)?;
+        if self.orders.is_some() && !self.grant.iter().any(|c| opens_orders(c)) {
+            return Err(ConfigError::OrdersWithoutGrant {
+                extension: self.name.clone(),
+            });
+        }
         let own = self.commands.and_then(|c| c.timeout_ms);
+        let orders = self.orders.unwrap_or(FileOrders {
+            rate_per_second: None,
+            burst: None,
+            max_running: None,
+        });
+        let orders_default = Orders::default();
         let login = self.decide_login.unwrap_or(FileLoginDecision {
             timeout_ms: None,
             on_error: None,
@@ -300,6 +356,13 @@ impl FileExtension {
             },
             own_commands: OwnCommands {
                 timeout_ms: own.unwrap_or(OwnCommands::default().timeout_ms),
+            },
+            orders: Orders {
+                rate_per_second: orders
+                    .rate_per_second
+                    .unwrap_or(orders_default.rate_per_second),
+                burst: orders.burst.unwrap_or(orders_default.burst),
+                max_running: orders.max_running.unwrap_or(orders_default.max_running),
             },
         })
     }
@@ -455,6 +518,33 @@ pub(crate) fn validate(extensions: &[Extension]) -> Result<(), ConfigError> {
             return Err(ConfigError::CommandsNeedPlaces {
                 extension: e.name.clone(),
             });
+        }
+        zero(
+            "orders rate-per-second",
+            u64::from(e.orders.rate_per_second),
+        )?;
+        zero("orders burst", u64::from(e.orders.burst))?;
+        zero("orders max-running", u64::from(e.orders.max_running))?;
+        for (setting, value, most) in [
+            (
+                "orders rate-per-second",
+                e.orders.rate_per_second,
+                MAX_ORDERS_RATE,
+            ),
+            ("orders burst", e.orders.burst, MAX_ORDERS_BURST),
+            (
+                "orders max-running",
+                e.orders.max_running,
+                MAX_ORDERS_RUNNING,
+            ),
+        ] {
+            if value > most {
+                return Err(ConfigError::ExtensionSettingAbove {
+                    extension: e.name.clone(),
+                    setting,
+                    most: u64::from(most),
+                });
+            }
         }
         if e.own_commands.timeout_ms > MAX_OWN_COMMANDS_TIMEOUT_MS {
             return Err(ConfigError::ExtensionSettingAbove {
