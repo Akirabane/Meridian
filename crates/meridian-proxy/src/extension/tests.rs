@@ -829,8 +829,8 @@ fn the_extensions_own_requests_are_answered_with_the_id_they_came_with() {
     let fake = Fake::start(Script::default());
     let (_registry, _link, _folder) = connect(&fake);
     fake.send(r#"{"jsonrpc":"2.0","id":"abc-1","method":"meridian:rpc.discover"}"#);
-    fake.send(r#"{"jsonrpc":"2.0","id":7,"method":"meridian:players/list"}"#);
-    fake.send(r#"{"jsonrpc":"2.0","method":"meridian:players/list"}"#);
+    fake.send(r#"{"jsonrpc":"2.0","id":7,"method":"meridian:nothing/here"}"#);
+    fake.send(r#"{"jsonrpc":"2.0","method":"meridian:nothing/here"}"#);
     until("both answers", || {
         fake.seen(|s| {
             s.texts
@@ -1032,7 +1032,7 @@ fn a_trial_that_cannot_be_sent_ends_the_trial() {
     let mut settings = Settings::new("x", "127.0.0.1:1", "x.token");
     settings.breaker_failures = 1;
     settings.breaker_open = Duration::from_millis(30);
-    let link = Link::new(settings);
+    let link = Link::new(settings, Arc::default());
     // An outbox that is full: the request cannot be handed over.
     let (outbox, _inbox) = std::sync::mpsc::sync_channel::<String>(1);
     outbox.send(String::new()).unwrap();
@@ -1723,7 +1723,7 @@ mod the_orders {
         // `decide.command` is not granted: `orders.read` is.
         let (fake, registry, link, _folder) = orderly(&["orders.read"], |_| {});
         order(&fake, &json!(300), INVALIDATE, r#"{"all":true}"#);
-        order(&fake, &json!(301), "meridian:players/list", "{}");
+        order(&fake, &json!(301), "meridian:nothing/here", "{}");
         order(&fake, &json!(302), "meridian:made/up", "{}");
         let (ungranted, unbuilt, made_up) = (
             answer(&fake, &json!(300)),
@@ -1741,7 +1741,7 @@ mod the_orders {
         let mut page = String::new();
         registry.render(&mut page);
         assert!(
-            !page.contains("made/up") && !page.contains("players/list"),
+            !page.contains("made/up") && !page.contains("nothing/here"),
             "{page}"
         );
     }
@@ -1856,7 +1856,15 @@ mod the_orders {
         assert_eq!(methods(&["decide.command"]), [INVALIDATE]);
         assert_eq!(
             methods(&["orders.read"]),
-            [BLOCK, PANIC, "meridian:test/slow-write"]
+            [
+                "meridian:players/list",
+                "meridian:players/find",
+                "meridian:servers/list",
+                "meridian:queue/list",
+                BLOCK,
+                PANIC,
+                "meridian:test/slow-write"
+            ]
         );
         assert!(methods(&["decide.login", "events"]).is_empty());
     }
@@ -1936,5 +1944,396 @@ mod the_orders {
         order(&fake, &json!(2000), SLOW, "{}");
         assert_eq!(answer(&fake, &json!(2000))["result"], json!({"ok": true}));
         test_support::WRITE_OPEN.store(false, Ordering::SeqCst);
+    }
+
+    // ---- the orders that read ------------------------------------------------------------------------
+
+    use crate::extension::orders::Facts;
+    use meridian_extension::orders::{
+        self as shapes, Found, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList,
+        Waiting,
+    };
+
+    /// Facts that are made up: seven players (P1 to P7, ids that sort as their numbers, all with an address), three
+    /// servers and a queue of two. `players` waits while `hold` is set, to keep a read running.
+    struct Stub {
+        hold: AtomicBool,
+        entered: AtomicUsize,
+    }
+
+    impl Stub {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                hold: AtomicBool::new(false),
+                entered: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl Facts for Stub {
+        fn players(&self, with_addresses: bool) -> Vec<PlayerInfo> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let limit = Instant::now() + Duration::from_secs(20);
+            while self.hold.load(Ordering::SeqCst) && Instant::now() < limit {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            (1..=7)
+                .rev()
+                .map(|n| PlayerInfo {
+                    name: format!("P{n}"),
+                    uuid: format!("{n}0000000-0000-0000-0000-000000000000"),
+                    auth: if n % 2 == 0 {
+                        meridian_extension::decide::Auth::Verified
+                    } else {
+                        meridian_extension::decide::Auth::Unverified
+                    },
+                    server: "lobby".into(),
+                    seconds: 60 * n,
+                    address: with_addresses.then(|| format!("203.0.113.{n}")),
+                })
+                .collect()
+        }
+
+        fn servers(&self) -> Vec<ServerInfo> {
+            vec![
+                ServerInfo {
+                    name: "lobby".into(),
+                    default: true,
+                    players: 7,
+                    role: Some("lobby".into()),
+                    soft_cap: Some(40),
+                    hard_cap: Some(50),
+                    state: Some("open".into()),
+                    ping_ms: Some(4),
+                },
+                ServerInfo {
+                    name: "east".into(),
+                    default: false,
+                    players: 0,
+                    role: Some("game".into()),
+                    soft_cap: Some(20),
+                    hard_cap: Some(24),
+                    state: Some("draining".into()),
+                    ping_ms: None,
+                },
+                ServerInfo {
+                    name: "tools".into(),
+                    default: false,
+                    players: 0,
+                    role: None,
+                    soft_cap: None,
+                    hard_cap: None,
+                    state: None,
+                    ping_ms: None,
+                },
+            ]
+        }
+
+        fn queue(&self) -> QueueState {
+            QueueState {
+                enabled: true,
+                total: 2,
+                waiting: vec![
+                    Waiting {
+                        position: 1,
+                        name: "Dave".into(),
+                        seconds: 41,
+                    },
+                    Waiting {
+                        position: 2,
+                        name: "Erin".into(),
+                        seconds: 9,
+                    },
+                ],
+            }
+        }
+    }
+
+    /// `orderly`, with the facts of `stub` served.
+    fn reading(
+        grant: &[&str],
+        stub: &Arc<Stub>,
+        change: impl FnOnce(&mut Settings),
+    ) -> (Fake, Registry, Arc<Link>, Folder) {
+        let (fake, registry, link, folder) = orderly(grant, change);
+        registry.serve_facts(Arc::clone(stub) as Arc<dyn Facts>);
+        (fake, registry, link, folder)
+    }
+
+    fn page(reply: &Value) -> PlayersPage {
+        serde_json::from_value(reply["result"].clone()).unwrap_or_else(|e| panic!("{e}: {reply}"))
+    }
+
+    #[test]
+    fn the_orders_that_read_need_orders_read_and_are_refused_as_if_they_did_not_exist_without_it() {
+        let (fake, _registry, link, _folder) = reading(&["decide.command"], &Stub::new(), |_| {});
+        for (n, method) in [
+            shapes::PLAYERS_LIST,
+            shapes::PLAYERS_FIND,
+            shapes::SERVERS_LIST,
+            shapes::QUEUE_LIST,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = json!(3000 + n);
+            order(&fake, &id, method, r#"{"player":"Steve"}"#);
+            let reply = answer(&fake, &id);
+            assert_eq!(code_of(&reply), -32601, "{method}");
+            assert_eq!(link.stats().orders(method, Ended::Refused), 1, "{method}");
+        }
+        // Granted, they answer.
+        let (fake, _registry, _link, _folder) = reading(&["orders.read"], &Stub::new(), |_| {});
+        for (n, (method, params)) in [
+            (shapes::PLAYERS_LIST, "{}"),
+            (shapes::PLAYERS_FIND, r#"{"player":"P1"}"#),
+            (shapes::SERVERS_LIST, "{}"),
+            (shapes::QUEUE_LIST, "{}"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = json!(3100 + n);
+            order(&fake, &id, method, params);
+            assert!(answer(&fake, &id).get("result").is_some(), "{method}");
+        }
+    }
+
+    #[test]
+    fn the_players_come_a_page_at_a_time_in_the_order_of_their_ids_and_the_cursor_goes_on() {
+        let (fake, _registry, link, _folder) = reading(&["orders.read"], &Stub::new(), |_| {});
+        let mut told = Vec::new();
+        let mut cursor: Option<String> = None;
+        for n in 0..10 {
+            let id = json!(3200 + n);
+            let params = match &cursor {
+                Some(c) => format!(r#"{{"limit":3,"cursor":"{c}"}}"#),
+                None => r#"{"limit":3}"#.to_owned(),
+            };
+            order(&fake, &id, shapes::PLAYERS_LIST, &params);
+            let got = page(&answer(&fake, &id));
+            assert_eq!(got.total, 7);
+            told.extend(got.players.into_iter().map(|p| p.name));
+            match got.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(told, ["P1", "P2", "P3", "P4", "P5", "P6", "P7"]);
+        // No parameter at all: the first hundred, which is all seven.
+        fake.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":3300,"method":"{}"}}"#,
+            shapes::PLAYERS_LIST
+        ));
+        assert_eq!(page(&answer(&fake, &json!(3300))).players.len(), 7);
+        // More than a page may hold, or none, or a cursor nobody gave: told so, and nothing is read.
+        for (n, params) in [
+            r#"{"limit":501}"#,
+            r#"{"limit":0}"#,
+            r#"{"cursor":"nonsense"}"#,
+            r#"{"more":1}"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = json!(3400 + n);
+            order(&fake, &id, shapes::PLAYERS_LIST, params);
+            assert_eq!(code_of(&answer(&fake, &id)), -32602, "{params}");
+        }
+        assert_eq!(link.stats().orders(shapes::PLAYERS_LIST, Ended::Invalid), 4);
+    }
+
+    #[test]
+    fn a_players_address_is_told_only_to_an_extension_that_was_granted_addresses() {
+        let addresses = |grant: &[&str]| -> (Vec<Option<String>>, Option<String>) {
+            let (fake, _registry, _link, _folder) = reading(grant, &Stub::new(), |_| {});
+            order(&fake, &json!(3500), shapes::PLAYERS_LIST, "{}");
+            let listed = page(&answer(&fake, &json!(3500)));
+            order(
+                &fake,
+                &json!(3501),
+                shapes::PLAYERS_FIND,
+                r#"{"player":"p3"}"#,
+            );
+            let found: Found =
+                serde_json::from_value(answer(&fake, &json!(3501))["result"].clone()).unwrap();
+            (
+                listed.players.into_iter().map(|p| p.address).collect(),
+                found.player.unwrap().address,
+            )
+        };
+        let (listed, found) = addresses(&["orders.read"]);
+        assert!(
+            listed.iter().all(Option::is_none) && found.is_none(),
+            "{listed:?} {found:?}"
+        );
+        let (listed, found) = addresses(&["orders.read", "addresses"]);
+        assert_eq!(listed.len(), 7);
+        assert!(listed.iter().all(Option::is_some), "{listed:?}");
+        assert_eq!(found.as_deref(), Some("203.0.113.3"));
+    }
+
+    #[test]
+    fn a_player_is_found_by_name_in_any_case_or_by_id_and_nobody_is_null() {
+        let (fake, _registry, _link, _folder) = reading(&["orders.read"], &Stub::new(), |_| {});
+        let find = |n: u64, who: &str| -> Option<String> {
+            order(
+                &fake,
+                &json!(3600 + n),
+                shapes::PLAYERS_FIND,
+                &format!(r#"{{"player":"{who}"}}"#),
+            );
+            let reply = answer(&fake, &json!(3600 + n));
+            let found: Found = serde_json::from_value(reply["result"].clone())
+                .unwrap_or_else(|e| panic!("{e}: {reply}"));
+            found.player.map(|p| p.name)
+        };
+        assert_eq!(find(0, "P2").as_deref(), Some("P2"));
+        assert_eq!(find(1, "p5").as_deref(), Some("P5"));
+        assert_eq!(
+            find(2, "40000000-0000-0000-0000-000000000000").as_deref(),
+            Some("P4")
+        );
+        assert_eq!(
+            find(3, "60000000000000000000000000000000").as_deref(),
+            Some("P6")
+        );
+        assert_eq!(find(4, "Nobody"), None);
+        assert_eq!(find(5, "99000000-0000-0000-0000-000000000000"), None);
+        // Something that is neither a name nor an id, or no parameter: told so.
+        for (n, params) in [r#"{"player":""}"#, r#"{"player":7}"#, "{}"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = json!(3700 + n);
+            order(&fake, &id, shapes::PLAYERS_FIND, params);
+            assert_eq!(code_of(&answer(&fake, &id)), -32602, "{params}");
+        }
+    }
+
+    #[test]
+    fn the_servers_and_the_queue_are_told_as_facts_and_no_server_address_is_told() {
+        let (fake, _registry, _link, _folder) =
+            reading(&["orders.read", "addresses"], &Stub::new(), |_| {});
+        order(&fake, &json!(3800), shapes::SERVERS_LIST, "{}");
+        let reply = answer(&fake, &json!(3800));
+        let servers: ServersList = serde_json::from_value(reply["result"].clone()).unwrap();
+        assert_eq!(servers.servers.len(), 3);
+        assert!(servers.servers[0].default && !servers.servers[1].default);
+        assert_eq!(servers.servers[0].state.as_deref(), Some("open"));
+        assert_eq!(servers.servers[2].role, None);
+        assert!(!reply.to_string().contains("address"), "{reply}");
+        order(&fake, &json!(3801), shapes::QUEUE_LIST, "{}");
+        let queue: QueueState =
+            serde_json::from_value(answer(&fake, &json!(3801))["result"].clone()).unwrap();
+        assert_eq!(
+            (queue.enabled, queue.total, queue.waiting.len()),
+            (true, 2, 2)
+        );
+        assert_eq!(queue.waiting[0].name, "Dave");
+    }
+
+    /// The two orders that take no parameters refuse any: a program that thinks it is filtering finds out.
+    #[test]
+    fn the_orders_that_take_no_parameters_refuse_any_and_take_none_as_none() {
+        let (fake, _registry, link, _folder) = reading(&["orders.read"], &Stub::new(), |_| {});
+        for (n, method) in [shapes::SERVERS_LIST, shapes::QUEUE_LIST]
+            .into_iter()
+            .enumerate()
+        {
+            let n = n as u64 * 10;
+            for (k, params) in [r#"{"x":1}"#, "[1]", r#""all""#, "7"]
+                .into_iter()
+                .enumerate()
+            {
+                let id = json!(5000 + n + k as u64);
+                order(&fake, &id, method, params);
+                let reply = answer(&fake, &id);
+                assert_eq!(code_of(&reply), -32602, "{method} {params}");
+                assert_eq!(reply["error"]["message"], "this order takes no parameters");
+            }
+            for (k, params) in ["{}", "null"].into_iter().enumerate() {
+                let id = json!(5100 + n + k as u64);
+                order(&fake, &id, method, params);
+                assert!(
+                    answer(&fake, &id).get("result").is_some(),
+                    "{method} {params}"
+                );
+            }
+            // And none at all.
+            let id = json!(5200 + n);
+            fake.send(&format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}"}}"#
+            ));
+            assert!(answer(&fake, &id).get("result").is_some(), "{method}");
+            assert_eq!(link.stats().orders(method, Ended::Invalid), 4, "{method}");
+        }
+    }
+
+    /// A limit and a cursor that are null are the first page, as if they were left out.
+    #[test]
+    fn a_page_with_a_null_limit_and_cursor_is_the_first_page() {
+        let (fake, _registry, _link, _folder) = reading(&["orders.read"], &Stub::new(), |_| {});
+        order(
+            &fake,
+            &json!(5300),
+            shapes::PLAYERS_LIST,
+            r#"{"limit":null,"cursor":null}"#,
+        );
+        assert_eq!(page(&answer(&fake, &json!(5300))).players.len(), 7);
+    }
+
+    #[test]
+    fn with_no_facts_given_a_read_says_it_is_not_available_and_nothing_breaks() {
+        // `orderly` serves none: the registry was never given the proxy's.
+        let (fake, _registry, link, _folder) = orderly(&["orders.read"], |_| {});
+        order(&fake, &json!(3900), shapes::PLAYERS_LIST, "{}");
+        let reply = answer(&fake, &json!(3900));
+        assert_eq!(
+            (code_of(&reply), reply["error"]["message"].as_str()),
+            (-32603, Some("not available"))
+        );
+        assert_eq!(link.stats().orders(shapes::PLAYERS_LIST, Ended::Failed), 1);
+        assert!(link.is_connected() && ping(&link, Duration::from_secs(2)).is_ok());
+    }
+
+    /// A read costs one order of the budget and holds a place while it runs, like any order: over the budget it is
+    /// refused with -32001, and with the places taken with -32002, and neither reads anything.
+    #[test]
+    fn a_read_is_refused_over_the_budget_and_when_the_places_are_taken() {
+        let stub = Stub::new();
+        let (fake, _registry, link, _folder) = reading(&["orders.read"], &stub, |settings| {
+            settings.order_burst = 3;
+            settings.order_rate = 1;
+            settings.orders_running = 1;
+        });
+        // The place: a read that is held takes it, and the next is refused at once.
+        stub.hold.store(true, Ordering::SeqCst);
+        order(&fake, &json!(4000), shapes::PLAYERS_LIST, "{}");
+        until("the read to start", || {
+            stub.entered.load(Ordering::SeqCst) == 1
+        });
+        order(&fake, &json!(4001), shapes::SERVERS_LIST, "{}");
+        assert_eq!(code_of(&answer(&fake, &json!(4001))), -32002);
+        assert_eq!(stub.entered.load(Ordering::SeqCst), 1);
+        stub.hold.store(false, Ordering::SeqCst);
+        assert_eq!(page(&answer(&fake, &json!(4000))).total, 7);
+        assert_eq!(link.stats().orders(shapes::SERVERS_LIST, Ended::Busy), 1);
+        // The budget: three tokens, one spent on the held read (the refused one spent none): two more, then over.
+        let mut over = 0u64;
+        for n in 0..4 {
+            let id = json!(4100 + n);
+            order(&fake, &id, shapes::QUEUE_LIST, "{}");
+            let reply = answer(&fake, &id);
+            if reply.get("error").is_some() {
+                assert_eq!(code_of(&reply), -32001);
+                over += 1;
+            }
+        }
+        assert!((1..=3).contains(&over), "{over} were over the budget");
+        assert_eq!(
+            link.stats().orders(shapes::QUEUE_LIST, Ended::OverBudget),
+            over
+        );
     }
 }

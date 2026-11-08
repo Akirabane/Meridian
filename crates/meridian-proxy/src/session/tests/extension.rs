@@ -2986,3 +2986,200 @@ groups = ["staff"]
         assert!(weak.upgrade().is_none(), "the stopped link is still held");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The orders that read (docs/EXTENSIONS.md, section 5), from the real sessions and over the real connection
+
+mod reading {
+    use super::*;
+    use crate::extension::Facts;
+    use crate::extension::facts::ProxyFacts;
+    use meridian_config::{BalancedServer, Balancing, Role};
+    use meridian_extension::decide::Auth;
+    use std::sync::RwLock;
+
+    fn facts_of(sessions: &Arc<Sessions>, config: &Config) -> ProxyFacts {
+        ProxyFacts::new(sessions, &Arc::new(RwLock::new(Arc::new(config.clone()))))
+    }
+
+    /// The routing config, with `lobby` balanced (soft cap 40, hard cap 50).
+    fn balanced() -> Config {
+        Config {
+            balanced: vec![BalancedServer {
+                backend: "lobby".into(),
+                role: Role::Lobby,
+                soft_cap: 40,
+                hard_cap: 50,
+            }],
+            balancing: Balancing {
+                enabled: true,
+                ..Balancing::default()
+            },
+            ..routed()
+        }
+    }
+
+    #[test]
+    fn the_facts_of_the_proxy_are_its_sessions_its_servers_and_its_queue() {
+        let sessions = Arc::new(Sessions::default());
+        let config = balanced();
+        let facts = facts_of(&sessions, &config);
+        assert!(facts.players(true).is_empty());
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let _notch = connected(
+            &sessions,
+            "Notch",
+            Identity::Verified(offline_uuid("Notch").to_be_bytes()),
+        );
+        // The players, with how each was proven, where they are, and their address (the order takes it out).
+        let mut players = facts.players(true);
+        players.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(players.len(), 2);
+        assert_eq!(
+            (players[0].name.as_str(), players[0].auth),
+            ("Alex", Auth::Unverified)
+        );
+        assert_eq!(
+            (players[1].name.as_str(), players[1].auth),
+            ("Notch", Auth::Verified)
+        );
+        assert_eq!(
+            players[0].uuid,
+            hyphenated(offline_uuid("Alex").to_be_bytes()).to_ascii_lowercase()
+        );
+        assert!(
+            players
+                .iter()
+                .all(|p| p.server == "lobby" && p.address.is_some())
+        );
+        // A caller that did not ask for the addresses is not given them: the facts do not hand them out.
+        let without = facts.players(false);
+        assert_eq!(without.len(), 2);
+        assert!(without.iter().all(|p| p.address.is_none()), "{without:?}");
+        // The servers: the three of the configuration, `lobby` the default and balanced, the others with no role.
+        let servers = facts.servers();
+        let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["lobby", "east", "west"]);
+        assert_eq!(
+            servers.iter().map(|s| s.default).collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        assert_eq!(
+            servers.iter().map(|s| s.players).collect::<Vec<_>>(),
+            [2, 0, 0]
+        );
+        assert_eq!(servers[0].role.as_deref(), Some("lobby"));
+        assert_eq!(
+            (servers[0].soft_cap, servers[0].hard_cap),
+            (Some(40), Some(50))
+        );
+        assert!(servers[0].state.is_some());
+        assert_eq!(
+            (&servers[1].role, &servers[1].state, servers[1].soft_cap),
+            (&None, &None, None)
+        );
+        // The queue: nobody waits.
+        let queue = facts.queue();
+        assert_eq!(
+            (queue.enabled, queue.total, queue.waiting.len()),
+            (config.queue.enabled, 0, 0)
+        );
+    }
+
+    #[test]
+    fn the_facts_hold_the_sessions_weakly_and_say_nothing_once_they_are_gone() {
+        let sessions = Arc::new(Sessions::default());
+        let facts = facts_of(&sessions, &balanced());
+        drop(sessions);
+        assert!(facts.players(true).is_empty() && facts.servers().is_empty());
+        assert_eq!(facts.queue().total, 0);
+    }
+
+    /// An extension that asks for `orders.read` (and `addresses`), granted by the operator, reading the proxy's own
+    /// sessions with its SDK over the real connection.
+    fn read_with(addresses: bool) -> Option<String> {
+        let folder = Folder::new();
+        let mut extension = Sdk::new("reader", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .wants("orders.read");
+        let mut grant = vec!["orders.read"];
+        if addresses {
+            extension = extension.wants("addresses");
+            grant.push("addresses");
+        }
+        let running = extension.bind("127.0.0.1:0").unwrap();
+        let config = Config {
+            extensions: vec![extension_config(
+                running.local_addr().to_string(),
+                folder.token(),
+                &grant,
+                OnError::Default,
+                1000,
+            )],
+            ..routed()
+        };
+        let sessions = Arc::new(sessions_for(&config));
+        sessions
+            .extensions
+            .serve_facts(Arc::new(facts_of(&sessions, &config)));
+        let _alex = connected(&sessions, "Alex", Identity::Unverified("alex".into()));
+        let proxy = running.proxy();
+        let players = proxy.players().unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(
+            (players[0].name.as_str(), players[0].server.as_str()),
+            ("Alex", "lobby")
+        );
+        let found = proxy.find_player("ALEX").unwrap().expect("Alex is online");
+        assert_eq!(found.uuid, players[0].uuid);
+        assert_eq!(
+            proxy
+                .find_player(&players[0].uuid.replace('-', ""))
+                .unwrap()
+                .map(|p| p.name),
+            Some("Alex".into())
+        );
+        assert_eq!(proxy.find_player("Nobody").unwrap(), None);
+        assert_eq!(proxy.servers().unwrap().len(), 3);
+        assert_eq!(proxy.queue().unwrap().total, 0);
+        // A page of one, from the beginning: the only player, and no cursor.
+        let page = proxy.players_page(Some(1), None).unwrap();
+        assert_eq!((page.players.len(), page.total, page.next), (1, 1, None));
+        players[0].address.clone()
+    }
+
+    #[test]
+    fn an_sdk_reads_the_proxys_sessions_servers_and_queue_and_gets_an_address_only_with_addresses()
+    {
+        assert_eq!(read_with(false), None);
+        assert!(read_with(true).is_some());
+    }
+
+    /// An extension that did not ask for `orders.read` in its hello is refused, though the operator granted it: only
+    /// what both sides name is used.
+    #[test]
+    fn an_extension_that_did_not_ask_for_orders_read_is_refused_the_reads_the_operator_granted() {
+        let folder = Folder::new();
+        let running = Sdk::new("quiet", "1.0.0", Secret::new(TOKEN).unwrap())
+            .log(Arc::new(Lines::default()) as Arc<dyn Log>)
+            .on_login(|_| meridian_extension::decide::Decision::Default)
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let config = Config {
+            extensions: vec![extension_config(
+                running.local_addr().to_string(),
+                folder.token(),
+                &["decide.login", "orders.read"],
+                OnError::Default,
+                1000,
+            )],
+            ..routed()
+        };
+        let sessions = Arc::new(sessions_for(&config));
+        sessions
+            .extensions
+            .serve_facts(Arc::new(facts_of(&sessions, &config)));
+        let refused = running.proxy().players().unwrap_err();
+        assert!(refused.is_not_granted(), "{refused}");
+    }
+}

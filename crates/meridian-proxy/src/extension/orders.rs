@@ -15,17 +15,79 @@
 
 use super::link::{Link, OrderPlace};
 use crate::log::debug;
-use meridian_config::DECIDE_COMMAND;
-use meridian_extension::orders::{self, Ack, Forget};
+use meridian_config::{ADDRESSES, DECIDE_COMMAND, ORDERS_READ};
+use meridian_extension::orders::{
+    self, Ack, Forget, Found, PlayerInfo, QueueState, ServerInfo, ServersList, Who,
+};
 use meridian_extension::wire::{self, Discover, DiscoverMethod, Id, RpcError, code};
 use meridian_websocket::Writer;
 use serde_json::Value;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// The facts the orders that read tell, taken from the rest of the proxy: who is online and where, the servers and
+/// what the balancer makes of them, and who waits in the queue. Given to the registry once the proxy is built
+/// ([`super::Registry::serve_facts`]), which is `extension/facts.rs` for the proxy and a stand-in in the tests.
+///
+/// **A player's `address` is given only when `with_addresses` says the extension was granted `addresses`**: the source of
+/// facts does not hand an address to a caller that did not ask for it, so that a mistake of a caller cannot tell it.
+/// No server address is told.
+pub trait Facts: Send + Sync {
+    /// Every player online, in any order, each with an address if `with_addresses`.
+    fn players(&self, with_addresses: bool) -> Vec<PlayerInfo>;
+    /// The servers, in the order of the configuration.
+    fn servers(&self) -> Vec<ServerInfo>;
+    /// The queue, with at most [`orders::MAX_PAGE`] of those who wait.
+    fn queue(&self) -> QueueState;
+}
+
+/// What the orders share with the rest of the proxy.
+#[derive(Default)]
+pub struct Services {
+    facts: Mutex<Option<Arc<dyn Facts>>>,
+}
+
+impl Services {
+    pub(super) fn facts(&self) -> Option<Arc<dyn Facts>> {
+        self.facts.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(super) fn set_facts(&self, facts: Arc<dyn Facts>) {
+        *self.facts.lock().unwrap_or_else(|e| e.into_inner()) = Some(facts);
+    }
+}
+
+/// What an order is given: the link it came on, and the facts, if the proxy has given them.
+pub(super) struct Ctx<'a> {
+    pub link: &'a Arc<Link>,
+    installed: Option<Arc<dyn Facts>>,
+}
+
+impl Ctx<'_> {
+    fn facts(&self) -> Result<&Arc<dyn Facts>, RpcError> {
+        self.installed
+            .as_ref()
+            .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "not available"))
+    }
+
+    /// The players, with an address only if the extension was granted `addresses`.
+    fn players(&self) -> Result<Vec<PlayerInfo>, RpcError> {
+        Ok(self.facts()?.players(self.link.is_granted(ADDRESSES)))
+    }
+}
+
+fn invalid(why: String) -> RpcError {
+    RpcError::new(code::INVALID_PARAMS, why)
+}
+
+/// The answer of an order, or the error if it could not be written as JSON (which a type of ours never fails to be).
+fn done(answer: serde_json::Result<Value>) -> Result<Value, RpcError> {
+    answer.map_err(|_| RpcError::new(code::INTERNAL_ERROR, "the order failed"))
+}
+
 /// What an order does with its parameters: its answer, or the error to send.
-type Run = fn(&Arc<Link>, Option<&Value>) -> Result<Value, RpcError>;
+type Run = fn(&Ctx<'_>, Option<&Value>) -> Result<Value, RpcError>;
 
 /// One order of the proxy.
 pub(super) struct Order {
@@ -44,15 +106,53 @@ const INVALIDATE: Order = Order {
     describe: orders::invalidate_method,
 };
 
+const PLAYERS_LIST: Order = Order {
+    method: orders::PLAYERS_LIST,
+    capability: ORDERS_READ,
+    run: players_list,
+    describe: || orders::read_methods().swap_remove(0).1,
+};
+
+const PLAYERS_FIND: Order = Order {
+    method: orders::PLAYERS_FIND,
+    capability: ORDERS_READ,
+    run: players_find,
+    describe: || orders::read_methods().swap_remove(1).1,
+};
+
+const SERVERS_LIST: Order = Order {
+    method: orders::SERVERS_LIST,
+    capability: ORDERS_READ,
+    run: servers_list,
+    describe: || orders::read_methods().swap_remove(2).1,
+};
+
+const QUEUE_LIST: Order = Order {
+    method: orders::QUEUE_LIST,
+    capability: ORDERS_READ,
+    run: queue_list,
+    describe: || orders::read_methods().swap_remove(3).1,
+};
+
 /// The orders the proxy serves.
 #[cfg(not(test))]
-pub(super) const ORDERS: &[Order] = &[INVALIDATE];
+pub(super) const ORDERS: &[Order] = &[
+    INVALIDATE,
+    PLAYERS_LIST,
+    PLAYERS_FIND,
+    SERVERS_LIST,
+    QUEUE_LIST,
+];
 
 /// The orders the proxy serves, and two that only the tests have: one that waits to be let go and one that
 /// panics, to see what the dispatcher does with a slow order and a failing one.
 #[cfg(test)]
 pub(super) const ORDERS: &[Order] = &[
     INVALIDATE,
+    PLAYERS_LIST,
+    PLAYERS_FIND,
+    SERVERS_LIST,
+    QUEUE_LIST,
     test_support::BLOCK,
     test_support::PANIC,
     test_support::SLOW_WRITE,
@@ -162,13 +262,43 @@ pub(super) fn discover(table: &[Order], link: &Link) -> Discover {
     )
 }
 
-fn invalidate(link: &Arc<Link>, params: Option<&Value>) -> Result<Value, RpcError> {
+fn invalidate(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
     match orders::parse_invalidate(params) {
-        Ok(Forget::All) => link.forget_all(),
-        Ok(Forget::Player(uuid)) => link.forget_player(uuid),
-        Err(why) => return Err(RpcError::new(code::INVALID_PARAMS, why)),
+        Ok(Forget::All) => ctx.link.forget_all(),
+        Ok(Forget::Player(uuid)) => ctx.link.forget_player(uuid),
+        Err(why) => return Err(invalid(why)),
     }
-    Ok(serde_json::to_value(Ack::done()).unwrap_or(Value::Null))
+    done(serde_json::to_value(Ack::done()))
+}
+
+/// `players/list`: a page of the players, in the order of their ids.
+fn players_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let page = orders::parse_list(params).map_err(invalid)?;
+    done(serde_json::to_value(orders::page_of(ctx.players()?, &page)))
+}
+
+/// `players/find`: one player, by unique id or by name (whatever its case), or `null`.
+fn players_find(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    let who = orders::parse_find(params).map_err(invalid)?;
+    let player = ctx.players()?.into_iter().find(|p| match &who {
+        Who::Id(id) => p.uuid.eq_ignore_ascii_case(id),
+        Who::Name(name) => p.name.eq_ignore_ascii_case(name),
+    });
+    done(serde_json::to_value(&Found { player }))
+}
+
+/// `servers/list`: the servers, with their players and what the balancer makes of them.
+fn servers_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    orders::parse_no_params(params).map_err(invalid)?;
+    done(serde_json::to_value(&ServersList {
+        servers: ctx.facts()?.servers(),
+    }))
+}
+
+/// `queue/list`: whether the queue is on, and who waits.
+fn queue_list(ctx: &Ctx<'_>, params: Option<&Value>) -> Result<Value, RpcError> {
+    orders::parse_no_params(params).map_err(invalid)?;
+    done(serde_json::to_value(ctx.facts()?.queue()))
 }
 
 /// Serves one request of the extension that is not `rpc.discover`: answers at once an order it refuses, and
@@ -264,7 +394,11 @@ fn run(
     params: Option<&Value>,
     place: OrderPlace,
 ) {
-    let (outcome, reply) = match catch_unwind(AssertUnwindSafe(|| (order.run)(link, params))) {
+    let ctx = Ctx {
+        link,
+        installed: link.facts(),
+    };
+    let (outcome, reply) = match catch_unwind(AssertUnwindSafe(|| (order.run)(&ctx, params))) {
         Ok(Ok(result)) => (Outcome::Done, wire::result(id, &result)),
         Ok(Err(error)) => {
             let outcome = if error.code == code::INVALID_PARAMS {
@@ -311,7 +445,7 @@ pub(super) mod test_support {
     /// How many orders of `BLOCK` have started.
     pub static ENTERED: AtomicUsize = AtomicUsize::new(0);
 
-    fn block(_: &Arc<Link>, _: Option<&Value>) -> Result<Value, RpcError> {
+    fn block(_: &Ctx<'_>, _: Option<&Value>) -> Result<Value, RpcError> {
         ENTERED.fetch_add(1, Ordering::SeqCst);
         let limit = Instant::now() + std::time::Duration::from_secs(20);
         while !RELEASE.load(Ordering::SeqCst) && Instant::now() < limit {
@@ -320,7 +454,7 @@ pub(super) mod test_support {
         Ok(serde_json::to_value(Ack::done()).unwrap())
     }
 
-    fn panic(_: &Arc<Link>, _: Option<&Value>) -> Result<Value, RpcError> {
+    fn panic(_: &Ctx<'_>, _: Option<&Value>) -> Result<Value, RpcError> {
         panic!("an order that fails");
     }
 
@@ -346,7 +480,7 @@ pub(super) mod test_support {
         WAITING_TO_WRITE.fetch_sub(1, Ordering::SeqCst);
     }
 
-    fn quick(_: &Arc<Link>, _: Option<&Value>) -> Result<Value, RpcError> {
+    fn quick(_: &Ctx<'_>, _: Option<&Value>) -> Result<Value, RpcError> {
         Ok(serde_json::to_value(Ack::done()).unwrap())
     }
 

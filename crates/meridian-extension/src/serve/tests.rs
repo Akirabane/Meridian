@@ -1954,4 +1954,243 @@ mod orders {
         assert_eq!(order.join().unwrap(), Ok(()));
         assert_eq!(handle.0.waiting(), 0);
     }
+
+    // ---- the orders that read ------------------------------------------------------------------------
+
+    use crate::orders::{self as shapes, PlayerInfo};
+
+    /// Seven players whose ids sort as their numbers.
+    fn seven() -> Vec<PlayerInfo> {
+        (1..=7)
+            .rev()
+            .map(|n| PlayerInfo {
+                name: format!("P{n}"),
+                uuid: format!("{n}0000000-0000-0000-0000-000000000000"),
+                auth: crate::decide::Auth::Verified,
+                server: "lobby".into(),
+                seconds: n,
+                address: None,
+            })
+            .collect()
+    }
+
+    /// Reads one order of the extension and answers it with `result`; the order's method and params are returned.
+    fn serve_one(
+        proxy: &mut Proxy,
+        result: impl FnOnce(&str, &Option<Value>) -> Result<Value, RpcError>,
+    ) -> (String, Option<Value>) {
+        match message(&mut proxy.socket) {
+            Message::Request {
+                id: Some(id),
+                method,
+                params,
+            } => {
+                let outcome = result(&method, &params);
+                answer(proxy, &id, outcome);
+                (method, params)
+            }
+            other => panic!("not an order: {other:?}"),
+        }
+    }
+
+    /// Answers `players/list` as the proxy does, from `players`.
+    fn page_from(
+        players: Vec<PlayerInfo>,
+    ) -> impl Fn(&str, &Option<Value>) -> Result<Value, RpcError> {
+        move |method, params| {
+            assert_eq!(method, shapes::PLAYERS_LIST);
+            let page = shapes::parse_list(params.as_ref())
+                .map_err(|why| RpcError::new(code::INVALID_PARAMS, why))?;
+            Ok(serde_json::to_value(shapes::page_of(players.clone(), &page)).unwrap())
+        }
+    }
+
+    #[test]
+    fn all_the_players_are_asked_for_a_page_at_a_time_and_a_page_has_its_own_limit_and_cursor() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        // One page, with a limit, as the proxy reads it.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.players_page(Some(3), None))
+        };
+        let (method, params) = serve_one(&mut proxy, page_from(seven()));
+        assert_eq!(method, shapes::PLAYERS_LIST);
+        assert_eq!(params.unwrap(), json!({"limit": 3}));
+        let page = asked.join().unwrap().unwrap();
+        assert_eq!((page.players.len(), page.total), (3, 7));
+        let cursor = page.next.expect("more players than a page");
+        // The next page, from the cursor the proxy gave, which goes out in its one spelling.
+        let asked = {
+            let handle = handle.clone();
+            let cursor = cursor.to_ascii_uppercase();
+            std::thread::spawn(move || handle.players_page(Some(3), Some(&cursor)))
+        };
+        let (_, params) = serve_one(&mut proxy, page_from(seven()));
+        assert_eq!(params.unwrap(), json!({"limit": 3, "cursor": cursor}));
+        let page = asked.join().unwrap().unwrap();
+        assert_eq!(page.players[0].name, "P4");
+        // All of them: pages of 500, which here is one.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.players())
+        };
+        let (_, params) = serve_one(&mut proxy, page_from(seven()));
+        assert_eq!(params.unwrap(), json!({"limit": 500}));
+        let all = asked.join().unwrap().unwrap();
+        let names: Vec<_> = all.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["P1", "P2", "P3", "P4", "P5", "P6", "P7"]);
+    }
+
+    /// `players()` goes on while the proxy gives a cursor: here a proxy that gives pages of three (it may give fewer than
+    /// asked), and all of them are told once, in order.
+    #[test]
+    fn players_goes_on_from_page_to_page_until_the_proxy_gives_no_cursor() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.players())
+        };
+        let players = seven();
+        let small = move |method: &str, params: &Option<Value>| {
+            assert_eq!(method, shapes::PLAYERS_LIST);
+            let mut page = shapes::parse_list(params.as_ref()).unwrap();
+            page.limit = 3;
+            Ok(serde_json::to_value(shapes::page_of(players.clone(), &page)).unwrap())
+        };
+        for _ in 0..3 {
+            serve_one(&mut proxy, small.clone());
+        }
+        let all = asked.join().unwrap().unwrap();
+        assert_eq!(all.len(), 7);
+        assert_eq!(all[6].name, "P7");
+    }
+
+    /// A proxy that gives the same cursor again, or one that is not an id, would have the loop go on for good: it is told
+    /// as an answer that is not what the order defines.
+    #[test]
+    fn a_proxy_whose_pages_do_not_go_forward_is_told_as_a_bad_answer() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        for stuck in [ALEX, "not-an-id"] {
+            let asked = {
+                let handle = handle.clone();
+                std::thread::spawn(move || handle.players())
+            };
+            let first = move |_: &str, _: &Option<Value>| {
+                Ok(
+                    json!({"players": [], "total": 9, "next": "30000000-0000-0000-0000-000000000000"}),
+                )
+            };
+            serve_one(&mut proxy, first);
+            // The second page says to go on from an id that is not after the one it was asked from.
+            let second = move |_: &str, _: &Option<Value>| {
+                Ok(json!({"players": [], "total": 9, "next": stuck}))
+            };
+            serve_one(&mut proxy, second);
+            assert!(
+                matches!(asked.join().unwrap(), Err(OrderError::BadAnswer(_))),
+                "{stuck}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_limit_a_cursor_a_name_or_an_id_is_refused_before_anything_is_sent() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        for limit in [0, 501, 100_000] {
+            assert!(
+                matches!(
+                    handle.players_page(Some(limit), None),
+                    Err(OrderError::Invalid(_))
+                ),
+                "{limit}"
+            );
+        }
+        assert!(matches!(
+            handle.players_page(None, Some("nonsense")),
+            Err(OrderError::Invalid(_))
+        ));
+        let long = "a".repeat(shapes::MAX_NAME + 1);
+        for who in ["", long.as_str(), "bell\u{7}"] {
+            assert!(
+                matches!(handle.find_player(who), Err(OrderError::Invalid(_))),
+                "{who:?}"
+            );
+        }
+        // Nothing was written: the next thing the stand-in proxy reads is the answer to its own request.
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 2}))).unwrap(),
+            json!({"k": 2})
+        );
+    }
+
+    #[test]
+    fn a_player_is_found_or_is_nobody_and_the_servers_and_the_queue_come_as_the_golden_files_say() {
+        let (_running, handle, mut proxy) = up(Duration::from_secs(10));
+        let result_of = |name: &str| match Message::parse(&golden(name)).unwrap() {
+            Message::Response {
+                outcome: Ok(result),
+                ..
+            } => result,
+            other => panic!("{other:?}"),
+        };
+        // By name, and the answer is the player.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.find_player("Bob"))
+        };
+        let answer_of = result_of("players-find.answer.json");
+        let (method, params) = serve_one(&mut proxy, move |_, _| Ok(answer_of));
+        assert_eq!(method, shapes::PLAYERS_FIND);
+        assert_eq!(params.unwrap(), json!({"player": "Bob"}));
+        let bob = asked.join().unwrap().unwrap().expect("Bob is online");
+        assert_eq!((bob.name.as_str(), bob.seconds), ("Bob", 3725));
+        // By id: sent in its one spelling; the answer is that nobody is.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                handle.find_player(&ALEX.replace('-', "").to_ascii_uppercase())
+            })
+        };
+        let none = result_of("players-find.answer.none.json");
+        let (_, params) = serve_one(&mut proxy, move |_, _| Ok(none));
+        assert_eq!(
+            params.unwrap(),
+            json!({"player": ALEX.replace('-', "").to_ascii_uppercase()})
+        );
+        assert_eq!(asked.join().unwrap(), Ok(None));
+        // The servers and the queue: no params, and the golden answers read into the types.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.servers())
+        };
+        let servers = result_of("servers-list.answer.json");
+        let (method, params) = serve_one(&mut proxy, move |_, _| Ok(servers));
+        assert_eq!((method.as_str(), params), (shapes::SERVERS_LIST, None));
+        let servers = asked.join().unwrap().unwrap();
+        assert_eq!(servers.len(), 3);
+        assert_eq!(servers[0].name, "lobby");
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.queue())
+        };
+        let queue = result_of("queue-list.answer.json");
+        let (method, _) = serve_one(&mut proxy, move |_, _| Ok(queue));
+        assert_eq!(method, shapes::QUEUE_LIST);
+        let queue = asked.join().unwrap().unwrap();
+        assert_eq!(
+            (queue.enabled, queue.total, queue.waiting[1].name.as_str()),
+            (true, 2, "Erin")
+        );
+        // An answer that is not the shape of the order is a bad answer, told in fixed words.
+        let asked = {
+            let handle = handle.clone();
+            std::thread::spawn(move || handle.queue())
+        };
+        serve_one(&mut proxy, |_, _| {
+            Ok(json!({"enabled": "a-secret-the-proxy-must-not-make-us-quote"}))
+        });
+        let bad = asked.join().unwrap().unwrap_err();
+        assert!(matches!(bad, OrderError::BadAnswer(_)));
+        assert!(!bad.to_string().contains("secret"), "{bad}");
+    }
 }

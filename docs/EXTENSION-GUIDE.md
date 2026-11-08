@@ -432,6 +432,31 @@ may give: 20 a second with bursts of 50, and 8 at a time (`[extension.orders]` i
   a handler can give one. At most 64 wait at once.
 - With no proxy connected, an order ends at once with `NotConnected`.
 
+### Reading the players, the servers and the queue
+
+With `orders.read` (ask for it with `.wants("orders.read")`, and the operator grants it in `grant`) your program can ask
+the proxy what it knows:
+
+```rust
+let proxy = extension.proxy();
+
+let everyone = proxy.players()?;                     // every player online, 500 to a page, in the order of their ids
+let one = proxy.find_player("Alex")?;                // by name (any case) or by unique id; None if nobody is online
+for server in proxy.servers()? {                     // name, default, players, and role/caps/state when balanced
+    println!("{}: {} players", server.name, server.players);
+}
+let queue = proxy.queue()?;                          // enabled, total, and the first 500 who wait
+```
+
+`players_page(limit, cursor)` is one page, for a program that does not want them all at once; the cursor is the `next`
+of the page before. Players who join or leave between two pages make nobody skipped or told twice among the players who are there at the cursor. **`players()` is several orders, and an error in the
+middle of it** (a refusal for the budget, `-32001`, on a large network) **loses the pages already read: ask again, from the
+beginning.** `find_player` by name, when two players have names that differ only in case, tells one of them (which one is not
+defined): ask by unique id. **A player's
+`address` is None unless your program also asked for `addresses` and the operator granted it**; no server address is ever
+told. Each of these is an order against the proxy's budget (one each, so `players()` on a large network is a few), with
+the limits and the errors above.
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told

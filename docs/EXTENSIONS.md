@@ -6,8 +6,8 @@ they go to. Part of it is built, and the pull requests of section 10 follow the 
 admission at login (4.2), the permission of a command and the extension's own commands (4.3) and the
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
-orders (8.1); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page leaves a
-choice open. Not built: the other orders (5) and the events the proxy sends the extension (6).
+orders (8.1), with the orders that read (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
+leaves a choice open. Not built: the orders that act (5) and the events the proxy sends the extension (6).
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -978,13 +978,53 @@ pub struct Player     { pub name: String, pub uuid: Uuid, pub auth: Auth, pub se
                         pub address: Option<IpAddr> }
 ```
 
+**As built, for the orders that read** (`extension/orders.rs`, `extension/facts.rs`, `meridian-extension/src/orders.rs`):
+`players/list`, `players/find`, `servers/list` and `queue/list`, all of capability `orders.read`, each costing one order of
+the budget and one place while it runs, like any order. They read the proxy's own state when asked (the sessions, the
+configuration in force, the balancer, the queue); until the proxy has given the registry its facts they answer
+`-32603 not available`.
+
+- **`players/list`**: params `{"limit": 1..500 (100 by default), "cursor": "<id>"}`, all optional. It answers
+  `{"players": [...], "total": N, "next": "<id>"}`. The players are told **in the order of their unique ids**, and the
+  `next` of a page, which is present only when more follow, is the id of the last player of it: players who join or
+  leave between two pages make nobody skipped or told twice **among the players who are there at the cursor** (a place number would); a player who joins with an id before the cursor is not in the pages that follow. A `limit` over 500, 0 or not a number, a
+  cursor that is not an id and a key nobody knows are `-32602`. 500 players of the longest the game allows, with an address,
+  are a little over 100 KiB: inside the 256 KiB of a message (decision Q4: pages, the limit stays 256 KiB everywhere).
+- **A player** is `{name, uuid, auth, server, seconds}`: the name, the unique id in lower case with its hyphens, how the
+  proxy knows them (`auth`: `verified` or `unverified`: **for an unverified player the name and the id prove nothing**), the
+  server they are on and how long they have been connected. **Their `address` is there only if the extension was asked for
+  `addresses` and the operator granted it** (decision Q9); without it the key is absent.
+- **Orders that take none.** `servers/list` and `queue/list` take no params: none, `null` and `{}` are fine, and anything
+  else is `-32602 this order takes no parameters`, so that a program that thinks it is filtering finds out. `players/list`
+  reads a `limit` or a `cursor` that is `null` as if it were left out.
+- **`players/find`**: params `{"player": "<name or id>"}`. A text that is a unique id (with or without hyphens, in any
+  case) is looked up by id, any other that is 1 to 32 characters with no control character by name, whatever its case.
+  It answers `{"player": {...}}`, or `{"player": null}` when nobody online is that: not an error. Anything else is `-32602`.
+  **Two players whose names differ only in case** (offline mode allows it) are not told apart by a name: the first the
+  proxy finds is answered, and which is the first is not defined; the unique id is.
+- **The address is given by the facts only when asked for**: the source of facts takes `with_addresses` and leaves the key out
+  otherwise, so that a caller's mistake cannot tell an address to an extension that was not granted `addresses`.
+- **`servers/list`** answers `{"servers": [...]}` in the order of the configuration. A server is
+  `{name, default, players, role?, soft_cap?, hard_cap?, state?, ping_ms?}`: `role`, the caps and `state` (`open`,
+  `closed`, `draining`, `not_offered`) only for a server the balancer places players on, `ping_ms` when its sidecar has been
+  asked. **No address of a server is told**, with or without `addresses`. It asks no server anything: it is what the proxy
+  knows (the console's `servers` also opens a connection to each one).
+- **`queue/list`** answers `{"enabled": bool, "total": N, "waiting": [{position, name, seconds}, ...]}`: how many wait in all,
+  and the first 500, the one who has waited longest first.
+- **Cost.** One order each (the budget of 5). A program that wants every player on a large network pays one order for each
+  500, not one for each player. **The SDK's `Proxy::players()` does this**, page after page, and gives up (`BadAnswer`) on a
+  proxy whose cursors do not go forward or whose pages do not end.
+
 **As built, for the orders** (`meridian-extension/src/serve/client.rs`). The trait sketch above puts a `&Proxy` in
 the argument of each method; the SDK's handlers are closures registered one by one (`on_login`, `on_command`...)
 and keep their signatures, so the handle is made apart and given to the closures that need it:
 `let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
 is connected its orders end with `NotConnected`.
 
-- **Methods.** `Proxy::invalidate_player(&str)` and `Proxy::invalidate_all()`, for `permissions/invalidate`; the
+- **Methods.** `Proxy::players_page(limit, cursor)`, `players()`, `find_player(&str)`, `servers()` and `queue()` for the orders
+  that read (they need `orders.read`: the extension asks for it with `Extension::wants("orders.read")`, and for the addresses
+  with `wants("addresses")`; the proxy serves a capability only if the hello asked for it **and** the operator granted
+  it); `Proxy::invalidate_player(&str)` and `Proxy::invalidate_all()`, for `permissions/invalidate`; the
   unique id is checked and given its one spelling before anything is sent (a text that is not an id is
   `Invalid`, and nothing goes out). The other orders come with their PRs.
 - **Ids.** Each order has a number of its own, counted up for as long as the extension runs (**not** started

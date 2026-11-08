@@ -24,9 +24,9 @@ pub use balancing::{BalancedServer, Balancing, Role, TieBreak};
 pub use commands::{CommandSettings, ProxyCommand};
 pub use error::ConfigError;
 pub use extension::{
-    CAPABILITIES, COMMANDS, CommandDecision, DECIDE_COMMAND, DECIDE_LOGIN, DECIDE_SERVER,
-    Extension, LoginDecision, MAX_EXTENSION_NAME, MIN_EXTENSION_TOKEN, OnError, Orders,
-    OwnCommands, ServerDecision, ServerOnError, opens_orders,
+    ADDRESSES, CAPABILITIES, COMMANDS, CommandDecision, DECIDE_COMMAND, DECIDE_LOGIN,
+    DECIDE_SERVER, Extension, LoginDecision, MAX_EXTENSION_NAME, MIN_EXTENSION_TOKEN, ORDERS_READ,
+    OnError, Orders, OwnCommands, ServerDecision, ServerOnError, opens_orders,
 };
 pub use fallback::Fallback;
 pub use favicon::{FAVICON_SIDE, Favicon, MAX_FAVICON_BYTES};

@@ -50,6 +50,10 @@ impl Proxy {
         let settings = Settings::from(&config.restart);
         let config = Arc::new(RwLock::new(Arc::new(config)));
         sessions.follow_config(Arc::clone(&config));
+        // What the orders that read tell an extension is read from these, on demand.
+        extensions.serve_facts(Arc::new(crate::extension::facts::ProxyFacts::new(
+            &sessions, &config,
+        )));
         let restarts = Detector::new(
             Arc::clone(&sessions.balancer),
             Arc::new(Counted {

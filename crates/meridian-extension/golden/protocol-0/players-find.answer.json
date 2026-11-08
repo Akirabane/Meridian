@@ -1,0 +1,5 @@
+{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "result": {"player": {"name": "Bob", "uuid": "1b3fb5cb-cdfe-4ae3-91f2-2be62b1fa36d", "auth": "verified", "server": "lobby", "seconds": 3725}}
+}

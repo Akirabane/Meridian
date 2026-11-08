@@ -20,16 +20,23 @@
 //! failed may or may not have been done, and what to do about it is for the extension to say (see
 //! [`OrderError::retry_later`]).
 
-use crate::orders::{self, Ack};
+use crate::orders::{
+    self, Ack, Found, PlayerInfo, PlayersPage, QueueState, ServerInfo, ServersList,
+};
 use crate::wire::{self, RpcError, code};
 use meridian_websocket::Writer;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
+
+/// The most pages [`Proxy::players`] asks for before it gives up: with 500 players a page, that is 100,000 players, far
+/// more than a proxy holds, so a proxy that never ends its pages is told from one that has many.
+const MAX_PAGES: usize = 200;
 
 /// The most requests to the proxy that wait for their answers at once.
 pub const MAX_WAITING: usize = 64;
@@ -203,6 +210,18 @@ impl Client {
         self.state().waiting.len()
     }
 
+    /// [`Client::order`], with the answer read as the type the order defines. What is wrong with an answer is told in
+    /// fixed words: they are never the proxy's own, which a reader of a log should not have to trust.
+    fn read<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<&impl Serialize>,
+    ) -> Result<T, OrderError> {
+        let result = self.order(method, params)?;
+        serde_json::from_value(result)
+            .map_err(|_| OrderError::BadAnswer("not the shape the order defines".into()))
+    }
+
     /// Sends `method` with `params` and waits for the answer's `result`, or says why there is none.
     fn order(&self, method: &str, params: Option<&impl Serialize>) -> Result<Value, OrderError> {
         let (id, writer, replies) = {
@@ -295,6 +314,89 @@ impl Proxy {
     /// As [`Proxy::invalidate_player`], for every player.
     pub fn invalidate_all(&self) -> Result<(), OrderError> {
         self.invalidate(&orders::InvalidateParams::all())
+    }
+
+    /// One page of the players online, **in the order of their unique ids** (`orders.read`, which the extension asks
+    /// for with [`Extension::wants`](super::Extension::wants) and the operator grants; an `address` is in it only if
+    /// `addresses` is too). `limit` is how many the page holds, 1 to [`orders::MAX_PAGE`] (100 when `None`), and `cursor`
+    /// the [`PlayersPage::next`] of the page before. A page tells how many players there are in all.
+    ///
+    /// Players who join or leave between two pages skip and repeat nobody: the cursor is an id, not a place. [`Proxy::players`]
+    /// asks for all of them.
+    pub fn players_page(
+        &self,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<PlayersPage, OrderError> {
+        let limit = match limit {
+            None => None,
+            Some(n) if (1..=orders::MAX_PAGE).contains(&n) => u32::try_from(n).ok(),
+            Some(_) => {
+                return Err(OrderError::Invalid(format!(
+                    "\"limit\" must be from 1 to {}",
+                    orders::MAX_PAGE
+                )));
+            }
+        };
+        let cursor = match cursor {
+            None => None,
+            Some(cursor) => Some(
+                orders::canonical_uuid(cursor)
+                    .ok_or_else(|| OrderError::Invalid("\"cursor\" is not a unique id".into()))?,
+            ),
+        };
+        self.0.read(
+            orders::PLAYERS_LIST,
+            Some(&orders::ListParams { limit, cursor }),
+        )
+    }
+
+    /// Every player online, a page at a time ([`Proxy::players_page`]), in the order of their unique ids. Each page is an
+    /// order against the proxy's budget, so a large network is a few orders (500 players a page), not one for each
+    /// player. A proxy whose pages do not go forward, or do not end, is [`OrderError::BadAnswer`].
+    pub fn players(&self) -> Result<Vec<PlayerInfo>, OrderError> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let page = self.players_page(Some(orders::MAX_PAGE), cursor.as_deref())?;
+            all.extend(page.players);
+            let Some(next) = page.next else {
+                return Ok(all);
+            };
+            let next = orders::canonical_uuid(&next)
+                .filter(|next| {
+                    cursor
+                        .as_deref()
+                        .is_none_or(|before| next.as_str() > before)
+                })
+                .ok_or_else(|| OrderError::BadAnswer("the pages do not go forward".into()))?;
+            cursor = Some(next);
+        }
+        Err(OrderError::BadAnswer("the pages do not end".into()))
+    }
+
+    /// The player called `who` (whatever the case) or with that unique id (with or without hyphens), or `None` if nobody
+    /// online is. A text that is neither is [`OrderError::Invalid`], and nothing is sent. Needs `orders.read`.
+    pub fn find_player(&self, who: &str) -> Result<Option<PlayerInfo>, OrderError> {
+        let params = orders::FindParams {
+            player: who.to_owned(),
+        };
+        orders::parse_find(serde_json::to_value(&params).ok().as_ref())
+            .map_err(OrderError::Invalid)?;
+        let found: Found = self.0.read(orders::PLAYERS_FIND, Some(&params))?;
+        Ok(found.player)
+    }
+
+    /// The servers, in the order of the proxy's configuration, with their players and, for those the balancer places
+    /// players on, their role, caps and state. No server address is told. Needs `orders.read`.
+    pub fn servers(&self) -> Result<Vec<ServerInfo>, OrderError> {
+        let list: ServersList = self.0.read(orders::SERVERS_LIST, None::<&Value>)?;
+        Ok(list.servers)
+    }
+
+    /// Whether the proxy's queue is on and who waits in it (the first 500). Needs `orders.read`.
+    pub fn queue(&self) -> Result<QueueState, OrderError> {
+        self.0.read(orders::QUEUE_LIST, None::<&Value>)
     }
 
     fn invalidate(&self, params: &orders::InvalidateParams) -> Result<(), OrderError> {
