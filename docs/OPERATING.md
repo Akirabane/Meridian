@@ -858,7 +858,7 @@ A server that stops takes its players with it. There are four ways the proxy lea
 | --- | --- | --- |
 | The operator types `drain <server> --move`, wait, then stops the server | Before the stop. Planned | A console, servers that take transfers |
 | The panel does it: `[drain-before-stop]` in the bench file, with `move-players = true` | Before the stop. Planned | The panel starts and stops the server |
-| The server announces its own stop (`server/stopping` of its management protocol), heard by its sidecar | At the start of the stop, about 78 ms before a Horizon server drops its players (measured): enough to drain it, not to move anyone. Planned or not, as long as the server says it | `--management-properties` on the sidecar, `management-server-enabled=true` on the server, `sidecar-notices = true` on the backend, a role and `[balancing] enabled` |
+| The server announces its own stop (`server/stopping` of its management protocol), heard by its sidecar | At the start of the stop. A Horizon server whose `[transfer] stop_wait_seconds` is above 0 (10 by default) waits for the players to be moved out, so there is time to move some of them (about 2 s each); with a wait of 0 it drops them about 78 ms later (measured on the build `02f05c1`): enough to drain it, not to move anyone. Planned or not, as long as the server says it | `--management-properties` on the sidecar, `management-server-enabled=true` on the server, `sidecar-notices = true` on the backend, a role and `[balancing] enabled` |
 | The sidecar of the server does not answer for `silent-rounds` readings in a row | After the server is down | `[balancing] enabled` and a sidecar |
 
 In all four cases the server is marked draining at once, so no new player is sent to it, and
@@ -872,7 +872,7 @@ silent-rounds = 3        # readings in a row without an answer before it counts 
 grace-seconds = 60       # a server told to stop may go on answering this long before it counts as back
 ```
 
-`evacuate` is off by default, and it cannot move a player ahead of a plain Horizon `stop`: the announcement comes about 78 ms before the server drops its players (measured, [VALIDATION.md](VALIDATION.md), B1), too soon for a move, and the fallback of section 5.11 catches them instead. It helps when the server is announced early, as it is by the panel's `[drain-before-stop]`; to move players before a stop you type, send them first with `drain <server> --move`. When it is on, the players of the server go one at a time (half a
+`evacuate` is off by default. A Horizon `stop` with players placed now waits `[transfer] stop_wait_seconds` (10 s by default, 0 for none; Horizon's pull request #11713, merged on 8 November 2026 at 01:18 UTC) so that a proxy can move them out first: about 2 s a player, so 10 s is room for about four, and a fuller server needs a longer wait (Horizon's `docs/server.md`). Run 7 of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md) saw `evacuate` do it, with the proxy from before #146; it was not run again with the fixed proxy. With no wait, or at a second `stop`, the announcement comes about 78 ms before the server drops its players (measured on the build `02f05c1`, [VALIDATION.md](VALIDATION.md), B1), too soon for a move, and the fallback of section 5.11 catches them instead. It also helps when the server is announced early, as it is by the panel's `[drain-before-stop]`; to move players before a stop you type, send them first with `drain <server> --move`. When it is on, the players of the server go one at a time (half a
 second apart) to servers of the same role that the balancer picks, never to the server itself.
 A player with nowhere to go stays and is named in the log. After the silence of an unplanned
 stop it is too late to move anyone, since the server is already gone, so the evacuation is
@@ -1099,7 +1099,7 @@ switch, and keep the proxy's log and both servers' logs.
 | Flood protection | `connections-per-minute` per address, `max-players`, `[auth] lookups-per-minute` for the hybrid mode | A firewall or a DDoS service in front of the port; the proxy is not one |
 | Player management | `kick`, `ban`, `pardon`, `banlist` and `whitelist` (section 5.8), their sync with the servers' own lists (section 5.12, off by default), groups of permissions with `perm`, `/send`, `/glist` and `/alert` in game (section 5.9), `max-players`, `on-duplicate`, and each server's own whitelist and bans | In-game commands for the bans and the groups, an expiry on a ban or a rank, a player database in the proxy |
 | Seamless moves between servers | `switch`, `send`, `/server`, `/hub`, `/lobby`, `drain --move` against servers with the transfer module | That module in a released Horizon, and a recorded run on real servers |
-| Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence. Horizon's `server/stopping` notice reaches the proxy (run on real servers, [VALIDATION.md](VALIDATION.md)) but only about 78 ms before the players are dropped | An early warning from Horizon itself: a delay between its announcement and the disconnect of its players |
+| Early warning of a restart | `drain --move`, the panel's `[drain-before-stop]`, and detection by the sidecar's silence. Horizon's `server/stopping` notice reaches the proxy (run on real servers, [VALIDATION.md](VALIDATION.md)) and, with Horizon's stop wait (`stop_wait_seconds`, 10 s by default, #11713, merged on 8 November 2026 at 01:18 UTC), the players are not dropped until they are moved or the wait ends; with a wait of 0 it was about 78 ms before they were dropped (build `02f05c1`) | The evacuation run again with the corrected proxy and the stop wait |
 | Report of a server's state | The sidecar's `status` request, which is Horizon's `transfer-status`, and the proxy's reading of `online` and `max_players` (and `accepts_transfers`, from the error of a server with transfers off) | Not run against a real Horizon yet. Against one from before `transfer-status`, balancing counts the proxy's own sessions |
 
 ## 12. Known limits
@@ -1128,12 +1128,12 @@ switch, and keep the proxy's log and both servers' logs.
   is lost. This ran with a real client over the Internet, once each for a killed server, a kick
   and a clean stop ([REAL-CLIENT-RUNS.md](REAL-CLIENT-RUNS.md), section 3). A planned restart moves its players without a
   loading screen, with the transfer module (section 6), and so did a stop that waits for the
-  evacuation, which needs Horizon's pull request #11713, not merged (run 7 of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)). A player still logging in is not moved.
+  evacuation, which Horizon's pull request #11713 added (`[transfer] stop_wait_seconds`, merged on 8 November 2026 at 01:18 UTC; run 7 of [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md)). A player still logging in is not moved.
 - Horizon's `server/stopping` notice and the panel's announcement are the signals for an early
   warning. The first is fed only when the sidecar is given `--management-properties` and the backend
   has `sidecar-notices = true`; the sidecar reads the management protocol on its own machine and
   does not verify the self-signed certificate Horizon makes ([RESTART.md](RESTART.md), "How the
-  announcement reaches the proxy"). It was run against real Horizon servers ([VALIDATION.md](VALIDATION.md)): the announcement reaches the proxy within a few milliseconds, but the server drops its players about 78 ms after it, so it is a signal to drain, not time to move.
+  announcement reaches the proxy"). It was run against real Horizon servers ([VALIDATION.md](VALIDATION.md)): the announcement reaches the proxy within a few milliseconds, but on that build (`02f05c1`) the server dropped its players about 78 ms after it, so it was a signal to drain, not time to move. Horizon's stop wait (#11713, merged on 8 November 2026 at 01:18 UTC) now gives time to move some of them (section 6).
   The second needs the panel to supervise the server.
 - The server's own report of its state (`accepts_transfers`, `players`, `capacity`) is not
   defined by Horizon yet; balancing counts the proxy's own sessions.

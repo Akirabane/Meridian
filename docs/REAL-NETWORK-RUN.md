@@ -164,7 +164,7 @@ A's and B's worlds are different, and the switch does not change that.
 
 A second session, the next day, with another question: what happens to the players when a Horizon
 server is stopped on purpose while they are on it. Horizon's stop module can wait before it stops
-(`[transfer] stop_wait_seconds`, Horizon's pull request #11713, a draft at the time), and the proxy,
+(`[transfer] stop_wait_seconds`, Horizon's pull request #11713, a draft at the time, merged on 8 November 2026 at 01:18 UTC), and the proxy,
 told by the server that it is stopping, moves the players out first (`[restart] evacuate = true`, see
 [RESTART.md](RESTART.md)). The run also tried the Meridian fix #146 (below).
 
