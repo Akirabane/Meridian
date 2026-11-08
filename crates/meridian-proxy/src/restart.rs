@@ -319,13 +319,12 @@ impl Evacuator {
             info!("backend \"{backend}\" is going down: nobody is on it");
             return None;
         };
-        info!(
-            "backend \"{backend}\" is going down: {} moved, {} stayed",
-            outcome.moved,
-            outcome.stayed.len()
-        );
+        info!("backend \"{backend}\" is going down: {}", outcome.counts());
         for (name, why) in &outcome.stayed {
             warning!("{name} stays on {backend}: {why}");
+        }
+        for line in outcome.already_lines() {
+            info!("{line}");
         }
         Some(outcome)
     }

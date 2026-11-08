@@ -983,6 +983,7 @@ stopping; it does not tell that a server is healthy, which `meridian_backend_sta
 | `WARN backend "<name>" is going down (<cause>): it takes no new player` | A restart was detected |
 | `ERROR ALERT <player>: transfer <id> from <a> to <b>: ...` | A switch left two servers with different files for a player. Act on it (section 10) |
 | `WARN <player> stays on <server>: <why>` | The evacuation could not move someone |
+| `INFO <player> is already on <server> (moved by the fallback)` | The server stopped before the evacuation reached this player, and the fallback had moved them: they are counted apart (`<k> already moved by the fallback`), not as staying |
 | `WARN switch-freeze-limit-ms ...` at start | The proxy's limit is not below Horizon's `max_freeze_seconds` |
 | `<n> connections are still open; they close when the proxy exits` | A stop did not finish in five seconds |
 | `servers` showing a server that never gets players | Drained, not heard from, at its cap, or in a group for the other kind of player |
