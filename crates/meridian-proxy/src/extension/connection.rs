@@ -155,8 +155,24 @@ fn attempt(link: &Arc<Link>) -> End {
         return End::Failed(format!("cannot start the thread that writes: {e}"));
     }
     link.connected(writer.clone(), outbox, info);
+    // The events are written by a thread of their own, from a queue of their own, and only to an extension granted `events`.
+    let events = if link.is_granted(meridian_config::EVENTS) {
+        match super::events::Subscription::start(link, writer.clone()) {
+            Ok(subscription) => Some(subscription),
+            Err(e) => {
+                crate::log::warning!(
+                    "extension \"{name}\": cannot start the thread that writes events: {e}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let ended = serve(&mut reader, &writer, link);
+    // Off the bus before the connection is said to be down: what is still queued is not replayed at the next one.
+    drop(events);
     link.disconnected();
     let _ = writer.shutdown();
     End::Served(match ended {

@@ -29,6 +29,8 @@ pub const ORDERS_OPERATE: &str = "orders.operate";
 /// The capability of the order that runs a line of the proxy's console (docs/EXTENSIONS.md, section 5): the operator's shell, granted
 /// by its name only (`grant` takes no pattern) and by no other capability.
 pub const ORDERS_CONSOLE: &str = "orders.console";
+/// The capability of the events the proxy tells an extension (docs/EXTENSIONS.md, section 6).
+pub const EVENTS: &str = "events";
 /// The capability that gives the players' addresses in what an extension is told (docs/EXTENSIONS.md, section 7).
 pub const ADDRESSES: &str = "addresses";
 
@@ -44,12 +46,15 @@ pub const CAPABILITIES: [&str; 12] = [
     "orders.moderate",
     "orders.operate",
     ORDERS_CONSOLE,
-    "events",
+    EVENTS,
     "addresses",
 ];
 
 /// The longest `[extension.commands] timeout-ms`: a thread waits that long for the lines of a command.
 pub const MAX_OWN_COMMANDS_TIMEOUT_MS: u64 = 10_000;
+
+/// The most events `[extension.events] queue` may hold for one extension.
+pub const MAX_EVENTS_QUEUE: u32 = 10_000;
 
 /// The highest `[extension.orders] rate-per-second`.
 pub const MAX_ORDERS_RATE: u32 = 1_000;
@@ -191,6 +196,19 @@ impl Default for Orders {
     }
 }
 
+/// `[extension.events]`: the events the proxy tells the extension (docs/EXTENSIONS.md, section 6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Events {
+    /// How many events may wait to be written to the extension. Past it the newest are dropped and counted.
+    pub queue: u32,
+}
+
+impl Default for Events {
+    fn default() -> Self {
+        Self { queue: 256 }
+    }
+}
+
 /// `[extension.decide-server]`: the choice of server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerDecision {
@@ -232,6 +250,7 @@ pub struct Extension {
     pub decide_server: ServerDecision,
     pub own_commands: OwnCommands,
     pub orders: Orders,
+    pub events: Events,
 }
 
 impl Extension {
@@ -259,6 +278,13 @@ pub(crate) struct FileExtension {
     decide_server: Option<FileServerDecision>,
     commands: Option<FileOwnCommands>,
     orders: Option<FileOrders>,
+    events: Option<FileEvents>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct FileEvents {
+    queue: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -324,6 +350,12 @@ impl FileExtension {
                 extension: self.name.clone(),
             });
         }
+        if self.events.is_some() && !self.grant.iter().any(|c| c == EVENTS) {
+            return Err(ConfigError::EventsWithoutGrant {
+                extension: self.name.clone(),
+            });
+        }
+        let events_queue = self.events.and_then(|e| e.queue);
         let own = self.commands.and_then(|c| c.timeout_ms);
         let orders = self.orders.unwrap_or(FileOrders {
             rate_per_second: None,
@@ -376,6 +408,9 @@ impl FileExtension {
             },
             own_commands: OwnCommands {
                 timeout_ms: own.unwrap_or(OwnCommands::default().timeout_ms),
+            },
+            events: Events {
+                queue: events_queue.unwrap_or(Events::default().queue),
             },
             orders: Orders {
                 rate_per_second: orders
@@ -548,6 +583,14 @@ pub(crate) fn validate(extensions: &[Extension]) -> Result<(), ConfigError> {
         )?;
         zero("orders burst", u64::from(e.orders.burst))?;
         zero("orders max-running", u64::from(e.orders.max_running))?;
+        zero("events queue", u64::from(e.events.queue))?;
+        if e.events.queue > MAX_EVENTS_QUEUE {
+            return Err(ConfigError::ExtensionSettingAbove {
+                extension: e.name.clone(),
+                setting: "events queue",
+                most: u64::from(MAX_EVENTS_QUEUE),
+            });
+        }
         for (setting, value, most) in [
             (
                 "orders rate-per-second",

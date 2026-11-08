@@ -474,8 +474,17 @@ fn dispatch(text: &str, writer: &Writer, shared: &Arc<Shared>) {
         Ok(Message::Response { id, outcome }) => {
             shared.extension.client.answered(id.as_ref(), outcome)
         }
-        // Version 0 has no notification from the proxy.
-        Ok(Message::Request { id: None, .. }) => {}
+        // A notification from the proxy is an event: given to the handler's queue, if the extension has a handler, and never
+        // answered. The handler does not run here.
+        Ok(Message::Request {
+            id: None,
+            method: name,
+            params,
+        }) => {
+            if let Some(events) = &shared.extension.events {
+                events.push(crate::events::Event::parse(&name, params.as_ref()));
+            }
+        }
         Ok(Message::Request {
             id: Some(id),
             method: name,

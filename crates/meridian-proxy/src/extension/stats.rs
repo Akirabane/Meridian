@@ -67,6 +67,10 @@ pub struct Stats {
     decisions: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
     /// The extension's orders by method and by how they ended.
     orders: Mutex<BTreeMap<(&'static str, orders::Outcome), u64>>,
+    /// The events written to the extension, by event.
+    events: Mutex<BTreeMap<&'static str, u64>>,
+    /// The events dropped because the queue of the connection was full.
+    events_dropped: AtomicU64,
 }
 
 impl Stats {
@@ -127,6 +131,38 @@ impl Stats {
             .unwrap_or_else(|e| e.into_inner())
             .entry((method, outcome))
             .or_default() += 1;
+    }
+
+    /// An event `label` was written to the extension.
+    pub fn event_sent(&self, label: &'static str) {
+        *self
+            .events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(label)
+            .or_default() += 1;
+    }
+
+    /// An event was dropped: the queue of the connection was full.
+    pub fn event_dropped(&self) {
+        self.events_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many events `label` were written (for the tests).
+    #[cfg(test)]
+    pub fn events_sent(&self, label: &'static str) -> u64 {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(label)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// How many events were dropped (for the tests).
+    #[cfg(test)]
+    pub fn events_dropped(&self) -> u64 {
+        self.events_dropped.load(Ordering::Relaxed)
     }
 
     /// How many orders of `method` ended as `outcome`.
@@ -278,6 +314,36 @@ pub fn render(extensions: &[(String, Arc<Stats>)], out: &mut String) {
                 );
             }
         }
+    }
+    family(
+        out,
+        "meridian_extension_events_total",
+        "counter",
+        "Events the proxy wrote to the extension, by event.",
+    );
+    for (name, stats) in extensions {
+        let events = stats.events.lock().unwrap_or_else(|e| e.into_inner());
+        for (event, count) in events.iter() {
+            let _ = writeln!(
+                out,
+                "meridian_extension_events_total{{extension=\"{}\",event=\"{event}\"}} {count}",
+                escaped(name),
+            );
+        }
+    }
+    family(
+        out,
+        "meridian_extension_events_dropped_total",
+        "counter",
+        "Events dropped because the extension's queue was full: the newest are the ones dropped.",
+    );
+    for (name, stats) in extensions {
+        let _ = writeln!(
+            out,
+            "meridian_extension_events_dropped_total{{extension=\"{}\"}} {}",
+            escaped(name),
+            stats.events_dropped.load(Ordering::Relaxed)
+        );
     }
     family(
         out,

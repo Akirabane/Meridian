@@ -583,6 +583,30 @@ it said after.
   first and applies after**, as `proxy.reload()` does, and costs the same half burst, paid once. A reload can remove your own
   `[[extension]]` entry, and then your program reconnects, or not, as the file says.
 
+## 9. Listening to events
+
+With `events` (ask for it with `.on_event(...)`, which asks for you, and the operator grants it in `grant`), the proxy tells your program when a player joins or leaves:
+
+```rust
+let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match event {
+    Event::Joined(j) => println!("{} joined {}", j.player.name, j.server),
+    Event::Left(l) => println!("{} left {}: {:?}", l.player.name, l.server, l.reason),
+    Event::Dropped(d) => resync_with_players_list(d.count),   // some events were lost: ask `players()` again
+    _ => {}
+});
+```
+
+- **The handler does not run on the thread that reads the connection**: events wait in a queue of 1024 and a thread of its own, so a slow handler never delays what the
+  proxy asks of you. Keep it quick anyway: when the queue is full you lose events.
+- **Events are at most once, in order, and never replayed**: when the proxy's queue for your connection is full it drops the **newest** event and tells you with
+  `Event::Dropped { count }` before the next one; the SDK does the same for its own queue. **After a `Dropped`, and each time your program connects, ask `players()` for who is on
+  now** (it needs `orders.read`): nothing from before the connection is replayed.
+- **`seq` is the number of the event on this connection** (it starts at 1 and goes up by one for each event the proxy tried to send, the dropped ones included): a gap is a loss.
+  `at` is the time in milliseconds since the epoch by the proxy's clock.
+- **The address of a player** is in `Joined` only if you also ask for `addresses` (`.wants("addresses")`) and the operator grants it.
+- **`Left::reason`**: `Left` (the player or the connection), `Kicked`, `Replaced`, `Shutdown` or `Error`; a reason a later proxy adds is `Other`. An event you do not know is `Event::Unknown`: ignore it.
+- An event is **never a decision**: you cannot answer it or refuse anything with it. To refuse a login use `on_login`.
+
 ## Good to know
 
 - **One connection at a time.** The proxy opens one connection for each extension. A second one is told

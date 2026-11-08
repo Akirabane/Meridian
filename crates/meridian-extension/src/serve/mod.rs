@@ -28,6 +28,7 @@
 
 pub mod client;
 mod connection;
+mod events;
 mod log;
 
 #[cfg(test)]
@@ -108,6 +109,8 @@ pub struct Extension {
     pub(crate) runs: Option<Arc<RunTable>>,
     /// The extension's requests to the proxy (its orders), shared with the [`Proxy`] handles.
     pub(crate) client: Arc<client::Client>,
+    /// What the events the proxy tells go to (`on_event`).
+    pub(crate) events: Option<Arc<events::Events>>,
 }
 
 /// What `command/run` finds its handler in: the words of a command, and what runs for it.
@@ -131,6 +134,7 @@ impl Extension {
             wanted: Vec::new(),
             runs: None,
             client: Arc::new(client::Client::new()),
+            events: None,
         }
     }
 
@@ -142,6 +146,31 @@ impl Extension {
     /// [`Extension::wants`]) and the operator granted it.
     pub fn proxy(&self) -> Proxy {
         Proxy(Arc::clone(&self.client))
+    }
+
+    /// Registers the handler of the events the proxy tells (docs/EXTENSIONS.md, section 6) and asks for the `events` capability, which the
+    /// operator must grant in `grant`. Without it the proxy tells nothing.
+    ///
+    /// **The handler never runs on the thread that reads the connection**: events go through a queue of 1024 and a thread of their own, so
+    /// a slow handler delays nothing the proxy asks. When the queue is full the newest event is dropped and the handler gets an
+    /// [`Event::Dropped`] before the next one; the proxy also drops events when *its* queue for this connection is full and says so with the
+    /// same event. **Events are at most once, in order, never replayed, and the newest is the one that is lost**: after an
+    /// [`Event::Dropped`], and after the connection came back, ask `players()` again (it needs `orders.read`), and read the `seq` of the
+    /// events (it goes up by one for each event the proxy tried to send, so a gap is a loss). Registering it twice panics.
+    pub fn on_event(
+        mut self,
+        handler: impl Fn(&crate::events::Event) + Send + Sync + 'static,
+    ) -> Self {
+        assert!(
+            self.events.is_none(),
+            "the handler of the events is registered twice"
+        );
+        self.wanted.push("events".to_owned());
+        self.events = Some(Arc::new(
+            events::Events::start(events::QUEUE, handler)
+                .expect("cannot start the thread that runs the handler of the events"),
+        ));
+        self
     }
 
     /// How long an order waits for the proxy's answer (5 seconds by default, and at least 1 ms). It counts

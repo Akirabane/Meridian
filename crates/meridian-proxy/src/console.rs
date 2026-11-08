@@ -989,6 +989,7 @@ mod tests {
             decide_server: Default::default(),
             own_commands: Default::default(),
             orders: Default::default(),
+            events: Default::default(),
         };
         let with = |extensions| Config {
             extensions,

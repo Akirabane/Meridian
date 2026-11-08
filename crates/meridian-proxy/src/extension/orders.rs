@@ -151,6 +151,8 @@ pub trait Console: Send + Sync {
 #[derive(Default)]
 pub struct Services {
     console: Mutex<Option<Arc<dyn Console>>>,
+    /// The connections that are told events.
+    pub(super) bus: super::events::Bus,
     operate: Mutex<Option<Arc<dyn Operate>>>,
     facts: Mutex<Option<Arc<dyn Facts>>>,
     actions: Mutex<Option<Arc<dyn Actions>>>,

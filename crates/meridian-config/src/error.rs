@@ -231,6 +231,8 @@ pub enum ConfigError {
     },
     /// `[extension.orders]` is written for an extension that is granted no order, and not `decide.command`.
     OrdersWithoutGrant { extension: String },
+    /// `[extension.events]` is written for an extension that is not granted `events`.
+    EventsWithoutGrant { extension: String },
     /// `[extension.decide-command] on-error = "allow"`: with no usable answer it would give every command
     /// of the proxy to whoever types it.
     ExtensionCommandAllow { extension: String },
@@ -620,6 +622,10 @@ impl fmt::Display for ConfigError {
             ConfigError::OrdersWithoutGrant { extension } => write!(
                 f,
                 "extension \"{extension}\": [extension.orders] is written and grant holds no \"orders.*\" and not \"decide.command\""
+            ),
+            ConfigError::EventsWithoutGrant { extension } => write!(
+                f,
+                "extension \"{extension}\": [extension.events] is written and grant does not hold \"events\""
             ),
             ConfigError::ExtensionCommandAllow { extension } => write!(
                 f,

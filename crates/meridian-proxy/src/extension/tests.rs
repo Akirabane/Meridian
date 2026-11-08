@@ -1240,6 +1240,7 @@ fn configured(
         decide_server: Default::default(),
         own_commands: Default::default(),
         orders: Default::default(),
+        events: Default::default(),
     };
     change(&mut extension);
     meridian_config::Config {
@@ -1265,6 +1266,7 @@ fn the_defaults_of_the_configuration_are_the_defaults_of_the_connection() {
         decide_server: Default::default(),
         own_commands: Default::default(),
         orders: Default::default(),
+        events: Default::default(),
     });
     assert_eq!(configured, defaults);
     // The shortest token the configuration accepts is the shortest the handshake accepts.
@@ -4314,5 +4316,328 @@ mod the_orders {
         until("the place to be let go", || link.console_lot().is_some());
         assert_eq!(code_of(&run_line(&fake, 11_961, "list")), -32001);
         assert_eq!(consoled.executed(), ["reload", "list"]);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The events the proxy tells an extension (docs/EXTENSIONS.md, section 6)
+
+mod the_events {
+    use super::events::Kind;
+    use super::*;
+    use meridian_extension::events::LeftReason;
+
+    const ASKED: &[&str] = &["events"];
+
+    /// A fake that asks for `asked` in its hello and a link that is granted `granted`, with `change` applied to the link's settings.
+    fn listening(
+        asked: &[&str],
+        granted: &[&str],
+        change: impl FnOnce(&mut Settings),
+    ) -> (Fake, Registry, Arc<Link>, Folder) {
+        let fake = Fake::start(Script {
+            capabilities: asked.iter().map(|c| (*c).to_owned()).collect(),
+            ..Script::default()
+        });
+        let (registry, link, folder) = connect_with(&fake, |settings| {
+            settings.grant = granted.iter().map(|c| (*c).to_owned()).collect();
+            change(settings);
+        });
+        until("the connection", || link.is_connected());
+        (fake, registry, link, folder)
+    }
+
+    fn joined(name: &str) -> Kind {
+        Kind::Joined {
+            player: Kind::player(name, [1; 16], true),
+            server: "lobby".into(),
+            address: "203.0.113.9".into(),
+        }
+    }
+
+    fn left(name: &str, reason: LeftReason) -> Kind {
+        Kind::Left {
+            player: Kind::player(name, [1; 16], false),
+            server: "east".into(),
+            reason,
+        }
+    }
+
+    /// What the fake was told as notifications, in the order it came: the method and the params.
+    fn told(fake: &Fake) -> Vec<(String, Value)> {
+        fake.seen(|seen| {
+            seen.texts
+                .iter()
+                .filter_map(|text| {
+                    let message: Value = serde_json::from_str(text).ok()?;
+                    if message.get("id").is_some() {
+                        return None;
+                    }
+                    let method = message["method"].as_str()?;
+                    method
+                        .starts_with("meridian:notification/")
+                        .then(|| (method.to_owned(), message["params"].clone()))
+                })
+                .collect()
+        })
+    }
+
+    fn wait_for(fake: &Fake, count: usize) -> Vec<(String, Value)> {
+        let mut found = Vec::new();
+        until("the events", || {
+            found = told(fake);
+            found.len() >= count
+        });
+        found
+    }
+
+    /// An extension that is not granted `events`, or did not ask for it, is told nothing, and nothing is even made for it.
+    #[test]
+    fn an_extension_that_does_not_have_events_by_both_its_hello_and_the_grant_is_told_nothing() {
+        for (asked, granted) in [
+            (ASKED, &["orders.read"][..]),
+            (&["orders.read"][..], &["events"][..]),
+            (&["orders.read"][..], &["orders.read"][..]),
+        ] {
+            let (fake, registry, _link, _folder) = listening(asked, granted, |_| {});
+            let made = AtomicUsize::new(0);
+            registry.emit(|| {
+                made.fetch_add(1, Ordering::SeqCst);
+                joined("Alex")
+            });
+            assert_eq!(made.load(Ordering::SeqCst), 0, "{asked:?} {granted:?}");
+            assert_eq!(registry.services.bus.listeners(), 0);
+            std::thread::sleep(Duration::from_millis(80));
+            assert!(told(&fake).is_empty(), "{asked:?} {granted:?}");
+        }
+        // Both: it is made, and told.
+        let (fake, registry, _link, _folder) = listening(ASKED, ASKED, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        registry.emit(|| joined("Alex"));
+        assert_eq!(wait_for(&fake, 1).len(), 1);
+    }
+
+    /// An event says who, where, `seq` and `at`, and nothing else; the address only to a connection granted `addresses`.
+    #[test]
+    fn an_event_has_its_number_and_time_and_the_address_only_with_addresses() {
+        let (fake, registry, _link, _folder) = listening(ASKED, ASKED, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        registry.emit(|| joined("Alex"));
+        registry.emit(|| left("Alex", LeftReason::Kicked));
+        let told = wait_for(&fake, 2);
+        assert_eq!(told[0].0, "meridian:notification/players/joined");
+        let keys = |params: &Value| {
+            let mut keys: Vec<&str> = params
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            keys.join(",")
+        };
+        assert_eq!(
+            keys(&told[0].1),
+            "at,player,seq,server",
+            "no address, and nothing else"
+        );
+        assert_eq!(told[0].1["seq"], 1);
+        assert!(
+            told[0].1["at"].as_u64().unwrap() > 1_700_000_000_000,
+            "milliseconds since the epoch"
+        );
+        assert_eq!(
+            told[0].1["player"],
+            json!({"name": "Alex", "uuid": "01010101-0101-0101-0101-010101010101", "auth": "verified"})
+        );
+        assert_eq!(told[0].1["server"], "lobby");
+        assert_eq!(told[1].0, "meridian:notification/players/left");
+        assert_eq!(told[1].1["seq"], 2);
+        assert_eq!(told[1].1["reason"], "kicked");
+        assert_eq!(told[1].1["server"], "east");
+        assert_eq!(told[1].1["player"]["auth"], "unverified");
+        assert_eq!(keys(&told[1].1), "at,player,reason,seq,server");
+        // With `addresses`: in `joined`, and only there.
+        let both = ["events", "addresses"];
+        let (fake, registry, _link, _folder) = listening(&both, &both, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        registry.emit(|| joined("Alex"));
+        registry.emit(|| left("Alex", LeftReason::Left));
+        let told = wait_for(&fake, 2);
+        assert_eq!(told[0].1["address"], "203.0.113.9");
+        assert!(told[1].1.get("address").is_none());
+        // Asked for and not granted: no address either.
+        let (fake, registry, _link, _folder) = listening(&both, ASKED, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        registry.emit(|| joined("Alex"));
+        assert!(wait_for(&fake, 1)[0].1.get("address").is_none());
+    }
+
+    /// In order, and the numbers go up by one.
+    #[test]
+    fn the_events_come_in_the_order_they_were_made_and_numbered_one_by_one() {
+        let (fake, registry, _link, _folder) = listening(ASKED, ASKED, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        for n in 0..200 {
+            registry.emit(|| joined(&format!("p{n}")));
+        }
+        let told = wait_for(&fake, 200);
+        for (n, (_, params)) in told.iter().enumerate() {
+            assert_eq!(params["seq"], n as u64 + 1);
+            assert_eq!(params["player"]["name"], format!("p{n}"));
+        }
+    }
+
+    /// A queue that is full drops the **newest**, counts it, the number is taken all the same (a gap is a loss), and the next event out is
+    /// preceded by `events/dropped`.
+    #[test]
+    fn a_full_queue_drops_the_newest_counts_them_and_tells_before_the_next_event() {
+        let (fake, registry, link, _folder) = listening(ASKED, ASKED, |settings| {
+            settings.events_queue = 2;
+        });
+        until("a listener", || registry.services.bus.listeners() == 1);
+        link.event_hold.on.store(true, Ordering::SeqCst);
+        // The first is taken by the writer, which waits; the room is then two, and the rest is lost.
+        registry.emit(|| joined("p1"));
+        until("the writer to hold", || {
+            link.event_hold.waiting.load(Ordering::SeqCst) == 1
+        });
+        for n in 2..=10 {
+            registry.emit(|| joined(&format!("p{n}")));
+        }
+        assert_eq!(link.stats().events_dropped(), 7);
+        link.event_hold.on.store(false, Ordering::SeqCst);
+        let told = wait_for(&fake, 4);
+        // `dropped` first (the writer tells before the next event that goes out), then what was kept: 1, 2 and 3.
+        assert_eq!(told[0].0, "meridian:notification/events/dropped");
+        assert_eq!(told[0].1["count"], 7);
+        assert!(
+            told[0].1.get("seq").is_none(),
+            "it has no number: the next event's shows the gap"
+        );
+        let seqs: Vec<u64> = told[1..]
+            .iter()
+            .map(|(_, p)| p["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            seqs,
+            [1, 2, 3],
+            "the oldest are kept and the newest dropped: 4 to 10 are lost"
+        );
+        // The next event after that has the number that follows the lost ones: the gap is the loss.
+        registry.emit(|| joined("later"));
+        let told = wait_for(&fake, 5);
+        assert_eq!(told[4].1["seq"], 11);
+        assert_eq!(told.len(), 5, "and `dropped` was told once");
+        assert_eq!(link.stats().events_sent("players/joined"), 4);
+        let mut page = String::new();
+        registry.render(&mut page);
+        for line in [
+            "meridian_extension_events_total{extension=\"perms\",event=\"players/joined\"} 4",
+            "meridian_extension_events_dropped_total{extension=\"perms\"} 7",
+        ] {
+            assert!(page.contains(line), "{line}\n{page}");
+        }
+    }
+
+    /// An extension that does not read never holds the thread that makes the events: a hundred thousand of them are made, and
+    /// handed over, while its writer is stuck.
+    #[test]
+    fn an_extension_that_does_not_read_never_holds_the_thread_that_emits() {
+        let (_fake, registry, link, _folder) = listening(ASKED, ASKED, |settings| {
+            settings.events_queue = 4;
+        });
+        until("a listener", || registry.services.bus.listeners() == 1);
+        link.event_hold.on.store(true, Ordering::SeqCst);
+        let registry = Arc::new(registry);
+        let done = Arc::new(AtomicBool::new(false));
+        let emitter = {
+            let (registry, done) = (Arc::clone(&registry), Arc::clone(&done));
+            std::thread::spawn(move || {
+                for n in 0..100_000 {
+                    registry.emit(|| joined(&format!("p{n}")));
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        until("the emitter to finish while the writer is stuck", || {
+            done.load(Ordering::SeqCst)
+        });
+        emitter.join().unwrap();
+        assert!(link.stats().events_dropped() >= 99_990);
+        link.event_hold.on.store(false, Ordering::SeqCst);
+    }
+
+    /// The queue is emptied when the connection ends: nothing is replayed to the next one, and its numbers start again at 1.
+    #[test]
+    fn what_is_queued_when_the_connection_ends_is_not_replayed_and_the_numbers_start_again() {
+        let (fake, registry, link, _folder) = listening(ASKED, ASKED, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        link.event_hold.on.store(true, Ordering::SeqCst);
+        for n in 0..3 {
+            registry.emit(|| joined(&format!("before{n}")));
+        }
+        fake.drop_connection();
+        until("the connection to come back", || {
+            fake.seen(|seen| seen.hellos.len()) == 2 && link.is_connected()
+        });
+        until("the new listener", || {
+            registry.services.bus.listeners() == 1
+        });
+        link.event_hold.on.store(false, Ordering::SeqCst);
+        registry.emit(|| joined("after"));
+        let told = wait_for(&fake, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        let told_later = told_of_the_second_connection(&fake);
+        assert_eq!(told_later.len(), 1, "{told:?} {told_later:?}");
+        assert_eq!(told_later[0]["player"]["name"], "after");
+        assert_eq!(
+            told_later[0]["seq"], 1,
+            "a new connection starts again at 1"
+        );
+        assert!(
+            !fake.seen(|seen| seen.texts.iter().any(|t| t.contains("before"))),
+            "what was queued was thrown away with its connection"
+        );
+    }
+
+    /// What the fake was told on its latest connection: the events that carry `after`.
+    fn told_of_the_second_connection(fake: &Fake) -> Vec<Value> {
+        told(fake)
+            .into_iter()
+            .filter(|(_, params)| params["player"]["name"] == "after")
+            .map(|(_, params)| params)
+            .collect()
+    }
+
+    /// With nobody listening an event costs one load and builds nothing; this measures what it costs, and is run by hand:
+    /// `cargo test -p meridian-proxy -- --ignored --nocapture the_cost_of_an_event`.
+    #[test]
+    #[ignore = "a measure, run by hand"]
+    fn the_cost_of_an_event_with_and_without_a_listener() {
+        const N: u32 = 200_000;
+        let (_fake, registry, link, _folder) = listening(ASKED, &["orders.read"], |_| {});
+        until("the connection", || link.is_connected());
+        let start = Instant::now();
+        for n in 0..N {
+            registry.emit(|| joined(&format!("p{n}")));
+        }
+        let nobody = start.elapsed();
+        let (fake, registry, link, _folder) = listening(ASKED, ASKED, |settings| {
+            settings.events_queue = 10_000;
+        });
+        until("a listener", || registry.services.bus.listeners() == 1);
+        let start = Instant::now();
+        for n in 0..N {
+            registry.emit(|| joined(&format!("p{n}")));
+        }
+        let listener = start.elapsed();
+        eprintln!(
+            "emit: {} ns each with nobody listening, {} ns each with one listener ({} dropped, {} written so far)",
+            nobody.as_nanos() / u128::from(N),
+            listener.as_nanos() / u128::from(N),
+            link.stats().events_dropped(),
+            told(&fake).len()
+        );
     }
 }

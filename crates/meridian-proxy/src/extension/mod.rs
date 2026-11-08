@@ -16,6 +16,7 @@ mod breaker;
 pub(crate) mod command;
 mod connection;
 pub(crate) mod console;
+pub(crate) mod events;
 pub(crate) mod facts;
 mod link;
 pub(crate) mod login;
@@ -164,6 +165,12 @@ impl Registry {
     /// Gives the order that runs a console line the proxy's console. Until it is called it answers that it is not available.
     pub fn serve_console(&self, console: Arc<dyn Console>) {
         self.services.set_console(console);
+    }
+
+    /// Tells every extension that listens that `make()` happened (docs/EXTENSIONS.md, section 6). `make` is not called when nobody
+    /// listens: for a proxy with no extension granted `events` this is one load. It never waits for an extension.
+    pub fn emit(&self, make: impl FnOnce() -> events::Kind) {
+        self.services.bus.emit(make);
     }
 
     /// Gives the orders that operate the network what they operate (drain, undrain, reload). Until it is called they answer

@@ -394,6 +394,7 @@ extension, `ext.<name>.<command>`, is lower case.
 | `orders` `rate-per-second` | `20` | The orders the extension may give the proxy each second, once its burst is used. An order over the budget is answered with an error and is not run ([EXTENSIONS.md](EXTENSIONS.md), section 5). Changing it closes the connection and opens it again | 1 to 1000 |
 | `orders` `burst` | `50` | The orders it may give at once, from a rested budget. An order that reaches many players costs at most this | 1 to 10000 |
 | `orders` `max-kicks-per-minute` | `0` | The players the extension may kick in a minute (`players/kick`); past it a kick is refused (`too many kicks`). Only a kick that closed a session counts. 0 is no limit | 0 or more |
+| `events` `queue` | `256` | The events that may wait to be written to the extension (`grant` holds `events`; [EXTENSIONS.md](EXTENSIONS.md), section 6). When it is full the newest event is dropped, counted, and the next event written is preceded by `events/dropped`. Writing `[extension.events]` for an extension that is not granted `events` is refused. Changing it closes the connection and opens it again | 1 to 10000 |
 | `orders` `max-running` | `8` | The orders that may run at once, each on a thread of its own; as many again may wait to write their answers to an extension that does not read. One that finds no place is answered with an error and is not run | 1 to 64 |
 
 **The time a player waits in silence.** The player's client gives up after 30 seconds without a

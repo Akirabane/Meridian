@@ -7,7 +7,8 @@ admission at login (4.2), the permission of a command and the extension's own co
 choice of server, at login and at the fallback (4.4), with the Rust SDK (`meridian-extension`), and the
 dispatcher of the orders with the first one, `permissions/invalidate` (5), and the half of the SDK that sends
 orders (8.1), with the orders that read, those that message, the one that moves, the one that expels, those that operate and the one that runs console lines (5); the "As built" paragraphs of 4.3, 4.4, 5 and 8.1 say what the code does where this page
-leaves a choice open. Not built: the events the proxy sends the extension (6).
+leaves a choice open. Built of the events the proxy sends the extension (6): the bus, the queue of each connection, `events/dropped`,
+`players/joined` and `players/left`. Not built: `players/moved`, `players/fallback`, `servers/up`, `servers/down`, `queue/entered` and `queue/left`.
 
 **Status: decided.** The operator settled its choices on 2026-11-05 (section 10.3). Horizon's
 maintainer then agreed to the form on 2026-11-06: an external program on a local socket, speaking
@@ -888,6 +889,40 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
 - Events are never a decision. An extension that wants to refuse something uses a decision
   point.
 
+**As built, for the events** (`extension/events.rs`, `meridian-extension/src/events.rs`, `meridian-extension/src/serve/events.rs`).
+`players/joined`, `players/left` and `events/dropped` are built; the other notifications of the table are not yet.
+
+- **Who is told.** Only a connection whose hello asked for `events` **and** that the operator granted it (`grant = ["events", ...]`), as for any
+  capability. The SDK's `on_event` asks for it. A player's **address** is in `joined` only for a connection that asked for `addresses` and was
+  granted it (decision Q9); it is the IP, with no port. Nothing else of a player is there: no packet, no chat, no key, and no secret of the
+  proxy, of an extension or of a sidecar. Every word that says why (`reason`) is one of a fixed few, never a text a player wrote.
+- **Shapes** (JSON-RPC notifications, no id, `params` an object). Every event has `seq` (the number of the event **on this connection**: 1 for the
+  first of each connection, up by one for every event the proxy **tried** to send, the dropped ones included, so **a gap is a loss**) and `at` (milliseconds
+  since the Unix epoch, by the proxy's clock). `player` is `{"name", "uuid", "auth": "verified"|"unverified"}`.
+  - `meridian:notification/players/joined`: `{seq, at, player, server, address?}`.
+  - `meridian:notification/players/left`: `{seq, at, player, server, reason}`, where `server` is the one the player was on when the session ended and `reason`
+    is `left` (the player or the connection ended it), `kicked` (an operator, the console, a ban or an extension), `replaced` (the same player logged in again
+    with `on-duplicate = "replace"`), `shutdown` (the proxy was stopping) or `error` (the session broke). The proxy marks a session it ends itself just before
+    it disconnects the player; the others are `left` or `error` by how the relay ended. A reason this version of the SDK does not know is read as `other`.
+  - `meridian:notification/events/dropped`: `{at, count}`, with no `seq`.
+  The proxy tells an event **after** the session is listed (`joined`) and **after** it is let go of (`left`): an extension that asks `players/list` on `left`
+  finds the player gone. Fields are optional and a reader ignores one it does not know: **protocol 0, no change of version** when one is added.
+- **What is guaranteed.** At most once, in order for one connection, **never replayed**. Each connection has a queue of its own (`[extension.events] queue`, 256
+  by default, 1 to 10 000; an event is under 1 KiB) and **a thread of its own** that writes it, so that an extension that does not read holds that thread and nothing
+  else: no thread of a player and no decision waits for it. When the queue is full **the newest event is dropped**, counted
+  (`meridian_extension_events_dropped_total{extension}`), and the **next event written is preceded by `events/dropped` with the count**. If no event follows, the extension does not
+  learn of the loss: **it asks `players/list` again** (`orders.read`) after an `events/dropped`, and after each connection, because **nothing is replayed**: what was queued is thrown
+  away with its connection, and nothing is queued while the extension is not connected. An extension that does not read at all has its connection closed by the write timeout, as any
+  other write does. Two events about different players have no order between them; for one player `joined` comes first and `left` last, with one known exception: a move that ends at the
+  very moment the player leaves can be told after `left` (it will be a `players/moved` event, not yet built).
+- **The cost.** An event is a change of state of a session, never traffic: **nothing is on the path of the packets**. With no extension listening, an emission is **one relaxed
+  atomic load** and the event is not even built (it is described by a closure that is not called). With listeners it is made once and handed to each queue with a `try_send`, which never
+  waits, **outside any lock of the sessions**. `cargo test -p meridian-proxy -- --ignored --nocapture the_cost_of_an_event` measures an emission with and without a listener.
+- **On the SDK's side** (`Extension::on_event`): the handler **never runs on the thread that reads the connection**. Events go through a queue of 1024 and a thread of their own; a slow handler
+  delays nothing the proxy asks. When that queue is full the newest event is dropped and the handler gets an `Event::Dropped` before the next one (the same event as the proxy's own, with the
+  SDK's clock in `at`). A handler that panics loses that event and not the thread. `Event::parse` never fails: a method the SDK does not know, or params that are not its shape, is `Event::Unknown`.
+- **Metrics**: `meridian_extension_events_total{extension,event}` (written) and `meridian_extension_events_dropped_total{extension}`.
+
 ## 7. Security, data and logs
 
 **Who is trusted.** An extension holds the token the operator gave it and the capabilities the
@@ -936,6 +971,7 @@ A message over a limit closes the connection, logged once.
   - `meridian_extension_request_seconds{extension,method}`;
   - `meridian_extension_breaker_open{extension}`;
   - `meridian_extension_orders_total{extension,method,outcome}`;
+  - `meridian_extension_events_total{extension,event}`;
   - `meridian_extension_events_dropped_total{extension}`.
 
 ## 8. The Rust SDK: `meridian-extension`
@@ -1203,6 +1239,7 @@ and keep their signatures, so the handle is made apart and given to the closures
 `let proxy = extension.proxy();` (also `Running::proxy()`), cloned freely and used from any thread. Until a proxy
 is connected its orders end with `NotConnected`.
 
+- **Events.** `Extension::on_event(|event| ...)` registers the handler of the events and asks for `events` (see section 6, "As built"); it is not a method of `Proxy`.
 - **Methods.** `Proxy::console(line)` for the order that runs console lines (it needs `orders.console`: the operator's console; the
   line is checked as the proxy checks it and nothing is sent if it is not valid; the answer is `Executed { lines, truncated }`);
   `Proxy::drain(server, move_players)`, `undrain(server)` and `reload()` for the orders that operate (they need

@@ -2651,3 +2651,214 @@ mod orders {
         assert!(asked.join().unwrap().unwrap_err().may_have_run());
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The events the proxy tells the extension (docs/EXTENSIONS.md, section 6)
+
+mod the_events {
+    use super::*;
+    use crate::events::{self as shapes, Event, LeftReason};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn joined(seq: u64, name: &str) -> String {
+        wire::notification(
+            shapes::PLAYERS_JOINED,
+            &json!({
+                "seq": seq, "at": 1_800_000_000_000_u64,
+                "player": {"name": name, "uuid": "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c", "auth": "verified"},
+                "server": "lobby",
+            }),
+        )
+    }
+
+    /// An extension that collects the events its handler is given.
+    fn listening() -> (Extension, Arc<Mutex<Vec<Event>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let extension = echoing(&Arc::default()).on_event({
+            let seen = Arc::clone(&seen);
+            move |event| seen.lock().unwrap().push(event.clone())
+        });
+        (extension, seen)
+    }
+
+    /// The handler asks for `events` in the hello, and each event is read in its own shape; what is not understood is `Unknown`.
+    #[test]
+    fn the_handler_asks_for_events_and_each_event_is_read_in_its_shape_and_what_is_not_known_is_unknown()
+     {
+        let (extension, seen) = listening();
+        let running = start(extension);
+        let mut proxy = Proxy::connect(running.local_addr());
+        let (answer, outcome) = proxy.hello(&token());
+        assert_eq!(outcome.unwrap(), json!({}));
+        assert_eq!(answer.capabilities, ["decide.login", "events"]);
+        proxy.send(&joined(1, "Alex"));
+        // A field nobody knows is ignored (protocol 0: fields are optional and may be added), and so is a reason this version lacks.
+        proxy.send(&wire::notification(
+            shapes::PLAYERS_LEFT,
+            &json!({
+                "seq": 2, "at": 5, "future": [1, 2],
+                "player": {"name": "Alex", "uuid": "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c", "auth": "unverified"},
+                "server": "east", "reason": "kicked",
+            }),
+        ));
+        proxy.send(&wire::notification(
+            shapes::PLAYERS_LEFT,
+            &json!({
+                "seq": 3, "at": 6,
+                "player": {"name": "Bob", "uuid": "1b3fb5cb-cdfe-4ae3-91f2-2be62b1fa36d", "auth": "verified"},
+                "server": "east", "reason": "a-word-from-the-future",
+            }),
+        ));
+        proxy.send(&wire::notification(
+            shapes::EVENTS_DROPPED,
+            &json!({"at": 7, "count": 9}),
+        ));
+        proxy.send(&wire::notification(
+            "meridian:notification/servers/up",
+            &json!({"server": "east"}),
+        ));
+        // A known method whose params are not its shape is `Unknown` too, and never an error or a crash.
+        proxy.send(&wire::notification(
+            shapes::PLAYERS_JOINED,
+            &json!({"seq": "one"}),
+        ));
+        until("the six events", || seen.lock().unwrap().len() == 6);
+        let seen = seen.lock().unwrap();
+        let Event::Joined(first) = &seen[0] else {
+            panic!("{:?}", seen[0]);
+        };
+        assert_eq!(
+            (first.seq, first.player.name.as_str(), first.server.as_str()),
+            (1, "Alex", "lobby")
+        );
+        assert!(first.address.is_none());
+        let Event::Left(left) = &seen[1] else {
+            panic!("{:?}", seen[1]);
+        };
+        assert_eq!(
+            (left.reason, left.player.auth),
+            (LeftReason::Kicked, crate::decide::Auth::Unverified)
+        );
+        let Event::Left(other) = &seen[2] else {
+            panic!("{:?}", seen[2]);
+        };
+        assert_eq!(other.reason, LeftReason::Other);
+        assert_eq!(seen[3], Event::Dropped(shapes::Dropped { at: 7, count: 9 }));
+        assert_eq!(
+            seen[4],
+            Event::Unknown("meridian:notification/servers/up".into())
+        );
+        assert_eq!(seen[5], Event::Unknown(shapes::PLAYERS_JOINED.into()));
+    }
+
+    /// The handler never runs on the thread that reads: it is stuck, and the extension goes on answering the proxy; the queue is
+    /// bounded, and what it could not keep is told to the handler as `Dropped` before the next event.
+    #[test]
+    fn a_slow_handler_does_not_stop_the_reader_and_is_told_what_was_dropped() {
+        let handled = Arc::new(Mutex::new(Vec::new()));
+        let stuck = Arc::new(AtomicBool::new(true));
+        let extension = echoing(&Arc::default()).on_event({
+            let (handled, stuck) = (Arc::clone(&handled), Arc::clone(&stuck));
+            move |event| {
+                while stuck.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                handled.lock().unwrap().push(event.clone());
+            }
+        });
+        let running = start(extension);
+        let mut proxy = Proxy::up(running.local_addr());
+        let sent = 3_000_u64;
+        for n in 1..=sent {
+            proxy.send(&joined(n, "Alex"));
+        }
+        // Still reading, still answering, while the handler is stuck.
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 1}))).unwrap(),
+            json!({"k": 1})
+        );
+        stuck.store(false, Ordering::SeqCst);
+        until("the handler to have caught up", || {
+            let handled = handled.lock().unwrap();
+            let joined = handled
+                .iter()
+                .filter(|e| matches!(e, Event::Joined(_)))
+                .count() as u64;
+            let lost: u64 = handled
+                .iter()
+                .map(|e| {
+                    if let Event::Dropped(d) = e {
+                        d.count
+                    } else {
+                        0
+                    }
+                })
+                .sum();
+            joined + lost == sent
+        });
+        let handled = handled.lock().unwrap();
+        let lost: u64 = handled
+            .iter()
+            .map(|e| {
+                if let Event::Dropped(d) = e {
+                    d.count
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert!(
+            lost > 0 && lost <= sent - 1024,
+            "the queue holds 1024: {lost} dropped"
+        );
+        // The first event handled is the first sent: the oldest are kept, the newest dropped.
+        assert!(
+            matches!(&handled[0], Event::Joined(j) if j.seq == 1)
+                || matches!(&handled[1], Event::Joined(j) if j.seq == 1)
+        );
+    }
+
+    /// A handler that panics loses that event, not the thread.
+    #[test]
+    fn a_handler_that_panics_loses_that_event_and_not_the_thread() {
+        let handled = Arc::new(Mutex::new(Vec::new()));
+        let extension = echoing(&Arc::default()).on_event({
+            let handled = Arc::clone(&handled);
+            move |event| {
+                if matches!(event, Event::Joined(j) if j.player.name == "Boom") {
+                    panic!("a handler that fails");
+                }
+                handled.lock().unwrap().push(event.clone());
+            }
+        });
+        let running = start(extension);
+        let mut proxy = Proxy::up(running.local_addr());
+        proxy.send(&joined(1, "Boom"));
+        proxy.send(&joined(2, "Alex"));
+        until("the event after the panic", || {
+            !handled.lock().unwrap().is_empty()
+        });
+        assert!(matches!(&handled.lock().unwrap()[0], Event::Joined(j) if j.player.name == "Alex"));
+    }
+
+    /// An extension with no handler does not ask for `events`, ignores what it is told, and goes on answering.
+    #[test]
+    fn without_a_handler_events_are_ignored_and_not_asked_for() {
+        let running = start(echoing(&Arc::default()));
+        let mut proxy = Proxy::connect(running.local_addr());
+        let (answer, outcome) = proxy.hello(&token());
+        assert_eq!(outcome.unwrap(), json!({}));
+        assert_eq!(answer.capabilities, ["decide.login"]);
+        proxy.send(&joined(1, "Alex"));
+        assert_eq!(
+            proxy.call(ECHO, Some(&json!({"k": 2}))).unwrap(),
+            json!({"k": 2})
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "registered twice")]
+    fn the_handler_of_the_events_is_registered_once() {
+        let _ = echoing(&Arc::default()).on_event(|_| {}).on_event(|_| {});
+    }
+}

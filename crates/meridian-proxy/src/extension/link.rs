@@ -83,6 +83,8 @@ pub struct Settings {
     pub kicks_per_minute: u32,
     /// How long an order that runs a console line waits for the line to end before it answers that it did not finish.
     pub console_timeout: Duration,
+    /// The events that may wait to be written to it.
+    pub events_queue: usize,
     pub timings: Timings,
 }
 
@@ -112,6 +114,7 @@ impl Settings {
             orders_running: 8,
             kicks_per_minute: 0,
             console_timeout: CONSOLE_TIMEOUT,
+            events_queue: 256,
             timings: Timings::default(),
         }
     }
@@ -135,6 +138,7 @@ impl From<&meridian_config::Extension> for Settings {
             orders_running: e.orders.max_running as usize,
             kicks_per_minute: e.orders.max_kicks_per_minute,
             console_timeout: CONSOLE_TIMEOUT,
+            events_queue: e.events.queue as usize,
             timings: Timings::default(),
         }
     }
@@ -335,6 +339,9 @@ pub struct Link {
     forgotten: Mutex<Forgotten>,
     /// What the orders need of the rest of the proxy.
     services: Arc<Services>,
+    /// For the tests: holds the thread that writes the events.
+    #[cfg(test)]
+    pub(super) event_hold: Arc<super::events::Hold>,
 }
 
 impl Link {
@@ -360,6 +367,8 @@ impl Link {
             kicks: Mutex::new(Vec::new()),
             forgotten: Mutex::new(Forgotten::default()),
             services,
+            #[cfg(test)]
+            event_hold: Arc::default(),
         })
     }
 
@@ -399,6 +408,11 @@ impl Link {
     pub(super) fn order_place(self: &Arc<Self>) -> Option<OrderPlace> {
         acquire(&self.orders_running, self.settings.orders_running)
             .then(|| OrderPlace(Arc::clone(self)))
+    }
+
+    /// The connections that are told events.
+    pub(super) fn events(&self) -> &super::events::Bus {
+        &self.services.bus
     }
 
     /// The facts the orders that read tell, if the proxy has given them.
