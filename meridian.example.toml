@@ -162,6 +162,10 @@ address = "127.0.0.1:25566"
 # player (docs/OPERATING.md, section 5.15). Backends that name no group are in one
 # group together, so leaving it out everywhere carries the state on every move.
 # state-group = "lobby"
+# false: no seamless move to this backend, whatever starts it. For a world its
+# players must log in to, such as a hardcore one: the client learns that a world
+# is hardcore (its hearts, its death screen) only from a login.
+# seamless-arrival = true
 
 [[backends]]
 name = "east"
@@ -178,7 +182,8 @@ motd = "The east server"
 # true: a vanilla transfer a backend sends a player to this host (/transfer
 # east.example.com ...) becomes a seamless move to east, with no loading screen;
 # when that move cannot be made, the transfer goes to the client as it came. Needs
-# the sidecars of both backends (docs/OPERATING.md, section 5.15).
+# the sidecar of east, and of the backend that sends the transfer (without it, its
+# transfer goes as the game's own) (docs/OPERATING.md, section 5.15).
 # seamless = false
 
 # Groups of backends, each for one kind of player: "verified" (the session

@@ -1053,6 +1053,7 @@ state-group = "survival"
 name = "hardcore"
 address = "127.0.0.1:25603"
 state-group = "hardcore"
+seamless-arrival = false
 
 [[forced-host]]
 host = "survival.<domain>"
@@ -1072,11 +1073,12 @@ an extension's `send`):
   defaults the first time;
 - the server they leave is not told they moved (`player-release moved`, which saves nothing there) but lets them go on
   (`player-release abort`), and the proxy then closes its connection: that server saves its copy of the player as at
-  any departure, and its players see the "left the game" line whatever `switch-announce-departure` says;
+  any departure. For that server it is an ordinary departure, so its players see the "left the game" line (seen in a
+  local run), which `switch-announce-departure` does not reach;
 - the client is sent what differs: the other world, and the player's state on that server.
 
 A server that names no group is in one unnamed group with the others that name none: a file without the setting carries
-the state on every move, as before it.
+the state on every move, as before it. A group's name does not depend on case, and may not have spaces around it.
 
 **`seamless` on a `[[forced-host]]`.** The lobby still sends players with vanilla's `/transfer survival.<domain> 25565
 <player>`, as in section 5.13. When the host of that transfer is a seamless forced host, the proxy does not pass the
@@ -1093,13 +1095,23 @@ passes the transfer to the client as the lobby sent it, and the player goes with
 - a server or its sidecar cannot be reached, or the other server is full or refuses the player;
 - the servers configure their clients differently (section 3 of [DESIGN.md](DESIGN.md)).
 
-Both servers need a sidecar (section 4) and Horizon's `[transfer]` section (section 3); the proxy refuses a seamless forced host
-whose server has none.
+Both servers need a sidecar (section 4) and Horizon's `[transfer]` section (section 3). The proxy refuses a seamless forced host
+whose server has no sidecar; it cannot know which servers will send transfers to it, so a transfer sent by a server without
+a sidecar is passed to the client as it came, with a warning in the log.
 
 **What the client still shows.** No loading screen and no Respawn, but the other map arrives chunk by chunk from the
 player outwards, over a second or a few ([DESIGN.md](DESIGN.md), section 8.1). The values only a login sets stay those
-of the first server (section 8.2): with a lobby and a hardcore world, the hearts and the death screen would stay those of
-the lobby. That is why the example keeps vanilla's transfer for `hardcore`.
+of the first server ([DESIGN.md](DESIGN.md), section 8.2).
+
+**`seamless-arrival = false`: a hardcore world.** Whether a world is hardcore is one of those values: the client learns
+it from the login (`Login`'s hardcore flag) and from nothing else. A player moved seamlessly from a lobby to a hardcore
+world keeps the lobby's hearts, and at death the death screen offers "Respawn" where a hardcore world shows "Spectate
+World"; the server still makes the player a spectator after it, so the rule holds and the screen is wrong (both seen in a
+local run). `seamless-arrival = false` on such a server refuses every seamless move to it, whatever starts it (`/server`,
+`/hub`, `send`, `drain --move`, an evacuation, an extension's `send`): the player stays where they were and is told that
+the server is joined with a login. The proxy also refuses a seamless forced host that leads to it. Its players join it
+through its own address, or a server's vanilla transfer to its forced host, as in section 5.13. Moves from it are not
+changed.
 
 **What it does not do.** It does not keep a player's state in step between two servers of different groups: each
 server's copy changes only while the player is there. A server reached directly, not through the proxy, has an older
