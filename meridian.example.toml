@@ -156,6 +156,12 @@ address = "127.0.0.1:25566"
 # The most players the balancer ever places on it, taken only as overflow when every
 # backend of the role is at its soft cap. At least soft-cap; defaults to soft-cap.
 # hard-cap = 40
+# The worlds whose players share their state. A move between two backends of the
+# same group carries the player's inventory, experience, game mode...; a move
+# between two groups carries none of it, and each backend keeps its own copy of the
+# player (docs/OPERATING.md, section 5.15). Backends that name no group are in one
+# group together, so leaving it out everywhere carries the state on every move.
+# state-group = "lobby"
 
 [[backends]]
 name = "east"
@@ -169,6 +175,11 @@ address = "127.0.0.1:25567"
 host = "east.example.com"
 backend = "east"
 motd = "The east server"
+# true: a vanilla transfer a backend sends a player to this host (/transfer
+# east.example.com ...) becomes a seamless move to east, with no loading screen;
+# when that move cannot be made, the transfer goes to the client as it came. Needs
+# the sidecars of both backends (docs/OPERATING.md, section 5.15).
+# seamless = false
 
 # Groups of backends, each for one kind of player: "verified" (the session
 # service confirmed the account) or "unverified" (a name the proxy let in without
