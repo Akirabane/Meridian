@@ -9,20 +9,22 @@ What changes for whoever runs the proxy, newest first. The proxy has no release 
 
 Every setting below is off, or keeps the old behaviour, until you write it. A proxy refuses a key it does not know, so a
 file that uses one of them does not start on a proxy from before it. To go back to an older proxy, take these keys out
-of the file first:
+of the file first (the `[extension.*]` tables are those of an `[[extension]]` entry):
 
 | Key | Added by |
 | --- | --- |
 | `accept-transfers` | #176 |
 | `compression-level` | #179 |
-| `[extension]` `commands` `timeout-ms` | #158 |
-| `[extension]` `orders` `rate-per-second`, `burst`, `max-running`, `max-kicks-per-minute` | #163 to #173 |
-| `[extension]` `events` `queue` | #174 |
-| `[extension]` `grant` naming `commands`, an `orders.*` capability or `events` | #158, #163 to #173, #174 |
+| `[extension.commands]` `timeout-ms` | #158 |
+| `[extension.orders]` `rate-per-second`, `burst`, `max-running`, `max-kicks-per-minute` | #163 to #173 |
+| `[extension.events]` `queue` | #174 |
 | `[[backends]]` `state-group` and `seamless-arrival`, `[[forced-host]]` `seamless` | #190 |
 
+An older proxy accepts `grant` naming `commands`, `orders.*` or `events`, and does nothing with them.
+
 One name of the metrics page changed before any release used it: the players sent by another server are counted in
-`meridian_incoming_transfers_total{outcome}` (#177). `meridian_transfers_total` keeps its meaning: the seamless moves.
+`meridian_incoming_transfers_total{outcome}` (#177). `meridian_transfers_total` keeps its meaning (#182): the seamless
+moves.
 
 ### Players and servers
 
@@ -34,14 +36,14 @@ One name of the metrics page changed before any release used it: the players sen
   client; not run on a public proxy. OPERATING.md section 5.15.
 - **Players sent by another server** (#176, #177, #185). With `accept-transfers = true` the proxy takes the players a
   server sends with the game's own `/transfer`, checked as any login, the host choosing the server
-  (`[[forced-host]]`). Run on a public proxy with a lobby, a survival and a hardcore server (#186). OPERATING.md
-  section 5.13.
+  (`[[forced-host]]`). Run on a public proxy with a lobby, a survival and a hardcore server, with one player (#186).
+  OPERATING.md section 5.13.
 - **The compression level towards the players** (#179, #181). `compression-level` (1 to 9, `6` by default, the same
   bytes as before). Level 4 used 11.8 % less processor time on a running proxy at 100 players, for 1.5 to 1.7 % more
-  bytes, one run of each setting; level 3, and level 4 at 500 players, gave no conclusive figure (#187). OPERATING.md
-  section 5.14.
-- **Fewer writes to each player** (#160). The packets one read of a server brings are written to the player in one
-  write; the bytes are the same.
+  bytes, two runs of each setting, on a PC where other programs used the same load on both sides; level 3, and level 4
+  at 500 players, gave no conclusive figure (#187). OPERATING.md section 5.14.
+- **Fewer writes to each player** (#160, #162). The packets one read of a server brings are written to the player in
+  one write; the bytes are the same.
 - **The metrics page and `/healthz` answer at once** (#151): about 10 ms where they took 50 to 90 ms.
 - **The summary of an evacuation** names the players the fallback had already moved, instead of counting them as left
   behind (#152).
@@ -69,7 +71,7 @@ methods and fields only). docs/EXTENSIONS.md and docs/EXTENSION-GUIDE.md.
 - The load campaigns: 1,000 players on one proxy with simulated servers (docs/LOAD-1000.md, #157, #161), and real
   Horizon servers up to 500 players on one PC, with what gave no result (docs/LOAD-LEVEL2.md, #187).
 - The pages that say where things stand were checked against the code, and every series of the metrics page is listed
-  (#162, #184; OPERATING.md section 8.1); the online mode's account check with real clients (#175); Horizon's wait at a
+  (#184; OPERATING.md section 8.1); the online mode's account check with real clients (#175); Horizon's wait at a
   stop (#154).
 
 ### Tests and benches only
