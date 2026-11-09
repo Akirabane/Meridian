@@ -3,9 +3,9 @@
 What changes for whoever runs the proxy, newest first. The proxy has no release number of its own yet (`0.1.0` in
 `Cargo.toml`): each entry names the pull requests merged into `main`, and the setting, page or document to read.
 
-## Not released yet: pull requests #192 and #TBD
+## Not released yet: pull requests #192 and #193
 
-### Extensions: the example to start from, `allow-all` (#TBD)
+### Extensions: the example to start from, `allow-all` (#193)
 
 Nothing changes in the proxy, its settings or the protocol. docs/EXTENSIONS.md section 8.2 and EXTENSION-GUIDE.md.
 
