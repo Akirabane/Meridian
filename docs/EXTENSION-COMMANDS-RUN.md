@@ -148,7 +148,8 @@ The scripts that drove this run are not in this repository: they name folders of
 6. **Clean up.** Stop the clients, the proxy and the extension, `deop` the operator, and stop the server with
    `horizon-server stop`.
 
-Each step is a few lines of a script; the whole run took about two minutes and opened two minimised client windows.
+Each step is a few lines of a script; the whole run took about a minute and a half and opened two minimised
+client windows.
 
 ## 6. What this does not show
 
