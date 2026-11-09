@@ -40,8 +40,8 @@ moves.
   OPERATING.md section 5.13.
 - **The compression level towards the players** (#179, #181). `compression-level` (1 to 9, `6` by default, the same
   bytes as before). Level 4 used 11.8 % less processor time on a running proxy at 100 players, for 1.5 to 1.7 % more
-  bytes, two runs of each setting, on a PC where other programs used the same load on both sides; level 3, and level 4
-  at 500 players, gave no conclusive figure (#187). OPERATING.md section 5.14.
+  bytes, two runs of each setting, on a PC where other programs used about the same load on both sides; level 3,
+  and level 4 at 500 players, gave no conclusive figure (#187). OPERATING.md section 5.14.
 - **Fewer writes to each player** (#160, #162). The packets one read of a server brings are written to the player in
   one write; the bytes are the same.
 - **The metrics page and `/healthz` answer at once** (#151): about 10 ms where they took 50 to 90 ms.
