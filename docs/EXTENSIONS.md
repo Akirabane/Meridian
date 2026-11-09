@@ -1379,15 +1379,17 @@ command), `command_party` (an extension's own command) and `file_permissions` (b
   name they type, so anyone may use another's name; a `deny` still applies to everyone), and a node the file does not
   name is left to the proxy. It declares one command, `/extperms reload` (its node `ext.<extension>.extperms`, which it
   denies to whoever the file does not let reload, and which the command checks again when it runs), which reads the file
-  again and, only if it was read in full, puts it in force and sends `permissions/invalidate`. **No right is ever wider
-  than what a file it read in full gives**: a file it cannot read, that is not valid, or that holds no key at all (one
-  cut to nothing would take every `deny` away) leaves the permissions as they were, at a reload as at the start, tells
-  the proxy to forget nothing, and says so to the player and on its standard error stream; neither names the file or
-  holds a unique id. A file cut short that is still valid TOML cannot be told from a whole one: write the file in one
-  step (a temporary file, then a rename) and type `/extperms reload` only after. If, after a reload that worked, the
-  proxy cannot be told to forget (three tries), the new rules are in force but what the proxy kept stays up to a minute;
-  the player who typed the command reads so. It shows the cache, the precedence over `permissions.toml`, a command of
-  the extension's own, and an order. It is an example, not a second permissions system.
+  again and, only if it was read in full, puts it in force and sends `permissions/invalidate`. The node of `/extperms`
+  follows `reload` alone: no pattern touches it (`deny = ["*"]` does not take the reload, and `allow = ["ext.*"]` does
+  not give it); to take the reload from a player, set `reload = false` or leave it out. **No right is ever wider than
+  what a file it read in full gives**: a file it cannot read, that is not valid, or that holds no key at all (one cut to
+  nothing would take every `deny` away) leaves the permissions as they were, at a reload as at the start, tells the
+  proxy to forget nothing, and says so to the player and on its standard error stream; neither names the file or holds a
+  unique id. A file cut short that is still valid TOML cannot be told from a whole one: write the file in one step (a
+  temporary file, then a rename) and type `/extperms reload` only after. If, after a reload that worked, the proxy
+  cannot be told to forget (three tries), the new rules are in force but what the proxy kept stays up to a minute; the
+  player who typed the command reads so. It shows the cache, the precedence over `permissions.toml`, a command of the
+  extension's own, and an order. It is an example, not a second permissions system.
   - **The proxy's tests run it as a separate process** (`session/tests/extension/file_permissions.rs`, the same way as
     `allow-all`), with a file of players: a right the file gives opens a command `permissions.toml` keeps closed; the
     proxy keeps the answer while the file changes; `/extperms reload` takes the right back at once, not after the

@@ -23,10 +23,12 @@
 //! reload = true                                    # may type /extperms reload
 //! ```
 //!
-//! A pattern follows the rule of `permissions.toml` (lower-case words joined by dots, `*`, or words ending in `.*`)
-//! and anything else makes the file not valid. A wide pattern is wide by construction: `meridian.*` gives `/glist`,
+//! A pattern follows the rule of `permissions.toml` (lower-case words joined by dots, `*`, or words ending in `.*`) and
+//! anything else makes the file not valid. A wide pattern is wide by construction: `meridian.*` gives `/glist`,
 //! `/send`, `/alert` and any node a later proxy adds under `meridian.`; prefer narrow patterns and use `deny` for the
-//! exceptions. A node the file does not name is left to the proxy (`permissions.toml` and the operators).
+//! exceptions. A node the file does not name is left to the proxy (`permissions.toml` and the operators). The node of
+//! `/extperms` follows `reload` alone: no pattern touches it (`deny = ["*"]` does not take the reload, and
+//! `allow = ["ext.*"]` does not give it); to take the reload from a player, set `reload = false` or leave it out.
 //!
 //! The rule it keeps: **no right is ever wider than what a file it read in full gives.** A file that cannot be read,
 //! is not valid, or holds no key at all (one cut to nothing would take every `deny` away), at a reload, leaves the

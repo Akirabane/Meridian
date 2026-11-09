@@ -269,7 +269,9 @@ read, or that holds no key at all, leaves the rights as they were, and it says s
 file it read in full gives; write the file in one step (a temporary file, then a rename) before you reload it. Prefer
 narrow patterns (`meridian.*` gives every command of the proxy, and any it adds later) and use `deny` for the
 exceptions. With `trust-unverified = true`, an offline player's id comes from the name they type, so anyone may use
-another's name; a `deny` still applies to everyone.
+another's name; a `deny` still applies to everyone. The node of `/extperms` follows `reload` alone: no pattern touches
+it (`deny = ["*"]` does not take the reload, and `allow = ["ext.*"]` does not give it); to take the reload from a
+player, set `reload = false` or leave it out.
 
 ```toml
 [[extension]]
