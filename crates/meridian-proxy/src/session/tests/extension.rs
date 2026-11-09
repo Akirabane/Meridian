@@ -2987,6 +2987,174 @@ groups = ["staff"]
         registry.stop();
         assert!(weak.upgrade().is_none(), "the stopped link is still held");
     }
+
+    // The word of an extension, typed by a player, through `serve` and the real connection: what
+    // `docs/EXTENSIONS.md` (4.3, decision Q1) says in one line, that **the server never sees it**.
+    // The fake backend below fails the test on any packet it gets after the configuration phase, so
+    // a command that was passed on would end the test; the control at the end shows that it does
+    // see a command that is not the extension's.
+    mod wire {
+        use super::*;
+        use horizon_protocol::packets::play;
+        use ids::{configuration as cfg, play as ids_play};
+
+        fn payload(body: Vec<u8>) -> Vec<u8> {
+            body[1..].to_vec()
+        }
+
+        fn typed(line: &str) -> Step {
+            Step::send(
+                ids_play::serverbound::CHAT_COMMAND,
+                payload(
+                    play::Serverbound::ChatCommand(play::ChatCommand {
+                        command: line.into(),
+                    })
+                    .encode(),
+                ),
+            )
+        }
+
+        fn said(line: &str) -> Step {
+            Step::expect_exactly(
+                ids_play::clientbound::SYSTEM_CHAT,
+                payload(
+                    play::Clientbound::SystemChat(play::SystemChat {
+                        content: text::literal(line),
+                        overlay: false,
+                    })
+                    .encode(),
+                ),
+            )
+        }
+
+        /// Alex logs in, types `line`, reads `replies`, and leaves. The backend sees a command only
+        /// when `backend_gets_it`; otherwise it fails on anything but the player's close.
+        fn alex_types(
+            config: &Config,
+            sessions: &Sessions,
+            line: &str,
+            replies: &[&str],
+            backend_gets_it: bool,
+        ) {
+            let mut after_login = vec![
+                finish_configuration(),
+                Step::Expect {
+                    id: cfg::serverbound::FINISH_CONFIGURATION,
+                },
+            ];
+            if backend_gets_it {
+                after_login.push(Step::Expect {
+                    id: ids_play::serverbound::CHAT_COMMAND,
+                });
+            }
+            after_login.push(Step::ExpectClose);
+            let backend = FakeBackend {
+                forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                after_login,
+                ..FakeBackend::default()
+            };
+            let (connect, seen) = connector(backend, Recorder::new());
+            let (session, player) = logged_in("Alex", client::AuthKind::Offline, None);
+            let mut script = vec![
+                Step::Expect {
+                    id: cfg::clientbound::FINISH_CONFIGURATION,
+                },
+                acknowledge_configuration(),
+                typed(line),
+            ];
+            script.extend(replies.iter().map(|r| said(r)));
+            script.push(Step::Close);
+            let player =
+                meridian_testkit::peer::spawn(player, script, Dir::ToClient, Recorder::new());
+            serve(session, peer(), config, &*connect, sessions);
+            player.join().unwrap().unwrap();
+            let (_, _, backend) = seen.lock().unwrap().take().unwrap();
+            backend.join().unwrap().unwrap();
+        }
+
+        fn parties_with_time() -> Parties {
+            parties("gate", Duration::ZERO, &[("party", &["p"]), ("time", &[])])
+        }
+
+        #[test]
+        fn what_a_player_types_of_an_extensions_words_is_answered_by_it_and_never_reaches_the_server()
+         {
+            let party = parties_with_time();
+            let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+            let sessions = sessions_for(&config);
+            // One session for each word, as a player's next word may come before the guard of the
+            // last one is let go (the lines are told first).
+            alex_types(
+                &config,
+                &sessions,
+                "party invite Bob",
+                &["gate ran party"],
+                false,
+            );
+            alex_types(&config, &sessions, "p", &["gate ran party"], false);
+            // `time` is a word the server has too: it is the extension's as long as it declares it.
+            alex_types(
+                &config,
+                &sessions,
+                "time set 18000",
+                &["gate ran time"],
+                false,
+            );
+            let seen = party.seen.lock().unwrap().clone();
+            let asked: Vec<(&str, Vec<&str>)> = seen
+                .iter()
+                .map(|r| {
+                    (
+                        r.command.as_str(),
+                        r.args.iter().map(String::as_str).collect(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                asked,
+                [
+                    ("party", vec!["invite", "Bob"]),
+                    ("party", vec![]),
+                    ("time", vec!["set", "18000"]),
+                ]
+            );
+            let link = sessions.extensions.link("gate").unwrap();
+            assert_eq!(link.stats().count(run::RUN, RequestOutcome::Answered), 3);
+        }
+
+        #[test]
+        fn while_the_extension_is_down_its_words_say_so_and_still_never_reach_the_server() {
+            let party = parties_with_time();
+            let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+            let sessions = sessions_for(&config);
+            alex_types(&config, &sessions, "party", &["gate ran party"], false);
+            let Parties { running, .. } = party;
+            drop(running);
+            let link = sessions.extensions.link("gate").unwrap();
+            let limit = Instant::now() + Duration::from_secs(10);
+            while link.is_connected() {
+                assert!(Instant::now() < limit, "the connection never ended");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            alex_types(&config, &sessions, "party", &[NO_ANSWER], false);
+            alex_types(&config, &sessions, "time set 18000", &[NO_ANSWER], false);
+            assert_eq!(
+                link.stats().count(run::RUN, RequestOutcome::Disconnected),
+                2
+            );
+        }
+
+        #[test]
+        fn control_a_command_that_is_not_the_extensions_does_reach_the_server() {
+            let party = parties_with_time();
+            let config = config_of(vec![party.extension("gate", &["commands"], 2000)], &[]);
+            let sessions = sessions_for(&config);
+            // The backend of this session waits for the command and fails without it, as the two tests
+            // above fail with it: this is what makes their "never" worth something.
+            alex_types(&config, &sessions, "tp Bob", &[], true);
+            assert_eq!(party.asked(), 0, "the extension was not asked");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
