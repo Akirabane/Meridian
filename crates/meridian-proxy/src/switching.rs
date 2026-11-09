@@ -214,7 +214,7 @@ fn attempt(
             "{name}: no seamless move from {from} to {target}: {closed} has seamless-arrival = false, and {way} it a player goes only with a login"
         );
         return Err(failed(format!(
-            "check: {closed} is only joined or left with a login (its own address, or a server's transfer)"
+            "{closed} is only joined or left with a login (its own address, or a server's transfer)"
         )));
     }
     // One switch at a time: the switch itself refuses a second one, but saying so

@@ -1107,13 +1107,15 @@ of the first server ([DESIGN.md](DESIGN.md), section 8.2).
 it from the login (`Login`'s hardcore flag) and from nothing else. A player moved seamlessly from a lobby to a hardcore
 world keeps the lobby's hearts, and at death the death screen offers "Respawn" where a hardcore world shows "Spectate
 World"; the server still makes the player a spectator after it, so the rule holds and the screen is wrong (both seen in a
-local run). The same goes the other way: a player who logged in to the hardcore world and is moved seamlessly to the lobby
-keeps the hardcore hearts there, and its death screen. `seamless-arrival = false` on such a server refuses every seamless
+local run). The other way round follows from the same flag (not run): a player who logged in to the hardcore world, then
+moved seamlessly to the lobby, would keep the hardcore hearts there, and its death screen. `seamless-arrival = false` on such a server refuses every seamless
 move to it from a server that does not have the setting, and every seamless move from it to such a server, whatever
 starts the move (`/server`, `/hub`, `send`, `drain --move`, an evacuation, an extension's `send`): the player stays where
 they were and is told that the server is only joined or left with a login. Between two servers that both have the
 setting the move is made. `/hub`, `/play`, `drain --move` and an evacuation do not choose a server the move could not
-reach. The proxy also refuses a seamless forced host that leads to such a server. Its players join it through its own
+reach; when that leaves no server at all, the player reads "You can only leave this server by logging in to another
+one." (not that the lobbies are full), and an evacuation or `drain --move` says that the players of that server can only
+leave it with a login. The proxy also refuses a seamless forced host that leads to such a server. Its players join it through its own
 address, or a server's vanilla transfer to its forced host, and leave it the same way, as in section 5.13.
 
 **Going back to an older proxy.** A proxy from before these settings refuses a configuration file that holds

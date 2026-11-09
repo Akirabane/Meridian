@@ -1247,7 +1247,37 @@ fn the_choice_of_a_server_leaves_out_those_a_seamless_move_cannot_reach() {
     closed(&mut config, &["east", "west"]);
     let place = placing::elsewhere(&config, &shared, "east").unwrap();
     assert_eq!(place.backend(), "west");
-    // With no other closed lobby, nowhere.
+    // With no other closed lobby, nowhere: and the line says why, not that the lobbies are full.
     closed(&mut config, &["east"]);
-    assert!(placing::elsewhere(&config, &shared, "east").is_err());
+    assert_eq!(
+        placing::elsewhere(&config, &shared, "east").unwrap_err(),
+        "the players of east can only leave it with a login"
+    );
+}
+
+/// `/hub` from the only closed server (a hardcore world) with open lobbies that have room: the player reads that this
+/// server is left with a login, not that no lobby has room. When a reachable lobby is full, room is the reason again.
+#[test]
+fn the_hub_from_a_closed_server_says_it_is_left_with_a_login() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let mut config = with_queue(5, 5);
+    config.no_seamless_arrival.insert("guests".into());
+    assert_eq!(
+        placing::hub(&config, &shared, open_to_all, "guests").unwrap_err(),
+        placing::LEAVE_WITH_A_LOGIN
+    );
+    assert_eq!(
+        placing::LEAVE_WITH_A_LOGIN,
+        "You can only leave this server by logging in to another one."
+    );
+    // One closed lobby reachable from guests, full: the usual line.
+    config.no_seamless_arrival.insert("west".into());
+    let full = with_queue(1, 1);
+    config.balanced = full.balanced.clone();
+    let _held = hold(&sessions, &config, "west");
+    assert_eq!(
+        placing::hub(&config, &shared, open_to_all, "guests").unwrap_err(),
+        "No lobby has room right now."
+    );
 }
