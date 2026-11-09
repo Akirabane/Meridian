@@ -147,7 +147,8 @@ pub struct Dropped {
 /// The most characters of the name of a method [`Event::Unknown`] keeps.
 pub const MAX_UNKNOWN_METHOD: usize = 64;
 
-/// An event, as an extension reads it.
+/// An event, as an extension reads it. A version of the SDK that adds an event adds a variant: give a `match` on it a `_` arm, or it stops
+/// compiling at the upgrade (the protocol does not change when an event is added).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Joined(Joined),

@@ -1297,7 +1297,8 @@ fn a_switch_that_was_tried_is_told_to_the_extensions_that_listen_and_one_that_wa
         assert!(asked.is_err(), "{target}");
     }
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(told.lock().unwrap().len(), 1, "{:?}", told.lock().unwrap());
+    let seen = told.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(events[0].0, "meridian:notification/players/moved");
     let params = &events[0].1;
     assert_eq!(

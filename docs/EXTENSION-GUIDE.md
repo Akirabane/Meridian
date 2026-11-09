@@ -610,8 +610,11 @@ let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match
 - **`Left::reason`**: `Left` (the player or the connection), `Kicked`, `Replaced`, `Shutdown` or `Error`; a reason a later proxy adds is `Other`. An event you do not know is `Event::Unknown`: ignore it.
 - **`Moved`** says that the proxy tried to move a player from a server to another, whoever asked (the console, `/server`, your own `players/send`...): `outcome` is `Seamless` or `Failed`, and a
   failure has a `reason`, the step it failed at (`Check`, `Prepare`, `Freeze`, `HandOver` or `Commit`); nothing the servers said is in it. **`Fallback`** says that a server was lost for a player
-  (`Crashed` or `Kicked`) and which server the proxy chose for them (`to`; none if nobody could take them): the player follows once their client acknowledges, so wait for the next `Moved` or `Left`
-  before you count them on the new server.
+  (`Crashed` or `Kicked`) and which server the proxy chose for them (`to`; none if nobody could take them): the player follows once their client acknowledges. **A follow that succeeds is told by no event**
+  (no `Moved`, no `Left`): count them on `to` unless a `Left` comes, which is what a client that does not follow ends with. In a `Moved`, `player.auth` is read when the switch ends, so a player who disconnected
+  during it is `Unverified`.
+- **`Event` is not `#[non_exhaustive]`**: each version of the SDK that adds an event adds a variant (`Moved` and `Fallback` came after `Joined`, `Left` and `Dropped`), so a `match` on `Event` with no `_` arm stops
+  compiling when you upgrade. The protocol does not change when an event is added (an extension that does not know it ignores it), so give your `match` a `_` arm.
 - An event is **never a decision**: you cannot answer it or refuse anything with it. To refuse a login use `on_login`.
 
 ## Good to know
