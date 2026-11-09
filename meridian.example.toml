@@ -162,9 +162,10 @@ address = "127.0.0.1:25566"
 # player (docs/OPERATING.md, section 5.15). Backends that name no group are in one
 # group together, so leaving it out everywhere carries the state on every move.
 # state-group = "lobby"
-# false: no seamless move to this backend, whatever starts it. For a world its
-# players must log in to, such as a hardcore one: the client learns that a world
-# is hardcore (its hearts, its death screen) only from a login.
+# false: no seamless move into this backend or out of it, from or to a backend
+# without the setting, whatever starts it. For a world its players join and leave
+# with a login, such as a hardcore one: the client learns that a world is hardcore
+# (its hearts, its death screen) only from a login.
 # seamless-arrival = true
 
 [[backends]]
