@@ -1204,7 +1204,7 @@ pub fn switch(
                 note("commit: the source keeps its own copy of the player, saved as they leave it")
             }
             Err(e) => note(&format!(
-                "commit: the source keeps its own copy of the player, saved as they leave it (its hand-over had ended: {e})"
+                "commit: the source keeps its own copy of the player, saved as they leave it (its hand-over had ended, or could not be asked: {e})"
             )),
         }
         None

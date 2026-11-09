@@ -880,13 +880,22 @@ fn place(
             return;
         }
     };
+    // The configuration of this login, one copy shared by the session's hooks.
+    let login_config = Arc::new(config.clone());
     let relay = relay
         .with_compression_level(config.compression_level)
-        .with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
+        .with_commands(commands_hook_with(
+            Arc::clone(&login_config),
+            sessions,
+            &handle,
+            &name,
+            auth,
+            peer,
+        ));
     // The backends' transfers are only looked at when one of them may be made seamless.
     let relay = if config.forced_hosts.iter().any(|f| f.seamless) {
         relay.with_transfers(switching::transfers_hook(
-            Arc::new(config.clone()),
+            login_config,
             Arc::clone(&sessions.switcher),
             sessions.shared(),
             name.clone(),
@@ -1040,8 +1049,8 @@ impl Drop for Leaving<'_> {
     }
 }
 
-/// The commands the proxy answers in game for the player of `handle`: a move
-/// starts a switch on a thread of its own, and the player is told at once.
+/// [`commands_hook_with`] for a configuration not shared yet (the tests build it this way).
+#[cfg(test)]
 fn commands_hook(
     config: &Config,
     sessions: &Sessions,
@@ -1050,7 +1059,20 @@ fn commands_hook(
     auth: meridian_config::AuthKind,
     peer: SocketAddr,
 ) -> Arc<meridian_net::relay::CommandHook> {
-    let config = Arc::new(config.clone());
+    commands_hook_with(Arc::new(config.clone()), sessions, handle, name, auth, peer)
+}
+
+/// The commands the proxy answers in game for the player of `handle`: a move
+/// starts a switch on a thread of its own, and the player is told at once. `config` is the
+/// login's, shared with the session's other hooks.
+fn commands_hook_with(
+    config: Arc<Config>,
+    sessions: &Sessions,
+    handle: &Handle,
+    name: &str,
+    auth: meridian_config::AuthKind,
+    peer: SocketAddr,
+) -> Arc<meridian_net::relay::CommandHook> {
     let shared = sessions.shared();
     // The extension that decides the permission of a command, if there is one, is asked with the
     // configuration in force when the command is typed. What it keeps of the answers belongs to this

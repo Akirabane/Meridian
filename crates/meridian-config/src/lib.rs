@@ -57,7 +57,7 @@ use queue::FileQueue;
 use restart::FileRestart;
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -201,6 +201,11 @@ pub struct Config {
     /// the player. A backend that names no group is in the unnamed group of the others
     /// that name none (see [`Config::carries_state`]).
     pub state_groups: BTreeMap<String, String>,
+    /// The backends that take no seamless arrival (`seamless-arrival = false` in their `[[backends]]` entry):
+    /// a server whose players must log in to it, such as a hardcore world, whose hearts and death screen come
+    /// with the login. A move to one of them is refused, whatever started it, and no seamless forced host may
+    /// lead to one (see [`Config::takes_seamless_arrival`]).
+    pub no_seamless_arrival: BTreeSet<String>,
     /// How players are logged in. Online by default.
     pub auth_mode: AuthMode,
     /// Groups of backends, each for one kind of player.
@@ -318,6 +323,7 @@ impl Default for Config {
             max_players: 20,
             forced_hosts: Vec::new(),
             state_groups: BTreeMap::new(),
+            no_seamless_arrival: BTreeSet::new(),
             auth_mode: AuthMode::Online,
             groups: Vec::new(),
             routes: Vec::new(),
@@ -371,6 +377,7 @@ impl std::fmt::Debug for Config {
             max_players,
             forced_hosts,
             state_groups,
+            no_seamless_arrival,
             auth_mode,
             groups,
             routes,
@@ -422,6 +429,7 @@ impl std::fmt::Debug for Config {
             .field("max_players", max_players)
             .field("forced_hosts", forced_hosts)
             .field("state_groups", state_groups)
+            .field("no_seamless_arrival", no_seamless_arrival)
             .field("auth_mode", auth_mode)
             .field("groups", groups)
             .field("routes", routes)
@@ -563,6 +571,7 @@ struct FileBackend {
     soft_cap: Option<u32>,
     hard_cap: Option<u32>,
     state_group: Option<String>,
+    seamless_arrival: Option<bool>,
 }
 
 impl Config {
@@ -628,10 +637,17 @@ impl Config {
                 })
                 .collect::<Vec<_>>(),
         )?;
+        // A group's name does not depend on case: "Lobby" and "lobby" are one group.
         let state_groups: BTreeMap<String, String> = file
             .backends
             .iter()
-            .filter_map(|b| Some((b.name.clone(), b.state_group.clone()?)))
+            .filter_map(|b| Some((b.name.clone(), b.state_group.as_deref()?.to_lowercase())))
+            .collect();
+        let no_seamless_arrival: BTreeSet<String> = file
+            .backends
+            .iter()
+            .filter(|b| b.seamless_arrival == Some(false))
+            .map(|b| b.name.clone())
             .collect();
         let backends: Vec<Backend> = file
             .backends
@@ -671,6 +687,7 @@ impl Config {
             try_backends: file.try_backends,
             max_players: file.max_players.unwrap_or(defaults.max_players),
             state_groups,
+            no_seamless_arrival,
             // Host names do not depend on case.
             forced_hosts: file
                 .forced_hosts
@@ -764,6 +781,12 @@ impl Config {
         self.state_groups.get(from) == self.state_groups.get(to)
     }
 
+    /// Whether a player may be moved seamlessly to `backend`: false for a backend with
+    /// `seamless-arrival = false`.
+    pub fn takes_seamless_arrival(&self, backend: &str) -> bool {
+        !self.no_seamless_arrival.contains(backend)
+    }
+
     /// Checks what the types alone cannot: there is at least one backend, names
     /// are unique and not empty, addresses are `host:port`, the default backend
     /// exists, the fallback list names other backends once each, the connect
@@ -812,6 +835,12 @@ impl Config {
                 return Err(ConfigError::DuplicateForcedHost(forced.host.clone()));
             }
             self.known_backend(&format!("forced-host \"{}\"", forced.host), &forced.backend)?;
+            if forced.seamless && !self.takes_seamless_arrival(&forced.backend) {
+                return Err(ConfigError::SeamlessToClosedBackend {
+                    host: forced.host.clone(),
+                    backend: forced.backend.clone(),
+                });
+            }
             if forced.seamless && !self.sidecars.iter().any(|s| s.backend == forced.backend) {
                 return Err(ConfigError::SeamlessWithoutSidecar {
                     host: forced.host.clone(),
@@ -825,6 +854,15 @@ impl Config {
             }
             if group.trim().is_empty() {
                 return Err(ConfigError::EmptyStateGroup(backend.clone()));
+            }
+            // "lobby" and "lobby " would be two groups that read the same.
+            if group.trim() != group {
+                return Err(ConfigError::StateGroupSpaces(backend.clone()));
+            }
+        }
+        for backend in &self.no_seamless_arrival {
+            if !self.backends.iter().any(|b| &b.name == backend) {
+                return Err(ConfigError::StateGroupOfUnknownBackend(backend.clone()));
             }
         }
         if self.online_mode != (self.auth_mode != AuthMode::Offline) {

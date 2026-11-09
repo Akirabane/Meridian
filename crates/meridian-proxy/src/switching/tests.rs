@@ -147,6 +147,8 @@ struct Sidecars {
     /// Whether `east.example.org` is a seamless forced host of east, and the session takes
     /// the backends' transfers as the proxy's sessions do then.
     seamless: bool,
+    /// Whether east takes no seamless arrival (`seamless-arrival = false`).
+    closed_east: bool,
 }
 
 /// The host of east's seamless forced host, when the test has one.
@@ -312,6 +314,9 @@ fn world(sidecars: Sidecars) -> World {
             seamless: true,
         });
     }
+    if sidecars.closed_east {
+        config.no_seamless_arrival.insert("east".into());
+    }
     let hook_config = Arc::new(config.clone());
     let mut proxy = Proxy::new(
         config,
@@ -327,6 +332,7 @@ fn world(sidecars: Sidecars) -> World {
         announce: _,
         state_groups: _,
         seamless,
+        closed_east: _,
     } = sidecars;
     let during_export = during_export.map(Arc::new);
     let controls = {
@@ -1552,4 +1558,86 @@ fn a_transfer_to_another_host_is_passed_at_once() {
         }
         assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
+}
+
+/// Two transfers back to back from lobby: the first is made a seamless move, and the second, which
+/// comes before that move has marked itself, is dropped: it is neither a second move nor a transfer
+/// passed to the client in the middle of the first.
+#[test]
+fn a_second_transfer_during_a_seamless_move_is_dropped() {
+    let World {
+        proxy: _proxy,
+        log,
+        mut player,
+        mut _source,
+        relay,
+        target,
+    } = world(Sidecars {
+        seamless: true,
+        ..Sidecars::default()
+    });
+    _source.send(&transfer(EAST_HOST, 25565)).unwrap();
+    _source.send(&transfer(EAST_HOST, 25565)).unwrap();
+    asked(
+        &log,
+        &[
+            "east expect",
+            "lobby export",
+            "east import place=false",
+            "east confirm",
+            "lobby release Moved",
+        ],
+    );
+    // Every packet the client gets, from the move to a while after it: never a transfer (one passed
+    // during the move would come in the middle of the target's world).
+    let not_a_transfer = |id: i32, payload: &[u8]| {
+        assert!(
+            !matches!(C::decode(id, payload), Ok(C::Transfer(_))),
+            "a transfer reached the client"
+        );
+    };
+    loop {
+        let (id, payload) = heard(&mut player);
+        not_a_transfer(id, &payload);
+        if id == pc::COMMANDS {
+            break;
+        }
+    }
+    accept(&mut player, 2, [41.0, 70.0, 41.0]);
+    loop {
+        let (id, payload) = heard(&mut player);
+        not_a_transfer(id, &payload);
+        if id == pc::UPDATE_MOB_EFFECT {
+            break;
+        }
+    }
+    player
+        .reader
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    while let Ok((id, payload)) = player.recv() {
+        not_a_transfer(id, &payload);
+    }
+    player.reader.set_read_timeout(None).unwrap();
+    assert_eq!(log.lines().len(), 5, "{:?}", log.lines());
+    attack(&mut player, TARGET_ID);
+    target.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
+}
+
+/// A backend that takes no seamless arrival (a hardcore world) is refused to every move, before any
+/// sidecar is asked, and the player is told how its players join it.
+#[test]
+fn a_move_to_a_backend_without_seamless_arrival_is_refused() {
+    let World { proxy, log, .. } = world(Sidecars {
+        closed_east: true,
+        ..Sidecars::default()
+    });
+    let lines = Commands::builtin().execute(&proxy, "switch Alex east");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("east takes no seamless arrival") && lines[0].contains("with a login"),
+        "{lines:?}"
+    );
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
 }

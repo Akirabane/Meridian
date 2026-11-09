@@ -1929,3 +1929,152 @@ fn a_player_who_leaves_during_a_move_without_state_is_kept_by_the_source() {
     );
     run.join().unwrap().unwrap();
 }
+
+/// Without the state, a target that will not place the player: the client, which has the target's
+/// world, is disconnected, and the source is let go on and closed, so that it saves its own copy.
+#[test]
+fn a_refused_confirmation_without_state_disconnects_the_player_and_the_source_keeps_them() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal).refusing("confirm", "the player is not held"),
+        &Digests::default(),
+        &Settings {
+            carry_state: false,
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Disconnected)
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=none announce=Some(true) place=false",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+            "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+        ]
+    );
+    let mut last = 0;
+    while let Ok((id, _)) = player.recv() {
+        last = id;
+    }
+    assert_eq!(last, pc::DISCONNECT);
+    run.join().unwrap().unwrap();
+}
+
+/// Without the state, a freeze that runs short before the confirm: the arrival is dropped, never
+/// placed, and the source is let go on.
+#[test]
+fn a_freeze_that_runs_short_without_state_drops_the_arrival() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).with_ticks_left(Some(80)),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            carry_state: false,
+            commit_margin: Duration::from_millis(1500),
+            trace: Some(Arc::new(|what: &str, _| {
+                if what.starts_with("hand over: the client has the target's world") {
+                    std::thread::sleep(Duration::from_millis(2800));
+                }
+            })),
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        (failure.step, failure.after),
+        (Step::HandOver, After::Disconnected)
+    );
+    assert!(failure.reason.contains("was dropped"), "{failure}");
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=none announce=Some(true) place=false",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+            "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+        ]
+    );
+    let mut last = 0;
+    while let Ok((id, _)) = player.recv() {
+        last = id;
+    }
+    assert_eq!(last, pc::DISCONNECT);
+    run.join().unwrap().unwrap();
+}
+
+/// Without the state, a player who leaves once the target took the (empty) import: nothing is
+/// placed anywhere; the target forgets the arrival by its hand-over, and the source keeps them.
+#[test]
+fn a_player_who_leaves_after_an_import_without_state_is_kept_by_the_source() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let mut player = Some(player);
+    let watched = handle.clone();
+    let mut target_control = FakeControl::new("target", &log).on("import", move || {
+        let _ = signal.send("import");
+        drop(player.take());
+        wait_for(|| watched.is_over());
+    });
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control,
+        &Digests::default(),
+        &Settings {
+            carry_state: false,
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::HandOver, After::Left));
+    assert!(
+        failure.reason.contains("the source keeps them"),
+        "{failure}"
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=none announce=Some(true) place=false",
+            "target drop 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+        ]
+    );
+    run.join().unwrap().unwrap();
+}

@@ -384,3 +384,60 @@ backend = \"east\"
     assert!(e.to_string().contains("survival.example.org"), "{e}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_state_group_is_one_name_whatever_its_case_and_has_no_spaces_around_it() {
+    let config = Config::from_toml_str(&text(
+        "",
+        "state-group = \"Lobby\"",
+        "state-group = \"lobby\"",
+    ))
+    .unwrap();
+    assert!(config.carries_state("lobby", "east"));
+    assert_eq!(
+        config.state_groups.get("lobby").map(String::as_str),
+        Some("lobby")
+    );
+    for spaced in ["state-group = \"lobby \"", "state-group = \" lobby\""] {
+        let e = Config::from_toml_str(&text("", spaced, "")).unwrap_err();
+        assert!(
+            matches!(e, ConfigError::StateGroupSpaces(ref b) if b == "lobby"),
+            "{spaced}: {e}"
+        );
+    }
+}
+
+#[test]
+fn a_backend_may_take_no_seamless_arrival_and_then_no_seamless_host_leads_to_it() {
+    let dir = folder("closed");
+    let sidecar = "sidecar = \"127.0.0.1:7001\"\nsidecar-secret-file = \"a.key\"";
+    // Open by default.
+    let config = load(&dir, "", "", sidecar).unwrap();
+    assert!(config.takes_seamless_arrival("east"));
+    // Closed.
+    let closed = format!("{sidecar}\nseamless-arrival = false");
+    let config = load(&dir, "", "", &closed).unwrap();
+    assert!(!config.takes_seamless_arrival("east"));
+    assert!(config.takes_seamless_arrival("lobby"));
+    // A forced host that is not seamless may lead to it (the game's own transfer, with a login).
+    let forced = |seamless: &str| {
+        format!("[[forced-host]]\nhost = \"east.example.org\"\nbackend = \"east\"\n{seamless}")
+    };
+    load(&dir, &forced(""), "", &closed).unwrap();
+    // A seamless one may not.
+    let e = load(&dir, &forced("seamless = true"), "", &closed).unwrap_err();
+    assert!(
+        matches!(e, ConfigError::SeamlessToClosedBackend { ref backend, .. } if backend == "east"),
+        "{e}"
+    );
+    // Not true or false: refused.
+    let e = load(&dir, "", "", "seamless-arrival = \"no\"").unwrap_err();
+    assert!(matches!(e, ConfigError::Parse(_)), "{e}");
+    // Given to a backend the configuration does not have, in code: refused.
+    let mut config = load(&dir, "", "", "").unwrap();
+    config.no_seamless_arrival.insert("west".into());
+    assert!(
+        matches!(config.validate().unwrap_err(), ConfigError::StateGroupOfUnknownBackend(ref b) if b == "west")
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

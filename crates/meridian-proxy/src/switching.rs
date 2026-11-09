@@ -13,6 +13,7 @@ use meridian_sidecar::client::SidecarClient;
 use std::cell::Cell;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// How the proxy reaches a backend's sidecar: over TCP with its secret, or a
@@ -201,6 +202,13 @@ fn attempt(
     if from == backend.name {
         return Err(format!("{name} is already on {target}"));
     }
+    // A server whose players must log in to it (a hardcore world: its hearts and its death screen come with
+    // the login, and a seamless move keeps those of the first server).
+    if !config.takes_seamless_arrival(&backend.name) {
+        return Err(failed(format!(
+            "check: {target} takes no seamless arrival (seamless-arrival = false): its players join it with a login, through its own address or a server's transfer"
+        )));
+    }
     // One switch at a time: the switch itself refuses a second one, but saying so
     // here spares the sidecars a request.
     if handle.is_switching() {
@@ -351,6 +359,8 @@ pub fn transfers_hook(
     name: String,
     player_address: IpAddr,
 ) -> Arc<TransferHook> {
+    // A move this hook started and has not finished: a second transfer meanwhile is not a second move.
+    let moving = Arc::new(AtomicBool::new(false));
     Arc::new(
         move |handle: &SessionHandle, host: &str, port: i32| -> bool {
             // As the server choice reads a handshake's host: no case, no final dot.
@@ -367,12 +377,23 @@ pub fn transfers_hook(
             if handle.backend() == target || handle.is_switching() {
                 return false;
             }
+            // A transfer that comes while the one before is being made seamless (the switch marks itself
+            // only once its thread runs): it is dropped, so that it is neither a second move nor passed
+            // to the client in the middle of the first.
+            if moving.swap(true, Ordering::SeqCst) {
+                warning!(
+                    "{name}: a transfer to {host} came while another is being made seamless: it is dropped"
+                );
+                return true;
+            }
             let (config, switcher, shared) =
                 (Arc::clone(&config), Arc::clone(&switcher), shared.clone());
             let (handle, name, host) = (handle.clone(), name.clone(), host.to_owned());
-            std::thread::Builder::new()
+            let done = Moving(Arc::clone(&moving));
+            let spawned = std::thread::Builder::new()
                 .name(format!("transfer-{name}"))
                 .spawn(move || {
+                    let _done = done;
                     let from = handle.backend();
                     let pass = |why: &str| {
                         warning!(
@@ -393,10 +414,20 @@ pub fn transfers_hook(
                         Err(why) if !handle.is_over() && handle.backend() == from => pass(&why),
                         Err(why) => warning!("{why}"),
                     }
-                })
-                .is_ok()
+                });
+            // A thread that did not start dropped its `Moving`: the next transfer is free to go.
+            spawned.is_ok()
         },
     )
+}
+
+/// Lets the next transfer of the session be made seamless when it goes, however the move's thread ends.
+struct Moving(Arc<AtomicBool>);
+
+impl Drop for Moving {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
