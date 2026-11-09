@@ -182,8 +182,8 @@ effect: they say it was not shown on this machine.
 - **A pool of compressors: not shown.** A candidate change to the proxy's compression (a pool of compressors) was run
   against the build without it at 100 players on one server, in the order A, B, A, B (the first A redone, for its
   other load). It lowered the proxy's processor time by about 1.7 % (0.0075 cores, 0.4285 against 0.436), under the 3 %
-  fixed beforehand, so the effect is **not shown** and the change was not adopted on this evidence. B was not worse than
-  A, and the work was the same on both sides. Every step had 0.66 to 0.79 cores of other load (not clean).
+  fixed beforehand, so the effect is **not shown**, and no gain on real servers is claimed for the change. B was not
+  worse than A, and the work was the same on both sides. Every step had 0.66 to 0.79 cores of other load (not clean).
 - **Level 3 and the 500-player pair:** section 5.
 
 ## 7. What these figures do not say
