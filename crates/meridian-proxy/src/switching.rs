@@ -376,7 +376,7 @@ pub fn transfers_hook(
                     let from = handle.backend();
                     let pass = |why: &str| {
                         warning!(
-                            "{name}: the transfer from {from} to {host} is passed to the client                              (a loading screen): {why}"
+                            "{name}: the transfer from {from} to {host} is passed to the client (a loading screen): {why}"
                         );
                         handle.pass_transfer(&host, port);
                     };

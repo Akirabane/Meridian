@@ -520,7 +520,7 @@ impl Run<'_> {
             self.source_lane.closer.close();
             return Failure {
                 step,
-                reason: "the player left during the switch; no state goes between these                          servers, so the source keeps them and saves them"
+                reason: "the player left during the switch; no state goes between these servers, so the source keeps them and saves them"
                     .to_owned(),
                 after: After::Left,
             };
@@ -957,8 +957,10 @@ pub fn switch(
     // The confirm and the release take about as long as the slowest request so far.
     freeze.slowest = freeze.slowest.max(import_sent.elapsed());
     note(&match (run.carry, arrival) {
-        _ if !run.carry_state => "hand over: the target took no part of the record: it keeps its                                   own copy of the player"
-            .to_owned(),
+        _ if !run.carry_state => {
+            "hand over: the target took no part of the record: it keeps its own copy of the player"
+                .to_owned()
+        }
         (false, _) => "hand over: the target took the record, all but the position".to_owned(),
         (true, Some(arrival)) => format!(
             "hand over: the target took the record, at the client's place {:.2} {:.2} {:.2} \
@@ -1202,7 +1204,7 @@ pub fn switch(
                 note("commit: the source keeps its own copy of the player, saved as they leave it")
             }
             Err(e) => note(&format!(
-                "commit: the source keeps its own copy of the player, saved as they leave it                  (its hand-over had ended: {e})"
+                "commit: the source keeps its own copy of the player, saved as they leave it (its hand-over had ended: {e})"
             )),
         }
         None

@@ -457,15 +457,15 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::SeamlessWithoutSidecar { host, backend } => write!(
                 f,
-                "[[forced-host]] \"{host}\" is seamless, but its backend \"{backend}\" has no                  sidecar: a seamless move needs the sidecars of both servers (or remove                  seamless, and the transfer is the game's own, with its loading screen)"
+                "[[forced-host]] \"{host}\" is seamless, but its backend \"{backend}\" has no sidecar: a seamless move needs the sidecars of both servers (or remove seamless, and the transfer is the game's own, with its loading screen)"
             ),
             ConfigError::EmptyStateGroup(backend) => write!(
                 f,
-                "backend \"{backend}\" has an empty state-group: name the group, or leave the                  setting out"
+                "backend \"{backend}\" has an empty state-group: name the group, or leave the setting out"
             ),
             ConfigError::StateGroupOfUnknownBackend(backend) => write!(
                 f,
-                "a state group is given to \"{backend}\", which is not a backend of the                  configuration"
+                "a state group is given to \"{backend}\", which is not a backend of the configuration"
             ),
             ConfigError::LimitWithoutRole { backend, key } => write!(
                 f,
