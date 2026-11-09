@@ -305,3 +305,150 @@ fn a_sidecar_gives_notices_only_when_the_backend_says_so() {
     assert!(e.to_string().contains("sidecar-notices"), "{e}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_move_carries_the_state_only_inside_one_state_group() {
+    // No group anywhere: every move carries the state, as before the setting.
+    let config = Config::from_toml_str(&text("", "", "")).unwrap();
+    assert!(config.state_groups.is_empty());
+    assert!(config.carries_state("lobby", "east"));
+    // Two groups: nothing is carried between them, either way.
+    let config = Config::from_toml_str(&text(
+        "",
+        "state-group = \"lobby\"",
+        "state-group = \"survival\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        config.state_groups.get("lobby").map(String::as_str),
+        Some("lobby")
+    );
+    assert_eq!(
+        config.state_groups.get("east").map(String::as_str),
+        Some("survival")
+    );
+    assert!(!config.carries_state("lobby", "east"));
+    assert!(!config.carries_state("east", "lobby"));
+    // The same group: carried.
+    let config =
+        Config::from_toml_str(&text("", "state-group = \"one\"", "state-group = \"one\"")).unwrap();
+    assert!(config.carries_state("lobby", "east"));
+    // One server in a group and one in none: they are not the same group.
+    let config = Config::from_toml_str(&text("", "state-group = \"lobby\"", "")).unwrap();
+    assert!(!config.carries_state("lobby", "east"));
+    assert!(!config.carries_state("east", "lobby"));
+    // An empty name is refused, not taken as "no group".
+    for empty in ["state-group = \"\"", "state-group = \"  \""] {
+        let e = Config::from_toml_str(&text("", empty, "")).unwrap_err();
+        assert!(
+            matches!(e, ConfigError::EmptyStateGroup(ref b) if b == "lobby"),
+            "{empty}: {e}"
+        );
+    }
+    // A group given to a backend the configuration does not have (a configuration built in
+    // code) is refused.
+    let mut config = Config::from_toml_str(&text("", "", "")).unwrap();
+    config.state_groups.insert("west".into(), "survival".into());
+    let e = config.validate().unwrap_err();
+    assert!(
+        matches!(e, ConfigError::StateGroupOfUnknownBackend(ref b) if b == "west"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_seamless_forced_host_needs_the_sidecar_of_its_backend() {
+    let dir = folder("seamless");
+    let forced = |seamless: &str| {
+        format!(
+            "[[forced-host]]
+host = \"Survival.Example.org\"
+backend = \"east\"
+{seamless}"
+        )
+    };
+    let sidecar = "sidecar = \"127.0.0.1:7001\"\nsidecar-secret-file = \"a.key\"";
+    // Off by default.
+    let config = load(&dir, &forced(""), "", "").unwrap();
+    assert!(!config.forced_hosts[0].seamless);
+    // On, with the backend's sidecar.
+    let config = load(&dir, &forced("seamless = true"), "", sidecar).unwrap();
+    assert!(config.forced_hosts[0].seamless);
+    assert_eq!(config.forced_hosts[0].host, "survival.example.org");
+    // On, without it: refused, naming the host and the backend.
+    let e = load(&dir, &forced("seamless = true"), sidecar, "").unwrap_err();
+    assert!(
+        matches!(e, ConfigError::SeamlessWithoutSidecar { ref backend, .. } if backend == "east"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("survival.example.org"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_state_group_is_one_name_whatever_its_case_and_has_no_spaces_around_it() {
+    let config = Config::from_toml_str(&text(
+        "",
+        "state-group = \"Lobby\"",
+        "state-group = \"lobby\"",
+    ))
+    .unwrap();
+    assert!(config.carries_state("lobby", "east"));
+    assert_eq!(
+        config.state_groups.get("lobby").map(String::as_str),
+        Some("lobby")
+    );
+    for spaced in ["state-group = \"lobby \"", "state-group = \" lobby\""] {
+        let e = Config::from_toml_str(&text("", spaced, "")).unwrap_err();
+        assert!(
+            matches!(e, ConfigError::StateGroupSpaces(ref b) if b == "lobby"),
+            "{spaced}: {e}"
+        );
+    }
+}
+
+#[test]
+fn a_backend_may_take_no_seamless_arrival_and_then_no_seamless_host_leads_to_it() {
+    let dir = folder("closed");
+    let sidecar = "sidecar = \"127.0.0.1:7001\"\nsidecar-secret-file = \"a.key\"";
+    // Open by default.
+    let config = load(&dir, "", "", sidecar).unwrap();
+    assert!(config.takes_seamless_arrival("east"));
+    // Closed.
+    let closed = format!("{sidecar}\nseamless-arrival = false");
+    let config = load(&dir, "", "", &closed).unwrap();
+    assert!(!config.takes_seamless_arrival("east"));
+    assert!(config.takes_seamless_arrival("lobby"));
+    // A forced host that is not seamless may lead to it (the game's own transfer, with a login).
+    let forced = |seamless: &str| {
+        format!("[[forced-host]]\nhost = \"east.example.org\"\nbackend = \"east\"\n{seamless}")
+    };
+    load(&dir, &forced(""), "", &closed).unwrap();
+    // A seamless one may not.
+    let e = load(&dir, &forced("seamless = true"), "", &closed).unwrap_err();
+    assert!(
+        matches!(e, ConfigError::SeamlessToClosedBackend { ref backend, .. } if backend == "east"),
+        "{e}"
+    );
+    // Not true or false: refused.
+    let e = load(&dir, "", "", "seamless-arrival = \"no\"").unwrap_err();
+    assert!(matches!(e, ConfigError::Parse(_)), "{e}");
+    // Given to a backend the configuration does not have, in code: refused.
+    let mut config = load(&dir, "", "", "").unwrap();
+    config.no_seamless_arrival.insert("west".into());
+    assert!(
+        matches!(config.validate().unwrap_err(), ConfigError::StateGroupOfUnknownBackend(ref b) if b == "west")
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_seamless_move_goes_between_two_open_servers_or_two_closed_ones() {
+    let mut config = Config::from_toml_str(&text("", "", "")).unwrap();
+    assert!(config.seamless_between("lobby", "east"));
+    config.no_seamless_arrival.insert("east".into());
+    assert!(!config.seamless_between("lobby", "east"));
+    assert!(!config.seamless_between("east", "lobby"));
+    config.no_seamless_arrival.insert("lobby".into());
+    assert!(config.seamless_between("lobby", "east"));
+}

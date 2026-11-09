@@ -1050,6 +1050,7 @@ mod tests {
             host: host.into(),
             backend: "east".into(),
             motd: motd.map(str::to_owned),
+            seamless: false,
         };
         Config {
             motd: "Global".into(),

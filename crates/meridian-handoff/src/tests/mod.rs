@@ -117,6 +117,12 @@ impl FakeControl {
         }
     }
 
+    /// The record the export gives: one of the player in `dimension`.
+    fn exporting_in(mut self, dimension: &str) -> Self {
+        self.record = record(dimension);
+        self
+    }
+
     fn with_ticks_left(mut self, ticks: Option<u64>) -> Self {
         self.ticks_left = ticks;
         self
@@ -236,11 +242,16 @@ impl PlayerControl for FakeControl {
         place: bool,
         arrival: Option<Arrival>,
     ) -> Result<Imported, String> {
-        assert_eq!(record_dimension(&record), Some(OVERWORLD));
+        // A record of another dimension than the target's reaches it only when it takes
+        // no part of it: then the record only names the hand-over.
+        if parts.as_ref().is_none_or(|parts| !parts.is_empty()) {
+            assert_eq!(record_dimension(&record), Some(OVERWORLD));
+        }
         // The record goes to the target as the source gave it, with its hand-over id.
         assert_eq!(record_handover(&record).as_deref(), Some(HANDOVER));
         let parts = match parts {
             None => "all".to_owned(),
+            Some(parts) if parts.is_empty() => "none".to_owned(),
             Some(parts)
                 if parts.len() == PARTS.len() - 1 && !parts.iter().any(|p| p == "position") =>
             {
@@ -301,8 +312,18 @@ fn bench() -> Bench {
     bench_as(&INFORMATION)
 }
 
+/// As [`bench`], with a transfer hook that holds a handle to the session and takes the
+/// transfers to `taken.example.org`.
+fn bench_with_transfers() -> Bench {
+    bench_hooked(&INFORMATION, true)
+}
+
 /// As [`bench`], for a client that sends `information` as its Client Information.
 fn bench_as(information: &[u8]) -> Bench {
+    bench_hooked(information, false)
+}
+
+fn bench_hooked(information: &[u8], transfers: bool) -> Bench {
     let (proxy_client, mut player) = pipe();
     let (proxy_backend, mut source) = pipe();
     let client = ClientSession {
@@ -315,6 +336,14 @@ fn bench_as(information: &[u8]) -> Bench {
         connection: proxy_backend,
     };
     let (session, handle) = Session::new(client, backend, "source").unwrap();
+    let session = if transfers {
+        let kept = handle.clone();
+        session.with_transfers(Arc::new(move |_: &SessionHandle, host: &str, _: i32| {
+            !kept.is_over() && host == "taken.example.org"
+        }))
+    } else {
+        session
+    };
     let run = std::thread::spawn(move || session.run());
     join_source_as(&mut player, &mut source, information);
     Bench {

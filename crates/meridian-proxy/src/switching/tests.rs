@@ -86,7 +86,7 @@ impl PlayerControl for FakeSidecar {
         &mut self,
         _: &str,
         _: Record,
-        _: Option<Vec<String>>,
+        parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
         _: Option<meridian_handoff::Arrival>,
@@ -96,7 +96,13 @@ impl PlayerControl for FakeSidecar {
         } else {
             String::new()
         };
-        self.answer("import", format!("import place={place}{said}"))
+        // An import that takes no part says so; the others are written as before.
+        let none = if parts.as_ref().is_some_and(Vec::is_empty) {
+            " parts=none"
+        } else {
+            ""
+        };
+        self.answer("import", format!("import place={place}{said}{none}"))
             .map(|()| Imported::default())
     }
 
@@ -136,7 +142,19 @@ struct Sidecars {
     /// `switch-announce-arrival` and `switch-announce-departure` of the configuration, when
     /// the test sets them; the log then says what each import and release asked to announce.
     announce: Option<(bool, bool)>,
+    /// The `state-group` of `lobby` and of `east`, when the test gives them.
+    state_groups: Option<(&'static str, &'static str)>,
+    /// Whether `east.example.org` is a seamless forced host of east, and the session takes
+    /// the backends' transfers as the proxy's sessions do then.
+    seamless: bool,
+    /// Whether east takes no seamless arrival (`seamless-arrival = false`).
+    closed_east: bool,
+    /// Whether lobby takes none either.
+    closed_lobby: bool,
 }
+
+/// The host of east's seamless forced host, when the test has one.
+const EAST_HOST: &str = "east.example.org";
 
 /// How the other threads of a test ended, and when, since its world was made. A failure that
 /// only says that the player's connection closed leaves open who closed it, and a failure in CI
@@ -286,6 +304,25 @@ fn world(sidecars: Sidecars) -> World {
         config.switch_announce_arrival = arrival;
         config.switch_announce_departure = departure;
     }
+    if let Some((lobby, east)) = sidecars.state_groups {
+        config.state_groups.insert("lobby".into(), lobby.into());
+        config.state_groups.insert("east".into(), east.into());
+    }
+    if sidecars.seamless {
+        config.forced_hosts.push(meridian_config::ForcedHost {
+            host: EAST_HOST.into(),
+            backend: "east".into(),
+            motd: None,
+            seamless: true,
+        });
+    }
+    if sidecars.closed_east {
+        config.no_seamless_arrival.insert("east".into());
+    }
+    if sidecars.closed_lobby {
+        config.no_seamless_arrival.insert("lobby".into());
+    }
+    let hook_config = Arc::new(config.clone());
     let mut proxy = Proxy::new(
         config,
         "does-not-exist/meridian.toml".into(),
@@ -298,6 +335,10 @@ fn world(sidecars: Sidecars) -> World {
         source_refuses,
         during_export,
         announce: _,
+        state_groups: _,
+        seamless,
+        closed_east: _,
+        closed_lobby: _,
     } = sidecars;
     let during_export = during_export.map(Arc::new);
     let controls = {
@@ -354,6 +395,17 @@ fn world(sidecars: Sidecars) -> World {
         "lobby",
     )
     .unwrap();
+    let session = if seamless {
+        session.with_transfers(transfers_hook(
+            hook_config,
+            Arc::clone(&proxy.sessions.switcher),
+            proxy.sessions.shared(),
+            "Alex".into(),
+            "198.51.100.7".parse().unwrap(),
+        ))
+    } else {
+        session
+    };
     let relay = watched(
         &ended,
         "the relay",
@@ -1355,4 +1407,275 @@ fn a_switch_that_cannot_start_fails_at_the_check() {
         ),
         (Some("failed"), Some("check"))
     );
+}
+
+/// A move between two state groups carries nothing: the target takes no part of the record, and
+/// the source is let go on and disconnected, so that it saves its own copy. Inside one group the
+/// move is as it always was.
+#[test]
+fn a_switch_between_two_state_groups_carries_no_state() {
+    for (groups, import, release) in [
+        (
+            ("lobby", "survival"),
+            "east import place=false parts=none",
+            "lobby release Abort",
+        ),
+        (
+            ("one", "one"),
+            "east import place=false",
+            "lobby release Moved",
+        ),
+    ] {
+        let World {
+            proxy,
+            log,
+            mut player,
+            _source,
+            relay,
+            target,
+        } = world(Sidecars {
+            state_groups: Some(groups),
+            ..Sidecars::default()
+        });
+        let lines = Commands::builtin().execute(&proxy, "switch alex east");
+        assert!(
+            lines[0].starts_with("Alex moved from lobby to east"),
+            "{groups:?}: {lines:?}"
+        );
+        assert_eq!(
+            log.lines(),
+            [
+                "east expect",
+                "lobby export",
+                import,
+                "east confirm",
+                release
+            ],
+            "{groups:?}"
+        );
+        let _ = client_after_switch(&mut player);
+        attack(&mut player, TARGET_ID);
+        target.join().unwrap().unwrap();
+        relay.join().unwrap().unwrap();
+    }
+}
+
+/// What lobby's `/transfer <host> <port> Alex` sends the player.
+fn transfer(host: &str, port: i32) -> Vec<u8> {
+    C::Transfer(horizon_protocol::packets::configuration::Transfer {
+        host: host.into(),
+        port,
+    })
+    .encode()
+}
+
+/// Waits until the fake sidecars were asked `lines`, up to a few seconds.
+fn asked(log: &Log, lines: &[&str]) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while log.lines() != lines {
+        assert!(
+            Instant::now() < until,
+            "{:?}
+{}",
+            log.lines(),
+            ended_report()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A transfer lobby sends to a seamless forced host is a seamless move to its backend: the
+/// player never gets the transfer, and gets east's world on the connection they have. The host
+/// is compared without its case or a final dot, and the port is not looked at.
+#[test]
+fn a_transfer_to_a_seamless_host_moves_the_player_without_a_loading_screen() {
+    let World {
+        proxy: _proxy,
+        log,
+        mut player,
+        mut _source,
+        relay,
+        target,
+    } = world(Sidecars {
+        seamless: true,
+        ..Sidecars::default()
+    });
+    _source.send(&transfer("East.Example.ORG.", 25599)).unwrap();
+    asked(
+        &log,
+        &[
+            "east expect",
+            "lobby export",
+            "east import place=false",
+            "east confirm",
+            "lobby release Moved",
+        ],
+    );
+    let (chat, _) = client_after_switch(&mut player);
+    assert!(chat.is_empty(), "the move is quiet: {chat:?}");
+    attack(&mut player, TARGET_ID);
+    target.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
+}
+
+/// A move the proxy cannot make while the player is still on lobby (here east will not expect
+/// them) gives the transfer back to the client as lobby sent it: the player goes, with the
+/// loading screen.
+#[test]
+fn a_transfer_the_move_cannot_make_is_passed_to_the_client() {
+    let World {
+        log,
+        mut player,
+        mut _source,
+        ..
+    } = world(Sidecars {
+        seamless: true,
+        target_refuses: Some(("expect", "64 players already expected".into())),
+        ..Sidecars::default()
+    });
+    _source.send(&transfer(EAST_HOST, 25599)).unwrap();
+    let (id, payload) = heard(&mut player);
+    match C::decode(id, &payload) {
+        Ok(C::Transfer(t)) => assert_eq!((t.host.as_str(), t.port), (EAST_HOST, 25599)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(log.lines(), ["east expect"]);
+}
+
+/// A transfer to a host that is not a seamless forced host, or a session without seamless hosts,
+/// is passed to the client at once, as the proxy always did.
+#[test]
+fn a_transfer_to_another_host_is_passed_at_once() {
+    for (seamless, host) in [(true, "west.example.org"), (false, EAST_HOST)] {
+        let World {
+            log,
+            mut player,
+            mut _source,
+            ..
+        } = world(Sidecars {
+            seamless,
+            ..Sidecars::default()
+        });
+        _source.send(&transfer(host, 25565)).unwrap();
+        let (id, payload) = heard(&mut player);
+        match C::decode(id, &payload) {
+            Ok(C::Transfer(t)) => assert_eq!(t.host, host),
+            other => panic!("{seamless} {host}: {other:?}"),
+        }
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+    }
+}
+
+/// Two transfers back to back from lobby: the first is made a seamless move, and the second, which
+/// comes before that move has marked itself, is dropped: it is neither a second move nor a transfer
+/// passed to the client in the middle of the first.
+#[test]
+fn a_second_transfer_during_a_seamless_move_is_dropped() {
+    let World {
+        proxy: _proxy,
+        log,
+        mut player,
+        mut _source,
+        relay,
+        target,
+    } = world(Sidecars {
+        seamless: true,
+        ..Sidecars::default()
+    });
+    _source.send(&transfer(EAST_HOST, 25565)).unwrap();
+    _source.send(&transfer(EAST_HOST, 25565)).unwrap();
+    asked(
+        &log,
+        &[
+            "east expect",
+            "lobby export",
+            "east import place=false",
+            "east confirm",
+            "lobby release Moved",
+        ],
+    );
+    // Every packet the client gets, from the move to a while after it: never a transfer (one passed
+    // during the move would come in the middle of the target's world).
+    let not_a_transfer = |id: i32, payload: &[u8]| {
+        assert!(
+            !matches!(C::decode(id, payload), Ok(C::Transfer(_))),
+            "a transfer reached the client"
+        );
+    };
+    loop {
+        let (id, payload) = heard(&mut player);
+        not_a_transfer(id, &payload);
+        if id == pc::COMMANDS {
+            break;
+        }
+    }
+    accept(&mut player, 2, [41.0, 70.0, 41.0]);
+    loop {
+        let (id, payload) = heard(&mut player);
+        not_a_transfer(id, &payload);
+        if id == pc::UPDATE_MOB_EFFECT {
+            break;
+        }
+    }
+    player
+        .reader
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    while let Ok((id, payload)) = player.recv() {
+        not_a_transfer(id, &payload);
+    }
+    player.reader.set_read_timeout(None).unwrap();
+    assert_eq!(log.lines().len(), 5, "{:?}", log.lines());
+    attack(&mut player, TARGET_ID);
+    target.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
+}
+
+/// A server only joined or left with a login (`seamless-arrival = false`, a hardcore world): a move to it
+/// from an ordinary server is refused, and a move from it to an ordinary one too, before any sidecar is
+/// asked; the line says so in words a player reads, without the setting's name.
+#[test]
+fn a_move_into_or_out_of_a_server_without_seamless_arrival_is_refused() {
+    for (closed_east, closed_lobby, closed) in [(true, false, "east"), (false, true, "lobby")] {
+        let World { proxy, log, .. } = world(Sidecars {
+            closed_east,
+            closed_lobby,
+            ..Sidecars::default()
+        });
+        let lines = Commands::builtin().execute(&proxy, "switch Alex east");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("{closed} is only joined or left with a login")),
+            "{lines:?}"
+        );
+        assert!(!lines[0].contains("seamless-arrival"), "{lines:?}");
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+    }
+}
+
+/// Between two servers that both take no seamless arrival the move is made, as between two ordinary ones.
+#[test]
+fn a_move_between_two_servers_without_seamless_arrival_is_made() {
+    let World {
+        proxy,
+        log,
+        mut player,
+        _source,
+        relay,
+        target,
+    } = world(Sidecars {
+        closed_east: true,
+        closed_lobby: true,
+        ..Sidecars::default()
+    });
+    let lines = Commands::builtin().execute(&proxy, "switch Alex east");
+    assert!(
+        lines[0].starts_with("Alex moved from lobby to east"),
+        "{lines:?}"
+    );
+    assert_eq!(log.lines().len(), 5, "{:?}", log.lines());
+    let _ = client_after_switch(&mut player);
+    attack(&mut player, TARGET_ID);
+    target.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
 }

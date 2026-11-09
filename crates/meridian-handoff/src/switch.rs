@@ -167,6 +167,15 @@ pub struct Settings {
     /// arrive where the target puts them, in chunks the target already sent;
     /// with it, the target must first send the chunks around the new place.
     pub carry_position: bool,
+    /// Whether the player's state goes to the target (the import's parts, all but
+    /// the position unless [`Settings::carry_position`]). Without it, the import
+    /// takes no part of the record: the target keeps what it loaded for the player
+    /// from its own file (or a new player's defaults), the position included, and
+    /// the source is not told the player moved but let go on (`player-release
+    /// abort`) and then disconnected, so that it saves its own copy of the player as
+    /// at any departure. Each server then keeps its own state of the player, and
+    /// nothing of one goes to the other.
+    pub carry_state: bool,
     /// The target's players are told the player came (join line, list entry).
     pub announce_arrival: bool,
     /// The source's players get the "left the game" line.
@@ -187,6 +196,7 @@ impl Default for Settings {
             export_attempts: 3,
             commit_attempts: 3,
             carry_position: false,
+            carry_state: true,
             announce_arrival: true,
             announce_departure: true,
             trace: None,
@@ -195,8 +205,12 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The parts the import takes: every one, or every one but the position.
+    /// The parts the import takes: every one, every one but the position, or none
+    /// when the state is not carried.
     fn parts(&self) -> Option<Vec<String>> {
+        if !self.carry_state {
+            return Some(Vec::new());
+        }
         (!self.carry_position).then(|| {
             PARTS
                 .iter()
@@ -341,6 +355,8 @@ struct Run<'a> {
     parts: Option<Vec<String>>,
     /// Whether the player's place goes to the target.
     carry: bool,
+    /// Whether the player's state goes to the target ([`Settings::carry_state`]).
+    carry_state: bool,
     /// The id of the hand-over, which the export with freeze gave and the requests
     /// that end it name. `None` until the export.
     handover: Option<String>,
@@ -493,6 +509,22 @@ impl Run<'_> {
         announce: bool,
         retry: Retry<'_>,
     ) -> Failure {
+        // Without the state there is nothing to save on the target: it forgets the
+        // arrival, and the source, let go on and disconnected, saves its own copy.
+        if !self.carry_state {
+            let _ = self.drop_target();
+            if let Some(lane) = &self.lane {
+                lane.closer.close();
+            }
+            let _ = self.release_source(Outcome::Abort, false);
+            self.source_lane.closer.close();
+            return Failure {
+                step,
+                reason: "the player left during the switch; no state goes between these servers, so the source keeps them and saves them"
+                    .to_owned(),
+                after: After::Left,
+            };
+        }
         // A placed player is saved by the target when its connection closes.
         let placed = match record {
             Some(record) => {
@@ -574,7 +606,9 @@ pub fn switch(
         source_lane: Arc::clone(&shared.up().lane),
         lane: None,
         parts: settings.parts(),
-        carry: settings.carry_position,
+        // A place goes only with the state it belongs to.
+        carry: settings.carry_position && settings.carry_state,
+        carry_state: settings.carry_state,
         handover: None,
         imported: false,
     };
@@ -842,7 +876,9 @@ pub fn switch(
             ));
         }
     }
-    if record_dimension(&record) != target_dimension.as_deref() {
+    // Without the state, the record is not taken: where the source had the player
+    // says nothing of where the target holds them.
+    if run.carry_state && record_dimension(&record) != target_dimension.as_deref() {
         run.abort();
         return Err(run.fail(
             Step::Freeze,
@@ -920,7 +956,11 @@ pub fn switch(
     run.imported = true;
     // The confirm and the release take about as long as the slowest request so far.
     freeze.slowest = freeze.slowest.max(import_sent.elapsed());
-    note(&match (settings.carry_position, arrival) {
+    note(&match (run.carry, arrival) {
+        _ if !run.carry_state => {
+            "hand over: the target took no part of the record: it keeps its own copy of the player"
+                .to_owned()
+        }
         (false, _) => "hand over: the target took the record, all but the position".to_owned(),
         (true, Some(arrival)) => format!(
             "hand over: the target took the record, at the client's place {:.2} {:.2} {:.2} \
@@ -949,7 +989,7 @@ pub fn switch(
     // the player frozen until the import timeout and abort the switch.
     // Whether the player moved to another chunk: the target says so in its answer,
     // or, when it does not, the centre of the view it sent after the import does.
-    let carry = settings.carry_position;
+    let carry = run.carry;
     let settled = |s: &crate::prepare::Preparing| {
         if s.positions <= positions {
             return None;
@@ -1152,16 +1192,34 @@ pub fn switch(
     // target. The source's connection closes all the same, and the source saves its
     // own copy when it does: the two servers' files differ from then on, and the
     // caller tells the operator ([`Done::source_kept`]).
-    let source_kept = match run.release_source(Outcome::Moved, settings.announce_departure) {
-        Ok(()) => {
-            note("commit: the source let the player go");
-            None
+    //
+    // Without the state, the source keeps its own copy of the player: it is let go on
+    // (`abort`), and its connection closes just below, so that it saves the player as
+    // at any departure. A source that refuses the abort has no hand-over any more (the
+    // freeze ran out): the player went on there already, and is saved all the same.
+    // Nothing went from one server to the other, so the two files are meant to differ.
+    let source_kept = if !run.carry_state {
+        match run.release_source(Outcome::Abort, false) {
+            Ok(()) => {
+                note("commit: the source keeps its own copy of the player, saved as they leave it")
+            }
+            Err(e) => note(&format!(
+                "commit: the source keeps its own copy of the player, saved as they leave it (its hand-over had ended, or could not be asked: {e})"
+            )),
         }
-        Err(e) => {
-            note(&format!(
-                "commit: the source would not let the player go: {e}"
-            ));
-            Some(e)
+        None
+    } else {
+        match run.release_source(Outcome::Moved, settings.announce_departure) {
+            Ok(()) => {
+                note("commit: the source let the player go");
+                None
+            }
+            Err(e) => {
+                note(&format!(
+                    "commit: the source would not let the player go: {e}"
+                ));
+                Some(e)
+            }
         }
     };
     source_lane.closer.close();

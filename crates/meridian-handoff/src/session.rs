@@ -125,7 +125,17 @@ pub struct Session {
     /// Kept here and then by the thread that reads the client, never in [`Shared`]: a hook
     /// may hold a [`SessionHandle`], which would then keep the session alive for good.
     commands: Option<Arc<CommandHook>>,
+    /// Kept here until the relay runs, then in [`Shared`] while it runs: a session never run
+    /// holds it nowhere else.
+    transfers: Option<Arc<TransferHook>>,
 }
+
+/// Told when the active backend sends the player a vanilla transfer (`Transfer`, in the play
+/// phase) to `host` and `port`: `true` when the hook takes it. A transfer taken is not passed to
+/// the client: the hook moves the player itself (a seamless switch, on a thread of its own, since
+/// it is called while the session writes to the client), and gives the transfer back with
+/// [`SessionHandle::pass_transfer`] when it cannot. `false` passes it on, as without a hook.
+pub type TransferHook = dyn Fn(&SessionHandle, &str, i32) -> bool + Send + Sync;
 
 /// Switches a session to another backend (`crate::switch`), or ends it, from another
 /// thread. It can be cloned and kept after the session is over.
@@ -154,6 +164,10 @@ pub(crate) struct Shared {
     pub(crate) delta_gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     /// Where the client's packets go while a switch hands the client over.
     pub(crate) routing: Routing,
+    /// What is told of a backend's transfers ([`TransferHook`]). Held here so that every lane,
+    /// those a switch opens included, asks it; only while the session's relay runs, since the
+    /// hook may hold what holds this session.
+    transfers: Mutex<Option<Arc<TransferHook>>>,
     up: Mutex<Up>,
     client_closer: Closer,
     events: Mutex<Option<mpsc::Sender<Event>>>,
@@ -335,6 +349,7 @@ impl Session {
             #[cfg(test)]
             delta_gate: Mutex::new(None),
             routing: Routing::default(),
+            transfers: Mutex::new(None),
         });
         ALIVE.fetch_add(1, Ordering::Relaxed);
         let handle = SessionHandle(Arc::clone(&shared));
@@ -345,6 +360,7 @@ impl Session {
                 client_reader,
                 first: (lane, backend_reader),
                 commands: None,
+                transfers: None,
             },
             handle,
         ))
@@ -360,6 +376,12 @@ impl Session {
     /// Lets `hook` answer the commands the player types in the play phase.
     pub fn with_commands(mut self, hook: Arc<CommandHook>) -> Self {
         self.commands = Some(hook);
+        self
+    }
+
+    /// Lets `hook` take the vanilla transfers the backends send the player ([`TransferHook`]).
+    pub fn with_transfers(mut self, hook: Arc<TransferHook>) -> Self {
+        self.transfers = Some(hook);
         self
     }
 
@@ -385,7 +407,11 @@ impl Session {
             client_reader,
             first: (lane, backend_reader),
             commands,
+            transfers,
         } = self;
+        // The transfer hook is asked while the relay runs, and goes when it ends, however it ends.
+        *lock(&shared.transfers) = transfers;
+        let _transfers = ForgetTransfers(&shared);
         shared
             .fallback_kick
             .store(fallback.on_kick, Ordering::SeqCst);
@@ -762,6 +788,23 @@ impl SessionHandle {
         true
     }
 
+    /// Passes the client a vanilla transfer to `host` and `port`, as the backend sent it: the
+    /// client leaves and connects there. What a [`TransferHook`] does with a transfer it took
+    /// and could not make seamless. Whether it was written: nothing is sent outside the play
+    /// phase.
+    pub fn pass_transfer(&self, host: &str, port: i32) -> bool {
+        let mut down = self.0.down();
+        if down.phase != Phase::Play {
+            return false;
+        }
+        let packet = play::Clientbound::Transfer(configuration::Transfer {
+            host: host.to_owned(),
+            port,
+        })
+        .encode();
+        down.writer.send(&packet).is_ok()
+    }
+
     /// Whether a switch of this player is under way.
     pub fn is_switching(&self) -> bool {
         self.0.switching.load(Ordering::SeqCst)
@@ -881,6 +924,15 @@ impl Shared {
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Drops the session's transfer hook when the relay ends.
+struct ForgetTransfers<'a>(&'a Arc<Shared>);
+
+impl Drop for ForgetTransfers<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.transfers).take();
+    }
 }
 
 /// Starts the thread that reads a lane.
@@ -1006,7 +1058,7 @@ fn flush(down: &mut Down, out: &mut Vec<u8>) -> bool {
 /// write each. The batch is only what one read already brought (nothing waits for more), and
 /// `down` is held from the first packet to the write, as it was held for each packet: a switch,
 /// which writes its delta and changes the active lane under `down`, never comes in between.
-fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End {
+fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Arc<Shared>) -> End {
     let mut body = Vec::new();
     let mut out = Vec::new();
     let mut batch: Vec<(i32, Vec<u8>)> = Vec::new();
@@ -1070,10 +1122,17 @@ fn relay(
     body: &mut Vec<u8>,
     out: &mut Vec<u8>,
     lane: &Lane,
-    shared: &Shared,
+    shared: &Arc<Shared>,
 ) -> std::result::Result<(), End> {
     for (id, payload) in batch.drain(..) {
         if down.active != lane.id {
+            continue;
+        }
+        // A vanilla transfer the proxy may make seamless: the hook takes it or passes it on.
+        if down.phase == Phase::Play
+            && id == ids::play::clientbound::TRANSFER
+            && taken_transfer(shared, &payload)
+        {
             continue;
         }
         // The backend disconnects the player: with the fallback on, the player is moved
@@ -1160,6 +1219,24 @@ fn relay(
         }
     }
     Ok(())
+}
+
+/// Whether the session's transfer hook takes this transfer. Asked under `down`: the hook only
+/// starts what moves the player.
+fn taken_transfer(shared: &Arc<Shared>, payload: &[u8]) -> bool {
+    let Some(hook) = lock(&shared.transfers).clone() else {
+        return false;
+    };
+    let Ok(play::Clientbound::Transfer(transfer)) =
+        play::Clientbound::decode(ids::play::clientbound::TRANSFER, payload)
+    else {
+        return false;
+    };
+    hook(
+        &SessionHandle(Arc::clone(shared)),
+        &transfer.host,
+        transfer.port,
+    )
 }
 
 /// Notes what a switch checks from the active backend's Login and Respawn.

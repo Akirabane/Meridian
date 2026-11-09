@@ -326,10 +326,20 @@ fn in_roles(
     shared
         .balancer
         .retain(|name| config.balanced(name).is_some());
+    // Whether some server of the roles was left out only because no seamless move reaches it, and whether one was kept.
+    let (mut cut, mut kept) = (false, false);
     for &role in roles {
         let servers: Vec<Server<'_>> = config
             .servers_with_role(role)
             .filter(|s| open_to(&s.backend))
+            // Never a server the player cannot be moved to seamlessly (`seamless-arrival`).
+            .filter(|s| {
+                let reachable = config.seamless_between(current, &s.backend);
+                cut |= !reachable;
+                // The server the player is on does not count: it is never where they go.
+                kept |= reachable && s.backend != current;
+                reachable
+            })
             .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
             .collect();
         let reserved = shared.balancer.reserve(
@@ -346,8 +356,25 @@ fn in_roles(
             return Ok((target, reservation));
         }
     }
+    // Every server of the roles was out of reach of a seamless move: room is not the reason. Which side asks for a login
+    // says which line: the server the player is on, or the servers they could go to.
+    if cut && !kept {
+        let line = if config.takes_seamless_arrival(current) {
+            JOIN_WITH_A_LOGIN
+        } else {
+            LEAVE_WITH_A_LOGIN
+        };
+        return Err(line.to_owned());
+    }
     Err(none.to_owned())
 }
+
+/// What a player on a server only left with a login reads when every server they could be sent to is out of reach of a
+/// seamless move (`seamless-arrival`).
+pub const LEAVE_WITH_A_LOGIN: &str = "You can only leave this server by logging in to another one.";
+
+/// What a player on an ordinary server reads when every server they could be sent to is only joined with a login.
+pub const JOIN_WITH_A_LOGIN: &str = "That server can only be joined with a login.";
 
 /// Where a player on the drained `from` can go: the best server of the same role by the
 /// rule of the login, never `from`, and never one that serves the other kind of player
@@ -374,10 +401,29 @@ pub fn elsewhere(config: &Config, shared: &Shared, from: &str) -> Result<Reserva
     shared
         .balancer
         .retain(|name| config.balanced(name).is_some());
-    let servers: Vec<Server<'_>> = config
+    let candidates: Vec<_> = config
         .servers_with_role(role)
         .filter(|s| s.backend != from)
         .filter(|s| kind.is_none_or(|k| !crate::route::serves_other_kind(config, &s.backend, k)))
+        .collect();
+    // Never a server the players of `from` cannot be moved to seamlessly (`seamless-arrival`); when that leaves none,
+    // room is not the reason, and the line says so.
+    let reachable: Vec<_> = candidates
+        .iter()
+        .filter(|s| config.seamless_between(from, &s.backend))
+        .collect();
+    if !candidates.is_empty() && reachable.is_empty() {
+        return Err(if config.takes_seamless_arrival(from) {
+            format!(
+                "no other server of role {} can be joined without a login",
+                role.name()
+            )
+        } else {
+            format!("the players of {from} can only leave it with a login")
+        });
+    }
+    let servers: Vec<Server<'_>> = reachable
+        .into_iter()
         .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
         .collect();
     shared

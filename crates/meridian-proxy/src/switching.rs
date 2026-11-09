@@ -5,12 +5,15 @@
 use crate::log::{error, info, warning};
 use crate::metrics::{self, Metrics};
 use meridian_config::{Config, Sidecar};
-use meridian_handoff::{Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend};
+use meridian_handoff::{
+    Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend, TransferHook,
+};
 use meridian_net::backend::BackendOptions;
 use meridian_sidecar::client::SidecarClient;
 use std::cell::Cell;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// How the proxy reaches a backend's sidecar: over TCP with its secret, or a
@@ -199,6 +202,21 @@ fn attempt(
     if from == backend.name {
         return Err(format!("{name} is already on {target}"));
     }
+    // A server whose players must log in to it, or leave it with a login (a hardcore world: its hearts and its
+    // death screen come with the login, and a seamless move keeps those of the first server), in either way.
+    if !config.seamless_between(&from, &backend.name) {
+        let (closed, way) = if config.takes_seamless_arrival(&backend.name) {
+            (&from, "from")
+        } else {
+            (&backend.name, "to")
+        };
+        info!(
+            "{name}: no seamless move from {from} to {target}: {closed} has seamless-arrival = false, and {way} it a player goes only with a login"
+        );
+        return Err(failed(format!(
+            "{closed} is only joined or left with a login (its own address, or a server's transfer)"
+        )));
+    }
     // One switch at a time: the switch itself refuses a second one, but saying so
     // here spares the sidecars a request.
     if handle.is_switching() {
@@ -232,18 +250,30 @@ fn attempt(
         player_address,
     };
     let (who, to) = (name.to_owned(), backend.name.clone());
+    // Between two state groups nothing of the player goes: each server keeps its own copy
+    // (`state-group`, OPERATING.md 5.15). Whatever started the move.
+    let carry_state = config.carries_state(&from, &backend.name);
     let settings = Settings {
         trace: Some(Arc::new(move |step: &str, at: Duration| {
             info!("{who}: switch to {to}: {step} (+{} ms)", at.as_millis());
         })),
         carry_position: config.switch_carry_position,
+        carry_state,
         announce_arrival: config.switch_announce_arrival,
         announce_departure: config.switch_announce_departure,
         freeze_limit: Duration::from_millis(config.switch_freeze_limit_ms),
         commit_margin: Duration::from_millis(config.switch_commit_margin_ms),
         ..Settings::default()
     };
-    info!("{name}: switch from {from} to {}: starting", backend.name);
+    info!(
+        "{name}: switch from {from} to {}: starting{}",
+        backend.name,
+        if carry_state {
+            ""
+        } else {
+            " (other state group: no state is carried, each server keeps its own copy)"
+        }
+    );
     let started = Instant::now();
     let done = meridian_handoff::switch(
         handle,
@@ -318,6 +348,93 @@ pub fn in_game(
         });
     if let Err(e) = spawned {
         warning!("cannot start a thread for a switch: {e}");
+    }
+}
+
+/// What a session does with the vanilla transfers its backends send (`/transfer <host>` on a
+/// server): a transfer to a `[[forced-host]]` marked `seamless` is taken, and the player is moved
+/// to that host's backend on a thread of its own, with no loading screen. When the move fails
+/// while the player is still where they were, with nothing of the other world sent (another
+/// dimension, a server that cannot be reached, a full one), the transfer is passed to the client
+/// as it came: the player goes all the same, with the loading screen. Any other transfer is
+/// passed at once. What the move carries follows `state-group`, as for every move.
+///
+/// The hook is kept by the session only while its relay runs, so it may hold the proxy's state.
+pub fn transfers_hook(
+    config: Arc<Config>,
+    switcher: Arc<Switcher>,
+    shared: crate::session::Shared,
+    name: String,
+    player_address: IpAddr,
+) -> Arc<TransferHook> {
+    // A move this hook started and has not finished: a second transfer meanwhile is not a second move.
+    let moving = Arc::new(AtomicBool::new(false));
+    Arc::new(
+        move |handle: &SessionHandle, host: &str, port: i32| -> bool {
+            // As the server choice reads a handshake's host: no case, no final dot.
+            let wanted = host.trim_end_matches('.').to_ascii_lowercase();
+            let Some(target) = config
+                .forced_hosts
+                .iter()
+                .find(|f| f.seamless && f.host == wanted)
+                .map(|f| f.backend.clone())
+            else {
+                return false;
+            };
+            // Already there, or already moving: the transfer is the game's own.
+            if handle.backend() == target || handle.is_switching() {
+                return false;
+            }
+            // A transfer that comes while the one before is being made seamless (the switch marks itself
+            // only once its thread runs): it is dropped, so that it is neither a second move nor passed
+            // to the client in the middle of the first.
+            if moving.swap(true, Ordering::SeqCst) {
+                warning!(
+                    "{name}: a transfer to {host} came while another is being made seamless: it is dropped"
+                );
+                return true;
+            }
+            let (config, switcher, shared) =
+                (Arc::clone(&config), Arc::clone(&switcher), shared.clone());
+            let (handle, name, host) = (handle.clone(), name.clone(), host.to_owned());
+            let done = Moving(Arc::clone(&moving));
+            let spawned = std::thread::Builder::new()
+                .name(format!("transfer-{name}"))
+                .spawn(move || {
+                    let _done = done;
+                    let from = handle.backend();
+                    let pass = |why: &str| {
+                        warning!(
+                            "{name}: the transfer from {from} to {host} is passed to the client (a loading screen): {why}"
+                        );
+                        handle.pass_transfer(&host, port);
+                    };
+                    // The place reserved on the target is kept until the move has ended.
+                    let _place = match crate::placing::named(&config, &shared, &target) {
+                        Ok(place) => place,
+                        Err(line) => return pass(&line),
+                    };
+                    info!("{name}: a transfer from {from} to {host} is made a seamless move to {target}");
+                    match switch(&config, &switcher, &handle, &name, player_address, &target) {
+                        Ok(moved) => info!("{}", moved.describe(&name)),
+                        // Still on the server that sent the transfer, and nothing of the target
+                        // was sent: the transfer goes as it came.
+                        Err(why) if !handle.is_over() && handle.backend() == from => pass(&why),
+                        Err(why) => warning!("{why}"),
+                    }
+                });
+            // A thread that did not start dropped its `Moving`: the next transfer is free to go.
+            spawned.is_ok()
+        },
+    )
+}
+
+/// Lets the next transfer of the session be made seamless when it goes, however the move's thread ends.
+struct Moving(Arc<AtomicBool>);
+
+impl Drop for Moving {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
