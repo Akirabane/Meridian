@@ -224,23 +224,24 @@ rate: 40 runs, and eight more (two per path) for the bytes.
 
 ### The proxy alone: no delay, no rate limit
 
-| Path | 329th chunk | Last chunk | Against direct, 329th | Bytes on the link, against direct |
+| Path | 329th chunk | Last chunk | Against direct, 329th | Bytes on the link, two passes |
 | --- | --- | --- | --- | --- |
-| Direct (no proxy) | 1.04 s | 1.34 s | | 4.53 and 4.46 MB |
-| Proxy, level 6 | 1.39 s | 1.89 s | **+0.35 s (+34 %)** | 1.0 % and 1.3 % **less** |
-| Proxy, level 4 | 1.29 s | 1.69 s | **+0.25 s (+24 %)** | 0.5 % and 1.2 % more |
-| Proxy, level 1 | 1.14 s | 1.48 s | **+0.10 s (+9 %)** | 32 % and 35 % more |
+| Direct (no proxy) | 1.04 s | 1.34 s | | 4.53 and 4.46 MB (1.7 % apart) |
+| Proxy, level 6 | 1.39 s | 1.89 s | **+0.35 s (+34 %)** | 0.2 % and 2.1 % **less** |
+| Proxy, level 4 | 1.29 s | 1.69 s | **+0.25 s (+24 %)** | 1.3 % and 0.4 % more |
+| Proxy, level 1 | 1.14 s | 1.48 s | **+0.10 s (+9 %)** | 33.4 % and 33.5 % more |
 
 The times are the median of three passes; the three passes of one path differ by 0.1 to 1.5 % (1.04 s: 1.039 to 1.040;
-level 6: 1.387 to 1.408). The bytes are the proxy's relay's own count of what reached the bot, two passes per path (the
-"bytes" runs, not the same passes as the times). **Levels 6 and 4 send about what a direct connection does (between
-1.3 % less and 1.2 % more), and level 1 a third more.** [OPERATING.md](OPERATING.md), section 5.14, gives the same order
-for the compression alone (level 4 about 3 % more than level 6, level 1 about 38 % more).
+level 6: 1.387 to 1.408). The bytes are the proxy's relay's own count of what reached the bot, two passes per path, in
+the order they ran (the "bytes" runs, not the same passes as the times); the percentages are against the mean of the two
+direct passes (4.50 MB), because those two already differ by 1.7 % from each other. **Levels 6 and 4 send about what a
+direct connection does, to within about 2 %, and level 1 a third more.** [OPERATING.md](OPERATING.md), section 5.14,
+gives the same order for the compression alone (level 4 about 3 % more than level 6, level 1 about 38 % more).
 
 A fixed delay alone changes little: 25 ms each way (a 50 ms round trip), direct, gives 1.16 s for the 329th chunk
-(+0.12 s over 1.04 s, two passes) with batches of the same size (a median of 17 chunks against 18), and nothing
-collapses.
-Through the proxy at level 6 with the same delay it is 1.46 s (two passes), +0.30 s over the direct run with that delay.
+(+0.12 s over 1.04 s, two passes) with batches of about the same size (a median of 17 chunks, against 17.5 without the
+delay), and nothing collapses. Through the proxy at level 6 with the same delay it is 1.46 s (two passes), +0.30 s over
+the direct run with that delay.
 
 ### Behind a link that is limited
 
@@ -262,8 +263,8 @@ view ended.
 ### What is measured, and what is deduced
 
 **Measured.** The times, the batch sizes and the bytes above; that the proxy makes the first view later at every level
-and every rate that was run; that a delay alone does not; that the batches shrink behind a limit with or without the
-proxy (a little more with it).
+and every rate that was run; that a delay alone adds 0.12 s and collapses nothing; that the batches shrink behind a
+limit with or without the proxy (a little more with it).
 
 **Deduced, not measured.**
 - *Where the proxy's time goes.* The proxy decompresses each chunk packet from the server and compresses it again
@@ -273,8 +274,8 @@ proxy (a little more with it).
 - *Why the batches shrink.* The wire carries only 4.5 MB, about a fifth of the 22.8 MB: at 10 Mbit/s the link alone
   would take 3.6 s, and the whole view took 9.1 s direct (2.5 times that); at 100 Mbit/s it would take 0.36 s and took
   2.5 s (6.9 times). The speed is not set by the bandwidth but by the client's own estimate of it, which asks for fewer
-  chunks when a batch arrives slowly. That is vanilla's design, the server reproduces it, and it is the same behind any
-  hop: the proxy creates none of it and adds a little to it.
+  chunks when a batch arrives slowly. That is vanilla's design, the server reproduces it, and in these runs it is the
+  same with or without the proxy: the proxy creates none of it and adds a little to it.
 - *Not explained.* At 10 Mbit/s the proxy adds +27 % (1.75 s), more than a flat 1 ms a chunk would give (329 ms, 5 % of
   the direct 6.48 s). The recompression alone does not account for it, and it was not looked into.
 
@@ -288,7 +289,7 @@ proxy (a little more with it).
   bound of the effect (a reading, not measured).
 - **More than one player.** One bot, one world, one machine, Windows.
 - **How many passes.** Three (two for the scenarios with a delay and no rate): the passes of one scenario differ by
-  2.2 % or less in 11 of the 14 scenarios, and by 3.1 % and 4.5 % (two passes each) and 8.4 % in the other three. The
+  2.3 % or less in 11 of the 14 scenarios, and by 3.1 % and 4.5 % (two passes each) and 8.4 % in the other three. The
   8.4 % is the direct run at 100 Mbit/s, one pass of which took 1.94 s against 1.79 s for the other two, in runs whose
   other load was 0.34 to 0.44 cores (clean, see the next point); it was not explained.
 - **A quiet machine.** Six of the 40 runs are "not clean" (other programs used more than 0.5 cores on average during the
