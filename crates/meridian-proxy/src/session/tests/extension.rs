@@ -1119,7 +1119,7 @@ mod server {
     // ---- when a server is lost ------------------------------------------------------------------
 
     /// The replacer's answer to the loss of `lobby`, and the addresses it tried.
-    fn lose_lobby(
+    pub(super) fn lose_lobby(
         config: &Config,
         sessions: &Sessions,
         up: &[(&str, bool)],

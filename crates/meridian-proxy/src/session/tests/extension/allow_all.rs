@@ -6,7 +6,7 @@
 //! Every wait is for something to happen (a line the program writes, the link going down), bounded, and
 //! fails with what was seen; no port is fixed.
 use super::command::{DENIED_SEND, FILE, hook_of, six_commands};
-use super::server::{ALL_UP, EAST, LOBBY, WEST, login_alex};
+use super::server::{ALL_UP, EAST, LOBBY, WEST, login_alex, lose_lobby};
 use super::*;
 use meridian_config::{
     BalancedServer, Balancing, CommandDecision, Role, ServerDecision, ServerOnError,
@@ -15,7 +15,6 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The longest wait for the program to say where it listens, for a line it writes, or for the proxy to see
 /// it gone.
@@ -81,13 +80,6 @@ fn follow(stream: impl Read + Send + 'static) -> Receiver<String> {
     lines
 }
 
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
-}
-
 /// The program while it runs; killed when dropped.
 struct AllowAll {
     child: Child,
@@ -97,14 +89,11 @@ struct AllowAll {
     lines: Receiver<String>,
     /// What the SDK writes on the standard error stream.
     errors: Receiver<String>,
-    /// When it was started, by the system's clock.
-    started_ms: u128,
 }
 
 impl AllowAll {
     fn start() -> Self {
         let folder = Folder::new();
-        let started_ms = now_ms();
         let mut child = Command::new(program())
             .arg(folder.token())
             .arg("127.0.0.1:0")
@@ -121,7 +110,6 @@ impl AllowAll {
             address: String::new(),
             lines,
             errors,
-            started_ms,
         };
         // The SDK says where it listens: the port the system picked.
         let until = Instant::now() + WAIT;
@@ -163,8 +151,8 @@ impl AllowAll {
         extension
     }
 
-    /// The next `count` lines it writes, each without its time, which is checked: a number of
-    /// milliseconds between its start and now.
+    /// The next `count` lines it writes, each without its time, which is checked to be a whole number of
+    /// milliseconds (not against the test's clock, which a machine may set again while it runs).
     fn wrote(&self, count: usize) -> Vec<String> {
         let until = Instant::now() + WAIT;
         let mut lines = Vec::new();
@@ -177,11 +165,7 @@ impl AllowAll {
                 );
             };
             let (time, rest) = line.split_once(' ').unwrap_or_else(|| panic!("{line:?}"));
-            let time: u128 = time.parse().unwrap_or_else(|_| panic!("{line:?}"));
-            assert!(
-                (self.started_ms..=now_ms()).contains(&time),
-                "{line:?} is not of this run"
-            );
+            assert!(time.parse::<u128>().is_ok(), "{line:?}");
             lines.push(rest.to_owned());
         }
         lines
@@ -286,6 +270,70 @@ fn a_player_goes_where_the_routes_send_them_without_allow_all_and_it_is_asked_at
         allow_all.wrote(6),
         [LOGIN, SERVER, LOGIN, SERVER, LOGIN, SERVER]
     );
+}
+
+/// The host the player typed to connect, and the address they connect from (the session's `peer`).
+const HOST: &str = "play.example.org";
+const PLAYER_ADDRESS: &str = "198.51.100.7";
+
+#[test]
+fn what_allow_all_writes_holds_neither_the_address_nor_the_host_and_a_fallback_is_written_as_one() {
+    let allow_all = AllowAll::start();
+    // Granted `addresses` as well: it does not ask for it, so it is not given the address.
+    let mut extension = allow_all.extension();
+    extension.grant.push("addresses".into());
+    let config = Config {
+        extensions: vec![extension],
+        ..alone()
+    };
+    let sessions = sessions_for(&config);
+    let info = sessions.extensions.link("gate").unwrap().info().unwrap();
+    assert!(
+        !info.granted.iter().any(|c| c == "addresses"),
+        "{:?}",
+        info.granted
+    );
+
+    let (without, _) = login_alex(
+        &alone(),
+        &Sessions::default(),
+        &ALL_UP,
+        Some(HOST),
+        vec![Step::ExpectClose],
+    );
+    let (tried, _) = login_alex(
+        &config,
+        &sessions,
+        &ALL_UP,
+        Some(HOST),
+        vec![Step::ExpectClose],
+    );
+    assert_eq!(tried, without);
+    // The lobby is lost: the fallback goes where it goes without allow-all.
+    let (answer, without) = lose_lobby(&alone(), &Sessions::default(), &ALL_UP);
+    let expected = answer.unwrap().backend;
+    let (answer, tried) = lose_lobby(&config, &sessions, &ALL_UP);
+    assert_eq!(tried, without);
+    assert_eq!(answer.unwrap().backend, expected);
+    assert_eq!(decisions(&sessions, "login", "default"), 1);
+    assert_eq!(decisions(&sessions, "server", "default"), 2);
+    none_late(&sessions);
+
+    let lines = allow_all.wrote(3);
+    assert_eq!(
+        lines,
+        [
+            LOGIN,
+            SERVER,
+            "server player=Alex reason=fallback candidates=2 -> default"
+        ]
+    );
+    for line in &lines {
+        assert!(
+            !line.contains(HOST) && !line.contains(PLAYER_ADDRESS),
+            "{line:?}"
+        );
+    }
 }
 
 #[test]
