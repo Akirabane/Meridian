@@ -1346,10 +1346,10 @@ is connected its orders end with `NotConnected`.
 
 ### 8.2 Examples
 
-**Built:** five programs in `crates/meridian-extension/examples/`: `allow_all` (the one to start from, below),
+**Built:** six programs in `crates/meridian-extension/examples/`: `allow_all` (the one to start from, below),
 `login_gate` (the admission at login), `server_chooser` (the choice of server), `command_ranks` (the permission of a
-command) and `command_party` (an extension's own command). [EXTENSION-GUIDE.md](EXTENSION-GUIDE.md) walks through
-them. **Not built:** `file-permissions`, below, which this page planned and which is not in the repository.
+command), `command_party` (an extension's own command) and `file_permissions` (below).
+[EXTENSION-GUIDE.md](EXTENSION-GUIDE.md) walks through them. Every item of this page's plan is built.
 
 - **`allow-all`** (built: `examples/allow_all.rs`). It asks for the three decisions (`decide.login`, `decide.server`,
   `decide.command`), answers `Default` to each, and writes one line for each request on its standard output: the time
@@ -1368,11 +1368,25 @@ them. **Not built:** `file-permissions`, below, which this page planned and whic
     stopped the on-error policies (`default`) decide at once. Every wait is for a line or a state, bounded (10 s), and
     fails with what was seen; no port is fixed. The test needs cargo, which runs it; it does not fall back on the SDK's
     `serve` in a thread, which would not be a separate process.
-- **`file-permissions`** (not built). It reads a TOML file of players (by unique id) and the nodes they are
-  given or denied. It answers `decide.command` from it, with `cache_seconds` 60. It declares one
-  command, `/extperms reload`, under its own node, which reads the file again and sends
-  `permissions/invalidate`. It shows the cache, the precedence over `permissions.toml`, a command
-  of the extension's own, and an order.
+- **`file-permissions`** (built: `examples/file_permissions.rs`, granted `decide.command` and `commands`). It reads a
+  TOML file of players, by unique id, with the nodes each is given (`allow`) or denied (`deny`), a node or every node
+  below one (`meridian.server.*`), and whether they may reload it (`reload`). It answers `decide.command` from it with
+  `cache_seconds` 60: a deny wins over an allow and over `permissions.toml`, an allow is given only to an account the
+  session service verified unless the file says `trust-unverified = true`, and a node the file does not name is left to
+  the proxy. It declares one command, `/extperms reload` (its node `ext.<extension>.extperms`, which it denies to
+  whoever the file does not let reload, and which the command checks again when it runs), which reads the file again
+  and, only if it was read in full, puts it in force and sends `permissions/invalidate`. **No right is ever wider than
+  what a file it read in full gives**: a file it cannot read or that is not valid leaves the permissions as they were,
+  tells the proxy to forget nothing, and says so to the player and on its standard error stream; neither names the file
+  or holds a unique id. It shows the cache, the precedence over `permissions.toml`, a command of the extension's own,
+  and an order. It is an example, not a second permissions system.
+  - **The proxy's tests run it as a separate process** (`session/tests/extension/file_permissions.rs`, the same way as
+    `allow-all`), with a file of players: a right the file gives opens a command `permissions.toml` keeps closed; the
+    proxy keeps the answer while the file changes; `/extperms reload` takes the right back at once, not after the
+    minute; a file that cannot be read at a reload (not valid, a bad unique id, removed) leaves the rights of the last
+    file read in full, tells the proxy to forget nothing, and says so; a deny wins over an allow and over
+    `permissions.toml`; an account nobody verified is given an allow only when the file trusts it; and whoever the file
+    does not let reload cannot, whether or not the extension is granted `decide.command`.
 
 ### 8.3 Tests
 
@@ -1465,7 +1479,8 @@ Windows.
    `players/list` of a large network reaches near 1,700 players: pages, or a higher limit.
 10. **The SDK and `allow-all`** (built). Proof: the SDK's tests, and the proxy's test with `allow-all` started as a
     process, on Linux and Windows (section 8.2).
-11. **`file-permissions`** (not built). Proof: its tests, and an integration test of a rank given by the file.
+11. **`file-permissions`** (built). Proof: its tests, and the proxy's test with it started as a process: a rank
+    given by the file, taken back at once by a reload, and a file it cannot read (section 8.2).
 12. **The operator's documentation.** OPERATING.md and CONFIG.md gain a section, and the README's
     "Extensions" row changes to the state reached. DESIGN.md sections 13.5 and 14 and PARITY.md's
     item 9 are aligned with this page.

@@ -3,7 +3,18 @@
 What changes for whoever runs the proxy, newest first. The proxy has no release number of its own yet (`0.1.0` in
 `Cargo.toml`): each entry names the pull requests merged into `main`, and the setting, page or document to read.
 
-## Not released yet: pull requests #192 and #193
+## Not released yet: pull requests #192, #193 and #TBD
+
+### Extensions: permissions from a file, the example `file-permissions` (#TBD)
+
+Nothing changes in the proxy, its settings or the protocol. docs/EXTENSIONS.md section 8.2 and EXTENSION-GUIDE.md
+section 6.
+
+- **A sixth example program for extensions**, `crates/meridian-extension/examples/file_permissions.rs`: it gives or
+  denies the proxy's command permissions from a file of players, lets the proxy keep each answer a minute, and reads the
+  file again on `/extperms reload`, after which the proxy forgets what it kept. A file it cannot read leaves the rights
+  as they were and it says so; no right is ever wider than what a file it read in full gives.
+- **The proxy's tests run it as a separate process**, on Linux and Windows, as they run `allow-all`.
 
 ### Extensions: the example to start from, `allow-all` (#193)
 

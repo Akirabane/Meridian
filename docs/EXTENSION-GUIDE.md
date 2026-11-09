@@ -262,6 +262,11 @@ fn decide(request: &CommandRequest) -> NodeAnswers {
 The whole program, with a list of administrators on its command line, is
 `crates/meridian-extension/examples/command_ranks.rs`.
 
+A program that reads the rights from a file of players, lets the proxy keep them a minute, and reads the file again on a
+command of its own (`/extperms reload`, which then tells the proxy to forget what it kept) is
+`crates/meridian-extension/examples/file_permissions.rs`; grant it `decide.command` and `commands`. A file it cannot
+read leaves the rights as they were, and it says so: no right is ever wider than what a file it read in full gives.
+
 ```toml
 [[extension]]
 name = "ranks"
