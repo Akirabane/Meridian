@@ -42,7 +42,14 @@ nothing but `serde`, `serde_json`, `getrandom` and Meridian's own crates):
 meridian-extension = { path = "../meridian/crates/meridian-extension" }
 ```
 
-Then the whole program, shortened from `crates/meridian-extension/examples/login_gate.rs`, which takes
+The smallest program to start from is `crates/meridian-extension/examples/allow_all.rs`: it asks for the three decisions
+(the login, the choice of server and the permission of a command), leaves each to the proxy, and writes a line for each
+request, without the player's address or what they typed
+(`cargo run -p meridian-extension --example allow_all -- extensions/gate.token 127.0.0.1:25590`, granted `decide.login`,
+`decide.server` and `decide.command`). The proxy with it does what it does without it, and its tests check so; copy it
+and change one answer at a time.
+
+Then a program that decides something, shortened from `crates/meridian-extension/examples/login_gate.rs`, which takes
 the token file, the address and the names to refuse on its command line and can be run as it is
 (`cargo run -p meridian-extension --example login_gate -- extensions/gate.token 127.0.0.1:25590 Alex`):
 

@@ -619,6 +619,11 @@ fn what_the_extension_did_not_declare_is_not_asked_and_what_is_not_granted_is_no
 }
 
 // ---------------------------------------------------------------------------------------------
+// The SDK's example `allow-all`, run as a separate process (docs/EXTENSIONS.md, 8.2)
+
+mod allow_all;
+
+// ---------------------------------------------------------------------------------------------
 // The choice of server (docs/EXTENSIONS.md, 4.4)
 
 mod server {
@@ -631,9 +636,9 @@ mod server {
     use meridian_extension::decide::{Choice, Placing, ServerRequest};
     use meridian_handoff::{Loss, Notice, Replacement};
 
-    const LOBBY: &str = "127.0.0.1:25601";
-    const EAST: &str = "127.0.0.1:25602";
-    const WEST: &str = "127.0.0.1:25603";
+    pub(super) const LOBBY: &str = "127.0.0.1:25601";
+    pub(super) const EAST: &str = "127.0.0.1:25602";
+    pub(super) const WEST: &str = "127.0.0.1:25603";
 
     /// An extension that chooses servers, with what it was asked.
     struct Chooser {
@@ -732,7 +737,7 @@ mod server {
     }
 
     /// Logs Alex in; `up` says which backends answer. The addresses tried and what the player got.
-    fn login_alex(
+    pub(super) fn login_alex(
         config: &Config,
         sessions: &Sessions,
         up: &[(&str, bool)],
@@ -750,7 +755,7 @@ mod server {
         )
     }
 
-    const ALL_UP: [(&str, bool); 3] = [(LOBBY, true), (EAST, true), (WEST, true)];
+    pub(super) const ALL_UP: [(&str, bool); 3] = [(LOBBY, true), (EAST, true), (WEST, true)];
 
     /// Goes in, to the backends `tried`.
     fn goes_to(config: &Config, sessions: &Sessions, up: &[(&str, bool)], tried: &[&str]) {
@@ -1114,7 +1119,7 @@ mod server {
     // ---- when a server is lost ------------------------------------------------------------------
 
     /// The replacer's answer to the loss of `lobby`, and the addresses it tried.
-    fn lose_lobby(
+    pub(super) fn lose_lobby(
         config: &Config,
         sessions: &Sessions,
         up: &[(&str, bool)],
@@ -1344,7 +1349,7 @@ mod command {
     }
 
     /// All six commands on, and no extension.
-    fn six_commands() -> Config {
+    pub(super) fn six_commands() -> Config {
         Config {
             commands: CommandSettings {
                 enabled: vec![
@@ -1370,7 +1375,7 @@ mod command {
     }
 
     /// Gives Alex the staff nodes, and nobody else.
-    const FILE: &str = r#"
+    pub(super) const FILE: &str = r#"
 [group.staff]
 allow = ["meridian.send", "meridian.glist", "meridian.alert"]
 [[player]]
@@ -1389,7 +1394,7 @@ groups = ["nobody"]
 
     /// The hook of Alex's session, with the extension of `config` in `sessions`; what the staff closure
     /// was asked is kept.
-    fn hook_of(
+    pub(super) fn hook_of(
         config: &Config,
         sessions: &Sessions,
         file: &str,
@@ -1434,7 +1439,7 @@ groups = ["nobody"]
             .decisions("command", decision)
     }
 
-    const DENIED_SEND: &str = "You do not have permission to use /send.";
+    pub(super) const DENIED_SEND: &str = "You do not have permission to use /send.";
     const DENIED_SERVER: &str = "You do not have permission to use /server.";
 
     // ---- the rule, and who is asked --------------------------------------------------------------

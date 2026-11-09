@@ -3,7 +3,18 @@
 What changes for whoever runs the proxy, newest first. The proxy has no release number of its own yet (`0.1.0` in
 `Cargo.toml`): each entry names the pull requests merged into `main`, and the setting, page or document to read.
 
-## Not released yet: pull request #192
+## Not released yet: pull requests #192 and #193
+
+### Extensions: the example to start from, `allow-all` (#193)
+
+Nothing changes in the proxy, its settings or the protocol. docs/EXTENSIONS.md section 8.2 and EXTENSION-GUIDE.md.
+
+- **A fifth example program for extensions**, `crates/meridian-extension/examples/allow_all.rs`: it asks for the three
+  decisions, leaves each to the proxy, and writes a line for each request (never the player's address or what they
+  typed). It is the one to copy first.
+- **The proxy's tests run it as a separate process**, on Linux and Windows: with it, players go where they go without
+  it, commands are decided by `permissions.toml` as without it, and once it is stopped the on-error policies decide at
+  once.
 
 ### Extensions: the state of each server (#192)
 
