@@ -1446,7 +1446,7 @@ pub(crate) mod tests {
         );
         assert_eq!(unset, six, "without the setting, level 6");
         assert!(
-            one > six && one > nine,
+            one > six && one > nine && nine != six,
             "level 1 {one}, 6 {six}, 9 {nine} bytes"
         );
     }

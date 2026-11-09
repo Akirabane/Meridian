@@ -10,6 +10,11 @@
 # tests fail, so the breakage can be fixed in place; `git checkout -- Cargo.toml
 # Cargo.lock docs/BUILD.md` puts the old revision back.
 #
+# meridian-handoff depends on flate2 directly (compress.rs), with the version and the
+# features horizon-protocol uses at the pinned revision, so that compression-level 6 gives
+# horizon-protocol's bytes. The run compares the two flate2 lines and says when the new
+# revision changed horizon-protocol's: then change meridian-handoff's to the same.
+#
 # Set BUMP_REPORT to a file name to get what the run found as Markdown (the nightly
 # workflow does). Set CARGO_BUILD_JOBS to limit the compiler's parallelism.
 #
@@ -124,6 +129,23 @@ else
   say "$(printf '%s\n' "$history" | sed -n '1,20p' | sed 's/^/    /')"
   count=$(printf '%s\n' "$history" | wc -l | tr -d ' ')
   if [ "$count" -gt 20 ]; then say "    ... and $((count - 20)) more"; fi
+fi
+say ""
+
+# flate2: meridian-handoff's line must stay the one horizon-protocol has (see the top of this file).
+ours=$(grep -E '^flate2 *=' crates/meridian-handoff/Cargo.toml || true)
+theirs=
+for dir in "${CARGO_HOME:-$HOME/.cargo}"/git/checkouts/horizon-*/"${new:0:7}"; do
+  if [ -f "$dir/crates/horizon-protocol/Cargo.toml" ]; then
+    theirs=$(grep -E '^flate2 *=' "$dir/crates/horizon-protocol/Cargo.toml" || true)
+  fi
+done
+if [ -z "$theirs" ]; then
+  say "flate2: horizon-protocol's line was not found in Cargo's checkout of ${new:0:12}; compare it with crates/meridian-handoff/Cargo.toml by hand."
+elif [ "$ours" != "$theirs" ]; then
+  say "flate2 differs: horizon-protocol has \`$theirs\`, meridian-handoff has \`$ours\`. Make meridian-handoff's the same."
+else
+  say "flate2: meridian-handoff's line is horizon-protocol's."
 fi
 say ""
 

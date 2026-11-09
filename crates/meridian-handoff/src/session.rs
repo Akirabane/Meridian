@@ -950,6 +950,10 @@ pub(crate) fn frame_at(
 }
 
 /// Writes one packet to the client as [`ConnWriter::send`] does, compressed at the session's level.
+///
+/// `ConnWriter::send` has two branches this does not: a writer with an `adapter` (a server of an older release) and
+/// one with an `older_client`. The second is [`frame_at`]'s `for_client`. The first never applies here: the player's
+/// writer has no adapter (Meridian sets one on no connection to a client), so the bytes are the same.
 pub(crate) fn send(down: &mut Down, body: &[u8]) -> horizon_protocol::Result<()> {
     let level = down.compression;
     let mut out = Vec::new();
@@ -1133,7 +1137,13 @@ fn relay(
                     && let Some(notice) = down.notice.take()
                 {
                     let chat = play::Clientbound::SystemChat(notice.chat());
-                    let _ = frame_at(&mut down.writer, down.compression, &chat.encode(), out);
+                    // The proxy's own message: level 6, as all of them (`with_compression_level`).
+                    let _ = frame_at(
+                        &mut down.writer,
+                        flate2::Compression::default(),
+                        &chat.encode(),
+                        out,
+                    );
                 }
                 let packet = Packet { id, payload };
                 // A packet the ghost cannot read leaves it as it was; it is noted

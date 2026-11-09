@@ -101,6 +101,25 @@ mod tests {
     }
 
     #[test]
+    fn frame_contents_is_still_the_encoder_at_level_6() {
+        // `contents` hands level 6 to `frame::contents`; this checks that `frame::contents` is still what the other
+        // levels do here with 6: the same encoder, header, prefix and capacity. A Horizon revision that compressed
+        // differently would make level 6 and the other levels two different encoders, and fail here.
+        for body in corpus().into_iter().filter(|b| b.len() >= 256) {
+            let mut expected = Vec::with_capacity(body.len() / 2 + 8);
+            horizon_protocol::buf::write_varint(&mut expected, body.len() as i32);
+            let mut z = ZlibEncoder::new(expected, Compression::new(6));
+            z.write_all(&body).unwrap();
+            assert_eq!(
+                horizon_protocol::frame::contents(&body, Some(256)).unwrap(),
+                z.finish().unwrap(),
+                "{} bytes",
+                body.len()
+            );
+        }
+    }
+
+    #[test]
     fn every_level_gives_a_stream_that_reads_back_as_the_body() {
         for level in 1..=9 {
             for body in corpus().into_iter().filter(|b| b.len() >= 256) {
