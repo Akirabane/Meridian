@@ -943,6 +943,26 @@ another version included: as vanilla, the version is checked once the transfer i
 after the login, so a `logged_in` player can still be turned away by a ban, the whitelist or a full proxy, as any player
 is; those refusals are counted with every login's (`meridian_login_failures_total{reason}`).
 
+**Checked on a public proxy, 9 November 2026.** The layout above ran on a public proxy built from `355b461` (main of
+9 November), with three Horizon servers (`lobby`, `survival`, `hardcore`), a forced host for each and
+`accept-transfers = true`. One player, with a real account, joined through the lobby's host, was sent to survival by a
+lobby command (vanilla's transfer), came back to the lobby by connecting again, and was sent to hardcore the same way.
+Both transfers logged in; the proxy's logs show the player joining each server in that order. The metrics page, read at
+13:57 (Paris time), after 6 hours and 18 minutes without a restart:
+
+| Counter | Value | What it was |
+| --- | --- | --- |
+| `meridian_incoming_transfers_total{outcome="logged_in"}` | 2 | the two transfers of the trip |
+| `meridian_incoming_transfers_total{outcome="refused"}` | 0 | |
+| `meridian_incoming_transfers_total{outcome="failed"}` | 1 | a probe sent on purpose at the deployment: a transfer from a client of another version |
+| `meridian_login_failures_total{reason="protocol"}` | 3 | the probes sent at the deployment |
+| `meridian_transfers_total` (seamless switches) | 0 | none asked: the servers keep their own state (section 5.13) |
+| `meridian_fallbacks_total{cause,result}` | 0 for every label | no server was lost |
+
+What this shows: the forced hosts, the transfers and their counting work on a proxy reached from the internet, with an
+account checked online. What it does not show: more than one player, more than a few minutes of play, a load, a
+transfer refused by a ban or a full server, or a server lost during a transfer.
+
 ### 5.14 Compression: processor time against bandwidth
 
 The proxy compresses every packet of `compression-threshold` bytes or more that it sends a player. On a busy network
