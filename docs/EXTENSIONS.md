@@ -1346,15 +1346,26 @@ is connected its orders end with `NotConnected`.
 
 ### 8.2 Examples
 
-**Built:** four programs in `crates/meridian-extension/examples/`: `login_gate` (the admission at login),
-`server_chooser` (the choice of server), `command_ranks` (the permission of a command) and `command_party`
-(an extension's own command). [EXTENSION-GUIDE.md](EXTENSION-GUIDE.md) walks through them. **Not built:** the two
-below, `allow-all` and `file-permissions`, which this page planned and which are not in the repository.
+**Built:** five programs in `crates/meridian-extension/examples/`: `allow_all` (the one to start from, below),
+`login_gate` (the admission at login), `server_chooser` (the choice of server), `command_ranks` (the permission of a
+command) and `command_party` (an extension's own command). [EXTENSION-GUIDE.md](EXTENSION-GUIDE.md) walks through
+them. **Not built:** `file-permissions`, below, which this page planned and which is not in the repository.
 
-- **`allow-all`** (not built). It answers `Default` to everything and logs each request with its time. It is
-  the smallest extension that runs, the template to copy, and the one the proxy's integration
-  tests start. It shows that the proxy with an extension that never disagrees behaves as without
-  one.
+- **`allow-all`** (built: `examples/allow_all.rs`). It asks for the three decisions (`decide.login`, `decide.server`,
+  `decide.command`), answers `Default` to each, and writes one line for each request on its standard output: the time
+  (milliseconds since 1970), the decision, the player's name, and why the player is placed and how many servers are
+  offered, or the permission nodes a command checks (a node may name a server of the configuration). It never writes
+  the player's address, the address they typed to connect, or the command they typed and its arguments. It is the
+  smallest extension that runs, the template to copy.
+  - **The proxy's tests run it as a separate process** (`session/tests/extension/allow_all.rs` in `meridian-proxy`): the
+    program cargo builds for it, whose path cargo gives
+    (`cargo build -p meridian-extension --example allow_all --message-format=json`, the same on Linux and Windows),
+    started with a token file and port 0, the port the system picks being read from the line the SDK writes when it
+    listens. With fake backends, they check that with it a player goes where the routes and the balancer send them
+    without it, that a command is decided by `permissions.toml` as without it, that it is asked each time and never runs
+    out of time, and that once it is stopped the on-error policies (`default`) decide at once. Every wait is for a line
+    or a state, bounded (10 s), and fails with what was seen; no port is fixed. The test needs cargo, which runs it; it
+    does not fall back on the SDK's `serve` in a thread, which would not be a separate process.
 - **`file-permissions`** (not built). It reads a TOML file of players (by unique id) and the nodes they are
   given or denied. It answers `decide.command` from it, with `cache_seconds` 60. It declares one
   command, `/extperms reload`, under its own node, which reads the file again and sends
@@ -1450,8 +1461,8 @@ Windows.
    for each method against the code the console uses, and the refusals. This pull request settles
    what happens when an answer would pass the limit of 256 KiB a message (section 2.1), which a
    `players/list` of a large network reaches near 1,700 players: pages, or a higher limit.
-10. **The SDK and `allow-all`** (the SDK is built; `allow-all` is not). Proof: the SDK's tests, and the proxy's integration test with
-    `allow-all` started as a process on both systems.
+10. **The SDK and `allow-all`** (built). Proof: the SDK's tests, and the proxy's test with `allow-all` started as a
+    process, on Linux and Windows (section 8.2).
 11. **`file-permissions`** (not built). Proof: its tests, and an integration test of a rank given by the file.
 12. **The operator's documentation.** OPERATING.md and CONFIG.md gain a section, and the README's
     "Extensions" row changes to the state reached. DESIGN.md sections 13.5 and 14 and PARITY.md's
