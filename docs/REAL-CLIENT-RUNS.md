@@ -216,7 +216,7 @@ What was seen:
   service.
 - No `WARN` and no `ERROR` in the proxy's log.
 - The server saw the player's real address, not the proxy's, through the forwarding.
-- The proxy's counter `logins_total` was 2, and no login failed.
+- The proxy's counter `meridian_logins_total` was 2, and no login failed.
 
 Not covered: the hybrid mode, more than one account at the same time, a long session, an account with no
 licence, and the queue in online mode. One account, one run; the logs are not kept in this repository.

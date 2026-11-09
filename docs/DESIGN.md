@@ -559,7 +559,8 @@ reopened; until then it is the rule.
    advancements and statistics are taken from the target; unknown named blocks are
    kept in the proxy's copy.
 6. **The form of the proxy's extension point.** *Decided 2026-11-02:* a Rust trait
-   first, a local socket later if asked, no dynamic libraries.
+   first, a local socket later if asked, no dynamic libraries. *Replaced on 2026-11-05:*
+   only the socket form is built, in Rust first ([EXTENSIONS.md](EXTENSIONS.md)).
 7. **Login modes** (section 15). *Decided 2026-11-02:* `online` is the default;
    `offline` and `hybrid` are included; the documentation says *verified* and
    *unverified*.
@@ -708,6 +709,10 @@ need, to be proposed there according to that project's own process (section 15).
 
 ### 13.5 An extension point on the proxy
 
+*This section is the first proposal. The operator replaced its recommendation on 2026-11-05: what is built is a
+separate program on a local socket, not a Rust trait, and what it can decide, ask and be told is specified in
+[EXTENSIONS.md](EXTENSIONS.md).*
+
 A plugin sometimes needs to act on the proxy itself: to change a policy for one
 player, to refuse a move, to add a block no server produces, to choose a target.
 The proxy exposes points where such code runs: before a switch is decided, after the
@@ -776,7 +781,7 @@ forwarding was written. The milestones are those of section 11.
 
 | Function | In Meridian | Milestone |
 | --- | --- | --- |
-| Events and an extension API | Rust trait on the proxy (13.5) | J7 |
+| Events and an extension API | A program on a local socket ([EXTENSIONS.md](EXTENSIONS.md); the Rust trait of 13.5 was not built) | J7 |
 | Messages between servers | Named channels carried through the proxy and the sidecars | J7 |
 | Ban lists at the proxy | Bans by name, unique id and address that apply before any backend | J7 |
 | Richer permissions | Groups and per-command permissions, through the extension API | J7 |

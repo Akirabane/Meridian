@@ -352,10 +352,11 @@ External programs the proxy connects to and asks for decisions ([EXTENSIONS.md](
 None by default, and then nothing changes: no thread, no connection, no line on the metrics page.
 One `[[extension]]` for each program. The proxy connects to the extension (never the other way), on
 the loopback, and proves itself to it, and asks it to prove itself, with a token kept in a file. The
-protocol is version 0, which is experimental. **One decision point is wired: the admission at login**
-(`decide.login`, [EXTENSIONS.md](EXTENSIONS.md) section 4.2). The permission of a command and the choice
-of server are not asked yet, so an extension that is granted them is connected and not consulted for
-them, and the proxy decides as it does without one.
+protocol is version 0, which is experimental. **The three decision points are wired**: the admission at login
+(`decide.login`, [EXTENSIONS.md](EXTENSIONS.md) section 4.2), the permission of a command (`decide.command`, 4.3) and
+the choice of server, at login and at the fallback (`decide.server`, 4.4). So are the extension's own commands
+(`commands`), the orders it gives the proxy (`orders.*`, section 5) and the events the proxy tells it (`events`,
+section 6). Each is used only when `grant` holds its capability.
 
 ```toml
 [[extension]]
@@ -411,7 +412,8 @@ configuration without an extension is checked as it always was.
 
 **A reload** closes the connection of an extension it removes or switches off, opens one for an
 extension it adds or switches on, and closes the connection of an extension whose `address`,
-`token-file`, `grant`, `max-in-flight`, `breaker-failures` or `breaker-seconds` changed and opens a
+`token-file`, `grant`, `max-in-flight`, `breaker-failures`, `breaker-seconds`, or a key of its
+`[extension.orders]` or `[extension.events]` table changed, and opens a
 new one (its breaker and counters start again). A change of a `decide-*` table keeps the connection
 and applies to the next decision. An extension that did not change is not touched. Decisions that
 wait on a connection that is closed take their on-error policy. The proxy says which of these it

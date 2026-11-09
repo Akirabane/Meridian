@@ -4,8 +4,9 @@ This page says how to run Meridian in front of one Horizon server on one
 machine, how to check that it relays a player correctly, and what such a check
 showed. The proxy so far is the transparent relay of milestone J1
 ([DESIGN.md](DESIGN.md), section 11): it logs a player in, connects to a
-backend on the player's behalf, and passes everything between them. Switching a
-player between servers is not built yet.
+backend on the player's behalf, and passes everything between them. The page is
+about that relay; moving a player between servers, which is built, is in
+[OPERATING.md](OPERATING.md) and [REAL-NETWORK-RUN.md](REAL-NETWORK-RUN.md).
 
 ## 1. What you need
 

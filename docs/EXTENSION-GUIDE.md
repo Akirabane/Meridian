@@ -492,8 +492,8 @@ let started = proxy.send_all("east")?;                  // every player
 ```
 
 **The answer comes when the moves start**, with how many players the proxy started to move (those who were not on that
-server yet). They go on one after the other, each player is told, and how each one ended is in the proxy's log: until
-there are events (version 1.1), ask `proxy.find_player(...)` where a player is. A server the proxy does not have is refused
+server yet). They go on one after the other, each player is told, and how each one ended comes as an `Event::Moved` (section 9),
+and `proxy.find_player(...)` says where a player is. A server the proxy does not have is refused
 (`OrderError::Refused`, `-32602`). **The order costs the proxy's budget the number of players it moves, at most the
 burst** (charged all at once): a `send_all` on a large network uses the whole burst, and one that the budget cannot pay is
 refused (`retry_later()`) and moves nobody. **A program sends one lot at a time**: while the players of one are being moved,
