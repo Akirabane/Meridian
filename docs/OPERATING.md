@@ -970,22 +970,22 @@ only the setting changed.
 
 | | Level 6 | Level 4 |
 | --- | --- | --- |
-| The proxy's processor time, two runs (cores) | 0.440 and 0.438 | 0.390 and 0.384 |
+| The proxy's processor time, two runs (cores, estimated from the process's cycles that Windows counts) | 0.440 and 0.438 | 0.390 and 0.384 |
 | Mean | 0.439 | 0.387: 0.052 cores less, 11.8 % of the proxy |
-| The bytes the players received, two runs (MB/s) | 8.81 and 8.74 | 8.92 and 8.91: 1.7 % and 1.5 % more |
+| The bytes the players received, two runs (MB/s) | 8.81 and 8.74 | 8.92 and 8.91: 1.7 % and 1.5 % more than the mean of the two level-6 runs |
 
 The rules were set before the test, and all held: both level-4 runs below both level-6 runs; the difference at least
-twice the gap between the two runs of one level (0.006 cores at most: the difference is about nine times that); at
-least 3 % of the proxy; and the bytes at most 5 % more. Every run was valid: the server at 20 ticks a second, its tick
-time at the 95th percentile between 31.9 and 32.6 ms (under the 50 ms limit), no player lost, and the same work from the
-server at both levels (its chunks within 2 %). Other programs of the machine used 0.66 to 0.73 cores during every run,
-the same at both levels within 0.07 cores: a reserve on the absolute figures, not on the comparison. The proxy used
-about 3 MB more memory at level 4.
+twice the gap between the two runs of one level (0.006 cores at most: the difference is about nine times that); at least
+3 % of the proxy; and the bytes at most 5 % more. Every run was valid: the server at 20 ticks a second on average (19.27
+at the lowest sample), its tick time at the 95th percentile between 31.9 and 32.6 ms (under the 50 ms limit), no player
+lost, and the same work from the server at both levels (its chunks within 2 %). Other programs of the machine used 0.66
+to 0.73 cores during every run, the same at both levels within 0.07 cores: a reserve on the absolute figures, not on the
+comparison. The proxy used about 3 MB more memory at level 4.
 
 What this does not say: how real players behave (the bots load chunks all the time, so the compression is a large share
 of the proxy's time; players who move less load fewer chunks, and a level saves less); another machine, more servers
 or more players (one machine, one server, 100 players); level 3 (not measured on a running proxy); the packets towards
-the servers (they keep level 6). The default stays `6`.
+the servers (they keep level 6). This measure does not change the default, `6`.
 
 **What it does not change.** The threshold, the packets towards the servers, the proxy's own messages (they keep level
 6), and the players' side: zlib's format is the same at every level, and every client reads every level.
