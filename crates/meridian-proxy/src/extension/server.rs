@@ -128,11 +128,14 @@ pub(crate) fn choose(
 /// players against its caps, whether it is offered), and the name only for one it knows nothing of.
 fn describe(config: &Config, shared: &Shared, candidates: &[String]) -> Vec<Candidate> {
     let counts = shared.counts();
+    let now = std::time::Instant::now();
     candidates
         .iter()
         .map(|name| {
             let on = counts.get(name).copied().unwrap_or(0);
-            let standing = crate::placing::standing(config, shared, name, on, None);
+            let restarting = shared.restarting(name);
+            let standing =
+                crate::placing::standing(config, shared, name, on, restarting.as_deref());
             let number = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
             Candidate {
                 name: name.clone(),
@@ -141,6 +144,9 @@ fn describe(config: &Config, shared: &Shared, candidates: &[String]) -> Vec<Cand
                 soft_cap: standing.as_ref().map(|s| s.soft_cap),
                 hard_cap: standing.as_ref().map(|s| s.hard_cap),
                 state: standing.as_ref().map(|s| s.offer.state().to_owned()),
+                why: standing.as_ref().and_then(|s| s.offer.why()),
+                up: shared.statuses.answering(name),
+                report: crate::status::report_of(&shared.statuses, name, now),
             }
         })
         .collect()

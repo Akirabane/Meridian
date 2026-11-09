@@ -1,0 +1,5 @@
+{
+  "jsonrpc": "2.0",
+  "method": "meridian:notification/servers/state",
+  "params": {"seq": 41, "at": 1762700000000, "server": "east", "state": "draining", "why": "restarting", "players": 12, "capacity": 24, "stopping": true}
+}

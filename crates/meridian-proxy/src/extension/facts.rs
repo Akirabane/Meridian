@@ -71,14 +71,16 @@ impl Facts for ProxyFacts {
         let config = self.config();
         let players = sessions.players();
         let shared = sessions.shared();
+        let now = std::time::Instant::now();
         config
             .backends
             .iter()
             .map(|backend| {
                 let on = players.iter().filter(|p| p.backend == backend.name).count();
-                // `None` for a server with no role. The detector's reason for a restart is not asked: it only tells
-                // `draining` from `draining`.
-                let standing = placing::standing(&config, &shared, &backend.name, on, None);
+                // `None` for a server with no role. The detector's reason tells `restarting` from `drained`.
+                let restarting = shared.restarting(&backend.name);
+                let standing =
+                    placing::standing(&config, &shared, &backend.name, on, restarting.as_deref());
                 ServerInfo {
                     name: backend.name.clone(),
                     default: backend.name == config.default_backend,
@@ -91,6 +93,9 @@ impl Facts for ProxyFacts {
                         .as_ref()
                         .and_then(|s| s.ping)
                         .map(|p| u64::try_from(p.as_millis()).unwrap_or(u64::MAX)),
+                    why: standing.as_ref().and_then(|s| s.offer.why()),
+                    up: shared.statuses.answering(&backend.name),
+                    report: crate::status::report_of(&shared.statuses, &backend.name, now),
                 }
             })
             .collect()

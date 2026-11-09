@@ -206,6 +206,52 @@ pub enum Placing {
     Other,
 }
 
+/// Why a server is not open to new players, when its `state` is `draining` or `not_offered`: one word of a fixed list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Why {
+    /// The proxy believes it is going down for a restart (it announced its stop, or stopped answering).
+    Restarting,
+    /// Drained on purpose: from the console, or by an extension (`servers/drain`).
+    Drained,
+    /// It does not take the players the proxy sends (its transfers are off).
+    NotAccepting,
+    /// It has not reported its state recently enough to be believed.
+    NoReport,
+    /// A word that this version does not know.
+    #[serde(other)]
+    Other,
+}
+
+/// What a server last said of itself (Horizon's `transfer-status`), read by the proxy at its rounds of readings. A field the
+/// server did not give is absent. `age_ms` is how long ago it was read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerReport {
+    /// The players it counts: placed, held for a hand-over and still joining (Horizon's `online`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub players: Option<u64>,
+    /// The most players it takes (`max_players`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u64>,
+    /// Players held for a hand-over, not placed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<u64>,
+    /// Places promised to players announced by the proxy, not logged in yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<u64>,
+    /// Players it is handing over to another server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen: Option<u64>,
+    /// Whether it takes no more ordinary logins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full: Option<bool>,
+    /// Whether it has begun to stop and takes nobody any more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping: Option<bool>,
+    /// Milliseconds since the reading.
+    pub age_ms: u64,
+}
+
 /// A server the player may be sent to, as the proxy sees it now. With balancing off, or for a server
 /// that has no role, everything but the name is null: the proxy knows nothing more of it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +271,15 @@ pub struct Candidate {
     /// `not_offered` (no recent report from it). A word a later version adds is to be read as `closed`.
     #[serde(default)]
     pub state: Option<String>,
+    /// Why it is `draining` or `not_offered`; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<Why>,
+    /// Whether it answered at the proxy's last round of readings; absent for a server the rounds do not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<bool>,
+    /// What it last said of itself; absent for a server the rounds do not read, or that never answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ServerReport>,
 }
 
 /// What the proxy tells the extension when it places a player.
@@ -745,6 +800,36 @@ mod tests {
 
     // ---- the choice of server ------------------------------------------------------------------
 
+    /// The candidates of `decide/server` with why each is kept from players, whether it answered and what it last said of
+    /// itself: read and written as the golden file says. A candidate without them writes none of the three.
+    #[test]
+    fn the_candidates_with_their_state_are_what_the_golden_file_says() {
+        let Message::Request { id, method, params } =
+            Message::parse(&golden("server.request.state.json")).unwrap()
+        else {
+            panic!("a request");
+        };
+        assert_eq!((id, method.as_str()), (Some(6.into()), SERVER));
+        let read: ServerParams = wire::decode(params.as_ref()).unwrap();
+        let candidates = &read.request.candidates;
+        assert_eq!((candidates[0].why, candidates[0].up), (None, Some(true)));
+        assert_eq!(candidates[0].report.and_then(|r| r.stopping), Some(false));
+        assert_eq!(
+            (candidates[1].why, candidates[1].up),
+            (Some(Why::Drained), Some(true))
+        );
+        assert_eq!(
+            candidates[1].report.map(|r| (r.players, r.full, r.age_ms)),
+            Some((Some(3), None, 800))
+        );
+        assert_eq!(
+            (candidates[2].why, candidates[2].up, candidates[2].report),
+            (None, None, None)
+        );
+        let written = wire::request(6, SERVER, Some(&read));
+        assert_eq!(value(&written), value(&golden("server.request.state.json")));
+    }
+
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| (*n).to_owned()).collect()
     }
@@ -761,6 +846,9 @@ mod tests {
             soft_cap: Some(20),
             hard_cap: Some(30),
             state: Some(state.into()),
+            why: None,
+            up: None,
+            report: None,
         };
         ServerRequest {
             player: alex().player,
@@ -777,6 +865,9 @@ mod tests {
                     soft_cap: None,
                     hard_cap: None,
                     state: None,
+                    why: None,
+                    up: None,
+                    report: None,
                 },
             ],
         }

@@ -1,6 +1,7 @@
 use super::*;
 use crate::extension::events::told_events;
 use meridian_config::{BalancedServer, Role};
+use meridian_extension::decide::Why;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ fn status(players: u64) -> ServerStatus {
         players: Some(players),
         capacity: Some(20),
         accepts_transfers: Some(true),
+        ..ServerStatus::default()
     }
 }
 
@@ -346,6 +348,241 @@ fn the_extensions_are_told_a_server_that_went_down_with_why_and_one_that_came_ba
     assert_eq!(seqs, [1, 2, 3]);
 }
 
+// ---- servers/state, and what servers/list and the candidates tell of a server ----
+
+/// A status that names its stop, as Horizon's `transfer-status` does.
+fn stopping(players: u64, stopping: bool) -> ServerStatus {
+    ServerStatus {
+        stopping: Some(stopping),
+        ..status(players)
+    }
+}
+
+/// The sessions of a test, with the configuration of [`config`] balanced and a detector that drains on the balancer of these
+/// sessions, as the proxy wires them.
+fn sessions_with_detector() -> (Arc<crate::session::Sessions>, Arc<Detector>) {
+    let sessions = Arc::new(crate::session::Sessions::default());
+    let detector = Arc::new(Detector::new(
+        Arc::clone(&sessions.balancer),
+        Arc::new(Nobody),
+        crate::restart::Settings::default(),
+    ));
+    let _ = sessions.restarts.set(Arc::downgrade(&detector));
+    (sessions, detector)
+}
+
+/// The words of a `servers/state` kind, for an assertion.
+fn words(
+    kind: &Kind,
+) -> (
+    String,
+    String,
+    Option<Why>,
+    Option<u64>,
+    Option<u64>,
+    Option<bool>,
+) {
+    match kind {
+        Kind::ServerState {
+            server,
+            state,
+            why,
+            players,
+            capacity,
+            stopping,
+        } => (
+            server.clone(),
+            state.clone(),
+            *why,
+            *players,
+            *capacity,
+            *stopping,
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The first round that sees a server tells nothing; after it, a change of its word, of why, or of what it says of its stop
+/// is told once, and a round where nothing changed tells nothing.
+#[test]
+fn the_state_of_a_server_is_told_when_it_changes_and_not_at_the_first_round() {
+    let (sessions, _detector) = sessions_with_detector();
+    let shared = sessions.shared();
+    let config = config();
+    let start = Instant::now();
+    let on = |_: &str| 2;
+    shared.statuses.record("lobby", stopping(2, false), start);
+    shared.statuses.record("east", status(2), start);
+    assert!(
+        state_changes(&config, &shared, on, start).is_empty(),
+        "the first round sets what each starts from"
+    );
+    assert!(
+        state_changes(&config, &shared, on, start).is_empty(),
+        "nothing changed"
+    );
+    // Drained from the console.
+    shared.balancer.drain("east");
+    let told = state_changes(&config, &shared, on, start);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(
+        words(&told[0]),
+        (
+            "east".into(),
+            "draining".into(),
+            Some(Why::Drained),
+            Some(2),
+            Some(20),
+            None
+        )
+    );
+    assert!(
+        state_changes(&config, &shared, on, start).is_empty(),
+        "told once"
+    );
+    // Lobby says it has begun to stop: its word is the same, and the change is told.
+    shared.statuses.record("lobby", stopping(2, true), start);
+    let told = state_changes(&config, &shared, on, start);
+    assert_eq!(
+        told.iter().map(words).collect::<Vec<_>>(),
+        [(
+            "lobby".into(),
+            "open".into(),
+            None,
+            Some(2),
+            Some(20),
+            Some(true)
+        )]
+    );
+    // Lobby's report is past the age it is believed for, at the time the round is read: what it said of its stop is not
+    // believed any more, and that is a change. (The balancer reads its own clock for the word, which this does not move.)
+    let later = start + AGE + Duration::from_secs(1);
+    let told = state_changes(&config, &shared, on, later);
+    assert_eq!(
+        told.iter().map(words).collect::<Vec<_>>(),
+        [("lobby".into(), "open".into(), None, Some(2), None, None)]
+    );
+}
+
+/// Balancing turned off and on again: what was seen before is forgotten, and the first round after it tells nothing, though the
+/// server changed meanwhile.
+#[test]
+fn the_first_round_after_balancing_is_back_tells_nothing() {
+    let (sessions, _detector) = sessions_with_detector();
+    let shared = sessions.shared();
+    let config = config();
+    let now = Instant::now();
+    shared.statuses.record("east", status(1), now);
+    shared.statuses.record("lobby", status(1), now);
+    assert!(state_changes(&config, &shared, |_| 0, now).is_empty());
+    // Off: the loop forgets. Meanwhile east is drained.
+    shared.statuses.forget_states();
+    shared.balancer.drain("east");
+    assert!(
+        state_changes(&config, &shared, |_| 0, now).is_empty(),
+        "a new start, not a change"
+    );
+    shared.balancer.undrain("east");
+    assert_eq!(state_changes(&config, &shared, |_| 0, now).len(), 1);
+}
+
+/// A server the detector has going down is `restarting`, not `drained`, in the event as in what placement tells: the sessions
+/// reach the detector.
+#[test]
+fn a_server_going_down_for_a_restart_is_told_as_restarting() {
+    let (sessions, detector) = sessions_with_detector();
+    let shared = sessions.shared();
+    let config = config();
+    let now = Instant::now();
+    shared.statuses.record("east", status(1), now);
+    shared.statuses.record("lobby", status(1), now);
+    assert!(state_changes(&config, &shared, |_| 0, now).is_empty());
+    detector.announce("east", crate::restart::Cause::Announced, now);
+    assert!(shared.restarting("east").is_some());
+    let told = state_changes(&config, &shared, |_| 0, now);
+    assert_eq!(
+        told.iter().map(words).collect::<Vec<_>>(),
+        [(
+            "east".into(),
+            "draining".into(),
+            Some(Why::Restarting),
+            // The players the balancer counts: the sessions (none here), or what the server reported, if more.
+            Some(1),
+            Some(20),
+            None
+        )]
+    );
+    // Without a detector (the sessions of a test, or one the proxy dropped) a drain is only `drained`.
+    let alone = crate::session::Sessions::default();
+    assert!(alone.shared().restarting("east").is_none());
+}
+
+/// What a server last said of itself, as an extension is told it: every field it gave, and the age of the reading, capped at a
+/// day. Nothing for a server no round read.
+#[test]
+fn the_report_of_a_server_is_its_last_reading_and_its_age() {
+    let statuses = Statuses::default();
+    let at = Instant::now();
+    assert_eq!(report_of(&statuses, "lobby", at), None);
+    let full = ServerStatus {
+        held: Some(1),
+        expected: Some(2),
+        frozen: Some(0),
+        full: Some(true),
+        stopping: Some(false),
+        ..status(20)
+    };
+    statuses.record("lobby", full, at);
+    let report = report_of(&statuses, "lobby", at + Duration::from_millis(2400)).unwrap();
+    assert_eq!(
+        (
+            report.players,
+            report.capacity,
+            report.held,
+            report.expected,
+            report.frozen
+        ),
+        (Some(20), Some(20), Some(1), Some(2), Some(0))
+    );
+    assert_eq!(
+        (report.full, report.stopping, report.age_ms),
+        (Some(true), Some(false), 2400)
+    );
+    let old = report_of(&statuses, "lobby", at + Duration::from_secs(3 * 86_400)).unwrap();
+    assert_eq!(old.age_ms, MAX_AGE_MS);
+}
+
+/// The event as an extension that listens receives it: its words, and nothing of a player.
+#[test]
+fn servers_state_reaches_the_extensions_that_listen_as_its_words() {
+    let registry = Registry::default();
+    let recorded = registry.bus().recording(false);
+    let (sessions, _detector) = sessions_with_detector();
+    let shared = sessions.shared();
+    let config = config();
+    let now = Instant::now();
+    shared.statuses.record("east", status(3), now);
+    shared.statuses.record("lobby", status(3), now);
+    let _ = state_changes(&config, &shared, |_| 3, now);
+    shared.balancer.drain("east");
+    for kind in state_changes(&config, &shared, |_| 3, now) {
+        registry.emit(move || kind);
+    }
+    let events = told_events(&recorded, 1);
+    assert_eq!(events[0].0, "meridian:notification/servers/state");
+    let params = &events[0].1;
+    assert_eq!(params["server"], "east");
+    assert_eq!(params["state"], "draining");
+    assert_eq!(params["why"], "drained");
+    assert_eq!(params["players"], 3);
+    assert_eq!(params["capacity"], 20);
+    assert!(
+        params.get("stopping").is_none(),
+        "unknown, so not written: {params}"
+    );
+    assert!(params.get("player").is_none() && params.get("address").is_none());
+}
+
 // ---- The whole way: the proxy, a sidecar over a socket, and a backend's endpoint ----
 
 const SECRET: &[u8] = b"the secret the proxy and the sidecar share";
@@ -440,6 +677,7 @@ fn the_proxy_reads_a_backends_state_through_its_sidecar() {
             players: Some(6),
             capacity: Some(16),
             accepts_transfers: Some(false),
+            ..ServerStatus::default()
         }
     );
 }
@@ -457,6 +695,11 @@ fn the_proxy_reads_horizons_transfer_status_through_its_sidecar() {
             players: Some(13),
             capacity: Some(20),
             accepts_transfers: Some(true),
+            held: Some(1),
+            expected: Some(2),
+            frozen: Some(0),
+            full: Some(false),
+            stopping: None,
         }
     );
 }

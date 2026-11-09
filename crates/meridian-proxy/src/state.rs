@@ -32,7 +32,7 @@ pub struct Proxy {
     /// The connections that are logging in now.
     pub logins: Arc<crate::throttle::Logins>,
     /// Which backends are going down (docs/RESTART.md).
-    pub restarts: Detector,
+    pub restarts: Arc<Detector>,
     /// The bans and whitelist changes still to be told to the servers (`[access.sync]`).
     pub access_sync: Arc<crate::access::sync::Outbox>,
     /// The extensions the proxy keeps a connection to (docs/EXTENSIONS.md). None are started
@@ -63,14 +63,16 @@ impl Proxy {
         extensions.serve_actions(Arc::new(crate::extension::actions::ProxyActions::new(
             &sessions, &config,
         )));
-        let restarts = Detector::new(
+        let restarts = Arc::new(Detector::new(
             Arc::clone(&sessions.balancer),
             Arc::new(Counted {
                 metrics: Arc::clone(sessions.metrics()),
                 inner: Evacuator::new(Arc::clone(&sessions), Arc::clone(&config)),
             }),
             settings,
-        );
+        ));
+        // Weakly: the detector holds the sessions (its evacuator), and a hold both ways would keep both for good.
+        let _ = sessions.restarts.set(Arc::downgrade(&restarts));
         Self {
             config,
             config_path,

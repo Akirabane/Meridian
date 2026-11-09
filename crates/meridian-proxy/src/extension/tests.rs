@@ -2022,6 +2022,9 @@ mod the_orders {
                     hard_cap: Some(50),
                     state: Some("open".into()),
                     ping_ms: Some(4),
+                    why: None,
+                    up: None,
+                    report: None,
                 },
                 ServerInfo {
                     name: "east".into(),
@@ -2032,6 +2035,9 @@ mod the_orders {
                     hard_cap: Some(24),
                     state: Some("draining".into()),
                     ping_ms: None,
+                    why: None,
+                    up: None,
+                    report: None,
                 },
                 ServerInfo {
                     name: "tools".into(),
@@ -2042,6 +2048,9 @@ mod the_orders {
                     hard_cap: None,
                     state: None,
                     ping_ms: None,
+                    why: None,
+                    up: None,
+                    report: None,
                 },
             ]
         }

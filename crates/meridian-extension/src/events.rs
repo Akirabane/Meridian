@@ -12,7 +12,7 @@
 //! **Protocol 0, so a field is optional**: these structures do not refuse a field they do not know, and a new field can be added
 //! to an event without changing the version. A method this SDK does not know is [`Event::Unknown`].
 
-use crate::decide::Player;
+use crate::decide::{Player, Why};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -28,6 +28,8 @@ pub const PLAYERS_FALLBACK: &str = "meridian:notification/players/fallback";
 pub const SERVERS_DOWN: &str = "meridian:notification/servers/down";
 /// The proxy saw that a server answers again.
 pub const SERVERS_UP: &str = "meridian:notification/servers/up";
+/// A server's state for new players changed (`open`, `closed`, `draining`, `not_offered`), or why, or whether it is stopping.
+pub const SERVERS_STATE: &str = "meridian:notification/servers/state";
 /// A player entered the line that waits for a place.
 pub const QUEUE_ENTERED: &str = "meridian:notification/queue/entered";
 /// A player left the line that waits for a place.
@@ -176,6 +178,27 @@ pub struct ServerDown {
     pub cause: Option<DownCause>,
 }
 
+/// `servers/state`: the server's state for new players changed, as `servers/list` gives it (`state`, and `why` for `draining` and
+/// `not_offered`), or it began or stopped stopping. Told at most once for each server at each round of readings; the first round
+/// that reads a server sets what it starts from, and nothing is told. `players` are the players the balancer counts on it (those on
+/// it and the places held for players being sent there, or what the server reported, if that is more), `capacity` and `stopping`
+/// what the server said of itself in a report that is still believed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerState {
+    pub seq: u64,
+    pub at: u64,
+    pub server: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<Why>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub players: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping: Option<bool>,
+}
+
 /// `queue/entered`: a player entered the line, at `position` (1 is the first to be served) when they entered. A player who finds a place
 /// at once never enters the line, and is not told.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,9 +248,11 @@ pub struct Dropped {
 /// The most characters of the name of a method [`Event::Unknown`] keeps.
 pub const MAX_UNKNOWN_METHOD: usize = 64;
 
-/// An event, as an extension reads it. A version of the SDK that adds an event adds a variant: give a `match` on it a `_` arm, or it stops
-/// compiling at the upgrade (the protocol does not change when an event is added).
+/// An event, as an extension reads it. A version of the SDK that adds an event adds a variant, so the enum is `non_exhaustive`: a `match`
+/// on it outside this crate needs a `_` arm, which keeps it compiling when a later version adds one (the protocol does not change when an
+/// event is added).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     Joined(Joined),
     Left(Left),
@@ -235,6 +260,7 @@ pub enum Event {
     Fallback(Fallback),
     ServerUp(ServerUp),
     ServerDown(ServerDown),
+    ServerState(ServerState),
     QueueEntered(QueueEntered),
     QueueLeft(QueueLeft),
     Dropped(Dropped),
@@ -255,6 +281,7 @@ impl Event {
             PLAYERS_FALLBACK => read(params).map(Event::Fallback),
             SERVERS_UP => read(params).map(Event::ServerUp),
             SERVERS_DOWN => read(params).map(Event::ServerDown),
+            SERVERS_STATE => read(params).map(Event::ServerState),
             QUEUE_ENTERED => read(params).map(Event::QueueEntered),
             QUEUE_LEFT => read(params).map(Event::QueueLeft),
             EVENTS_DROPPED => read(params).map(Event::Dropped),
@@ -270,6 +297,65 @@ mod tests {
     use super::*;
     use crate::decide::Auth;
     use serde_json::json;
+
+    #[test]
+    fn servers_state_is_what_its_golden_file_says_and_what_the_proxy_writes_is_what_the_sdk_reads()
+    {
+        let path = format!(
+            "{}/golden/protocol-0/servers-state.notification.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let crate::wire::Message::Request {
+            id: None,
+            method,
+            params,
+        } = crate::wire::Message::parse(&text).unwrap()
+        else {
+            panic!("a notification");
+        };
+        assert_eq!(method, SERVERS_STATE);
+        let state = ServerState {
+            seq: 41,
+            at: 1_762_700_000_000,
+            server: "east".into(),
+            state: "draining".into(),
+            why: Some(Why::Restarting),
+            players: Some(12),
+            capacity: Some(24),
+            stopping: Some(true),
+        };
+        assert_eq!(
+            Event::parse(&method, params.as_ref()),
+            Event::ServerState(state.clone())
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&crate::wire::notification(SERVERS_STATE, &state)).unwrap();
+        assert_eq!(
+            written,
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()
+        );
+        // Only the server and its word are required: the rest is absent when unknown, and not written then.
+        let bare = ServerState {
+            seq: 1,
+            at: 2,
+            server: "lobby".into(),
+            state: "open".into(),
+            why: None,
+            players: None,
+            capacity: None,
+            stopping: None,
+        };
+        let value = serde_json::to_value(&bare).unwrap();
+        assert_eq!(
+            value,
+            json!({"seq": 1, "at": 2, "server": "lobby", "state": "open"})
+        );
+        assert_eq!(
+            Event::parse(SERVERS_STATE, Some(&value)),
+            Event::ServerState(bare)
+        );
+    }
 
     fn player() -> Player {
         Player {

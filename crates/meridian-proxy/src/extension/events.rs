@@ -19,12 +19,13 @@
 use super::link::Link;
 use super::stats::Stats;
 use crate::log::warning;
+use meridian_extension::decide::Why;
 use meridian_extension::decide::{Auth, Player};
 use meridian_extension::events::{
     DownCause, Dropped, EVENTS_DROPPED, FailedStep, Fallback, Joined, Left, LeftReason, Loss,
     MoveOutcome, Moved, PLAYERS_FALLBACK, PLAYERS_JOINED, PLAYERS_LEFT, PLAYERS_MOVED,
-    QUEUE_ENTERED, QUEUE_LEFT, QueueCause, QueueEntered, QueueLeft, SERVERS_DOWN, SERVERS_UP,
-    ServerDown, ServerUp,
+    QUEUE_ENTERED, QUEUE_LEFT, QueueCause, QueueEntered, QueueLeft, SERVERS_DOWN, SERVERS_STATE,
+    SERVERS_UP, ServerDown, ServerState, ServerUp,
 };
 use meridian_extension::wire;
 use meridian_websocket::Writer;
@@ -70,6 +71,15 @@ pub enum Kind {
         server: String,
         cause: Option<DownCause>,
     },
+    /// The state of the server for new players changed (its word, why, or whether it is stopping).
+    ServerState {
+        server: String,
+        state: String,
+        why: Option<Why>,
+        players: Option<u64>,
+        capacity: Option<u64>,
+        stopping: Option<bool>,
+    },
     /// The player entered the line that waits for a place, at `position` (1 is the first).
     QueueEntered { player: Player, position: u64 },
     /// The player left the line.
@@ -99,6 +109,7 @@ impl Kind {
             Kind::Fallback { .. } => "players/fallback",
             Kind::ServerUp { .. } => "servers/up",
             Kind::ServerDown { .. } => "servers/down",
+            Kind::ServerState { .. } => "servers/state",
             Kind::QueueEntered { .. } => "queue/entered",
             Kind::QueueLeft { .. } => "queue/left",
         }
@@ -184,6 +195,26 @@ impl Kind {
                     at,
                     server: server.clone(),
                     cause: *cause,
+                },
+            ),
+            Kind::ServerState {
+                server,
+                state,
+                why,
+                players,
+                capacity,
+                stopping,
+            } => wire::notification(
+                SERVERS_STATE,
+                &ServerState {
+                    seq,
+                    at,
+                    server: server.clone(),
+                    state: state.clone(),
+                    why: *why,
+                    players: *players,
+                    capacity: *capacity,
+                    stopping: *stopping,
                 },
             ),
             Kind::QueueEntered { player, position } => wire::notification(

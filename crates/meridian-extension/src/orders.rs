@@ -17,7 +17,7 @@
 //! [`wire::code::OVER_BUDGET`] and one that finds too many running with [`wire::code::TOO_MANY_RUNNING`].
 //! Neither ran.
 
-use crate::decide::Auth;
+use crate::decide::{Auth, ServerReport, Why};
 use crate::wire::DiscoverMethod;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -337,6 +337,15 @@ pub struct ServerInfo {
     /// How long it took to answer the last time the proxy asked its sidecar, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ping_ms: Option<u64>,
+    /// Why it is `draining` or `not_offered`; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<Why>,
+    /// Whether it answered at the proxy's last round of readings; absent for a server the rounds do not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<bool>,
+    /// What it last said of itself; absent for a server the rounds do not read, or that never answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ServerReport>,
 }
 
 /// `result` of [`SERVERS_LIST`].
@@ -887,6 +896,64 @@ mod tests {
     }
 
     const ALEX: &str = "0a2ea4ba-bced-39d2-80e1-1ad51a0e925c";
+
+    /// `servers/list` with what each server last said of itself, why it is kept from players and whether it answered: read
+    /// and written as its golden file says. A server the rounds do not read has none of them.
+    #[test]
+    fn the_servers_list_with_the_state_of_each_server_is_what_its_golden_file_says() {
+        let Message::Response {
+            outcome: Ok(result),
+            ..
+        } = Message::parse(&golden("servers-list.answer.state.json")).unwrap()
+        else {
+            panic!("an answer");
+        };
+        let list: ServersList = serde_json::from_value(result.clone()).unwrap();
+        let [lobby, east, west, tools] = &list.servers[..] else {
+            panic!("four servers");
+        };
+        assert_eq!((lobby.why, lobby.up), (None, Some(true)));
+        let report = lobby.report.unwrap();
+        assert_eq!(
+            (
+                report.players,
+                report.capacity,
+                report.held,
+                report.expected,
+                report.frozen
+            ),
+            (Some(31), Some(60), Some(1), Some(2), Some(0))
+        );
+        assert_eq!(
+            (report.full, report.stopping, report.age_ms),
+            (Some(false), Some(false), 2400)
+        );
+        assert_eq!(
+            (east.why, east.up),
+            (Some(crate::decide::Why::Restarting), Some(false))
+        );
+        let report = east.report.unwrap();
+        assert_eq!(
+            (report.stopping, report.held, report.full),
+            (Some(true), None, None)
+        );
+        assert_eq!(
+            (west.why, west.up, west.report),
+            (Some(crate::decide::Why::NoReport), Some(false), None)
+        );
+        assert_eq!((tools.why, tools.up, tools.report), (None, None, None));
+        assert_eq!(serde_json::to_value(&list).unwrap(), result);
+    }
+
+    /// A word for `why` that a later proxy adds is read as `Other`, not refused.
+    #[test]
+    fn a_why_this_version_does_not_know_is_other() {
+        let info: ServerInfo = serde_json::from_value(serde_json::json!({
+            "name": "east", "default": false, "players": 0, "state": "draining", "why": "flooded"
+        }))
+        .unwrap();
+        assert_eq!(info.why, Some(crate::decide::Why::Other));
+    }
 
     #[test]
     fn the_requests_are_what_the_golden_files_say_and_the_proxy_reads_them() {

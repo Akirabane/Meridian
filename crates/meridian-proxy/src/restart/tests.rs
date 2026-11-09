@@ -243,6 +243,7 @@ fn the_rounds_of_the_poller_drain_a_backend_whose_sidecar_goes_quiet() {
                 players: Some(1),
                 capacity: Some(20),
                 accepts_transfers: Some(true),
+                ..ServerStatus::default()
             })
         }
     };
@@ -262,6 +263,7 @@ fn the_rounds_of_the_poller_drain_a_backend_whose_sidecar_goes_quiet() {
             players: Some(0),
             capacity: Some(20),
             accepts_transfers: Some(true),
+            ..ServerStatus::default()
         })
     };
     poll(&config, &all_up, &statuses);
