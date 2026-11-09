@@ -623,14 +623,14 @@ let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match
   **`QueueEntered`** gives the place a player took when they entered the line (`position`, 1 first; it is not told again as the line moves), and **`QueueLeft`** says why they left it: `Served`, `Left`, `Timeout`,
   `Shutdown` or `Refused` (their turn came and no session followed). A player who finds a place at once is in neither.
 - **`ServerState`** says that a server's state for new players changed: its word (`open`, `closed`, `draining`,
-  `not_offered`), why it is kept from players (`ServerState::why`: `Restarting`, `Drained`, `NotAccepting`, `NoReport`), or
-  whether it is stopping, with the players the balancer counts on it and its capacity when it reported one. It comes once at
-  most for each server at each round of readings (10 s by default), never at the first round: wait for it instead of asking
-  `servers/list` again and again.
+  `not_offered`), why it is kept from players (`ServerState::why`: `Restarting`, `Drained`, `NotAccepting`, `NoReport`),
+  or whether it is stopping, with the players the balancer counts on it and its capacity when it reported one. It comes
+  once at most for each server at each round of readings (10 s by default), never at the first round: wait for it
+  instead of asking `servers/list` again and again.
 - **`Event` is `#[non_exhaustive]`**: each version of the SDK that adds an event adds a variant (`Moved`, `Fallback`,
-  `ServerDown`, `ServerUp`, `ServerState`, `QueueEntered` and `QueueLeft` came after `Joined`, `Left` and `Dropped`), so a
-  `match` on `Event` outside the SDK must have a `_` arm, and keeps compiling when a later version adds one. The protocol does
-  not change when an event is added (an extension that does not know it ignores it).
+  `ServerDown`, `ServerUp`, `ServerState`, `QueueEntered` and `QueueLeft` came after `Joined`, `Left` and `Dropped`), so
+  a `match` on `Event` outside the SDK must have a `_` arm, and keeps compiling when a later version adds one. The
+  protocol does not change when an event is added (an extension that does not know it ignores it).
 - An event is **never a decision**: you cannot answer it or refuse anything with it. To refuse a login use `on_login`.
 
 ## Good to know
