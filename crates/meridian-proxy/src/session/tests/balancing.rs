@@ -1219,3 +1219,35 @@ fn play_in_game_tells_a_player_already_on_the_game_server_so() {
     let _keep = (relay, handle, player, server);
     assert_eq!(hook("play").as_deref(), Some("You are already on arena."));
 }
+
+/// A server only joined or left with a login (`seamless-arrival = false`, a hardcore world) is never
+/// chosen for a player of another kind of server, and a player on one is only sent to another like it:
+/// `/hub`, `/play`, `drain --move` and an evacuation choose among the servers the move can reach.
+#[test]
+fn the_choice_of_a_server_leaves_out_those_a_seamless_move_cannot_reach() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let mut config = with_queue(5, 5);
+    config.no_seamless_arrival.insert("east".into());
+    // East is the fullest lobby, and is left out for a player on an ordinary server.
+    let _held = [
+        hold(&sessions, &config, "east"),
+        hold(&sessions, &config, "east"),
+    ];
+    let (target, _place) = placing::hub(&config, &shared, open_to_all, "guests").unwrap();
+    assert_ne!(target, "east");
+    // A player on a closed server goes only to another closed one: here, west, though east is fuller.
+    let closed = |config: &mut Config, names: &[&str]| {
+        config.no_seamless_arrival = names.iter().map(|n| n.to_string()).collect();
+    };
+    closed(&mut config, &["guests", "west"]);
+    let (target, _place) = placing::hub(&config, &shared, open_to_all, "guests").unwrap();
+    assert_eq!(target, "west");
+    // The players of a drained closed lobby: only the other closed lobby.
+    closed(&mut config, &["east", "west"]);
+    let place = placing::elsewhere(&config, &shared, "east").unwrap();
+    assert_eq!(place.backend(), "west");
+    // With no other closed lobby, nowhere.
+    closed(&mut config, &["east"]);
+    assert!(placing::elsewhere(&config, &shared, "east").is_err());
+}

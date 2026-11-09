@@ -330,6 +330,8 @@ fn in_roles(
         let servers: Vec<Server<'_>> = config
             .servers_with_role(role)
             .filter(|s| open_to(&s.backend))
+            // Never a server the player cannot be moved to seamlessly (`seamless-arrival`).
+            .filter(|s| config.seamless_between(current, &s.backend))
             .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
             .collect();
         let reserved = shared.balancer.reserve(
@@ -378,6 +380,8 @@ pub fn elsewhere(config: &Config, shared: &Shared, from: &str) -> Result<Reserva
         .servers_with_role(role)
         .filter(|s| s.backend != from)
         .filter(|s| kind.is_none_or(|k| !crate::route::serves_other_kind(config, &s.backend, k)))
+        // Never a server the players of `from` cannot be moved to seamlessly (`seamless-arrival`).
+        .filter(|s| config.seamless_between(from, &s.backend))
         .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
         .collect();
     shared

@@ -787,6 +787,13 @@ impl Config {
         !self.no_seamless_arrival.contains(backend)
     }
 
+    /// Whether a player may be moved seamlessly from `from` to `to`: both take seamless arrivals, or neither
+    /// does. A client keeps the values of its login (a hardcore world's hearts and death screen), so a move
+    /// into such a server, or out of it to one that is not, would show the other world's.
+    pub fn seamless_between(&self, from: &str, to: &str) -> bool {
+        self.takes_seamless_arrival(from) == self.takes_seamless_arrival(to)
+    }
+
     /// Checks what the types alone cannot: there is at least one backend, names
     /// are unique and not empty, addresses are `host:port`, the default backend
     /// exists, the fallback list names other backends once each, the connect

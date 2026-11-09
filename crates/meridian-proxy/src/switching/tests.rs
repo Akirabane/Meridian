@@ -149,6 +149,8 @@ struct Sidecars {
     seamless: bool,
     /// Whether east takes no seamless arrival (`seamless-arrival = false`).
     closed_east: bool,
+    /// Whether lobby takes none either.
+    closed_lobby: bool,
 }
 
 /// The host of east's seamless forced host, when the test has one.
@@ -317,6 +319,9 @@ fn world(sidecars: Sidecars) -> World {
     if sidecars.closed_east {
         config.no_seamless_arrival.insert("east".into());
     }
+    if sidecars.closed_lobby {
+        config.no_seamless_arrival.insert("lobby".into());
+    }
     let hook_config = Arc::new(config.clone());
     let mut proxy = Proxy::new(
         config,
@@ -333,6 +338,7 @@ fn world(sidecars: Sidecars) -> World {
         state_groups: _,
         seamless,
         closed_east: _,
+        closed_lobby: _,
     } = sidecars;
     let during_export = during_export.map(Arc::new);
     let controls = {
@@ -1625,19 +1631,51 @@ fn a_second_transfer_during_a_seamless_move_is_dropped() {
     relay.join().unwrap().unwrap();
 }
 
-/// A backend that takes no seamless arrival (a hardcore world) is refused to every move, before any
-/// sidecar is asked, and the player is told how its players join it.
+/// A server only joined or left with a login (`seamless-arrival = false`, a hardcore world): a move to it
+/// from an ordinary server is refused, and a move from it to an ordinary one too, before any sidecar is
+/// asked; the line says so in words a player reads, without the setting's name.
 #[test]
-fn a_move_to_a_backend_without_seamless_arrival_is_refused() {
-    let World { proxy, log, .. } = world(Sidecars {
+fn a_move_into_or_out_of_a_server_without_seamless_arrival_is_refused() {
+    for (closed_east, closed_lobby, closed) in [(true, false, "east"), (false, true, "lobby")] {
+        let World { proxy, log, .. } = world(Sidecars {
+            closed_east,
+            closed_lobby,
+            ..Sidecars::default()
+        });
+        let lines = Commands::builtin().execute(&proxy, "switch Alex east");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("{closed} is only joined or left with a login")),
+            "{lines:?}"
+        );
+        assert!(!lines[0].contains("seamless-arrival"), "{lines:?}");
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+    }
+}
+
+/// Between two servers that both take no seamless arrival the move is made, as between two ordinary ones.
+#[test]
+fn a_move_between_two_servers_without_seamless_arrival_is_made() {
+    let World {
+        proxy,
+        log,
+        mut player,
+        _source,
+        relay,
+        target,
+    } = world(Sidecars {
         closed_east: true,
+        closed_lobby: true,
         ..Sidecars::default()
     });
     let lines = Commands::builtin().execute(&proxy, "switch Alex east");
-    assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
-        lines[0].contains("east takes no seamless arrival") && lines[0].contains("with a login"),
+        lines[0].starts_with("Alex moved from lobby to east"),
         "{lines:?}"
     );
-    assert!(log.lines().is_empty(), "{:?}", log.lines());
+    assert_eq!(log.lines().len(), 5, "{:?}", log.lines());
+    let _ = client_after_switch(&mut player);
+    attack(&mut player, TARGET_ID);
+    target.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
 }

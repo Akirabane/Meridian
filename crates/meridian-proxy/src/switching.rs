@@ -202,11 +202,19 @@ fn attempt(
     if from == backend.name {
         return Err(format!("{name} is already on {target}"));
     }
-    // A server whose players must log in to it (a hardcore world: its hearts and its death screen come with
-    // the login, and a seamless move keeps those of the first server).
-    if !config.takes_seamless_arrival(&backend.name) {
+    // A server whose players must log in to it, or leave it with a login (a hardcore world: its hearts and its
+    // death screen come with the login, and a seamless move keeps those of the first server), in either way.
+    if !config.seamless_between(&from, &backend.name) {
+        let (closed, way) = if config.takes_seamless_arrival(&backend.name) {
+            (&from, "from")
+        } else {
+            (&backend.name, "to")
+        };
+        info!(
+            "{name}: no seamless move from {from} to {target}: {closed} has seamless-arrival = false, and {way} it a player goes only with a login"
+        );
         return Err(failed(format!(
-            "check: {target} takes no seamless arrival (seamless-arrival = false): its players join it with a login, through its own address or a server's transfer"
+            "check: {closed} is only joined or left with a login (its own address, or a server's transfer)"
         )));
     }
     // One switch at a time: the switch itself refuses a second one, but saying so

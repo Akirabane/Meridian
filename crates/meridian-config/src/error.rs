@@ -478,7 +478,7 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::StateGroupOfUnknownBackend(backend) => write!(
                 f,
-                "a state group is given to \"{backend}\", which is not a backend of the configuration"
+                "a state group or seamless-arrival is given to \"{backend}\", which is not a backend of the configuration"
             ),
             ConfigError::LimitWithoutRole { backend, key } => write!(
                 f,

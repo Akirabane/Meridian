@@ -441,3 +441,14 @@ fn a_backend_may_take_no_seamless_arrival_and_then_no_seamless_host_leads_to_it(
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_seamless_move_goes_between_two_open_servers_or_two_closed_ones() {
+    let mut config = Config::from_toml_str(&text("", "", "")).unwrap();
+    assert!(config.seamless_between("lobby", "east"));
+    config.no_seamless_arrival.insert("east".into());
+    assert!(!config.seamless_between("lobby", "east"));
+    assert!(!config.seamless_between("east", "lobby"));
+    config.no_seamless_arrival.insert("lobby".into());
+    assert!(config.seamless_between("lobby", "east"));
+}
