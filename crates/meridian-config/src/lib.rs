@@ -166,6 +166,12 @@ pub struct Config {
     /// Packets of at least this many bytes are compressed; a negative value turns
     /// compression off.
     pub compression_threshold: i32,
+    /// The zlib level of the packets compressed towards the players, from 1 (the fastest, the largest packets) to 9
+    /// (the slowest, the smallest); 6, the default, is the level vanilla and Velocity use. The packets the proxy
+    /// relays from the backends follow it, and the world a switch sends; the proxy's own messages and the packets
+    /// towards the backends keep 6. Read when a player connects: a reload changes it for the players who connect
+    /// after.
+    pub compression_level: u32,
     /// Milliseconds allowed to reach a backend.
     pub connect_timeout_ms: u64,
     /// The secret shared with the backends, which use it to check that a login
@@ -290,6 +296,7 @@ impl Default for Config {
             favicon: None,
             online_mode: true,
             compression_threshold: 256,
+            compression_level: 6,
             connect_timeout_ms: 5_000,
             forwarding_secret: String::new(),
             try_backends: Vec::new(),
@@ -341,6 +348,7 @@ impl std::fmt::Debug for Config {
             favicon,
             online_mode,
             compression_threshold,
+            compression_level,
             connect_timeout_ms,
             forwarding_secret,
             try_backends,
@@ -390,6 +398,7 @@ impl std::fmt::Debug for Config {
             .field("favicon", favicon)
             .field("online_mode", online_mode)
             .field("compression_threshold", compression_threshold)
+            .field("compression_level", compression_level)
             .field("connect_timeout_ms", connect_timeout_ms)
             .field("forwarding_secret", &format_args!("{secret}"))
             .field("try_backends", try_backends)
@@ -446,6 +455,7 @@ struct File {
     favicon: Option<PathBuf>,
     online_mode: Option<bool>,
     compression_threshold: Option<i32>,
+    compression_level: Option<i64>,
     connect_timeout_ms: Option<u64>,
     forwarding_secret: Option<String>,
     #[serde(default, rename = "try")]
@@ -623,6 +633,11 @@ impl Config {
             compression_threshold: file
                 .compression_threshold
                 .unwrap_or(defaults.compression_threshold),
+            compression_level: match file.compression_level {
+                None => defaults.compression_level,
+                Some(level) => u32::try_from(level)
+                    .map_err(|_| ConfigError::CompressionLevelOutOfRange(level))?,
+            },
             connect_timeout_ms: file
                 .connect_timeout_ms
                 .unwrap_or(defaults.connect_timeout_ms),
@@ -771,6 +786,11 @@ impl Config {
         self.validate_groups()?;
         self.validate_routes()?;
         self.auth.validate()?;
+        if !(1..=9).contains(&self.compression_level) {
+            return Err(ConfigError::CompressionLevelOutOfRange(i64::from(
+                self.compression_level,
+            )));
+        }
         if self.status_sample > MAX_STATUS_SAMPLE {
             return Err(ConfigError::StatusSampleTooLarge(self.status_sample));
         }

@@ -36,7 +36,10 @@ direct dependency of `meridian-handoff`, on a second line of the same `Cargo.tom
 `rev`; the two lines are kept identical ([COMPAT.md](COMPAT.md)).
 
 Moving the pin is a deliberate change: `scripts/bump-horizon.sh` updates the `rev`,
-runs the tests and notes the commit here. A nightly build against Horizon's head warns
+runs the tests and notes the commit here. It also checks that the `flate2` line of
+`crates/meridian-handoff/Cargo.toml` is still the one of horizon-protocol at the new
+revision (the same version and features, so that `compression-level` 6 gives
+horizon-protocol's bytes), and says when it is not. A nightly build against Horizon's head warns
 when a change of Horizon would break Meridian; [COMPAT.md](COMPAT.md) describes both.
 
 Pinned commit: `0d21d5520ec26c49b774bf1533e53ea8af81278d`.

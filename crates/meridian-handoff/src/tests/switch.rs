@@ -1680,3 +1680,64 @@ fn a_lost_confirm_is_not_asked_again_past_the_freeze_limit() {
     assert_eq!(last, pc::DISCONNECT);
     run.join().unwrap().unwrap();
 }
+
+/// The world a switch sends follows the session's compression level, as the relayed packets do: with every packet
+/// compressed (threshold 0) and level 1, the bytes the client reads from the switch to its first live packet are
+/// exactly level-1 frames of what it got.
+#[test]
+fn the_world_a_switch_sends_is_compressed_at_the_session_level() {
+    let Bench {
+        handle,
+        run,
+        mut player,
+        source,
+    } = super::relay::compressed_bench(0, Some(1));
+    let log = Log::default();
+    let (address, imported, target_thread) = target(TargetWorld::default());
+    let source = Arc::new(Mutex::new(source));
+    let mut source_control = {
+        let source = Arc::clone(&source);
+        FakeControl::new("source", &log).on("release", move || {
+            send(&mut source.lock().unwrap(), pc::DISCONNECT, &[10, 0]);
+        })
+    };
+    let mut target_control = target_control(&log, imported);
+    let before = player
+        .reader
+        .counters
+        .bytes_in
+        .load(std::sync::atomic::Ordering::Relaxed);
+    switch(
+        &handle,
+        TargetBackend {
+            name: "target",
+            address: &address,
+            options: &options(),
+        },
+        &mut source_control,
+        &mut target_control,
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap();
+    let packets = after_switch(&mut player);
+    let got = player
+        .reader
+        .counters
+        .bytes_in
+        .load(std::sync::atomic::Ordering::Relaxed)
+        - before;
+    let bodies: Vec<Vec<u8>> = packets
+        .iter()
+        .map(|(id, payload)| meridian_testkit::body(*id, payload))
+        .collect();
+    let (one, six) = (
+        super::relay::framed_len(&bodies, 0, 1),
+        super::relay::framed_len(&bodies, 0, 6),
+    );
+    assert_ne!(one, six, "the levels must differ on these packets");
+    assert_eq!(got as usize, one, "{} packets", packets.len());
+    attack(&mut player, TARGET_ID);
+    target_thread.join().unwrap().unwrap();
+    run.join().unwrap().unwrap();
+}

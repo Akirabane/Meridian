@@ -30,6 +30,7 @@
 //! in a circle: a target's prepare state, then what goes to the client ([`Down`]),
 //! then what goes to the backend ([`Up`]), then a lane's writer.
 use crate::{
+    compress,
     configure::{ClientConfiguration, Digest, DigestBuilder, Summary},
     prepare::{Pose, Target},
     reason::{Notice, Reason},
@@ -220,6 +221,8 @@ pub(crate) struct Down {
     pub answering: Option<(std::thread::ThreadId, Vec<Vec<u8>>)>,
     /// Said in the chat once the next Login arrives: why the player was moved.
     notice: Option<Notice>,
+    /// The level of the packets this session compresses for the client ([`Session::with_compression_level`]).
+    pub compression: flate2::Compression,
 }
 
 /// What goes to the backend.
@@ -303,6 +306,7 @@ impl Session {
                 writes: 0,
                 answering: None,
                 notice: None,
+                compression: flate2::Compression::default(),
             }),
             up: Mutex::new(Up {
                 lane: Arc::clone(&lane),
@@ -344,6 +348,13 @@ impl Session {
             },
             handle,
         ))
+    }
+
+    /// Compresses what goes to the client at zlib `level` (1 to 9; 6, zlib's default, unless this is called): the
+    /// packets relayed from the backends and the world a switch sends. The session's own messages keep 6.
+    pub fn with_compression_level(self, level: u32) -> Self {
+        self.shared.down().compression = flate2::Compression::new(level);
+        self
     }
 
     /// Lets `hook` answer the commands the player types in the play phase.
@@ -912,19 +923,45 @@ pub fn relayed_to_players() -> (u64, u64) {
     )
 }
 
-/// Frames `body` for `writer`'s client into `out`, as [`ConnWriter::send`] would write it:
-/// compressed by the writer's threshold and encrypted in turn, the bytes in the same order.
+/// [`frame_at`] at the default level: the bytes [`ConnWriter::send`] writes.
+#[cfg(test)]
 pub(crate) fn frame(
     writer: &mut ConnWriter,
     body: &[u8],
     out: &mut Vec<u8>,
 ) -> horizon_protocol::Result<()> {
+    frame_at(writer, flate2::Compression::default(), body, out)
+}
+
+/// Frames `body` for `writer`'s client into `out`, as [`ConnWriter::send`] would write it but compressed at
+/// `level`: compressed by the writer's threshold and encrypted in turn, the bytes in the same order.
+pub(crate) fn frame_at(
+    writer: &mut ConnWriter,
+    level: flate2::Compression,
+    body: &[u8],
+    out: &mut Vec<u8>,
+) -> horizon_protocol::Result<()> {
     // A client of an older release would be renumbered; Meridian serves none.
     if let Some(body) = writer.for_client(body)? {
-        let contents = horizon_protocol::frame::contents(&body, writer.threshold)?;
+        let contents = compress::contents(&body, writer.threshold, level)?;
         writer.frame_into(&contents, out);
     }
     Ok(())
+}
+
+/// Writes one packet to the client as [`ConnWriter::send`] does, compressed at the session's level.
+///
+/// `ConnWriter::send` has two branches this does not: a writer with an `adapter` (a server of an older release) and
+/// one with an `older_client`. The second is [`frame_at`]'s `for_client`. The first never applies here: the player's
+/// writer has no adapter (Meridian sets one on no connection to a client), so the bytes are the same.
+pub(crate) fn send(down: &mut Down, body: &[u8]) -> horizon_protocol::Result<()> {
+    let level = down.compression;
+    let mut out = Vec::new();
+    frame_at(&mut down.writer, level, body, &mut out)?;
+    if out.is_empty() {
+        return Ok(());
+    }
+    down.writer.write_raw(&out)
 }
 
 /// What a session keeps between batches. A join's world comes 64 KiB a read, many packets each,
@@ -1068,7 +1105,7 @@ fn relay(
             payload
         };
         encode(body, id, &payload);
-        if frame(&mut down.writer, body, out).is_err() {
+        if frame_at(&mut down.writer, down.compression, body, out).is_err() {
             // As a failed write was: what came before is written, and the lane ends.
             flush(down, out);
             return Err(End::ClientGone);
@@ -1100,7 +1137,13 @@ fn relay(
                     && let Some(notice) = down.notice.take()
                 {
                     let chat = play::Clientbound::SystemChat(notice.chat());
-                    let _ = frame(&mut down.writer, &chat.encode(), out);
+                    // The proxy's own message: level 6, as all of them (`with_compression_level`).
+                    let _ = frame_at(
+                        &mut down.writer,
+                        flate2::Compression::default(),
+                        &chat.encode(),
+                        out,
+                    );
                 }
                 let packet = Packet { id, payload };
                 // A packet the ghost cannot read leaves it as it was; it is noted

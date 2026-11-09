@@ -978,6 +978,151 @@ meridian_connections_throttled_total 1
         player
     }
 
+    /// `compression-level` is read again at a reload and holds for the connections that start after it; a player
+    /// already connected keeps the level of their connection. Two players reach play through the proxy and a backend
+    /// that waits for each to speak before it sends them a large packet: the first connected before the reload (level
+    /// 6), the second after it (level 1), and both packets are sent after the reload.
+    #[test]
+    fn compression_level_holds_for_the_connections_after_a_reload() {
+        use horizon_protocol::ids::{configuration as cfg, play};
+        use meridian_testkit::{
+            backend::{FakeBackend, acknowledge_configuration, finish_configuration},
+            client::FakeClient,
+            peer::Step,
+            trace::Recorder,
+        };
+        const SECRET: &str = "a shared secret";
+        let large: Vec<u8> = (0..20_000u32).map(|i| ((i / 7) % 13) as u8).collect();
+        // The backend: two players, each through the configuration to play, then it waits for the player's
+        // keep-alive before it sends the large packet, and closes.
+        let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+        let backend_address = backend.local_addr().unwrap();
+        let backend_thread = {
+            let large = large.clone();
+            thread::spawn(move || {
+                let mut sessions = Vec::new();
+                for _ in 0..2 {
+                    let (stream, _) = backend.accept().unwrap();
+                    let connection = Connection::from_stream(stream).unwrap();
+                    sessions.push(
+                        FakeBackend {
+                            compression: Some(64),
+                            forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                            after_login: vec![
+                                Step::send(cfg::clientbound::REGISTRY_DATA, vec![5; 40]),
+                                finish_configuration(),
+                                Step::Expect {
+                                    id: cfg::serverbound::FINISH_CONFIGURATION,
+                                },
+                                Step::send(play::clientbound::LOGIN, vec![6; 60]),
+                                Step::Patience(Duration::from_secs(30)),
+                                Step::Expect {
+                                    id: play::serverbound::KEEP_ALIVE,
+                                },
+                                Step::send(play::clientbound::CUSTOM_PAYLOAD, large.clone()),
+                                Step::Close,
+                            ],
+                            ..FakeBackend::default()
+                        }
+                        .spawn(connection, Recorder::new()),
+                    );
+                }
+                for session in sessions {
+                    session.join().unwrap().unwrap();
+                }
+            })
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = Config {
+            backends: vec![Backend {
+                name: "lobby".into(),
+                address: backend_address.to_string(),
+            }],
+            default_backend: "lobby".into(),
+            auth_mode: meridian_config::AuthMode::Offline,
+            online_mode: false,
+            compression_threshold: 256,
+            connections_per_minute: 0,
+            forwarding_secret: SECRET.into(),
+            fallback: meridian_config::Fallback {
+                on_kick: false,
+                on_crash: false,
+                ..meridian_config::Fallback::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(config.compression_level, 6);
+        let proxy = Arc::new(Proxy::new(
+            config,
+            "meridian.toml".into(),
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let server = {
+            let proxy = Arc::clone(&proxy);
+            thread::spawn(move || serve(listener, &proxy))
+        };
+        // A player through the proxy to the play phase; their connection is handed back there.
+        let join = |name: &str| -> Connection {
+            let stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let connection = Connection::from_stream(stream).unwrap();
+            let (_, connection) = FakeClient {
+                after_login: vec![
+                    Step::Expect {
+                        id: cfg::clientbound::REGISTRY_DATA,
+                    },
+                    Step::Expect {
+                        id: cfg::clientbound::FINISH_CONFIGURATION,
+                    },
+                    acknowledge_configuration(),
+                    Step::Expect {
+                        id: play::clientbound::LOGIN,
+                    },
+                ],
+                ..FakeClient::named(name)
+            }
+            .spawn(connection, Recorder::new())
+            .join()
+            .unwrap()
+            .unwrap();
+            connection
+        };
+        let mut before = join("Alex");
+        let mut reloaded = (*proxy.config()).clone();
+        reloaded.compression_level = 1;
+        proxy.set_config(reloaded);
+        let mut after = join("Steve");
+        // Each player speaks, and gets the large packet: what it took on the wire is its connection's level.
+        let read_large = |player: &mut Connection| -> i64 {
+            let counted = player.reader.counters.bytes_in.load(Ordering::Relaxed);
+            player
+                .send(&meridian_testkit::body(
+                    play::serverbound::KEEP_ALIVE,
+                    &7u64.to_be_bytes(),
+                ))
+                .unwrap();
+            let (id, payload) = player.recv().unwrap();
+            assert_eq!(
+                (id, payload.len()),
+                (play::clientbound::CUSTOM_PAYLOAD, large.len())
+            );
+            assert_eq!(payload, large);
+            player.reader.counters.bytes_in.load(Ordering::Relaxed) - counted
+        };
+        let (old, new) = (read_large(&mut before), read_large(&mut after));
+        assert!(
+            new > old,
+            "the player who connected after the reload reads level 1 ({new} bytes), the one before keeps 6 ({old})"
+        );
+        backend_thread.join().unwrap();
+        proxy.stop();
+        drop((before, after));
+        server.join().unwrap().unwrap();
+    }
+
     /// `accept-transfers` is read again at a reload, and holds for the connections that start
     /// after it, as every setting of a login does.
     #[test]

@@ -502,6 +502,8 @@ fn core_settings_have_their_defaults() {
     assert_eq!(config.max_pending_logins, 2048);
     assert_eq!(config.max_pending_logins_per_address, 0);
     assert!(!config.accept_transfers);
+    assert_eq!(config.compression_level, 6);
+    assert_eq!(Config::default().compression_level, 6);
     assert_eq!(config.backend_retry_seconds, 10);
     assert_eq!(config.status_sample, 12);
 }
@@ -526,6 +528,42 @@ fn accept_transfers_is_read_and_must_be_a_boolean() {
     assert!(load("accept-transfers = true").accept_transfers);
     assert!(!load("accept-transfers = false").accept_transfers);
     refused("accept-transfers = \"yes\"");
+}
+
+#[test]
+fn the_compression_level_goes_from_1_to_9() {
+    for level in 1..=9 {
+        assert_eq!(
+            load(&format!("compression-level = {level}")).compression_level,
+            level
+        );
+    }
+    for (text, level) in [
+        ("0", 0),
+        ("10", 10),
+        ("-1", -1),
+        ("4294967296", 4_294_967_296),
+    ] {
+        let e = refused(&format!("compression-level = {text}"));
+        assert!(
+            matches!(e, ConfigError::CompressionLevelOutOfRange(n) if n == level),
+            "{text}: {e}"
+        );
+        let message = e.to_string();
+        assert!(
+            message.contains(&format!("compression-level = {level} is out of range"))
+                && message.contains("compression-threshold = -1"),
+            "{message}"
+        );
+    }
+    refused("compression-level = \"fast\"");
+    // A configuration built in code is checked too.
+    let mut config = load("");
+    config.compression_level = 0;
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::CompressionLevelOutOfRange(0))
+    ));
 }
 
 #[test]

@@ -136,6 +136,7 @@
 //!   a count of columns.
 //! - What the ghost does not keep (`meridian-ghost`'s known limits) is not in the
 //!   delta, except the packets sent after it.
+mod compress;
 mod configure;
 mod control;
 mod prepare;

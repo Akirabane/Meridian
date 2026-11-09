@@ -243,3 +243,83 @@ fn a_packet_alone_is_relayed_at_once() {
         assert_eq!(writes(&bench), before + 1);
     }
 }
+
+/// The bytes on the wire of `bodies` framed at `level` with `threshold`: what the client reads for them.
+pub(super) fn framed_len(bodies: &[Vec<u8>], threshold: usize, level: u32) -> usize {
+    bodies
+        .iter()
+        .map(|body| {
+            let contents =
+                crate::compress::contents(body, Some(threshold), flate2::Compression::new(level))
+                    .unwrap();
+            let mut prefix = Vec::new();
+            horizon_protocol::buf::write_varint(&mut prefix, contents.len() as i32);
+            prefix.len() + contents.len()
+        })
+        .sum()
+}
+
+/// A session set up as [`bench`], with compression at `threshold` between the proxy and the client and, when
+/// `level` is given, [`Session::with_compression_level`].
+pub(super) fn compressed_bench(threshold: i32, level: Option<u32>) -> Bench {
+    let (mut proxy_client, mut player) = pipe();
+    proxy_client.set_compression(threshold);
+    player.set_compression(threshold);
+    let (proxy_backend, mut source) = pipe();
+    let client = ClientSession {
+        profile: profile(),
+        auth: AuthKind::Offline,
+        virtual_host: None,
+        connection: proxy_client,
+    };
+    let backend = BackendLink {
+        connection: proxy_backend,
+    };
+    let (session, handle) = Session::new(client, backend, "source").unwrap();
+    let session = match level {
+        Some(level) => session.with_compression_level(level),
+        None => session,
+    };
+    let run = std::thread::spawn(move || session.run());
+    join_source_as(&mut player, &mut source, &INFORMATION);
+    Bench {
+        handle,
+        run,
+        player,
+        source,
+    }
+}
+
+/// The relay compresses at the session's level: a large packet from the backend reaches the client in exactly the
+/// bytes of a frame of that level, and without the call at the default level, 6.
+#[test]
+fn the_relay_compresses_at_the_session_level() {
+    let payload: Vec<u8> = (0..20_000u32).map(|i| ((i / 7) % 13) as u8).collect();
+    let packet = body(pc::CUSTOM_PAYLOAD, &payload);
+    let sizes: Vec<usize> = [1, 6, 9]
+        .iter()
+        .map(|&l| framed_len(std::slice::from_ref(&packet), 256, l))
+        .collect();
+    assert!(
+        sizes[0] != sizes[1] && sizes[1] != sizes[2],
+        "{sizes:?}: the levels must differ on this body"
+    );
+    for (level, expected) in [(None, sizes[1]), (Some(1), sizes[0]), (Some(9), sizes[2])] {
+        let mut bench = compressed_bench(256, level);
+        let counted = &bench.player.reader.counters.bytes_in;
+        let before = counted.load(std::sync::atomic::Ordering::Relaxed);
+        send(&mut bench.source, pc::CUSTOM_PAYLOAD, &payload);
+        assert_eq!(
+            expect(&mut bench.player, pc::CUSTOM_PAYLOAD).unwrap(),
+            payload
+        );
+        let got = bench
+            .player
+            .reader
+            .counters
+            .bytes_in
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - before;
+        assert_eq!(got as usize, expected, "level {level:?}");
+    }
+}
