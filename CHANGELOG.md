@@ -3,6 +3,28 @@
 What changes for whoever runs the proxy, newest first. The proxy has no release number of its own yet (`0.1.0` in
 `Cargo.toml`): each entry names the pull requests merged into `main`, and the setting, page or document to read.
 
+## Not released yet: pull request #TBD
+
+### Extensions: the state of each server (#TBD)
+
+No setting changes, and the protocol stays 0: an extension that does not know the new fields and the new event ignores
+them. docs/EXTENSIONS.md sections 4.4, 5 and 6.
+
+- **`servers/list` and the candidates of `decide/server`** give three more fields, each absent when unknown: `why` a
+  server is `draining` or `not_offered` (`restarting`, `drained`, `not_accepting`, `no_report`), whether it answered the
+  proxy's last round of readings (`up`), and what it last said of itself (`report`: its players, capacity, players held
+  for a hand-over, places promised, players handed over, whether it is full or stopping, and the age of the reading).
+  `up` and `report` are given for a server with a `role` and a sidecar, while `[balancing] enabled` is on.
+- **A new event, `servers/state`**, for an extension granted `events`: a server's state for new players changed (its
+  word, why, or whether it is stopping), at most once for each server at each round of readings.
+- The proxy does not change where it sends players because of any of it: a server that says it is stopping is still
+  offered until the restart detector or the balancer says otherwise.
+
+**For whoever writes an extension with the Rust SDK.** `orders::ServerInfo` and `decide::Candidate` have three more
+public fields (`why`, `up`, `report`): code that builds one with a struct literal, such as an extension's own tests,
+must add them. `events::Event` is now `#[non_exhaustive]`: a `match` on it with no `_` arm no longer compiles; add one
+(it also keeps the `match` compiling when a later version adds an event).
+
 ## 8 and 9 November 2026: pull requests #151 to #190 (main at `c65004d`)
 
 ### Before you update, and going back
