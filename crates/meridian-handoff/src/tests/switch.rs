@@ -1741,3 +1741,191 @@ fn the_world_a_switch_sends_is_compressed_at_the_session_level() {
     target_thread.join().unwrap().unwrap();
     run.join().unwrap().unwrap();
 }
+
+/// A move between servers that keep their own state of the player (`carry_state` off):
+/// the target takes no part of the record, and keeps the player it loaded from its own
+/// file, its place included even when places are carried; the source is let go on
+/// (`abort`, never `moved`, which would leave the player's latest state unsaved there)
+/// and its connection closes, so that it saves its own copy as at any departure.
+#[test]
+fn a_move_without_state_takes_no_part_and_lets_the_source_save_its_copy() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    let steps = Log::default();
+    let traced = steps.clone();
+    let done = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            carry_state: false,
+            carry_position: true,
+            trace: Some(Arc::new(move |what: &str, _| traced.push(what.to_owned()))),
+            ..settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target import parts=none announce=Some(true) place=false",
+            "target confirm 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+        ]
+    );
+    assert_eq!(done.source_kept, None);
+    assert_eq!(handle.backend(), "target");
+    let lines = steps.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("took no part of the record")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("commit: the source keeps its own copy of the player")),
+        "{lines:?}"
+    );
+    finish(player, target_thread, run);
+}
+
+/// Without the state, where the source had the player says nothing of where the target
+/// holds them: a record of another dimension does not stop the move. With the state it does,
+/// as before.
+#[test]
+fn a_record_of_another_dimension_stops_only_a_move_that_carries_the_state() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).exporting_in("minecraft:the_nether"),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            carry_state: false,
+            ..settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(handle.backend(), "target");
+    finish(player, target_thread, run);
+
+    let mut bench = bench();
+    let log = Log::default();
+    let (address, signal, _target) = target(TargetWorld::default());
+    let failure = switch(
+        &bench.handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log).exporting_in("minecraft:the_nether"),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &settings(),
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Stayed));
+    assert!(failure.reason.contains("minecraft:the_nether"), "{failure}");
+    still_on_source(&mut bench);
+}
+
+/// A source whose hand-over ended before the abort (its freeze ran out) let the player go on
+/// already: it saves its own copy when its connection closes, as it was meant to. Nothing went
+/// from one server to the other, so there is nothing for an operator to compare.
+#[test]
+fn a_refused_abort_after_a_move_without_state_raises_no_alert() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, signal, target_thread) = target(TargetWorld::default());
+    let done = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut FakeControl::new("source", &log)
+            .refusing("release", "the hand-over is over")
+            .with_ticks_left(None),
+        &mut target_control(&log, signal),
+        &Digests::default(),
+        &Settings {
+            carry_state: false,
+            ..settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(done.source_kept, None);
+    assert_eq!(
+        log.lines().last().map(String::as_str),
+        Some("source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false")
+    );
+    assert_eq!(handle.backend(), "target");
+    finish(player, target_thread, run);
+}
+
+/// A player who leaves during a move without state is not imported anywhere: the target forgets
+/// the arrival, and the source, let go on and disconnected, saves its own copy.
+#[test]
+fn a_player_who_leaves_during_a_move_without_state_is_kept_by_the_source() {
+    let Bench {
+        handle,
+        run,
+        player,
+        source: _source,
+    } = bench();
+    let log = Log::default();
+    let (address, imported, _target) = target(TargetWorld::default());
+    let mut player = Some(player);
+    let watched = handle.clone();
+    let mut source_control = FakeControl::new("source", &log).on("export", move || {
+        drop(player.take());
+        wait_for(|| watched.is_over());
+    });
+    let mut target_control = target_control(&log, imported);
+    let failure = switch(
+        &handle,
+        target_backend(&address, &options()),
+        &mut source_control,
+        &mut target_control,
+        &Digests::default(),
+        &Settings {
+            carry_state: false,
+            ..settings()
+        },
+    )
+    .unwrap_err();
+    assert_eq!((failure.step, failure.after), (Step::Freeze, After::Left));
+    assert!(
+        failure.reason.contains("the source keeps them"),
+        "{failure}"
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            "target expect Some(10)",
+            "source export freeze=true",
+            "target drop",
+            "source release 9f2c4be0a1d34e6b8c0f1e2d3c4b5a69 Abort announce=false",
+        ]
+    );
+    run.join().unwrap().unwrap();
+}

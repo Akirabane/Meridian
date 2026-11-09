@@ -319,8 +319,14 @@ fn a_move_carries_the_state_only_inside_one_state_group() {
         "state-group = \"survival\"",
     ))
     .unwrap();
-    assert_eq!(config.state_groups.get("lobby").map(String::as_str), Some("lobby"));
-    assert_eq!(config.state_groups.get("east").map(String::as_str), Some("survival"));
+    assert_eq!(
+        config.state_groups.get("lobby").map(String::as_str),
+        Some("lobby")
+    );
+    assert_eq!(
+        config.state_groups.get("east").map(String::as_str),
+        Some("survival")
+    );
     assert!(!config.carries_state("lobby", "east"));
     assert!(!config.carries_state("east", "lobby"));
     // The same group: carried.
@@ -334,14 +340,20 @@ fn a_move_carries_the_state_only_inside_one_state_group() {
     // An empty name is refused, not taken as "no group".
     for empty in ["state-group = \"\"", "state-group = \"  \""] {
         let e = Config::from_toml_str(&text("", empty, "")).unwrap_err();
-        assert!(matches!(e, ConfigError::EmptyStateGroup(ref b) if b == "lobby"), "{empty}: {e}");
+        assert!(
+            matches!(e, ConfigError::EmptyStateGroup(ref b) if b == "lobby"),
+            "{empty}: {e}"
+        );
     }
     // A group given to a backend the configuration does not have (a configuration built in
     // code) is refused.
     let mut config = Config::from_toml_str(&text("", "", "")).unwrap();
     config.state_groups.insert("west".into(), "survival".into());
     let e = config.validate().unwrap_err();
-    assert!(matches!(e, ConfigError::StateGroupOfUnknownBackend(ref b) if b == "west"), "{e}");
+    assert!(
+        matches!(e, ConfigError::StateGroupOfUnknownBackend(ref b) if b == "west"),
+        "{e}"
+    );
 }
 
 #[test]

@@ -117,6 +117,12 @@ impl FakeControl {
         }
     }
 
+    /// The record the export gives: one of the player in `dimension`.
+    fn exporting_in(mut self, dimension: &str) -> Self {
+        self.record = record(dimension);
+        self
+    }
+
     fn with_ticks_left(mut self, ticks: Option<u64>) -> Self {
         self.ticks_left = ticks;
         self
@@ -236,11 +242,16 @@ impl PlayerControl for FakeControl {
         place: bool,
         arrival: Option<Arrival>,
     ) -> Result<Imported, String> {
-        assert_eq!(record_dimension(&record), Some(OVERWORLD));
+        // A record of another dimension than the target's reaches it only when it takes
+        // no part of it: then the record only names the hand-over.
+        if parts.as_ref().is_none_or(|parts| !parts.is_empty()) {
+            assert_eq!(record_dimension(&record), Some(OVERWORLD));
+        }
         // The record goes to the target as the source gave it, with its hand-over id.
         assert_eq!(record_handover(&record).as_deref(), Some(HANDOVER));
         let parts = match parts {
             None => "all".to_owned(),
+            Some(parts) if parts.is_empty() => "none".to_owned(),
             Some(parts)
                 if parts.len() == PARTS.len() - 1 && !parts.iter().any(|p| p == "position") =>
             {

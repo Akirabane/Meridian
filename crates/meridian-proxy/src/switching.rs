@@ -232,18 +232,30 @@ fn attempt(
         player_address,
     };
     let (who, to) = (name.to_owned(), backend.name.clone());
+    // Between two state groups nothing of the player goes: each server keeps its own copy
+    // (`state-group`, OPERATING.md 5.15). Whatever started the move.
+    let carry_state = config.carries_state(&from, &backend.name);
     let settings = Settings {
         trace: Some(Arc::new(move |step: &str, at: Duration| {
             info!("{who}: switch to {to}: {step} (+{} ms)", at.as_millis());
         })),
         carry_position: config.switch_carry_position,
+        carry_state,
         announce_arrival: config.switch_announce_arrival,
         announce_departure: config.switch_announce_departure,
         freeze_limit: Duration::from_millis(config.switch_freeze_limit_ms),
         commit_margin: Duration::from_millis(config.switch_commit_margin_ms),
         ..Settings::default()
     };
-    info!("{name}: switch from {from} to {}: starting", backend.name);
+    info!(
+        "{name}: switch from {from} to {}: starting{}",
+        backend.name,
+        if carry_state {
+            ""
+        } else {
+            " (other state group: no state is carried, each server keeps its own copy)"
+        }
+    );
     let started = Instant::now();
     let done = meridian_handoff::switch(
         handle,
