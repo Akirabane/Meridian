@@ -61,6 +61,12 @@ auth-mode = "online"
 # compression off.
 compression-threshold = 256
 
+# The zlib level of the packets compressed towards the players, from 1 (the
+# fastest, the largest packets) to 9 (the slowest, the smallest). 6 is the level
+# vanilla uses. A lower level uses less processor time for more bandwidth
+# (docs/OPERATING.md, 5.14).
+compression-level = 6
+
 # Milliseconds allowed to reach a backend.
 connect-timeout-ms = 5000
 

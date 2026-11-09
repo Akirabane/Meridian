@@ -67,6 +67,8 @@ pub enum ConfigError {
     ZeroFreezeLimit,
     /// `status-sample` is above [`crate::MAX_STATUS_SAMPLE`].
     StatusSampleTooLarge(u32),
+    /// `compression-level` is not between 1 and 9.
+    CompressionLevelOutOfRange(i64),
     /// `[commands] enabled` lists a command twice.
     DuplicateCommand(&'static str),
     /// `forwarding-secret` is empty while backends are configured.
@@ -351,6 +353,12 @@ impl fmt::Display for ConfigError {
             ConfigError::ZeroSidecarTimeout => {
                 write!(f, "sidecar-timeout-ms must be more than 0")
             }
+            ConfigError::CompressionLevelOutOfRange(n) => write!(
+                f,
+                "compression-level = {n} is out of range: it goes from 1 (the fastest, the largest packets) to 9 \
+                 (the slowest, the smallest), and 6 is the default; to turn compression off, set \
+                 compression-threshold = -1"
+            ),
             ConfigError::StatusSampleTooLarge(n) => write!(
                 f,
                 "status-sample = {n} is too large: the server list shows at most {} names",

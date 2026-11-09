@@ -17,6 +17,9 @@ meridian-sidecar.workspace = true
 serde_json = "1"
 # The digest of a server's configuration phase.
 sha2 = "0.10"
+# The compression level towards the players (`compress.rs`): the version and the backend horizon-protocol already
+# pulls, so that the default level gives its bytes.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 
 [dev-dependencies]
 meridian-testkit.workspace = true

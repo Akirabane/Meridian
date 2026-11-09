@@ -99,6 +99,7 @@ fn the_example_file_is_valid() {
     assert_eq!(config.motd, defaults.motd);
     assert_eq!(config.online_mode, defaults.online_mode);
     assert_eq!(config.compression_threshold, defaults.compression_threshold);
+    assert_eq!(config.compression_level, defaults.compression_level);
     assert_eq!(config.connect_timeout_ms, defaults.connect_timeout_ms);
     assert_eq!(config.max_players, defaults.max_players);
     assert_eq!(config.auth_mode, defaults.auth_mode);

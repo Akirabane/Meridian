@@ -941,6 +941,43 @@ the proxy finished: the account checked, the name and the limits of a login pass
 not finish). The proxy's own checks come after the login, so a `logged_in` player can still be turned away by a ban, the
 whitelist or a full proxy, as any player is; those refusals are counted with every login's (`meridian_login_failures_total{reason}`).
 
+### 5.14 Compression: processor time against bandwidth
+
+The proxy compresses every packet of `compression-threshold` bytes or more that it sends a player. On a busy network
+this is the largest part of the proxy's processor time: about 41 % of it in a test with 100 players on one server,
+almost all of it spent on large packets (the chunks of the world). `compression-level` chooses how hard the proxy
+compresses them, from `1` to `9`; `6`, the default, is the level vanilla and Velocity use.
+
+A lower level compresses faster and sends more bytes. In a measure of the compression alone, on packets captured from
+test players (bots exploring a world, so mostly chunks), against level 6:
+
+| Level | Processor time of the compression | Bytes sent |
+| --- | --- | --- |
+| 4 | about 69 % | about 3 % more |
+| 3 | about 61 % | about 4 % more |
+| 2 | about 51 % | about 10 % more |
+| 1 | about 26 % | about 38 % more |
+
+These figures are not a measure of a running proxy: how much of the proxy's processor time a level saves on a network
+depends on how many chunks its players load, and real players who move less than those bots load fewer.
+
+**What it does not change.** The threshold, the packets towards the servers, the proxy's own messages (they keep level
+6), and the players' side: zlib's format is the same at every level, and every client reads every level.
+
+**When to change it.** Keep `6` unless the proxy's processor is the limit and the line has room for more bytes; then try
+`4`, then `3`. Level `1` costs far more bandwidth for the little processor time it saves over `3`.
+
+**How to measure it on a network.** Compare the same hour of play, with the same number of players, at least 10 minutes at
+each level:
+
+- the processor time of the proxy's process (`pidstat -u -p <pid> 60` or `top -p <pid>` on Linux; on Windows, the CPU
+  column of the process in Resource Monitor);
+- the bytes the machine sends (`vnstat -l -i <interface>` or `ip -s link show <interface>` read twice, a minute apart;
+  on Windows, the Network tab of Resource Monitor, or `nethogs` for the process alone on Linux).
+
+A reload applies the level to the players who connect after it; the players already connected keep theirs until they
+reconnect. Restart the proxy, or wait for the players to come back, before measuring the new level.
+
 ## 6. Restarting a server without losing its players
 
 A server that stops takes its players with it. There are four ways the proxy learns of it

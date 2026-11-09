@@ -5,7 +5,7 @@ use crate::{
         Arrival, Outcome, PlayerControl, Record, record_dimension, record_handover, uuid_text,
     },
     prepare::Target,
-    session::{Lane, SessionHandle, Shared, add, encode, lock, spawn_lane},
+    session::{Lane, SessionHandle, Shared, add, encode, lock, send, spawn_lane},
 };
 use meridian_ghost::{View, delta};
 use meridian_net::{
@@ -1042,7 +1042,7 @@ pub fn switch(
         let mut sent = true;
         for packet in packets.iter().chain(&extras) {
             encode(&mut body, packet.id, &packet.payload);
-            if down.writer.send(&body).is_err() {
+            if send(&mut down, &body).is_err() {
                 sent = false;
                 break;
             }

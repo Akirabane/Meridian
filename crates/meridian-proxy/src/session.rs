@@ -875,7 +875,9 @@ fn place(
             return;
         }
     };
-    let relay = relay.with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
+    let relay = relay
+        .with_compression_level(config.compression_level)
+        .with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
     let player = Player {
         name: name.clone(),
         uuid,
@@ -1390,6 +1392,63 @@ pub(crate) mod tests {
             })
         );
         assert_eq!(sessions.count(), 0, "the session is counted out at the end");
+    }
+
+    /// `compression-level` reaches the player: the session is set up with the level of the configuration the
+    /// connection is handled with (each connection takes the configuration of the moment, so a reload changes it for
+    /// the connections after). The scripts' registry data is the only packet at the threshold or above: the bytes the
+    /// player reads change with the level, and are those of level 6 when it is not set.
+    #[test]
+    fn the_compression_level_of_the_configuration_reaches_the_player() {
+        use ids::configuration as cfg;
+        let registry: Vec<u8> = (0..20_000u32).map(|i| ((i / 7) % 13) as u8).collect();
+        let received = |level: Option<u32>| -> i64 {
+            let (mut backend_script, mut client_script) = scripts();
+            backend_script[0] = Step::send(cfg::clientbound::REGISTRY_DATA, registry.clone());
+            client_script[0] =
+                Step::expect_exactly(cfg::clientbound::REGISTRY_DATA, registry.clone());
+            let (connect, _seen) = connector(
+                FakeBackend {
+                    compression: Some(64),
+                    forwarding_secret: Some(SECRET.as_bytes().to_vec()),
+                    after_login: backend_script,
+                    ..FakeBackend::default()
+                },
+                Recorder::new(),
+            );
+            let mut config = config();
+            if let Some(level) = level {
+                config.compression_level = level;
+            }
+            let (player_end, proxy_end) = pipe();
+            let sessions = Arc::new(Sessions::default());
+            let proxy = std::thread::spawn(move || {
+                handle(proxy_end, peer(), &config, &*connect, &sessions, None)
+            });
+            let client = FakeClient {
+                after_login: client_script,
+                ..FakeClient::named("Alex")
+            }
+            .spawn(player_end, Recorder::new());
+            let (_, connection) = client.join().unwrap().unwrap();
+            proxy.join().unwrap();
+            connection
+                .reader
+                .counters
+                .bytes_in
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let (unset, one, six, nine) = (
+            received(None),
+            received(Some(1)),
+            received(Some(6)),
+            received(Some(9)),
+        );
+        assert_eq!(unset, six, "without the setting, level 6");
+        assert!(
+            one > six && one > nine,
+            "level 1 {one}, 6 {six}, 9 {nine} bytes"
+        );
     }
 
     /// A backend that cannot be reached: the player is told so in the
