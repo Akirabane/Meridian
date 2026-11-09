@@ -1010,6 +1010,11 @@ of the proxy's time; players who move less load fewer chunks, and a level saves 
 or more players (one machine, one server, 100 players); level 3 (not measured on a running proxy); the packets towards
 the servers (they keep level 6). This measure does not change the default, `6`.
 
+**First view of a player.** A separate measure ([LOAD-LEVEL2.md](LOAD-LEVEL2.md), section 8: locally, one bot, three
+passes) found that the first view of a player (473 chunks) arrives later through the proxy than direct: +0.35 s at level
+6, +0.25 s at level 4 and +0.10 s at level 1. It is a second argument for level 4, next to the processor time. It is a
+bot, not a real client, and it does not change the default, `6`.
+
 **What it does not change.** The threshold, the packets towards the servers, the proxy's own messages (they keep level
 6), and the players' side: zlib's format is the same at every level, and every client reads every level.
 
