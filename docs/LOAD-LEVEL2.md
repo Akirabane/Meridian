@@ -1,4 +1,6 @@
-**One night and one morning of measurements on one Windows machine, over the loopback, with real Horizon servers. They say what this proxy cost there, on 8 and 9 November 2026. They are not its performance in production, they are not a promise, and several of the runs came out with no result: this page lists them too.**
+**One night, one morning and one afternoon of measurements on one Windows machine, over the loopback, with real Horizon
+servers. They say what this proxy cost there, on 8 and 9 November 2026. They are not its performance in production, they
+are not a promise, and several of the runs came out with no result: this page lists them too.**
 
 # The proxy in front of real Horizon servers: the level-2 campaign
 
@@ -23,6 +25,7 @@ by real `horizon-server` processes, with their engine, each holding its own worl
 | A relay that delays each way by 20 ms | A round trip grew by **40.05 ms** more than the proxy's own 49 µs, for two delays of 20 ms (one run, with 1.39 cores of other load: not clean) |
 | Compression level 4 against 6 | **Shown** at 100 players (see [OPERATING.md](OPERATING.md), section 5.14) |
 | Compression level 3 against 6, and a level 4 against 6 pair at 500 players | **Not conclusive** and **not judgeable**: section 5 |
+| First view of a player, one bot | **+0.35 s** (level 6), **+0.25 s** (4), **+0.10 s** (1) over 1.04 s: section 8 |
 
 ## 1. The machine and how a step was run
 
@@ -199,3 +202,97 @@ effect: they say it was not shown on this machine.
 - **One run each**, except where a row says otherwise: the spread between runs is known only at 100 players (about 2 %).
 - **Processor figures.** They are counted from the processor cycles Windows gives the process, on cores of two kinds;
   the 500 step's proxy ran on efficiency cores, so its figure cannot be set beside the others' without that caveat.
+
+## 8. The first view of a player (473 chunks, one bot that follows vanilla's ACK formula)
+
+The other sections load a server with many players. This one measures the opposite: how long **one** player waits for
+the world around them to arrive after joining, and what the proxy adds to it. It was run on the afternoon of 9 November
+2026, on the same machine, with the same Horizon build as section 1 and the Meridian build of section 5. Local runs, one
+bot, three passes per scenario: a first reading of the order of the effect, not a statistic.
+
+**How it was run.** One `horizon-bots` bot, behaviour `idle`, joined a real `horizon-server` whose world is the template
+of section 1 (view distance 10): the first view is **473 chunk packets**, about 22.8 MB once decompressed (the same in
+every run, to within 0.3 %). After each batch of chunks the bot answers with the number of chunks per tick that
+vanilla's formula gives, computed from how long the batch took to arrive: the server sizes its next batch from that
+answer, as it does for a vanilla client. What is read is the time, in milliseconds from the first batch's start, of each
+chunk packet at the bot. The figure used is the time of the **329th** chunk, the point at which the issue Horizon #9052
+quotes about 1.0 s on a direct connection; the time of the last (473rd) chunk is given next to it. Two servers stayed up
+for the whole campaign (one reached through the proxy with a forwarding secret, one direct), each warmed by one join,
+and the order of the scenarios was shuffled in each round. The servers, the proxy, the relay and the bot were each
+pinned to their own processors, at a low priority. Three passes per scenario, two for the scenarios with a delay and no
+rate: 40 runs, and eight more (two per path) for the bytes.
+
+### The proxy alone: no delay, no rate limit
+
+| Path | 329th chunk | Last chunk | Against direct, 329th | Bytes on the link, against direct |
+| --- | --- | --- | --- | --- |
+| Direct (no proxy) | 1.04 s | 1.34 s | | 4.53 and 4.46 MB |
+| Proxy, level 6 | 1.39 s | 1.89 s | **+0.35 s (+34 %)** | 1.0 % and 1.3 % **less** |
+| Proxy, level 4 | 1.29 s | 1.69 s | **+0.25 s (+24 %)** | 0.5 % and 1.2 % more |
+| Proxy, level 1 | 1.14 s | 1.48 s | **+0.10 s (+9 %)** | 32 % and 35 % more |
+
+The times are the median of three passes; the three passes of one path differ by 0.1 to 1.5 % (1.04 s: 1.039 to 1.040;
+level 6: 1.387 to 1.408). The bytes are the proxy's relay's own count of what reached the bot, two passes per path (the
+"bytes" runs, not the same passes as the times). **Levels 6 and 4 send about what a direct connection does (between
+1.3 % less and 1.2 % more), and level 1 a third more.** [OPERATING.md](OPERATING.md), section 5.14, gives the same order
+for the compression alone (level 4 about 3 % more than level 6, level 1 about 38 % more).
+
+A fixed delay alone changes little: 25 ms each way (a 50 ms round trip), direct, gives 1.16 s for the 329th chunk
+(+0.12 s over 1.04 s, two passes) with batches of the same size (a median of 17 chunks against 18), and nothing
+collapses.
+Through the proxy at level 6 with the same delay it is 1.46 s (two passes), +0.30 s over the direct run with that delay.
+
+### Behind a link that is limited
+
+A relay in front of the bot (section 4) held the link to a rate and a delay of 25 ms each way. Direct, and through the
+proxy at level 6, three passes each (median):
+
+| Rate | Direct: 329th / last | Proxy 6: 329th / last | Added, 329th | Added, last | Median batch, direct / proxy |
+| --- | --- | --- | --- | --- | --- |
+| 100 Mbit/s | 1.79 s / 2.49 s | 1.93 s / 2.64 s | +8 % | +6 % | 10 / 9 |
+| 50 Mbit/s | 2.78 s / 3.98 s | 3.19 s / 4.39 s | +15 % | +10 % | 6 / 5 |
+| 20 Mbit/s | 4.98 s / 6.89 s | 5.73 s / 8.13 s | +15 % | +18 % | 3 / 3 |
+| 10 Mbit/s | 6.48 s / 9.08 s | 8.23 s / 11.83 s | +27 % | +30 % | 3 / 2 |
+
+The batches shrink as the rate falls, with or without the proxy. At 10 Mbit/s the first batches are 9, 1, 1, 2, 2, 3, 3,
+3 chunks direct and 9, 1, 1, 2, 2, 2, 2, 2 through the proxy; with no limit, direct, they are 9, 5, 6, 8, 9, 10, 11, 12.
+No run reached a median batch of one chunk: the smallest medians are 3 direct and 2 through the proxy, and every first
+view ended.
+
+### What is measured, and what is deduced
+
+**Measured.** The times, the batch sizes and the bytes above; that the proxy makes the first view later at every level
+and every rate that was run; that a delay alone does not; that the batches shrink behind a limit with or without the
+proxy (a little more with it).
+
+**Deduced, not measured.**
+- *Where the proxy's time goes.* The proxy decompresses each chunk packet from the server and compresses it again
+  towards the player. The extra 0.35 s over 329 chunks is about 1.1 ms a chunk at level 6 (0.75 ms at level 4, 0.30 ms
+  at level 1), which is the order of a recompression. That time is added to what the client measures, so the client asks
+  for fewer chunks. This is a reading of the figures, not a profile.
+- *Why the batches shrink.* The wire carries only 4.5 MB, about a fifth of the 22.8 MB: at 10 Mbit/s the link alone
+  would take 3.6 s, and the whole view took 9.1 s direct (2.5 times that); at 100 Mbit/s it would take 0.36 s and took
+  2.5 s (6.9 times). The speed is not set by the bandwidth but by the client's own estimate of it, which asks for fewer
+  chunks when a batch arrives slowly. That is vanilla's design, the server reproduces it, and it is the same behind any
+  hop: the proxy creates none of it and adds a little to it.
+- *Not explained.* At 10 Mbit/s the proxy adds +27 % (1.75 s), more than a flat 1 ms a chunk would give (329 ms, 5 % of
+  the direct 6.48 s). The recompression alone does not account for it, and it was not looked into.
+
+### What this does not say
+
+- **A real kernel TCP path.** The relay runs on the loopback: it models a delay and a rate, not a round trip through a
+  kernel's TCP with a slow start, nor losses. The collapse of the batches to one chunk that Horizon #9052 describes,
+  over a long TCP tunnel, was **not reproduced**: no median batch of one chunk appeared in the 40 runs.
+- **A real vanilla client.** The bot is a Horizon test client that applies vanilla's formula. It dates the batch markers
+  in its reading thread, where a real client does it on its main thread, once a frame; probably the bot shows a lower
+  bound of the effect (a reading, not measured).
+- **More than one player.** One bot, one world, one machine, Windows.
+- **How many passes.** Three (two for the scenarios with a delay and no rate): the passes of one scenario differ by
+  2.2 % or less in 11 of the 14 scenarios, and by 3.1 % and 4.5 % (two passes each) and 8.4 % in the other three. The
+  8.4 % is the direct run at 100 Mbit/s, one pass of which took 1.94 s against 1.79 s for the other two, in runs whose
+  other load was 0.34 to 0.44 cores (clean, see the next point); it was not explained.
+- **A quiet machine.** Six of the 40 runs are "not clean" (other programs used more than 0.5 cores on average during the
+  run): 0.52 to 0.65 cores (the other 34 runs: 0.30 to 0.49), at most 1.26 cores in a 3-second sample. No visible effect
+  on the figures was found, but it was not measured.
+- **The default.** These figures do not change [OPERATING.md](OPERATING.md)'s advice on the compression level: they are
+  a second thing to weigh for level 4, next to the processor time.
