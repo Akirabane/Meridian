@@ -3,9 +3,9 @@
 What changes for whoever runs the proxy, newest first. The proxy has no release number of its own yet (`0.1.0` in
 `Cargo.toml`): each entry names the pull requests merged into `main`, and the setting, page or document to read.
 
-## Not released yet: pull request #TBD
+## Not released yet: pull request #192
 
-### Extensions: the state of each server (#TBD)
+### Extensions: the state of each server (#192)
 
 No setting changes, and the protocol stays 0: an extension that does not know the new fields and the new event ignores
 them. docs/EXTENSIONS.md sections 4.4, 5 and 6.
