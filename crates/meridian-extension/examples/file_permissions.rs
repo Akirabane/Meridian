@@ -12,7 +12,8 @@
 //!
 //! ```toml
 //! # Give the nodes in `allow` to players whose account the session service verified, unless the operator says
-//! # otherwise here (an offline network has no verified account).
+//! # otherwise here (an offline network has no verified account). With `true`, an offline player's id comes from the
+//! # name they type, so anyone may use another's name; a `deny` still applies to everyone.
 //! trust-unverified = false
 //!
 //! [[player]]
@@ -22,10 +23,18 @@
 //! reload = true                                    # may type /extperms reload
 //! ```
 //!
-//! A node the file does not name is left to the proxy (`permissions.toml` and the operators). The rule it keeps:
-//! **no right is ever wider than what a file it read in full gives.** A file that cannot be read or is not valid, at
-//! a reload, leaves the permissions as they were, says so to whoever typed the command and on the standard error
-//! stream, and tells the proxy to forget nothing. It never writes a unique id or a file's path, neither in what a
+//! A pattern follows the rule of `permissions.toml` (lower-case words joined by dots, `*`, or words ending in `.*`)
+//! and anything else makes the file not valid. A wide pattern is wide by construction: `meridian.*` gives `/glist`,
+//! `/send`, `/alert` and any node a later proxy adds under `meridian.`; prefer narrow patterns and use `deny` for the
+//! exceptions. A node the file does not name is left to the proxy (`permissions.toml` and the operators).
+//!
+//! The rule it keeps: **no right is ever wider than what a file it read in full gives.** A file that cannot be read,
+//! is not valid, or holds no key at all (one cut to nothing would take every `deny` away), at a reload, leaves the
+//! permissions as they were, says so to whoever typed the command and on the standard error stream, and tells the
+//! proxy to forget nothing. A file cut short that is still valid TOML cannot be told from a whole one: write it in
+//! one step (a temporary file, then a rename) and only then type `/extperms reload`. After a reload that worked, if
+//! the proxy could not be told to forget, the new rules are in force but what the proxy kept stays up to a minute
+//! (the player who typed the command reads so). It never writes a unique id or a file's path, neither in what a
 //! player reads nor in its own lines (the standard error stream).
 
 use meridian_extension::decide::{Auth, CommandRequest, NodeAnswers, Player};
@@ -51,8 +60,8 @@ const COMMAND: &str = "extperms";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct File {
-    #[serde(default)]
-    trust_unverified: bool,
+    // Optional, and told apart from absent: a file with no key at all is refused as empty.
+    trust_unverified: Option<bool>,
     #[serde(default)]
     player: Vec<Entry>,
 }
@@ -84,8 +93,28 @@ struct Rules {
     players: HashMap<String, Rights>,
 }
 
-/// Whether `pattern` (`a.b`, or `a.*` for every node below `a`) names `node`.
+/// `text` as a node or a pattern, in lower case: the rule of `permissions.toml` (words of `a-z`, `0-9`, `_` and `-`
+/// joined by dots, `*` alone, or words ending in `.*`). `None` for anything else, a space or a line end included: a
+/// pattern that can never name a node the proxy asks about would deny nothing, and nothing would say so.
+fn pattern(text: &str) -> Option<String> {
+    let pattern = text.to_ascii_lowercase();
+    if pattern == "*" {
+        return Some(pattern);
+    }
+    let words = pattern.strip_suffix(".*").unwrap_or(&pattern);
+    let word = |w: &str| {
+        !w.is_empty()
+            && w.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    };
+    words.split('.').all(word).then_some(pattern)
+}
+
+/// Whether `pattern` (`a.b`, `a.*` for every node below `a`, or `*` for every node) names `node`.
 fn names(pattern: &str, node: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
     match pattern.strip_suffix(".*") {
         Some(prefix) => node
             .strip_prefix(prefix)
@@ -100,8 +129,9 @@ fn is_own(node: &str) -> bool {
 }
 
 impl Rules {
-    /// Reads `text`. Every unique id must be one; a player named twice is an error, as is a key nobody knows. The
-    /// error says where it is, never what the file holds.
+    /// Reads `text`. Every unique id must be one and every pattern a node's (see [`pattern`]); a player named twice
+    /// is an error, as is a key nobody knows, and so is a file with no key at all (one cut to nothing would otherwise
+    /// take every `deny` away). The error says where it is, never what the file holds.
     fn parse(text: &str) -> Result<Self, String> {
         let file: File = toml::from_str(text).map_err(|e| match e.span() {
             Some(span) => {
@@ -110,13 +140,22 @@ impl Rules {
             }
             None => "not valid".to_owned(),
         })?;
+        if file.trust_unverified.is_none() && file.player.is_empty() {
+            return Err("the file is empty".to_owned());
+        }
         let mut players = HashMap::new();
         for (i, entry) in file.player.into_iter().enumerate() {
             let uuid = canonical_uuid(&entry.uuid)
                 .ok_or_else(|| format!("player {} has no valid uuid", i + 1))?;
+            let patterns = |list: Vec<String>| {
+                list.iter()
+                    .map(|p| pattern(p))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| format!("player {}: a pattern is not a node", i + 1))
+            };
             let rights = Rights {
-                allow: entry.allow,
-                deny: entry.deny,
+                allow: patterns(entry.allow)?,
+                deny: patterns(entry.deny)?,
                 reload: entry.reload,
             };
             if players.insert(uuid, rights).is_some() {
@@ -124,7 +163,7 @@ impl Rules {
             }
         }
         Ok(Self {
-            trust_unverified: file.trust_unverified,
+            trust_unverified: file.trust_unverified.unwrap_or(false),
             players,
         })
     }
@@ -430,26 +469,87 @@ allow = ["meridian.glist"]
 
     #[test]
     fn a_file_that_is_not_valid_is_refused_and_says_where_never_what() {
+        let alex = "[[player]]\nuuid = \"0a2ea4ba-bced-39d2-80e1-1ad51a0e925c\"\n";
         for (text, said) in [
             (
-                "[[player]]\nuuid = \"Alex\"\n",
+                "[[player]]\nuuid = \"Alex\"\n".to_owned(),
                 "player 1 has no valid uuid",
             ),
+            (format!("{alex}alow = []\n"), "not valid at line"),
             (
-                "[[player]]\nuuid = \"0a2ea4ba-bced-39d2-80e1-1ad51a0e925c\"\nalow = []\n",
-                "not valid at line",
+                "trust-unverified = \"yes\"\n".to_owned(),
+                "not valid at line 1",
             ),
-            ("trust-unverified = \"yes\"\n", "not valid at line 1"),
             (
-                "[[player]]\nuuid = \"0a2ea4ba-bced-39d2-80e1-1ad51a0e925c\"\n[[player]]\nuuid = \"0A2EA4BABCED39D280E11AD51A0E925C\"\n",
+                format!("{alex}[[player]]\nuuid = \"0A2EA4BABCED39D280E11AD51A0E925C\"\n"),
                 "player 2 is named twice",
             ),
+            // Cut to nothing, or to comments: every deny would be gone.
+            (String::new(), "the file is empty"),
+            ("# who may use what\n\n".to_owned(), "the file is empty"),
+            // A pattern that can never name a node the proxy asks about would deny nothing.
+            (
+                format!("{alex}deny = [\"meridian.alert \"]\n"),
+                "player 1: a pattern is not a node",
+            ),
+            (
+                format!(
+                    "{alex}allow = [\"meridian.send\"]\n[[player]]\nuuid = \"{BOB}\"\ndeny = [\"meridian.alert\\n\"]\n"
+                ),
+                "player 2: a pattern is not a node",
+            ),
         ] {
-            let why = Rules::parse(text).unwrap_err();
+            let why = Rules::parse(&text).unwrap_err();
             assert!(why.starts_with(said), "{text:?}: {why}");
-            assert!(!why.contains("0a2ea4ba") && !why.contains("alow"), "{why}");
+            assert!(
+                !why.contains("0a2ea4ba") && !why.contains("alow") && !why.contains("alert"),
+                "{why}"
+            );
         }
-        assert_eq!(Rules::parse("").unwrap(), Rules::default());
+        // A key is enough: a file that names nobody and says whom it trusts is a file.
+        assert_eq!(
+            Rules::parse("trust-unverified = false\n").unwrap(),
+            Rules::default()
+        );
+    }
+
+    #[test]
+    fn a_pattern_is_a_node_of_permissions_toml_in_lower_case() {
+        for (text, read) in [
+            ("meridian.send", Some("meridian.send")),
+            ("Meridian.Alert", Some("meridian.alert")),
+            ("meridian.server.*", Some("meridian.server.*")),
+            (
+                "ext.file-permissions.extperms",
+                Some("ext.file-permissions.extperms"),
+            ),
+            ("*", Some("*")),
+            ("meridian.alert ", None),
+            (" meridian.alert", None),
+            ("meridian.alert\n", None),
+            ("meridian..alert", None),
+            ("meridian.*.alert", None),
+            ("meridian*", None),
+            ("", None),
+        ] {
+            assert_eq!(pattern(text).as_deref(), read, "{text:?}");
+        }
+        // Read in lower case, a deny written in upper case denies.
+        let rules = Rules::parse(&format!(
+            "[[player]]\nuuid = \"{ALEX}\"\ndeny = [\"Meridian.Alert\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            verdicts(&rules, ALEX, Auth::Verified, &["meridian.alert"]),
+            ["Deny"]
+        );
+        // `*` names every node.
+        let everything =
+            Rules::parse(&format!("[[player]]\nuuid = \"{ALEX}\"\nallow = [\"*\"]\n")).unwrap();
+        assert_eq!(
+            verdicts(&everything, ALEX, Auth::Verified, &["meridian.glist"]),
+            ["Allow"]
+        );
     }
 
     /// A file of its own in the system's temporary folder, removed at the end.

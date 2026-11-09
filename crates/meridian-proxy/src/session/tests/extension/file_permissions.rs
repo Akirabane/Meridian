@@ -133,6 +133,13 @@ fn a_file_that_cannot_be_read_at_a_reload_leaves_the_rights_as_they_were_and_say
             2,
             "[[player]]\nuuid = \"Alex\"\nallow = [\"meridian.alert\"]\n".to_owned(),
         ),
+        // Cut to nothing: read in full, it would take every right of the file away (and every deny).
+        (3, String::new()),
+        // A deny that can never name a node (a space at its end) would deny nothing, and nothing would say so.
+        (
+            4,
+            format!("[[player]]\nuuid = \"{ALEX}\"\ndeny = [\"meridian.send \"]\n"),
+        ),
     ] {
         std::fs::write(&running.file, broken).unwrap();
         assert_eq!(hook("extperms reload").as_deref(), TAKEN_AT_ONCE);
@@ -145,7 +152,7 @@ fn a_file_that_cannot_be_read_at_a_reload_leaves_the_rights_as_they_were_and_say
     }
     std::fs::remove_file(&running.file).unwrap();
     assert_eq!(hook("extperms reload").as_deref(), TAKEN_AT_ONCE);
-    told_by_now(&told, 3);
+    told_by_now(&told, 5);
     running.logged("was not read again");
     // A file it could not read did not make it tell the proxy to forget: what the proxy kept still answers.
     let allowed = decisions(&sessions, "allow");
@@ -202,7 +209,7 @@ fn a_deny_wins_over_an_allow_and_over_permissions_toml_and_an_account_nobody_ver
  {
     let file = |trust: bool| {
         format!(
-            "trust-unverified = {trust}\n\n[[player]]\nuuid = \"{ALEX}\"\nallow = [\"meridian.*\"]\ndeny = [\"meridian.send\", \"meridian.server.*\"]\n"
+            "trust-unverified = {trust}\n\n[[player]]\nuuid = \"{ALEX}\"\nallow = [\"meridian.*\"]\ndeny = [\"Meridian.Send\", \"meridian.server.*\"]\n"
         )
     };
     const DENIED_GLIST: &str = "You do not have permission to use /glist.";
@@ -210,7 +217,8 @@ fn a_deny_wins_over_an_allow_and_over_permissions_toml_and_an_account_nobody_ver
         let running = Running::start(&file(trust));
         let config = config_of(vec![running.extension()], &[]);
         let sessions = sessions_for(&config);
-        // `permissions.toml` gives Alex /send (and /glist): the file's deny takes it, trusted or not.
+        // `permissions.toml` gives Alex /send (and /glist): the file's deny takes it, trusted or not. Written in
+        // upper case, it is read in lower case, as `permissions.toml` reads its own.
         let (hook, _) = hook_of(&config, &sessions, super::command::FILE);
         assert_eq!(
             hook("send all east").as_deref(),
