@@ -1002,10 +1002,13 @@ A message over a limit closes the connection, logged once.
   - `meridian_extension_requests_total{extension,method,outcome}`, where the outcome is
     `answered`, `timeout`, `invalid`, `busy`, `breaker` or `disconnected`;
   - `meridian_extension_request_seconds{extension,method}`;
+  - `meridian_extension_decisions_total{extension,point,decision}`, where the point is `login`, `command` or `server` and the
+    decision is what became of it (sections 4.2, 4.3 and 4.4);
   - `meridian_extension_breaker_open{extension}`;
   - `meridian_extension_orders_total{extension,method,outcome}`;
   - `meridian_extension_events_total{extension,event}`;
-  - `meridian_extension_events_dropped_total{extension}`.
+  - `meridian_extension_events_dropped_total{extension}`;
+  - `meridian_extension_late_answers_total{extension}`, the answers that came after their request was given up on and were dropped.
 
 ## 8. The Rust SDK: `meridian-extension`
 

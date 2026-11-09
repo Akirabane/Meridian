@@ -412,7 +412,8 @@ configuration without an extension is checked as it always was.
 
 **A reload** closes the connection of an extension it removes or switches off, opens one for an
 extension it adds or switches on, and closes the connection of an extension whose `address`,
-`token-file`, `grant`, `max-in-flight`, `breaker-failures` or `breaker-seconds` changed and opens a
+`token-file`, `grant`, `max-in-flight`, `breaker-failures`, `breaker-seconds`, or a key of its
+`[extension.orders]` or `[extension.events]` table changed, and opens a
 new one (its breaker and counters start again). A change of a `decide-*` table keeps the connection
 and applies to the next decision. An extension that did not change is not touched. Decisions that
 wait on a connection that is closed take their on-error policy. The proxy says which of these it

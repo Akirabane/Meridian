@@ -1107,6 +1107,7 @@ the gauges are worked out when the page is read.
 
 | Series | What it is |
 | --- | --- |
+| `meridian_info{version}` | Always 1; the label is the proxy's version |
 | `meridian_players` | Players connected to the proxy |
 | `meridian_sessions_alive` | Sessions still in memory, over or not. It follows `meridian_players`; staying above it for long is a leak |
 | `meridian_backend_players{backend}` | Players on each server |
@@ -1116,6 +1117,9 @@ the gauges are worked out when the page is read.
 | `meridian_incoming_transfers_total{outcome}` | Players other servers sent here with a vanilla transfer: `refused` (`accept-transfers` off), `logged_in` (their login finished; a ban, the whitelist or a full proxy can still turn them away), `failed` (section 5.13) |
 | `meridian_logins_total` | Players who ended on a server |
 | `meridian_login_failures_total{reason}` | Logins that did not: `protocol` (the handshake or login broke the protocol, or the connection failed), `duplicate`, `full`, `no_route`, `unreachable`, `banned` (including a connection closed for its address), `not_whitelisted`, `extension` (an extension refused the login, or refused the player at the choice of server, or could not be asked and its on-error policy refuses; [EXTENSIONS.md](EXTENSIONS.md) sections 4.2 and 4.4). A refusal by the authentication, and a server list ping, are not counted here |
+| `meridian_queue_length` | Players who wait for a place now (section 5.10) |
+| `meridian_queue_entered_total`, `meridian_queue_refused_total` | Players who entered the line, and those refused at once because it was at its longest |
+| `meridian_queue_left_total{cause}`, `meridian_queue_wait_seconds{cause}` | Players who left the line, and a histogram of how long they waited, by how the wait ended: `served`, `timeout` or `gone` (every other end: they closed the connection, the proxy was stopping, or their turn came and they got no session) |
 | `meridian_transfers_total` | Seamless switches of a player to another server that succeeded, the player staying connected: `/server` and `/hub` in game, `/send` and the console's `switch` and `send`, an extension's `send` order, an evacuation. A player another server sent here with a vanilla transfer is counted in `meridian_incoming_transfers_total`, and a player whose server was lost, moved or not, in `meridian_fallbacks_total` |
 | `meridian_transfer_failures_total{step}` | Transfers that failed, by step: `check`, `prepare`, `freeze`, `hand_over`, `commit` |
 | `meridian_transfer_duration_seconds{phase}` | A histogram (buckets from 0.05 s to 10 s) of the phases of a successful transfer: `prepare`, `freeze`, `hand_over`, `commit`, and `total` (which includes reaching the sidecars) |
@@ -1125,6 +1129,12 @@ the gauges are worked out when the page is read.
 | `meridian_restarts_detected_total{cause}` | Servers found to be going down: `announced`, `panel`, `unreachable` |
 | `meridian_status_rounds_total`, `meridian_status_round_duration_seconds` | Rounds of questions to the sidecars (with `[balancing] enabled`), and how long the last took |
 | `meridian_relay_packets_total{direction}`, `meridian_relay_writes_total{direction}` | The packets the relays sent the players, counted one by one as they were framed, and the writes they took; `direction="to_player"` is the only direction. The relay writes the packets that one read of a server brought in one write, at most 64 packets or 32 KiB of payload at a time (a join's world takes several), so the first over the second is how many packets a write carries (about one when a server writes each packet on its own, more when it writes a tick's at once). Only the relay's own writes are counted: not a transfer's delta, nor the proxy's messages to a player, nor the answers to commands. Both count every session of the proxy since it started |
+| `meridian_extension_connected{extension}`, `meridian_extension_breaker_open{extension}` | 1 while the proxy has a checked connection to the extension, and 1 while its breaker is open. The `meridian_extension_*` series are on the page only when an `[[extension]]` is configured ([EXTENSIONS.md](EXTENSIONS.md), section 7) |
+| `meridian_extension_requests_total{extension,method,outcome}`, `meridian_extension_request_seconds{extension,method}` | The proxy's requests to the extension, by how they ended (`answered`, `timeout`, `invalid`, `busy`, `breaker`, `disconnected`), and a histogram of the wait |
+| `meridian_extension_decisions_total{extension,point,decision}` | What became of each decision, by `point` (`login`, `command`, `server`) and `decision`: the extension's answer, `cached` for a command, or the on-error policy (`policy_allow`, `policy_deny`, `policy_default`, `policy_refuse`) |
+| `meridian_extension_orders_total{extension,method,outcome}` | The extension's orders, by how they ended: `done`, `invalid`, `failed`, `budget`, `busy`, `refused`. A method the proxy does not have is counted as `method="unknown"` |
+| `meridian_extension_events_total{extension,event}`, `meridian_extension_events_dropped_total{extension}` | The events written to the extension, by name (`players/joined`...), and those dropped because its queue was full |
+| `meridian_extension_late_answers_total{extension}` | Answers that came after their request was given up on, and were dropped |
 
 No label carries a player's name, address or unique id. The counters start at zero when
 the proxy starts. A monitor that reads `/healthz` tells that the proxy is up and not
@@ -1329,7 +1339,7 @@ this page, please report it):
 - `meridian-sidecar` options and `MERIDIAN_SIDECAR_SECRET`: `crates/meridian-sidecar/src/options.rs`.
 - `meridian-panel` commands and `[drain-before-stop]`: `crates/meridian-panel/src/main.rs`, `bench.rs`.
 - Configuration keys: `crates/meridian-config/src`, and [CONFIG.md](CONFIG.md).
-- The metrics page, its series and its labels (section 8.1): `crates/meridian-proxy/src/metrics.rs`.
+- The metrics page, its series and its labels (section 8.1): `crates/meridian-proxy/src/metrics.rs`, and `extension/stats.rs` for the `meridian_extension_*` series.
 - Log and error messages: the strings in `crates/meridian-proxy/src`, `meridian-net/src`,
   `meridian-handoff/src` and `meridian-sidecar/src`.
 - Horizon's side (`forwarding.secret`, the log line): Horizon's `docs/hosting.md`, "Behind a
