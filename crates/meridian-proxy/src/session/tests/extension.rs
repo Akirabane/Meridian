@@ -622,6 +622,8 @@ fn what_the_extension_did_not_declare_is_not_asked_and_what_is_not_granted_is_no
 // The SDK's example `allow-all`, run as a separate process (docs/EXTENSIONS.md, 8.2)
 
 mod allow_all;
+mod example;
+mod file_permissions;
 
 // ---------------------------------------------------------------------------------------------
 // The choice of server (docs/EXTENSIONS.md, 4.4)
@@ -2313,7 +2315,7 @@ mod own {
     }
 
     /// The six commands of the proxy, minus `without`, and the extensions.
-    fn config_of(extensions: Vec<ExtensionConfig>, without: &[ProxyCommand]) -> Config {
+    pub(super) fn config_of(extensions: Vec<ExtensionConfig>, without: &[ProxyCommand]) -> Config {
         let enabled = [
             ProxyCommand::Server,
             ProxyCommand::Hub,
@@ -2336,7 +2338,7 @@ mod own {
     }
 
     /// Alex's hook, and the lines told to Alex.
-    fn hook_of(
+    pub(super) fn hook_of(
         config: &Config,
         sessions: &Sessions,
         file: &str,
@@ -2375,7 +2377,7 @@ mod own {
     }
 
     /// Waits until `count` lines have been told, and gives them.
-    fn told_by_now(told: &Arc<Mutex<Vec<String>>>, count: usize) -> Vec<String> {
+    pub(super) fn told_by_now(told: &Arc<Mutex<Vec<String>>>, count: usize) -> Vec<String> {
         let limit = Instant::now() + Duration::from_secs(5);
         while told.lock().unwrap().len() < count {
             assert!(Instant::now() < limit, "told {:?}", told.lock().unwrap());
@@ -2384,7 +2386,7 @@ mod own {
         told.lock().unwrap().clone()
     }
 
-    const TAKEN_AT_ONCE: Option<&str> = Some(TAKEN);
+    pub(super) const TAKEN_AT_ONCE: Option<&str> = Some(TAKEN);
 
     #[test]
     fn without_an_extension_every_word_goes_to_the_server() {

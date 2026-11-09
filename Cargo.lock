@@ -502,6 +502,7 @@ dependencies = [
  "meridian-websocket",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

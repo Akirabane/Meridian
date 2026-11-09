@@ -17,5 +17,9 @@ meridian-hmac.workspace = true
 # The extension's end of the connection: it accepts the proxy with the same WebSocket code the proxy uses.
 meridian-websocket.workspace = true
 
+# The file of players of the example file_permissions, read as the configuration reads its own (the same crate).
+[dev-dependencies]
+toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
+
 [lints]
 workspace = true
