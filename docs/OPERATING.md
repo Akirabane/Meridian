@@ -1029,8 +1029,8 @@ reconnect. Restart the proxy, or wait for the players to come back, before measu
 
 ### 5.15 Worlds that keep their own state, without a loading screen
 
-A lobby, a survival world and a hardcore world must each keep their own copy of a player: what is carried in survival must
-not appear in the lobby. Section 5.13 does it with vanilla's transfer, and the client shows a loading screen. Two
+A lobby, a survival world and a hardcore world must each keep their own copy of a player: what is carried in survival
+must not appear in the lobby. Section 5.13 does it with vanilla's transfer, and the client shows a loading screen. Two
 settings keep each world's copy and move the player seamlessly, as `/server` does:
 
 ```toml
@@ -1080,11 +1080,11 @@ an extension's `send`):
 A server that names no group is in one unnamed group with the others that name none: a file without the setting carries
 the state on every move, as before it. A group's name does not depend on case, and may not have spaces around it.
 
-**`seamless` on a `[[forced-host]]`.** The lobby still sends players with vanilla's `/transfer survival.<domain> 25565
-<player>`, as in section 5.13. When the host of that transfer is a seamless forced host, the proxy does not pass the
-transfer to the client: it moves the player to that host's server itself, with no loading screen. The host is compared
-without its case or a final dot; the port is not looked at. A forced host without `seamless` (here `hardcore`) keeps
-vanilla's transfer and its loading screen.
+**`seamless` on a `[[forced-host]]`.** The lobby still sends players with vanilla's
+`/transfer survival.<domain> 25565 <player>`, as in section 5.13. When the host of that transfer is a seamless forced
+host, the proxy does not pass the transfer to the client: it moves the player to that host's server itself, with no
+loading screen. The host is compared without its case or a final dot; the port is not looked at. A forced host without
+`seamless` (here `hardcore`) keeps vanilla's transfer and its loading screen.
 
 When the move cannot be made while the player is still on the lobby, with nothing of the other world sent, the proxy
 passes the transfer to the client as the lobby sent it, and the player goes with the loading screen. The log says why
@@ -1095,9 +1095,9 @@ passes the transfer to the client as the lobby sent it, and the player goes with
 - a server or its sidecar cannot be reached, or the other server is full or refuses the player;
 - the servers configure their clients differently (section 3 of [DESIGN.md](DESIGN.md)).
 
-Both servers need a sidecar (section 4) and Horizon's `[transfer]` section (section 3). The proxy refuses a seamless forced host
-whose server has no sidecar; it cannot know which servers will send transfers to it, so a transfer sent by a server without
-a sidecar is passed to the client as it came, with a warning in the log.
+Both servers need a sidecar (section 4) and Horizon's `[transfer]` section (section 3). The proxy refuses a seamless
+forced host whose server has no sidecar; it cannot know which servers will send transfers to it, so a transfer sent by a
+server without a sidecar is passed to the client as it came, with a warning in the log.
 
 **What the client still shows.** No loading screen and no Respawn, but the other map arrives chunk by chunk from the
 player outwards, over a second or a few ([DESIGN.md](DESIGN.md), section 8.1). The values only a login sets stay those
@@ -1106,21 +1106,24 @@ of the first server ([DESIGN.md](DESIGN.md), section 8.2).
 **`seamless-arrival = false`: a hardcore world.** Whether a world is hardcore is one of those values: the client learns
 it from the login (`Login`'s hardcore flag) and from nothing else. A player moved seamlessly from a lobby to a hardcore
 world keeps the lobby's hearts, and at death the death screen offers "Respawn" where a hardcore world shows "Spectate
-World"; the server still makes the player a spectator after it, so the rule holds and the screen is wrong (both seen in a
-local run). The other way round follows from the same flag (not run): a player who logged in to the hardcore world, then
-moved seamlessly to the lobby, would keep the hardcore hearts there, and its death screen. `seamless-arrival = false` on such a server refuses every seamless
-move to it from a server that does not have the setting, and every seamless move from it to such a server, whatever
-starts the move (`/server`, `/hub`, `send`, `drain --move`, an evacuation, an extension's `send`): the player stays where
-they were and is told that the server is only joined or left with a login. Between two servers that both have the
-setting the move is made. `/hub`, `/play`, `drain --move` and an evacuation do not choose a server the move could not
-reach; when that leaves no server at all, the player reads "You can only leave this server by logging in to another
-one." (not that the lobbies are full), and an evacuation or `drain --move` says that the players of that server can only
-leave it with a login. The proxy also refuses a seamless forced host that leads to such a server. Its players join it through its own
-address, or a server's vanilla transfer to its forced host, and leave it the same way, as in section 5.13.
+World"; the server still makes the player a spectator after it, so the rule holds and the screen is wrong (both seen in
+a local run). The other way round follows from the same flag (not run): a player who logged in to the hardcore world,
+then moved seamlessly to the lobby, would keep the hardcore hearts there, and its death screen.
+`seamless-arrival = false` on such a server refuses every seamless move to it from a server that does not have the
+setting, and every seamless move from it to such a server, whatever starts the move (`/server`, `/hub`, `send`,
+`drain --move`, an evacuation, an extension's `send`): the player stays where they were and is told that the server is
+only joined or left with a login. Between two servers that both have the setting the move is made. `/hub`, `/play`,
+`drain --move` and an evacuation do not choose a server the move could not reach. When that leaves no server at all, the
+line says which side asks for a login, not that the servers are full: a player on such a server reads "You can only
+leave this server by logging in to another one.", and a player whose only targets are such servers reads "That server
+can only be joined with a login."; an evacuation or `drain --move` says that the players of the drained server can only
+leave it with a login, or that no other server of its role can be joined without one. The proxy also refuses a seamless
+forced host that leads to such a server. Its players join it through its own address, or a server's vanilla transfer to
+its forced host, and leave it the same way, as in section 5.13.
 
 **Going back to an older proxy.** A proxy from before these settings refuses a configuration file that holds
-`state-group`, `seamless-arrival` or `seamless` (it refuses every key it does not know): take them out of the file before
-running an older version.
+`state-group`, `seamless-arrival` or `seamless` (it refuses every key it does not know): take them out of the file
+before running an older version.
 
 **What it does not do.** It does not keep a player's state in step between two servers of different groups: each
 server's copy changes only while the player is there. A server reached directly, not through the proxy, has an older

@@ -336,7 +336,8 @@ fn in_roles(
             .filter(|s| {
                 let reachable = config.seamless_between(current, &s.backend);
                 cut |= !reachable;
-                kept |= reachable;
+                // The server the player is on does not count: it is never where they go.
+                kept |= reachable && s.backend != current;
                 reachable
             })
             .filter_map(|s| server_of(config, shared, &s.backend, &[], false, (retry, now)))
@@ -355,16 +356,25 @@ fn in_roles(
             return Ok((target, reservation));
         }
     }
-    // Every server of the roles was out of reach of a seamless move: room is not the reason.
+    // Every server of the roles was out of reach of a seamless move: room is not the reason. Which side asks for a login
+    // says which line: the server the player is on, or the servers they could go to.
     if cut && !kept {
-        return Err(LEAVE_WITH_A_LOGIN.to_owned());
+        let line = if config.takes_seamless_arrival(current) {
+            JOIN_WITH_A_LOGIN
+        } else {
+            LEAVE_WITH_A_LOGIN
+        };
+        return Err(line.to_owned());
     }
     Err(none.to_owned())
 }
 
-/// What a player reads when every server they could be sent to is one a seamless move cannot reach from where they are
-/// (`seamless-arrival`).
+/// What a player on a server only left with a login reads when every server they could be sent to is out of reach of a
+/// seamless move (`seamless-arrival`).
 pub const LEAVE_WITH_A_LOGIN: &str = "You can only leave this server by logging in to another one.";
+
+/// What a player on an ordinary server reads when every server they could be sent to is only joined with a login.
+pub const JOIN_WITH_A_LOGIN: &str = "That server can only be joined with a login.";
 
 /// Where a player on the drained `from` can go: the best server of the same role by the
 /// rule of the login, never `from`, and never one that serves the other kind of player
@@ -403,9 +413,14 @@ pub fn elsewhere(config: &Config, shared: &Shared, from: &str) -> Result<Reserva
         .filter(|s| config.seamless_between(from, &s.backend))
         .collect();
     if !candidates.is_empty() && reachable.is_empty() {
-        return Err(format!(
-            "the players of {from} can only leave it with a login"
-        ));
+        return Err(if config.takes_seamless_arrival(from) {
+            format!(
+                "no other server of role {} can be joined without a login",
+                role.name()
+            )
+        } else {
+            format!("the players of {from} can only leave it with a login")
+        });
     }
     let servers: Vec<Server<'_>> = reachable
         .into_iter()

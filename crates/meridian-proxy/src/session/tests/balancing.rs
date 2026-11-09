@@ -1281,3 +1281,37 @@ fn the_hub_from_a_closed_server_says_it_is_left_with_a_login() {
         "No lobby has room right now."
     );
 }
+
+/// The other way round: a player on an ordinary server whose only targets are joined with a login reads that the target
+/// asks for a login, not their own server; a drain says the same. And a player on a full closed server whose other
+/// targets are ordinary reads that their server is left with a login: being on it is no way out, full or not.
+#[test]
+fn the_line_names_the_side_that_asks_for_a_login() {
+    let sessions = Sessions::default();
+    let shared = sessions.shared();
+    let mut config = with_queue(5, 5);
+    for closed in ["lobby", "east", "west", "queue"] {
+        config.no_seamless_arrival.insert(closed.into());
+    }
+    assert_eq!(
+        placing::hub(&config, &shared, open_to_all, "guests").unwrap_err(),
+        placing::JOIN_WITH_A_LOGIN
+    );
+    assert_eq!(
+        placing::JOIN_WITH_A_LOGIN,
+        "That server can only be joined with a login."
+    );
+    // A drain of an open lobby whose fellow lobbies are all closed.
+    config.no_seamless_arrival.remove("lobby");
+    assert_eq!(
+        placing::elsewhere(&config, &shared, "lobby").unwrap_err(),
+        "no other server of role lobby can be joined without a login"
+    );
+    // West closed alone and full, the player on it: the open lobbies are out of reach, and west does not count.
+    config.no_seamless_arrival = ["west".to_string()].into_iter().collect();
+    let _full: Vec<Reservation> = (0..5).map(|_| hold(&sessions, &config, "west")).collect();
+    assert_eq!(
+        placing::hub(&config, &shared, open_to_all, "west").unwrap_err(),
+        placing::LEAVE_WITH_A_LOGIN
+    );
+}
