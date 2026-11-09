@@ -4,184 +4,44 @@
 //! and once it is stopped the on-error policies decide, at once.
 //!
 //! Every wait is for something to happen (a line the program writes, the link going down), bounded, and
-//! fails with what was seen; no port is fixed.
+//! fails with what was seen; no port is fixed (see `example`).
 use super::command::{DENIED_SEND, FILE, hook_of, six_commands};
+use super::example::{Example, WAIT};
 use super::server::{ALL_UP, EAST, LOBBY, WEST, login_alex, lose_lobby};
 use super::*;
 use meridian_config::{
     BalancedServer, Balancing, CommandDecision, Role, ServerDecision, ServerOnError,
 };
-use std::io::{BufRead, BufReader, Read};
-use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
-use std::sync::mpsc::{self, Receiver};
-
-/// The longest wait for the program to say where it listens, for a line it writes, or for the proxy to see
-/// it gone.
-const WAIT: Duration = Duration::from_secs(10);
-
-/// The longest wait for cargo to build the program: nothing to do when `cargo test` built it already.
-const BUILD: Duration = Duration::from_secs(300);
 
 /// The deadline of each decision: far above what the program takes, so that a slow machine is not
 /// taken for a slow extension.
 const DEADLINE_MS: u64 = 5000;
 
-/// The program, built by cargo once for the tests of this module; cargo says where it put it.
-fn program() -> &'static PathBuf {
-    static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
-    PROGRAM.get_or_init(|| {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| env!("CARGO").into());
-        let mut build = Command::new(cargo);
-        build
-            .args([
-                "build",
-                "-p",
-                "meridian-extension",
-                "--example",
-                "allow_all",
-            ])
-            .arg("--message-format=json")
-            .current_dir(env!("CARGO_MANIFEST_DIR"));
-        let (send, built) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = send.send(build.output());
-        });
-        let output = built
-            .recv_timeout(BUILD)
-            .expect("cargo did not build the example allow_all in time")
-            .expect("cannot run cargo to build the example allow_all");
-        let messages = String::from_utf8_lossy(&output.stdout);
-        messages
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "allow_all")
-            .find_map(|m| m["executable"].as_str().map(PathBuf::from))
-            .unwrap_or_else(|| {
-                panic!(
-                    "cargo gave no program for the example allow_all ({}):\n{}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                )
-            })
-    })
+type AllowAll = Example;
+
+fn start() -> AllowAll {
+    Example::start("allow_all", &[])
 }
 
-/// The lines of `stream`, as they come.
-fn follow(stream: impl Read + Send + 'static) -> Receiver<String> {
-    let (send, lines) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stream).lines().map_while(Result::ok) {
-            if send.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    lines
-}
-
-/// The program while it runs; killed when dropped.
-struct AllowAll {
-    child: Child,
-    folder: Folder,
-    address: String,
-    /// What it writes on its standard output: a line for each request.
-    lines: Receiver<String>,
-    /// What the SDK writes on the standard error stream.
-    errors: Receiver<String>,
-}
-
-impl AllowAll {
-    fn start() -> Self {
-        let folder = Folder::new();
-        let mut child = Command::new(program())
-            .arg(folder.token())
-            .arg("127.0.0.1:0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("cannot start the example allow_all");
-        let lines = follow(child.stdout.take().unwrap());
-        let errors = follow(child.stderr.take().unwrap());
-        let mut allow_all = Self {
-            child,
-            folder,
-            address: String::new(),
-            lines,
-            errors,
-        };
-        // The SDK says where it listens: the port the system picked.
-        let until = Instant::now() + WAIT;
-        let mut seen = Vec::new();
-        allow_all.address = loop {
-            let left = until.saturating_duration_since(Instant::now());
-            match allow_all.errors.recv_timeout(left) {
-                Ok(line) => match line.split_once(" listens on ") {
-                    Some((_, address)) => break address.trim().to_owned(),
-                    None => seen.push(line),
-                },
-                Err(_) => panic!(
-                    "allow_all never said where it listens; it wrote:\n{}",
-                    seen.join("\n")
-                ),
-            }
-        };
-        allow_all
-    }
-
-    /// The extension's `[[extension]]`, granted the three decisions; each falls back on `default`.
-    fn extension(&self) -> ExtensionConfig {
-        let mut extension = extension_config(
-            self.address.clone(),
-            self.folder.token(),
-            &["decide.login", "decide.server", "decide.command"],
-            OnError::Default,
-            DEADLINE_MS,
-        );
-        extension.decide_server = ServerDecision {
-            timeout_ms: DEADLINE_MS,
-            on_error: ServerOnError::Default,
-        };
-        extension.decide_command = CommandDecision {
-            timeout_ms: DEADLINE_MS,
-            on_error: OnError::Default,
-            cache_seconds_max: 0,
-        };
-        extension
-    }
-
-    /// The next `count` lines it writes, each without its time, which is checked to be a whole number of
-    /// milliseconds (not against the test's clock, which a machine may set again while it runs).
-    fn wrote(&self, count: usize) -> Vec<String> {
-        let until = Instant::now() + WAIT;
-        let mut lines = Vec::new();
-        while lines.len() < count {
-            let left = until.saturating_duration_since(Instant::now());
-            let Ok(line) = self.lines.recv_timeout(left) else {
-                panic!(
-                    "allow_all wrote {} lines of {count}: {lines:?}",
-                    lines.len()
-                );
-            };
-            let (time, rest) = line.split_once(' ').unwrap_or_else(|| panic!("{line:?}"));
-            assert!(time.parse::<u128>().is_ok(), "{line:?}");
-            lines.push(rest.to_owned());
-        }
-        lines
-    }
-
-    /// Kills the program and waits until it is gone.
-    fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for AllowAll {
-    fn drop(&mut self) {
-        self.stop();
-    }
+/// The extension's `[[extension]]`, granted the three decisions; each falls back on `default`.
+fn extension(allow_all: &AllowAll) -> ExtensionConfig {
+    let mut extension = extension_config(
+        allow_all.address.clone(),
+        allow_all.folder.token(),
+        &["decide.login", "decide.server", "decide.command"],
+        OnError::Default,
+        DEADLINE_MS,
+    );
+    extension.decide_server = ServerDecision {
+        timeout_ms: DEADLINE_MS,
+        on_error: ServerOnError::Default,
+    };
+    extension.decide_command = CommandDecision {
+        timeout_ms: DEADLINE_MS,
+        on_error: OnError::Default,
+        cache_seconds_max: 0,
+    };
+    extension
 }
 
 /// Three backends, `lobby` then `east` and `west`, and the six proxy commands: what the proxy does with
@@ -213,7 +73,7 @@ fn balanced(config: Config) -> Config {
 
 fn with(allow_all: &AllowAll, config: Config) -> Config {
     Config {
-        extensions: vec![allow_all.extension()],
+        extensions: vec![extension(allow_all)],
         ..config
     }
 }
@@ -246,7 +106,7 @@ fn none_late(sessions: &Sessions) {
 #[test]
 fn a_player_goes_where_the_routes_send_them_without_allow_all_and_it_is_asked_at_login_and_for_the_server()
  {
-    let allow_all = AllowAll::start();
+    let allow_all = start();
     let downs: [[(&str, bool); 3]; 3] = [
         ALL_UP,
         [(LOBBY, false), (EAST, true), (WEST, true)],
@@ -278,9 +138,9 @@ const PLAYER_ADDRESS: &str = "198.51.100.7";
 
 #[test]
 fn what_allow_all_writes_holds_neither_the_address_nor_the_host_and_a_fallback_is_written_as_one() {
-    let allow_all = AllowAll::start();
+    let allow_all = start();
     // Granted `addresses` as well: it does not ask for it, so it is not given the address.
-    let mut extension = allow_all.extension();
+    let mut extension = extension(&allow_all);
     extension.grant.push("addresses".into());
     let config = Config {
         extensions: vec![extension],
@@ -338,7 +198,7 @@ fn what_allow_all_writes_holds_neither_the_address_nor_the_host_and_a_fallback_i
 
 #[test]
 fn with_balancing_a_player_goes_where_the_balancer_sends_them_without_allow_all() {
-    let allow_all = AllowAll::start();
+    let allow_all = start();
     let config = with(&allow_all, balanced(alone()));
     let sessions = sessions_for(&config);
     let by_itself = Sessions::default();
@@ -361,7 +221,7 @@ fn with_balancing_a_player_goes_where_the_balancer_sends_them_without_allow_all(
 
 #[test]
 fn a_command_is_decided_by_the_file_as_without_allow_all_and_what_was_typed_is_not_written() {
-    let allow_all = AllowAll::start();
+    let allow_all = start();
     let config = with(&allow_all, alone());
     let sessions = sessions_for(&config);
     let by_itself = Sessions::default();
@@ -399,7 +259,7 @@ fn a_command_is_decided_by_the_file_as_without_allow_all_and_what_was_typed_is_n
 
 #[test]
 fn once_allow_all_is_stopped_the_policies_decide_and_nothing_waits_for_it() {
-    let mut allow_all = AllowAll::start();
+    let mut allow_all = start();
     let config = with(&allow_all, alone());
     let sessions = sessions_for(&config);
     allow_all.stop();
