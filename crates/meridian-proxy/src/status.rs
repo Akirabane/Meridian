@@ -227,7 +227,9 @@ fn record(statuses: &Statuses, sidecar: &Sidecar, result: Result<ServerStatus, S
 
 /// Tells the extensions that listen which backends changed state: `servers/up` for one that answers
 /// again and `servers/down` for one that stopped answering, with the cause `restart` if the detector
-/// believes it is going down for a restart (it announced its stop, or it was silent for rounds), and
+/// already has it going down for a restart (usually because it announced its stop: at the first round
+/// without an answer the detector has not yet counted `silent-rounds` of them, so a server that is only
+/// silent is `unreachable`; the silence counts only for an episode that is already open), and
 /// `unreachable` if not.
 pub fn tell(extensions: &Registry, detector: &Detector, changes: Vec<Change>) {
     for change in changes {

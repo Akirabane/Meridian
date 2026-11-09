@@ -890,7 +890,7 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
   point.
 
 **As built, for the events** (`extension/events.rs`, `meridian-extension/src/events.rs`, `meridian-extension/src/serve/events.rs`).
-every notification of the table is built, and `events/dropped`.
+Every notification of the table is built, and `events/dropped`.
 
 - **Who is told.** Only a connection whose hello asked for `events` **and** that the operator granted it (`grant = ["events", ...]`), as for any
   capability. The SDK's `on_event` asks for it. A player's **address** is in `joined` only for a connection that asked for `addresses` and was
@@ -920,7 +920,7 @@ every notification of the table is built, and `events/dropped`.
     probe (a sidecar that says it does not know the request is alive, so it answers) and **down** when it does not: the same reading the restart detector makes of each round. It is told **only
     when the state changes**: the first round that reads a server sets the state it starts from and tells nothing (a server that is down at the first round is told when it comes up), and a server
     that stays down is told once. `cause` is on a `down` only: `restart` when the restart detector already has the server going down for a restart at that moment, which is usually because it **announced its stop** (a server that goes silent without saying so is told `unreachable` at the first round it does not
-    answer: the detector only counts it as restarting after `[restart] silent_rounds` rounds, 3 by default, and the `down` is not told again then) and
+    answer: the detector only counts it as restarting after `[restart] silent-rounds` rounds, 3 by default, and the `down` is not told again then) and
     `unreachable` when nothing says it is a restart; an `up` has none. **Only the servers with a role and a sidecar are watched, and only while `[balancing] enabled` is on**: that is the probe;
     a server that a reload removes is forgotten, and when it comes back its first reading is its base again. The name of the server is all that is in it: no address, no answer of the sidecar.
   - `meridian:notification/queue/entered`: `{seq, at, player, position}`: the player entered the line that waits for a place (`[queue]`), and `position` is the place they took, 1 for the first to be served;
