@@ -1213,7 +1213,7 @@ the same calls, so what an operator can do at the console an extension granted `
   `-32602` in fixed words (the name is not given back); so is a `to` and a way to say whom that are not as above.
 - **The answer comes when the moves start, not when they end.** The moves go on after it, one after the other, on a thread
   of their own, as the staff's `/send` does (the same function, `staff::move_all`): each player is told they are being
-  moved and where, and how each move ended is in the proxy's log (and, in version 1.1, an event). Until then `players/find`
+  moved and where, and how each move ended comes as a `players/moved` event (section 6). `players/find`
   tells where a player is. A player whose move is under way is not moved twice at once. A repeated order moves only those
   who are not on `to` yet.
 - **Cost** (decision Q7): the number of players it moves, **and at most the burst**, charged all at once as a broadcast is
