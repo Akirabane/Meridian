@@ -675,7 +675,12 @@ pub(crate) fn serve(
             }
         }
     }
-    let line = queue::Line::new(&sessions.queue, sessions.metrics(), &config.queue, &name);
+    // The extensions that listen are told when the player enters the line and leaves it, if they wait.
+    let line = queue::Line::new(&sessions.queue, sessions.metrics(), &config.queue, &name).telling(
+        &sessions.extensions,
+        uuid,
+        session.auth == client::AuthKind::Premium,
+    );
     place(session, peer, config, connect, sessions, identity, line);
 }
 
@@ -2442,6 +2447,86 @@ pub(crate) mod tests {
         assert_eq!((entered, refused_at_once, left), (1, 1, [1, 0, 0]));
         for thread in backends.threads.lock().unwrap().drain(..) {
             thread.join().unwrap().unwrap();
+        }
+    }
+
+    /// What the extensions that listen are told of a player who waits at a real login: they enter the line at its first place and, when
+    /// the place comes, leave it served.
+    #[test]
+    fn a_player_who_waits_at_a_login_is_told_entering_the_line_and_served() {
+        let config = queued(5, 3);
+        let sessions = Sessions::default();
+        let told = sessions.extensions.bus().recording(false);
+        let held = sessions.admit(1).unwrap();
+        let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+        std::thread::scope(|scope| {
+            let sessions = &sessions;
+            scope.spawn(move || {
+                while sessions.queue.len() == 0 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                drop(held);
+            });
+            route_one(
+                &config,
+                sessions,
+                &*connect,
+                &backends,
+                logged_in("Steve", client::AuthKind::Offline, None),
+                vec![Step::ExpectClose],
+            )
+        });
+        let events =
+            crate::extension::events::told_matching(&told, "meridian:notification/queue/", 2);
+        assert_eq!(events[0].0, "meridian:notification/queue/entered");
+        assert_eq!(events[0].1["position"], 1);
+        assert_eq!(
+            events[0].1["player"],
+            serde_json::json!({
+                "name": "Steve",
+                "uuid": hyphenated(offline_uuid("Steve").to_be_bytes()),
+                "auth": "unverified"
+            })
+        );
+        assert_eq!(events[1].0, "meridian:notification/queue/left");
+        assert_eq!(events[1].1["cause"], "served");
+    }
+
+    /// A wait that runs out, and a player who closes the connection while they wait, are told with their own word.
+    #[test]
+    fn a_wait_that_ends_without_a_place_is_told_with_why() {
+        for (wait, steps, cause) in [(1, refused(), "timeout"), (10, vec![Step::Close], "left")] {
+            let config = queued(wait, 3);
+            let sessions = Sessions::default();
+            let told = sessions.extensions.bus().recording(false);
+            let _held = sessions.admit(1).unwrap();
+            let (connect, backends) = reachable(vec![("127.0.0.1:25601", true)]);
+            route_one(
+                &config,
+                &sessions,
+                &*connect,
+                &backends,
+                logged_in("Notch", client::AuthKind::Premium, None),
+                steps,
+            );
+            let events =
+                crate::extension::events::told_matching(&told, "meridian:notification/queue/", 2);
+            assert_eq!(
+                events[0].0, "meridian:notification/queue/entered",
+                "{cause}"
+            );
+            assert_eq!(events[1].0, "meridian:notification/queue/left", "{cause}");
+            assert_eq!(events[1].1["cause"], cause);
+            assert_eq!(
+                events[0].1["player"],
+                serde_json::json!({
+                    "name": "Notch",
+                    "uuid": hyphenated(offline_uuid("Notch").to_be_bytes()),
+                    "auth": "verified"
+                }),
+                "{cause}"
+            );
         }
     }
 
