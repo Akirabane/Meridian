@@ -2917,19 +2917,13 @@ mod the_orders {
         let acting = Acting::new(5);
         let (fake, _registry, link, _folder) = acting_with(&["orders.move"], &acting, |_| {});
         let secret = "name-that-must-not-come-back";
-        order(
-            &fake,
-            &json!(8300),
-            shapes::PLAYERS_SEND,
-            "{\"to\":\"nowhere\",\"all\":true}",
-        );
-        order(
-            &fake,
-            &json!(8301),
-            shapes::PLAYERS_SEND,
-            "{\"to\":\"east\",\"from\":\"nowhere\"}",
-        );
-        for id in [8300, 8301] {
+        // An extension sends one lot at a time, and an order holds the place for it until its handler returns: the second order is
+        // sent when the first one has been answered, as an extension that waits for the answer would, and not while it still runs.
+        for (id, params) in [
+            (8300, "{\"to\":\"nowhere\",\"all\":true}"),
+            (8301, "{\"to\":\"east\",\"from\":\"nowhere\"}"),
+        ] {
+            order(&fake, &json!(id), shapes::PLAYERS_SEND, params);
             let reply = answer(&fake, &json!(id));
             assert_eq!(code_of(&reply), -32602, "{reply}");
             assert!(
