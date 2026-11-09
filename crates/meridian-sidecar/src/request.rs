@@ -163,10 +163,13 @@ pub struct ServerStatus {
 }
 
 impl ServerStatus {
-    /// Reads the answer of the backend: a JSON object, whose `players` (or `online`),
-    /// `capacity` (or `max_players`), `held`, `expected` and `frozen` are whole numbers and
-    /// `accepts_transfers`, `full` and `stopping` booleans when they are there. A field that is
-    /// there with another type is an error; any other field is ignored.
+    /// Reads the answer of the backend: a JSON object, whose `players` (or `online`) and
+    /// `capacity` (or `max_players`) are whole numbers and `accepts_transfers` a boolean when
+    /// they are there; one of them with another type is an error, since the balancer decides
+    /// on them. `held`, `expected` and `frozen` (whole numbers) and `full` and `stopping`
+    /// (booleans) are only shown to extensions: one with another type is read as unknown, so
+    /// that a server whose answer changes shape for one of them is still read, and offered.
+    /// Any other field is ignored.
     pub fn from_value(answer: &Value) -> Result<ServerStatus, String> {
         let Value::Object(map) = answer else {
             return Err(format!("the status is not a JSON object: {answer}"));
@@ -185,11 +188,9 @@ impl ServerStatus {
                 return Err(format!("accepts_transfers is not true or false: {other}"));
             }
         };
-        let flag = |key: &str| match map.get(key) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::Bool(b)) => Ok(Some(*b)),
-            Some(other) => Err(format!("{key} is not true or false: {other}")),
-        };
+        // The fields only shown to extensions: unknown when they are not of their type.
+        let shown_number = |key: &str| map.get(key).and_then(Value::as_u64);
+        let shown_flag = |key: &str| map.get(key).and_then(Value::as_bool);
         let horizon = map.contains_key("max_players");
         Ok(ServerStatus {
             players: match number("online")? {
@@ -201,11 +202,11 @@ impl ServerStatus {
                 None => number("capacity")?,
             },
             accepts_transfers: accepts_transfers.or(horizon.then_some(true)),
-            held: number("held")?,
-            expected: number("expected")?,
-            frozen: number("frozen")?,
-            full: flag("full")?,
-            stopping: flag("stopping")?,
+            held: shown_number("held"),
+            expected: shown_number("expected"),
+            frozen: shown_number("frozen"),
+            full: shown_flag("full"),
+            stopping: shown_flag("stopping"),
         })
     }
 }
@@ -1143,12 +1144,34 @@ mod tests {
             ),
             (None, None, None, None, None)
         );
+        // One of them of another type is unknown, and the rest of the answer is read: a server is not
+        // left unread, and so not offered, for a field only an extension is shown.
+        for odd in [
+            r#"{"online":5,"max_players":20,"held":-1}"#,
+            r#"{"online":5,"max_players":20,"expected":"2"}"#,
+            r#"{"online":5,"max_players":20,"frozen":1.5}"#,
+            r#"{"online":5,"max_players":20,"full":1}"#,
+            r#"{"online":5,"max_players":20,"stopping":{"in_seconds":10}}"#,
+        ] {
+            let read = answer(odd).unwrap_or_else(|e| panic!("{odd}: {e}"));
+            assert_eq!((read.players, read.capacity), (Some(5), Some(20)), "{odd}");
+            assert_eq!(
+                (
+                    read.held,
+                    read.expected,
+                    read.frozen,
+                    read.full,
+                    read.stopping
+                ),
+                (None, None, None, None, None),
+                "{odd}"
+            );
+        }
+        // What the balancer decides on stays strict.
         for bad in [
-            r#"{"held":-1}"#,
-            r#"{"expected":"2"}"#,
-            r#"{"frozen":1.5}"#,
-            r#"{"full":1}"#,
-            r#"{"stopping":"yes"}"#,
+            r#"{"online":"5"}"#,
+            r#"{"max_players":-1}"#,
+            r#"{"accepts_transfers":"yes"}"#,
         ] {
             assert!(answer(bad).is_err(), "{bad}");
         }

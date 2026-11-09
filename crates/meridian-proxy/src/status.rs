@@ -54,12 +54,12 @@ struct State {
     answering: HashMap<String, bool>,
     /// The state each backend was last seen in by the extensions (`servers/state`): set by the first round that reads
     /// it, which is not a change.
-    told: HashMap<String, Told>,
+    told: HashMap<String, StateSeen>,
 }
 
 /// What `servers/state` tells of a backend, and a change of which is told.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Told {
+pub struct StateSeen {
     /// `open`, `closed`, `draining` or `not_offered`.
     pub state: &'static str,
     pub why: Option<Why>,
@@ -130,9 +130,14 @@ impl Statuses {
         self.lock().answering.get(backend).copied()
     }
 
+    /// Forgets the state `servers/state` last saw of every backend: the next round that sees one sets where it starts from.
+    pub fn forget_states(&self) {
+        self.lock().told.clear();
+    }
+
     /// `backend` is in state `now` at this round. Whether that is a change since the round before: the first round that
     /// sees a backend sets the state it starts from, and is not a change.
-    pub fn saw_state(&self, backend: &str, now: Told) -> bool {
+    pub fn saw_state(&self, backend: &str, now: StateSeen) -> bool {
         let before = self.lock().told.insert(backend.to_owned(), now.clone());
         before.is_some_and(|before| before != now)
     }
@@ -332,7 +337,7 @@ pub fn state_changes(
                 Report::Fresh(status) => Some(status),
                 Report::Unknown | Report::Stale => None,
             };
-            let told = Told {
+            let told = StateSeen {
                 state: standing.offer.state(),
                 why: standing.offer.why(),
                 stopping: fresh.and_then(|s| s.stopping),
@@ -419,6 +424,10 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
                         measure(&config, &*proxy.probe, &proxy.sessions.statuses);
                     }
                     proxy.sessions.metrics().status_round(round.elapsed());
+                } else {
+                    // No rounds: what `servers/state` last saw is forgotten, so that the first round after balancing is on
+                    // again sets where each server starts from, and tells nothing.
+                    proxy.sessions.statuses.forget_states();
                 }
                 let wait = Duration::from_secs(config.balancing.probe_interval_seconds);
                 let until = round + wait;

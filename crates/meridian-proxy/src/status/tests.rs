@@ -464,6 +464,28 @@ fn the_state_of_a_server_is_told_when_it_changes_and_not_at_the_first_round() {
     );
 }
 
+/// Balancing turned off and on again: what was seen before is forgotten, and the first round after it tells nothing, though the
+/// server changed meanwhile.
+#[test]
+fn the_first_round_after_balancing_is_back_tells_nothing() {
+    let (sessions, _detector) = sessions_with_detector();
+    let shared = sessions.shared();
+    let config = config();
+    let now = Instant::now();
+    shared.statuses.record("east", status(1), now);
+    shared.statuses.record("lobby", status(1), now);
+    assert!(state_changes(&config, &shared, |_| 0, now).is_empty());
+    // Off: the loop forgets. Meanwhile east is drained.
+    shared.statuses.forget_states();
+    shared.balancer.drain("east");
+    assert!(
+        state_changes(&config, &shared, |_| 0, now).is_empty(),
+        "a new start, not a change"
+    );
+    shared.balancer.undrain("east");
+    assert_eq!(state_changes(&config, &shared, |_| 0, now).len(), 1);
+}
+
 /// A server the detector has going down is `restarting`, not `drained`, in the event as in what placement tells: the sessions
 /// reach the detector.
 #[test]
