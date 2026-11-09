@@ -950,6 +950,16 @@ mod server {
         let _held = hold(&sessions, &config, "lobby");
         let _more = hold(&sessions, &config, "lobby");
         sessions.balancer.drain("west");
+        // What east last said of itself, as a round of readings keeps it.
+        let east_said = meridian_sidecar::request::ServerStatus {
+            players: Some(0),
+            capacity: Some(40),
+            stopping: Some(false),
+            ..Default::default()
+        };
+        sessions
+            .statuses
+            .record("east", east_said, std::time::Instant::now());
         let (tried, _) = login_alex(&config, &sessions, &ALL_UP, None, vec![Step::ExpectClose]);
         assert_eq!(tried.len(), 1);
         let seen = chooser.seen.lock().unwrap();
@@ -969,6 +979,19 @@ mod server {
         assert_eq!(by_name("east").players, Some(0));
         assert_eq!(by_name("east").state.as_deref(), Some("open"));
         assert_eq!(by_name("west").state.as_deref(), Some("draining"));
+        // Why west is kept from players; nothing for the open ones.
+        assert_eq!(
+            by_name("west").why,
+            Some(meridian_extension::decide::Why::Drained)
+        );
+        assert_eq!((by_name("east").why, lobby.why), (None, None));
+        // East's report, as the round kept it; none for a server no round read, and no `up` without a round.
+        let report = by_name("east").report.expect("east's reading");
+        assert_eq!((report.capacity, report.stopping), (Some(40), Some(false)));
+        assert_eq!(
+            (lobby.report, lobby.up, by_name("east").up),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -3269,6 +3292,49 @@ mod reading {
         assert_eq!(
             (queue.enabled, queue.total, queue.waiting.len()),
             (config.queue.enabled, 0, 0)
+        );
+    }
+
+    /// `servers/list` from the real sessions: a server the rounds read gives whether it answered and what it last said of itself;
+    /// one that is drained says why; one the rounds do not read gives none of it.
+    #[test]
+    fn the_list_of_servers_says_what_each_reported_whether_it_answered_and_why_it_is_kept() {
+        let sessions = Arc::new(Sessions::default());
+        let mut config = balanced();
+        config.sidecars = vec![meridian_config::Sidecar {
+            backend: "lobby".into(),
+            address: "127.0.0.1:25580".into(),
+            secret_file: PathBuf::from("unused"),
+            notices: false,
+        }];
+        let report = meridian_sidecar::request::ServerStatus {
+            players: Some(7),
+            capacity: Some(60),
+            held: Some(1),
+            stopping: Some(false),
+            ..Default::default()
+        };
+        crate::status::poll(&config, &|_, _| Ok(report), &sessions.statuses);
+        let facts = facts_of(&sessions, &config);
+        let servers = facts.servers();
+        let lobby = &servers[0];
+        assert_eq!((lobby.up, lobby.why), (Some(true), None));
+        let read = lobby
+            .report
+            .expect("a server the rounds read has its report");
+        assert_eq!(
+            (read.players, read.capacity, read.held, read.stopping),
+            (Some(7), Some(60), Some(1), Some(false))
+        );
+        assert!(read.age_ms < 60_000, "{read:?}");
+        assert_eq!(
+            (servers[1].up, servers[1].why, servers[1].report),
+            (None, None, None)
+        );
+        sessions.balancer.drain("lobby");
+        assert_eq!(
+            facts.servers()[0].why,
+            Some(meridian_extension::decide::Why::Drained)
         );
     }
 

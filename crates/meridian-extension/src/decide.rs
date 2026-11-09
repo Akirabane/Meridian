@@ -800,6 +800,36 @@ mod tests {
 
     // ---- the choice of server ------------------------------------------------------------------
 
+    /// The candidates of `decide/server` with why each is kept from players, whether it answered and what it last said of
+    /// itself: read and written as the golden file says. A candidate without them writes none of the three.
+    #[test]
+    fn the_candidates_with_their_state_are_what_the_golden_file_says() {
+        let Message::Request { id, method, params } =
+            Message::parse(&golden("server.request.state.json")).unwrap()
+        else {
+            panic!("a request");
+        };
+        assert_eq!((id, method.as_str()), (Some(6.into()), SERVER));
+        let read: ServerParams = wire::decode(params.as_ref()).unwrap();
+        let candidates = &read.request.candidates;
+        assert_eq!((candidates[0].why, candidates[0].up), (None, Some(true)));
+        assert_eq!(candidates[0].report.and_then(|r| r.stopping), Some(false));
+        assert_eq!(
+            (candidates[1].why, candidates[1].up),
+            (Some(Why::Drained), Some(true))
+        );
+        assert_eq!(
+            candidates[1].report.map(|r| (r.players, r.full, r.age_ms)),
+            Some((Some(3), None, 800))
+        );
+        assert_eq!(
+            (candidates[2].why, candidates[2].up, candidates[2].report),
+            (None, None, None)
+        );
+        let written = wire::request(6, SERVER, Some(&read));
+        assert_eq!(value(&written), value(&golden("server.request.state.json")));
+    }
+
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| (*n).to_owned()).collect()
     }

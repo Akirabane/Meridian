@@ -762,7 +762,16 @@ the SDK registers it with `Extension::on_server`. What the specification above l
   the one given), and its `state`: `open`, `closed` (at its soft cap), `draining` (drained from the
   console, restarting, or not accepting transfers) or `not_offered` (no recent report from it). For a
   server with no role, or with balancing off, everything but `name` is null. A state word a later
-  version adds is to be read as `closed`.
+  version adds is to be read as `closed`. `why`, `up` and `report` are added for each server (protocol 0: they are absent when unknown, and an extension
+  that does not know them ignores them). `why` says why a server is `draining` or `not_offered`, in one word of a fixed list:
+  `restarting` (the proxy believes it is going down: it announced its stop, or stopped answering for
+  `[restart] silent-rounds` rounds), `drained` (from the console, or by an extension's `servers/drain`), `not_accepting`
+  (its transfers are off) or `no_report` (no report recent enough to be believed); a word a later version adds is to be read
+  as a reason to keep the server from players. `up` says whether the server answered at the proxy's last round of readings,
+  and `report` is what it last said of itself (Horizon's `transfer-status`): `{players?, capacity?, held?, expected?,
+  frozen?, full?, stopping?, age_ms}`, each field absent when the server did not give it, and `age_ms` the time since the
+  reading (at most a day). Both are given only for a server the rounds read: one with a `role` and a sidecar, while
+  `[balancing] enabled` is on. Nothing is asked of a server for them: they are what the proxy already holds.
 - An `order` must name at least one server, each one of the `candidates` and spelled as it is; a name
   twice counts once, at its first place. An empty list, a name that is not a candidate, or a name that
   is not text is an invalid answer: it counts toward the breaker and the on-error policy applies
@@ -878,6 +887,7 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
 | `meridian:notification/players/left` | A session ends | the guard of the session (`Leaving`), when it is let go of |
 | `meridian:notification/players/moved` | A switch ends (seamless or failed, and why) | `switching::switch` |
 | `meridian:notification/servers/up`, `.../servers/down` | The sidecar's status of a server comes back or fails | `status::spawn` (the round that reads the servers), `status::tell` |
+| `meridian:notification/servers/state` | A server's state for new players changes (its word, why, or whether it is stopping) | `status::spawn`, `status::state_changes` |
 | `meridian:notification/players/fallback` | A player is moved off a lost server | `fallback::replacer` |
 | `meridian:notification/queue/entered`, `.../queue/left` (with the cause) | A player enters or leaves the line | `queue::Line::tell_entered`, `queue::Line::tell_left` |
 
@@ -925,6 +935,15 @@ Every notification of the table is built, and `events/dropped`.
     answer: the detector only counts it as restarting after `[restart] silent-rounds` rounds, 3 by default, and the `down` is not told again then) and
     `unreachable` when nothing says it is a restart; an `up` has none. **Only the servers with a role and a sidecar are watched, and only while `[balancing] enabled` is on**: that is the probe;
     a server that a reload removes is forgotten, and when it comes back its first reading is its base again. The name of the server is all that is in it: no address, no answer of the sidecar.
+  - `meridian:notification/servers/state`: `{seq, at, server, state, why?, players?, capacity?, stopping?}`: the server's
+    state for new players changed, as `servers/list` gives it (`state`, and `why` for `draining` and `not_offered`), or it
+    began or stopped stopping (what its last report that is believed says). It is told **once at most for each server at
+    each round of readings** (`[balancing] probe-interval-seconds`, 10 s by default), so a server that goes back and forth
+    across its soft cap cannot flood the queue; the first round that sees a server sets the state it starts from and tells
+    nothing, as for `servers/up`. `players` are the players the balancer counts on it (the sessions on it and the places
+    held for players being sent there, or what the server reported, if that is more), `capacity` and `stopping` what the
+    server said of itself in a report that is still believed. Only the servers with a `role` are told, while `[balancing]
+    enabled` is on; there is no heartbeat (`servers/list` answers what is). A server's address is never in it.
   - `meridian:notification/queue/entered`: `{seq, at, player, position}`: the player entered the line that waits for a place (`[queue]`), and `position` is the place they took, 1 for the first to be served;
     it is **their place when they entered**, and it is not told again as the line moves. A player who finds a place at once, or whom the line is too long for, never enters it and is not told.
   - `meridian:notification/queue/left`: `{seq, at, player, cause}`, told once for each `entered`: `served` (they got a place and a server), `left` (they closed the connection while they waited), `timeout` (they waited as
@@ -1078,7 +1097,8 @@ configuration in force, the balancer, the queue); until the proxy has given the 
 - **The address is given by the facts only when asked for**: the source of facts takes `with_addresses` and leaves the key out
   otherwise, so that a caller's mistake cannot tell an address to an extension that was not granted `addresses`.
 - **`servers/list`** answers `{"servers": [...]}` in the order of the configuration. A server is
-  `{name, default, players, role?, soft_cap?, hard_cap?, state?, ping_ms?}`: `role`, the caps and `state` (`open`,
+  `{name, default, players, role?, soft_cap?, hard_cap?, state?, ping_ms?, why?, up?, report?}` (the last three as for the
+  candidates of `decide/server`, section 4.4): `role`, the caps and `state` (`open`,
   `closed`, `draining`, `not_offered`) only for a server the balancer places players on, `ping_ms` when its sidecar has been
   asked. **No address of a server is told**, with or without `addresses`. It asks no server anything: it is what the proxy
   knows (the console's `servers` also opens a connection to each one).

@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 23,
+  "result": {
+    "servers": [
+      {"name": "lobby", "default": true, "players": 31, "role": "lobby", "soft_cap": 40, "hard_cap": 50, "state": "open", "ping_ms": 4, "up": true, "report": {"players": 31, "capacity": 60, "held": 1, "expected": 2, "frozen": 0, "full": false, "stopping": false, "age_ms": 2400}},
+      {"name": "east", "default": false, "players": 12, "role": "game", "soft_cap": 20, "hard_cap": 24, "state": "draining", "why": "restarting", "up": false, "report": {"players": 12, "capacity": 24, "stopping": true, "age_ms": 12000}},
+      {"name": "west", "default": false, "players": 0, "role": "game", "soft_cap": 20, "hard_cap": 24, "state": "not_offered", "why": "no_report", "up": false},
+      {"name": "tools", "default": false, "players": 0}
+    ]
+  }
+}

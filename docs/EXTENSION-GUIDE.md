@@ -442,7 +442,8 @@ let proxy = extension.proxy();
 
 let everyone = proxy.players()?;                     // every player online, 500 to a page, in the order of their ids
 let one = proxy.find_player("Alex")?;                // by name (any case) or by unique id; None if nobody is online
-for server in proxy.servers()? {                     // name, default, players, and role/caps/state when balanced
+for server in proxy.servers()? {                     // name, default, players, role/caps/state/why when balanced,
+                                                     // and up/report for a server the rounds read
     println!("{}: {} players", server.name, server.players);
 }
 let queue = proxy.queue()?;                          // enabled, total, and the first 500 who wait
@@ -621,8 +622,15 @@ let extension = Extension::new("watcher", "1.0.0", token).on_event(|event| match
   tells nothing), `ServerDown::cause` is `Restart` (the proxy already knew it was a restart, usually because the server announced its stop) or `Unreachable` (it does not answer and nothing said why: a restart that was not announced is also told this way, once; and one missed probe is a `ServerDown` and then, at the next round, a `ServerUp`, since the proxy waits several rounds before it counts a silence as a restart, so do not count on it to tell you of a restart), and a server is only watched if it has a role and a sidecar and `[balancing]` is on.
   **`QueueEntered`** gives the place a player took when they entered the line (`position`, 1 first; it is not told again as the line moves), and **`QueueLeft`** says why they left it: `Served`, `Left`, `Timeout`,
   `Shutdown` or `Refused` (their turn came and no session followed). A player who finds a place at once is in neither.
-- **`Event` is not `#[non_exhaustive]`**: each version of the SDK that adds an event adds a variant (`Moved`, `Fallback`, `ServerDown`, `ServerUp`, `QueueEntered` and `QueueLeft` came after `Joined`, `Left` and `Dropped`), so a `match` on `Event` with no `_` arm stops
-  compiling when you upgrade. The protocol does not change when an event is added (an extension that does not know it ignores it), so give your `match` a `_` arm.
+- **`ServerState`** says that a server's state for new players changed: its word (`open`, `closed`, `draining`,
+  `not_offered`), why it is kept from players (`ServerState::why`: `Restarting`, `Drained`, `NotAccepting`, `NoReport`), or
+  whether it is stopping, with the players the balancer counts on it and its capacity when it reported one. It comes once at
+  most for each server at each round of readings (10 s by default), never at the first round: wait for it instead of asking
+  `servers/list` again and again.
+- **`Event` is `#[non_exhaustive]`**: each version of the SDK that adds an event adds a variant (`Moved`, `Fallback`,
+  `ServerDown`, `ServerUp`, `ServerState`, `QueueEntered` and `QueueLeft` came after `Joined`, `Left` and `Dropped`), so a
+  `match` on `Event` outside the SDK must have a `_` arm, and keeps compiling when a later version adds one. The protocol does
+  not change when an event is added (an extension that does not know it ignores it).
 - An event is **never a decision**: you cannot answer it or refuse anything with it. To refuse a login use `on_login`.
 
 ## Good to know

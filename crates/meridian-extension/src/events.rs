@@ -180,8 +180,9 @@ pub struct ServerDown {
 
 /// `servers/state`: the server's state for new players changed, as `servers/list` gives it (`state`, and `why` for `draining` and
 /// `not_offered`), or it began or stopped stopping. Told at most once for each server at each round of readings; the first round
-/// that reads a server sets what it starts from, and nothing is told. `players` are the players the proxy counts on it (those on
-/// it and the places held for players being sent there), `capacity` and `stopping` what the server said of itself, when it did.
+/// that reads a server sets what it starts from, and nothing is told. `players` are the players the balancer counts on it (those on
+/// it and the places held for players being sent there, or what the server reported, if that is more), `capacity` and `stopping`
+/// what the server said of itself in a report that is still believed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerState {
     pub seq: u64,
@@ -296,6 +297,65 @@ mod tests {
     use super::*;
     use crate::decide::Auth;
     use serde_json::json;
+
+    #[test]
+    fn servers_state_is_what_its_golden_file_says_and_what_the_proxy_writes_is_what_the_sdk_reads()
+    {
+        let path = format!(
+            "{}/golden/protocol-0/servers-state.notification.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let crate::wire::Message::Request {
+            id: None,
+            method,
+            params,
+        } = crate::wire::Message::parse(&text).unwrap()
+        else {
+            panic!("a notification");
+        };
+        assert_eq!(method, SERVERS_STATE);
+        let state = ServerState {
+            seq: 41,
+            at: 1_762_700_000_000,
+            server: "east".into(),
+            state: "draining".into(),
+            why: Some(Why::Restarting),
+            players: Some(12),
+            capacity: Some(24),
+            stopping: Some(true),
+        };
+        assert_eq!(
+            Event::parse(&method, params.as_ref()),
+            Event::ServerState(state.clone())
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&crate::wire::notification(SERVERS_STATE, &state)).unwrap();
+        assert_eq!(
+            written,
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()
+        );
+        // Only the server and its word are required: the rest is absent when unknown, and not written then.
+        let bare = ServerState {
+            seq: 1,
+            at: 2,
+            server: "lobby".into(),
+            state: "open".into(),
+            why: None,
+            players: None,
+            capacity: None,
+            stopping: None,
+        };
+        let value = serde_json::to_value(&bare).unwrap();
+        assert_eq!(
+            value,
+            json!({"seq": 1, "at": 2, "server": "lobby", "state": "open"})
+        );
+        assert_eq!(
+            Event::parse(SERVERS_STATE, Some(&value)),
+            Event::ServerState(bare)
+        );
+    }
 
     fn player() -> Player {
         Player {
