@@ -4473,6 +4473,80 @@ mod the_events {
         assert!(wait_for(&fake, 1)[0].1.get("address").is_none());
     }
 
+    /// A move and a fallback say who, from where to where, and one fixed word each; a success has no reason and a fallback with nowhere to go has no
+    /// destination.
+    #[test]
+    fn a_move_and_a_fallback_are_told_with_fixed_words_and_nothing_else() {
+        use meridian_extension::events::{FailedStep, Loss, MoveOutcome};
+        let (fake, registry, _link, _folder) = listening(ASKED, ASKED, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        let player = || Kind::player("Alex", [1; 16], true);
+        registry.emit(|| Kind::Moved {
+            player: player(),
+            from: "lobby".into(),
+            to: "east".into(),
+            outcome: MoveOutcome::Seamless,
+            reason: None,
+        });
+        registry.emit(|| Kind::Moved {
+            player: player(),
+            from: "lobby".into(),
+            to: "east".into(),
+            outcome: MoveOutcome::Failed,
+            reason: Some(FailedStep::Prepare),
+        });
+        registry.emit(|| Kind::Fallback {
+            player: player(),
+            from: "lobby".into(),
+            to: Some("east".into()),
+            loss: Loss::Crashed,
+        });
+        registry.emit(|| Kind::Fallback {
+            player: player(),
+            from: "lobby".into(),
+            to: None,
+            loss: Loss::Kicked,
+        });
+        let told = wait_for(&fake, 4);
+        let keys = |params: &Value| {
+            let mut keys: Vec<&str> = params
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            keys.join(",")
+        };
+        assert_eq!(told[0].0, "meridian:notification/players/moved");
+        assert_eq!(keys(&told[0].1), "at,from,outcome,player,seq,to");
+        assert_eq!(told[0].1["outcome"], "seamless");
+        assert_eq!(keys(&told[1].1), "at,from,outcome,player,reason,seq,to");
+        assert_eq!(
+            (told[1].1["outcome"].as_str(), told[1].1["reason"].as_str()),
+            (Some("failed"), Some("prepare"))
+        );
+        assert_eq!(told[2].0, "meridian:notification/players/fallback");
+        assert_eq!(keys(&told[2].1), "at,from,loss,player,seq,to");
+        assert_eq!(
+            (told[2].1["to"].as_str(), told[2].1["loss"].as_str()),
+            (Some("east"), Some("crashed"))
+        );
+        assert_eq!(keys(&told[3].1), "at,from,loss,player,seq");
+        assert_eq!(told[3].1["loss"], "kicked");
+        // The address is never in these two, granted or not.
+        let both = ["events", "addresses"];
+        let (fake, registry, _link, _folder) = listening(&both, &both, |_| {});
+        until("a listener", || registry.services.bus.listeners() == 1);
+        registry.emit(|| Kind::Fallback {
+            player: player(),
+            from: "lobby".into(),
+            to: None,
+            loss: Loss::Crashed,
+        });
+        assert!(!wait_for(&fake, 1)[0].1.to_string().contains("address"));
+    }
+
     /// In order, and the numbers go up by one.
     #[test]
     fn the_events_come_in_the_order_they_were_made_and_numbered_one_by_one() {

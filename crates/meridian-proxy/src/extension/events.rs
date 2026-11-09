@@ -21,7 +21,8 @@ use super::stats::Stats;
 use crate::log::warning;
 use meridian_extension::decide::{Auth, Player};
 use meridian_extension::events::{
-    Dropped, EVENTS_DROPPED, Joined, Left, LeftReason, PLAYERS_JOINED, PLAYERS_LEFT,
+    Dropped, EVENTS_DROPPED, FailedStep, Fallback, Joined, Left, LeftReason, Loss, MoveOutcome,
+    Moved, PLAYERS_FALLBACK, PLAYERS_JOINED, PLAYERS_LEFT, PLAYERS_MOVED,
 };
 use meridian_extension::wire;
 use meridian_websocket::Writer;
@@ -45,6 +46,21 @@ pub enum Kind {
         server: String,
         reason: LeftReason,
     },
+    /// A switch ended: `reason` is there for a failure.
+    Moved {
+        player: Player,
+        from: String,
+        to: String,
+        outcome: MoveOutcome,
+        reason: Option<FailedStep>,
+    },
+    /// The server `from` was lost for the player and `to` was chosen for them, if a server could take them.
+    Fallback {
+        player: Player,
+        from: String,
+        to: Option<String>,
+        loss: Loss,
+    },
 }
 
 impl Kind {
@@ -66,6 +82,8 @@ impl Kind {
         match self {
             Kind::Joined { .. } => "players/joined",
             Kind::Left { .. } => "players/left",
+            Kind::Moved { .. } => "players/moved",
+            Kind::Fallback { .. } => "players/fallback",
         }
     }
 
@@ -98,6 +116,40 @@ impl Kind {
                     player: player.clone(),
                     server: server.clone(),
                     reason: *reason,
+                },
+            ),
+            Kind::Moved {
+                player,
+                from,
+                to,
+                outcome,
+                reason,
+            } => wire::notification(
+                PLAYERS_MOVED,
+                &Moved {
+                    seq,
+                    at,
+                    player: player.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    outcome: *outcome,
+                    reason: *reason,
+                },
+            ),
+            Kind::Fallback {
+                player,
+                from,
+                to,
+                loss,
+            } => wire::notification(
+                PLAYERS_FALLBACK,
+                &Fallback {
+                    seq,
+                    at,
+                    player: player.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    loss: *loss,
                 },
             ),
         }

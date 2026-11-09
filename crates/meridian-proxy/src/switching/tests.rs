@@ -326,7 +326,14 @@ fn world(sidecars: Sidecars) -> World {
         controls: Arc::new(controls),
         digests: Digests::default(),
         metrics: Arc::default(),
+        extensions: Default::default(),
     })));
+    // As the proxy is built: the switches tell the extensions of these sessions how they ended.
+    let _ = proxy
+        .sessions
+        .switcher
+        .extensions
+        .set(Arc::clone(&proxy.sessions.extensions));
     // Alex, relayed between the test's two pipes, joins lobby's world.
     let (proxy_client, mut player) = pipe();
     let (proxy_backend, mut source) = pipe();
@@ -1015,7 +1022,14 @@ fn a_scripted_bot_types_server_east_and_reads_the_proxys_answers() {
         controls: Arc::new(controls),
         digests: Digests::default(),
         metrics: Arc::default(),
+        extensions: Default::default(),
     })));
+    // As the proxy is built: the switches tell the extensions of these sessions how they ended.
+    let _ = proxy
+        .sessions
+        .switcher
+        .extensions
+        .set(Arc::clone(&proxy.sessions.extensions));
     let proxy = Arc::new(proxy);
     let listener = crate::serve::listen("127.0.0.1:0".parse().unwrap()).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1220,4 +1234,125 @@ fn an_extension_sends_a_player_for_real_with_the_plan_of_the_proxy_and_one_move_
     attack(&mut player, TARGET_ID);
     assert_eq!(target.join().unwrap().unwrap().attacked, CLIENT_ID);
     relay.join().unwrap().unwrap();
+}
+
+// ---- the events of a switch ------------------------------------------------------------------------------------
+
+/// What the extensions that listen were told, as (method, params), once `told` has `count` of them.
+fn told_events(
+    told: &std::sync::Mutex<Vec<String>>,
+    count: usize,
+) -> Vec<(String, serde_json::Value)> {
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found = told.lock().unwrap().clone();
+        if found.len() >= count {
+            return found
+                .iter()
+                .map(|text| {
+                    let message: serde_json::Value = serde_json::from_str(text).unwrap();
+                    (
+                        message["method"].as_str().unwrap().to_owned(),
+                        message["params"].clone(),
+                    )
+                })
+                .collect();
+        }
+        assert!(
+            Instant::now() < limit,
+            "gave up waiting for {count} events, got {found:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A switch that ended is told: who, from where to where, seamless; and one that failed says at which step. A name that is no server and the
+/// server the player is on are not switches, and say nothing.
+#[test]
+fn a_switch_that_was_tried_is_told_to_the_extensions_that_listen_and_one_that_was_not_is_not() {
+    let world = world(Sidecars::default());
+    let proxy = &world.proxy;
+    let told = proxy.sessions.extensions.bus().recording(false);
+    let lines = Commands::builtin().execute(proxy, "switch alex east");
+    assert!(
+        lines[0].starts_with("Alex moved from lobby to east in "),
+        "{lines:?}"
+    );
+    let events = told_events(&told, 1);
+    // Not switches: the server they are on, and a name that is no server. Nothing more is told.
+    Commands::builtin().execute(proxy, "switch alex east");
+    Commands::builtin().execute(proxy, "switch alex nowhere");
+    // The console refuses those before the switch: ask the switch itself.
+    let (_, handle) = proxy.sessions.session("Alex").unwrap();
+    for target in ["east", "nowhere"] {
+        let ip = "198.51.100.7".parse().unwrap();
+        let asked = switch(
+            &proxy.config(),
+            &proxy.sessions.switcher,
+            &handle,
+            "Alex",
+            ip,
+            target,
+        );
+        assert!(asked.is_err(), "{target}");
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let seen = told.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(events[0].0, "meridian:notification/players/moved");
+    let params = &events[0].1;
+    assert_eq!(
+        (
+            params["from"].as_str(),
+            params["to"].as_str(),
+            params["outcome"].as_str()
+        ),
+        (Some("lobby"), Some("east"), Some("seamless"))
+    );
+    assert!(params.get("reason").is_none());
+    assert_eq!(params["player"]["name"], "Alex");
+    assert_eq!(params["player"]["auth"], "unverified");
+}
+
+#[test]
+fn a_switch_that_failed_says_at_which_step() {
+    let world = world(Sidecars {
+        target_refuses: Some(("expect", "64 players already expected".into())),
+        ..Sidecars::default()
+    });
+    let proxy = &world.proxy;
+    let told = proxy.sessions.extensions.bus().recording(false);
+    Commands::builtin().execute(proxy, "switch Alex east");
+    let events = told_events(&told, 1);
+    let params = &events[0].1;
+    assert_eq!(
+        (
+            params["outcome"].as_str(),
+            params["reason"].as_str(),
+            params["to"].as_str()
+        ),
+        (Some("failed"), Some("prepare"), Some("east"))
+    );
+    // Nothing of what the server said is in it: the step is one word.
+    assert!(!events[0].1.to_string().contains("64 players"));
+}
+
+/// A server with no sidecar fails at the check, before anything is asked of a server.
+#[test]
+fn a_switch_that_cannot_start_fails_at_the_check() {
+    let world = world(Sidecars::default());
+    let proxy = &world.proxy;
+    let mut config = (*proxy.config()).clone();
+    config.sidecars.retain(|s| s.backend != "east");
+    proxy.set_config(config);
+    let told = proxy.sessions.extensions.bus().recording(false);
+    Commands::builtin().execute(proxy, "switch Alex east");
+    let events = told_events(&told, 1);
+    assert_eq!(
+        (
+            events[0].1["outcome"].as_str(),
+            events[0].1["reason"].as_str()
+        ),
+        (Some("failed"), Some("check"))
+    );
 }
