@@ -86,7 +86,7 @@ impl PlayerControl for FakeSidecar {
         &mut self,
         _: &str,
         _: Record,
-        _: Option<Vec<String>>,
+        parts: Option<Vec<String>>,
         announce: Option<bool>,
         place: bool,
         _: Option<meridian_handoff::Arrival>,
@@ -96,7 +96,13 @@ impl PlayerControl for FakeSidecar {
         } else {
             String::new()
         };
-        self.answer("import", format!("import place={place}{said}"))
+        // An import that takes no part says so; the others are written as before.
+        let none = if parts.as_ref().is_some_and(Vec::is_empty) {
+            " parts=none"
+        } else {
+            ""
+        };
+        self.answer("import", format!("import place={place}{said}{none}"))
             .map(|()| Imported::default())
     }
 
@@ -136,6 +142,8 @@ struct Sidecars {
     /// `switch-announce-arrival` and `switch-announce-departure` of the configuration, when
     /// the test sets them; the log then says what each import and release asked to announce.
     announce: Option<(bool, bool)>,
+    /// The `state-group` of `lobby` and of `east`, when the test gives them.
+    state_groups: Option<(&'static str, &'static str)>,
 }
 
 /// How the other threads of a test ended, and when, since its world was made. A failure that
@@ -286,6 +294,10 @@ fn world(sidecars: Sidecars) -> World {
         config.switch_announce_arrival = arrival;
         config.switch_announce_departure = departure;
     }
+    if let Some((lobby, east)) = sidecars.state_groups {
+        config.state_groups.insert("lobby".into(), lobby.into());
+        config.state_groups.insert("east".into(), east.into());
+    }
     let mut proxy = Proxy::new(
         config,
         "does-not-exist/meridian.toml".into(),
@@ -298,6 +310,7 @@ fn world(sidecars: Sidecars) -> World {
         source_refuses,
         during_export,
         announce: _,
+        state_groups: _,
     } = sidecars;
     let during_export = during_export.map(Arc::new);
     let controls = {
@@ -1355,4 +1368,55 @@ fn a_switch_that_cannot_start_fails_at_the_check() {
         ),
         (Some("failed"), Some("check"))
     );
+}
+
+/// A move between two state groups carries nothing: the target takes no part of the record, and
+/// the source is let go on and disconnected, so that it saves its own copy. Inside one group the
+/// move is as it always was.
+#[test]
+fn a_switch_between_two_state_groups_carries_no_state() {
+    for (groups, import, release) in [
+        (
+            ("lobby", "survival"),
+            "east import place=false parts=none",
+            "lobby release Abort",
+        ),
+        (
+            ("one", "one"),
+            "east import place=false",
+            "lobby release Moved",
+        ),
+    ] {
+        let World {
+            proxy,
+            log,
+            mut player,
+            _source,
+            relay,
+            target,
+        } = world(Sidecars {
+            state_groups: Some(groups),
+            ..Sidecars::default()
+        });
+        let lines = Commands::builtin().execute(&proxy, "switch alex east");
+        assert!(
+            lines[0].starts_with("Alex moved from lobby to east"),
+            "{groups:?}: {lines:?}"
+        );
+        assert_eq!(
+            log.lines(),
+            [
+                "east expect",
+                "lobby export",
+                import,
+                "east confirm",
+                release
+            ],
+            "{groups:?}"
+        );
+        let _ = client_after_switch(&mut player);
+        attack(&mut player, TARGET_ID);
+        target.join().unwrap().unwrap();
+        relay.join().unwrap().unwrap();
+    }
 }
