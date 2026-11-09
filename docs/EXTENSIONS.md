@@ -15,8 +15,10 @@ maintainer then agreed to the form on 2026-11-06: an external program on a local
 JSON-RPC with `rpc.discover` as the management protocol does (comment 6679084547 on Horizon's
 issue #7484). The questions asked of Horizon are in section 10.4, with what was answered.
 
-Every statement about the code as it is today names a file and a line, checked by searching the
-code at `e2211c5` (main after pull request #98). Statements about Horizon name its files on its
+Every statement about the code names a file and a line, checked by searching the code at `e2211c5`
+(main after pull request #98): the line numbers are those of that commit and have moved since, so
+search for the name next to a number. Where a statement names a function instead, it is the name that
+holds today. Statements about Horizon name its files on its
 main branch at `85d8e283f`.
 
 This page replaces the recommendation of [DESIGN.md](DESIGN.md) section 13.5
@@ -429,7 +431,7 @@ differ only in the metrics and the log, where `allow` records that the extension
 this server right now.`. A reason is plain text of at most 256 characters with no control character but
 the line break; an answer whose reason is not, or whose `decision` is none of the three words, is
 invalid (section 4.1), but a `reason` on `allow` or `default` is not read, whatever it is. `Reason::new` in the SDK cuts and cleans a reason to what the proxy accepts, so
-that an extension that means to refuse is never turned into a failure that the on-error policy lets in. The refusal goes through `refuse` (`session.rs:864`), is logged as
+that an extension that means to refuse is never turned into a failure that the on-error policy lets in. The refusal goes through `refuse` (`session::refuse`), is logged as
 the bans' refusals are (`session.rs:494`), and counts as
 `meridian_login_failures_total{reason="extension"}`.
 
@@ -610,8 +612,8 @@ commands in its `hello`:
   characters.
 - So that the relay's thread does not wait for the run, the proxy takes the command, answers
   nothing at once, and sends the lines when they come through `SessionHandle::tell`
-  (`crates/meridian-handoff/src/session.rs:604`), which `/alert` already uses. This needs one
-  change in `answer_command` (`session.rs:897-926`), which today always sends the hook's reply at
+  (in `crates/meridian-handoff/src/session.rs`), which `/alert` already uses. This needs one
+  change in `answer_command` (`crates/meridian-handoff/src/session.rs`), which today always sends the hook's reply at
   once: a hook result that means "taken, the answer comes later". The timeout is 2000 ms. After
   it, the player reads `That command did not answer.`.
 - The commands are offered to the client's completion only if the proxy changes the command tree
@@ -797,19 +799,19 @@ capability, and a request without it is answered `-32601`, as if the method did 
 | `meridian:players/list` | `list` (`console.rs:242`) | `orders.read` |
 | `meridian:players/find` (name or id) | `list` | `orders.read` |
 | `meridian:servers/list` (with counts, roles, caps, state) | `servers` (`console.rs:277`) | `orders.read` |
-| `meridian:queue/list` | `queue` (`queue.rs:426`) | `orders.read` |
-| `meridian:players/tell` (one player, a line) | none; `SessionHandle::tell` (`meridian-handoff/src/session.rs:604`) | `orders.message` |
+| `meridian:queue/list` | `queue` (`queue::command`) | `orders.read` |
+| `meridian:players/tell` (one player, a line) | none; `SessionHandle::tell` (`meridian-handoff/src/session.rs`) | `orders.message` |
 | `meridian:broadcast` (all, or one server) | `alert` (`console.rs:456`, `staff.rs:128`) | `orders.message` |
 | `meridian:players/send` (a player, all, or a server's, to a server) | `send` (`console.rs:406`, `staff.rs:18`) | `orders.move` |
-| `meridian:players/kick` (a player, a reason) | `kick` (`console.rs:474`, `session.rs:395`) | `orders.moderate` |
+| `meridian:players/kick` (a player, a reason) | `kick` (`console.rs:474`, `Sessions::kick` in `session.rs`) | `orders.moderate` |
 | `meridian:servers/drain`, `meridian:servers/undrain` | `drain`, `undrain` (`console.rs:334`, `:376`) | `orders.operate` |
 | `meridian:reload` | `reload` (`console.rs:501`) | `orders.operate` |
 | `meridian:permissions/invalidate` (a player, or all) | none | `decide.command` |
 | `meridian:console/execute` (a line) | any (`console.rs:165`, `Commands::execute`) | `orders.console` |
 
 - **The answers are the console's own facts as JSON**, not its text. `players/send` answers when
-  the moves have started, with the number of players. Each move's end comes as an event in
-  version 1.1. Until then, `players/find` tells where a player is.
+  the moves have started, with the number of players. Each move's end comes as a
+  `players/moved` event (section 6); `players/find` tells where a player is.
 - **`console/execute` is the remote console.** It returns the lines the console would print. It
   is logged **before** it runs (`extension "<name>" runs: <line>`) and what it said after (`ran: <line>: ...`), as an
   operator's command would be, except for the lines that carry a secret, which the console does not have today and must
@@ -872,9 +874,9 @@ Horizon names its own (`minecraft:notification/players/joined` in Horizon `manag
 
 | Notification | When | Where it starts in the code |
 | --- | --- | --- |
-| `meridian:notification/players/joined` | A session opens on a server | `session.rs:720` |
-| `meridian:notification/players/left` | A session ends | `session.rs:741-759` |
-| `meridian:notification/players/moved` | A switch ends (seamless, cold, or failed, and why) | `switching::switch` |
+| `meridian:notification/players/joined` | A session opens on a server | `session::place`, once the session is listed |
+| `meridian:notification/players/left` | A session ends | the guard of the session (`Leaving`), when it is let go of |
+| `meridian:notification/players/moved` | A switch ends (seamless or failed, and why) | `switching::switch` |
 | `meridian:notification/servers/up`, `.../servers/down` | The sidecar's status of a server comes back or fails | `status::spawn` (the round that reads the servers), `status::tell` |
 | `meridian:notification/players/fallback` | A player is moved off a lost server | `fallback::replacer` |
 | `meridian:notification/queue/entered`, `.../queue/left` (with the cause) | A player enters or leaves the line | `queue::Line::tell_entered`, `queue::Line::tell_left` |
@@ -1318,13 +1320,18 @@ is connected its orders end with `NotConnected`.
 - The wire types live in one module that the proxy uses too, so that the two cannot drift. The
   proxy depends on that module, not on the SDK's server.
 
-### 8.2 Two examples
+### 8.2 Examples
 
-- **`allow-all`.** It answers `Default` to everything and logs each request with its time. It is
+**Built:** four programs in `crates/meridian-extension/examples/`: `login_gate` (the admission at login),
+`server_chooser` (the choice of server), `command_ranks` (the permission of a command) and `command_party`
+(an extension's own command). [EXTENSION-GUIDE.md](EXTENSION-GUIDE.md) walks through them. **Not built:** the two
+below, `allow-all` and `file-permissions`, which this page planned and which are not in the repository.
+
+- **`allow-all`** (not built). It answers `Default` to everything and logs each request with its time. It is
   the smallest extension that runs, the template to copy, and the one the proxy's integration
   tests start. It shows that the proxy with an extension that never disagrees behaves as without
   one.
-- **`file-permissions`.** It reads a TOML file of players (by unique id) and the nodes they are
+- **`file-permissions`** (not built). It reads a TOML file of players (by unique id) and the nodes they are
   given or denied. It answers `decide.command` from it, with `cache_seconds` 60. It declares one
   command, `/extperms reload`, under its own node, which reads the file again and sends
   `permissions/invalidate`. It shows the cache, the precedence over `permissions.toml`, a command
@@ -1419,9 +1426,9 @@ Windows.
    for each method against the code the console uses, and the refusals. This pull request settles
    what happens when an answer would pass the limit of 256 KiB a message (section 2.1), which a
    `players/list` of a large network reaches near 1,700 players: pages, or a higher limit.
-10. **The SDK and `allow-all`.** Proof: the SDK's tests, and the proxy's integration test with
+10. **The SDK and `allow-all`** (the SDK is built; `allow-all` is not). Proof: the SDK's tests, and the proxy's integration test with
     `allow-all` started as a process on both systems.
-11. **`file-permissions`.** Proof: its tests, and an integration test of a rank given by the file.
+11. **`file-permissions`** (not built). Proof: its tests, and an integration test of a rank given by the file.
 12. **The operator's documentation.** OPERATING.md and CONFIG.md gain a section, and the README's
     "Extensions" row changes to the state reached. DESIGN.md sections 13.5 and 14 and PARITY.md's
     item 9 are aligned with this page.
