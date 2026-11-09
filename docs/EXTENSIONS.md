@@ -1370,23 +1370,32 @@ command), `command_party` (an extension's own command) and `file_permissions` (b
     `serve` in a thread, which would not be a separate process.
 - **`file-permissions`** (built: `examples/file_permissions.rs`, granted `decide.command` and `commands`). It reads a
   TOML file of players, by unique id, with the nodes each is given (`allow`) or denied (`deny`), a node or every node
-  below one (`meridian.server.*`), and whether they may reload it (`reload`). It answers `decide.command` from it with
+  below one (`meridian.server.*`) by the rule of `permissions.toml` (a pattern that is not a node makes the file not
+  valid: one that can never name a node would deny nothing), and whether they may reload it (`reload`). A wide pattern
+  is wide by construction: `meridian.*` gives `/glist`, `/send`, `/alert` and any node a later proxy adds under
+  `meridian.`; prefer narrow patterns and use `deny` for the exceptions. It answers `decide.command` from it with
   `cache_seconds` 60: a deny wins over an allow and over `permissions.toml`, an allow is given only to an account the
-  session service verified unless the file says `trust-unverified = true`, and a node the file does not name is left to
-  the proxy. It declares one command, `/extperms reload` (its node `ext.<extension>.extperms`, which it denies to
-  whoever the file does not let reload, and which the command checks again when it runs), which reads the file again
-  and, only if it was read in full, puts it in force and sends `permissions/invalidate`. **No right is ever wider than
-  what a file it read in full gives**: a file it cannot read or that is not valid leaves the permissions as they were,
-  tells the proxy to forget nothing, and says so to the player and on its standard error stream; neither names the file
-  or holds a unique id. It shows the cache, the precedence over `permissions.toml`, a command of the extension's own,
-  and an order. It is an example, not a second permissions system.
+  session service verified unless the file says `trust-unverified = true` (then an offline player's id comes from the
+  name they type, so anyone may use another's name; a `deny` still applies to everyone), and a node the file does not
+  name is left to the proxy. It declares one command, `/extperms reload` (its node `ext.<extension>.extperms`, which it
+  denies to whoever the file does not let reload, and which the command checks again when it runs), which reads the file
+  again and, only if it was read in full, puts it in force and sends `permissions/invalidate`. **No right is ever wider
+  than what a file it read in full gives**: a file it cannot read, that is not valid, or that holds no key at all (one
+  cut to nothing would take every `deny` away) leaves the permissions as they were, at a reload as at the start, tells
+  the proxy to forget nothing, and says so to the player and on its standard error stream; neither names the file or
+  holds a unique id. A file cut short that is still valid TOML cannot be told from a whole one: write the file in one
+  step (a temporary file, then a rename) and type `/extperms reload` only after. If, after a reload that worked, the
+  proxy cannot be told to forget (three tries), the new rules are in force but what the proxy kept stays up to a minute;
+  the player who typed the command reads so. It shows the cache, the precedence over `permissions.toml`, a command of
+  the extension's own, and an order. It is an example, not a second permissions system.
   - **The proxy's tests run it as a separate process** (`session/tests/extension/file_permissions.rs`, the same way as
     `allow-all`), with a file of players: a right the file gives opens a command `permissions.toml` keeps closed; the
     proxy keeps the answer while the file changes; `/extperms reload` takes the right back at once, not after the
-    minute; a file that cannot be read at a reload (not valid, a bad unique id, removed) leaves the rights of the last
-    file read in full, tells the proxy to forget nothing, and says so; a deny wins over an allow and over
-    `permissions.toml`; an account nobody verified is given an allow only when the file trusts it; and whoever the file
-    does not let reload cannot, whether or not the extension is granted `decide.command`.
+    minute; a file that cannot be read at a reload (not valid, a bad unique id, empty, a pattern that is not a node,
+    removed) leaves the rights of the last file read in full, tells the proxy to forget nothing, and says so; a deny
+    wins over an allow and over `permissions.toml`, written in upper case too; an account nobody verified is given an
+    allow only when the file trusts it; and whoever the file does not let reload cannot, whether or not the extension is
+    granted `decide.command`.
 
 ### 8.3 Tests
 

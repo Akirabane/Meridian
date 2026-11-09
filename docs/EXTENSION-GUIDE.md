@@ -265,7 +265,11 @@ The whole program, with a list of administrators on its command line, is
 A program that reads the rights from a file of players, lets the proxy keep them a minute, and reads the file again on a
 command of its own (`/extperms reload`, which then tells the proxy to forget what it kept) is
 `crates/meridian-extension/examples/file_permissions.rs`; grant it `decide.command` and `commands`. A file it cannot
-read leaves the rights as they were, and it says so: no right is ever wider than what a file it read in full gives.
+read, or that holds no key at all, leaves the rights as they were, and it says so: no right is ever wider than what a
+file it read in full gives; write the file in one step (a temporary file, then a rename) before you reload it. Prefer
+narrow patterns (`meridian.*` gives every command of the proxy, and any it adds later) and use `deny` for the
+exceptions. With `trust-unverified = true`, an offline player's id comes from the name they type, so anyone may use
+another's name; a `deny` still applies to everyone.
 
 ```toml
 [[extension]]
