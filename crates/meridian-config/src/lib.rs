@@ -57,6 +57,7 @@ use queue::FileQueue;
 use restart::FileRestart;
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -80,6 +81,13 @@ pub struct ForcedHost {
     /// The line the server list shows to clients that connect through this host, in
     /// place of [`Config::motd`]; `None` shows the proxy's.
     pub motd: Option<String>,
+    /// Whether a vanilla transfer that a backend sends a player to this host becomes a
+    /// seamless move to [`ForcedHost::backend`], with no loading screen (`seamless` in
+    /// the file, off by default). The transfer packet is passed to the client as it is
+    /// when the move cannot be made before the client is sent anything (another
+    /// dimension, a server that cannot be reached), so the player still goes, with the
+    /// loading screen. The backend needs a sidecar.
+    pub seamless: bool,
 }
 
 /// How the proxy decides whether to check a player's account (`auth-mode`,
@@ -186,6 +194,13 @@ pub struct Config {
     pub max_players: u32,
     /// Host names that choose the backend, in place of the default backend.
     pub forced_hosts: Vec<ForcedHost>,
+    /// The state group of each backend that names one (`state-group` in its
+    /// `[[backends]]` entry), by backend name. A move between two backends of the same
+    /// group carries the player's state (inventory, experience, game mode...); a move
+    /// between two groups carries none of it, and each server keeps its own copy of
+    /// the player. A backend that names no group is in the unnamed group of the others
+    /// that name none (see [`Config::carries_state`]).
+    pub state_groups: BTreeMap<String, String>,
     /// How players are logged in. Online by default.
     pub auth_mode: AuthMode,
     /// Groups of backends, each for one kind of player.
@@ -302,6 +317,7 @@ impl Default for Config {
             try_backends: Vec::new(),
             max_players: 20,
             forced_hosts: Vec::new(),
+            state_groups: BTreeMap::new(),
             auth_mode: AuthMode::Online,
             groups: Vec::new(),
             routes: Vec::new(),
@@ -354,6 +370,7 @@ impl std::fmt::Debug for Config {
             try_backends,
             max_players,
             forced_hosts,
+            state_groups,
             auth_mode,
             groups,
             routes,
@@ -404,6 +421,7 @@ impl std::fmt::Debug for Config {
             .field("try_backends", try_backends)
             .field("max_players", max_players)
             .field("forced_hosts", forced_hosts)
+            .field("state_groups", state_groups)
             .field("auth_mode", auth_mode)
             .field("groups", groups)
             .field("routes", routes)
@@ -528,6 +546,8 @@ struct FileForcedHost {
     host: String,
     backend: String,
     motd: Option<String>,
+    #[serde(default)]
+    seamless: bool,
 }
 
 #[derive(Deserialize)]
@@ -542,6 +562,7 @@ struct FileBackend {
     role: Option<Role>,
     soft_cap: Option<u32>,
     hard_cap: Option<u32>,
+    state_group: Option<String>,
 }
 
 impl Config {
@@ -607,6 +628,11 @@ impl Config {
                 })
                 .collect::<Vec<_>>(),
         )?;
+        let state_groups: BTreeMap<String, String> = file
+            .backends
+            .iter()
+            .filter_map(|b| Some((b.name.clone(), b.state_group.clone()?)))
+            .collect();
         let backends: Vec<Backend> = file
             .backends
             .into_iter()
@@ -644,6 +670,7 @@ impl Config {
             forwarding_secret: file.forwarding_secret.unwrap_or(defaults.forwarding_secret),
             try_backends: file.try_backends,
             max_players: file.max_players.unwrap_or(defaults.max_players),
+            state_groups,
             // Host names do not depend on case.
             forced_hosts: file
                 .forced_hosts
@@ -652,6 +679,7 @@ impl Config {
                     host: f.host.to_ascii_lowercase(),
                     backend: f.backend,
                     motd: f.motd,
+                    seamless: f.seamless,
                 })
                 .collect(),
             auth_mode,
@@ -728,6 +756,14 @@ impl Config {
         Ok(config)
     }
 
+    /// Whether a move from backend `from` to backend `to` carries the player's state:
+    /// only when both are in the same state group, the unnamed one included (two
+    /// backends that name no group). Between two groups each server keeps its own copy
+    /// of the player, and nothing of one goes to the other.
+    pub fn carries_state(&self, from: &str, to: &str) -> bool {
+        self.state_groups.get(from) == self.state_groups.get(to)
+    }
+
     /// Checks what the types alone cannot: there is at least one backend, names
     /// are unique and not empty, addresses are `host:port`, the default backend
     /// exists, the fallback list names other backends once each, the connect
@@ -776,6 +812,20 @@ impl Config {
                 return Err(ConfigError::DuplicateForcedHost(forced.host.clone()));
             }
             self.known_backend(&format!("forced-host \"{}\"", forced.host), &forced.backend)?;
+            if forced.seamless && !self.sidecars.iter().any(|s| s.backend == forced.backend) {
+                return Err(ConfigError::SeamlessWithoutSidecar {
+                    host: forced.host.clone(),
+                    backend: forced.backend.clone(),
+                });
+            }
+        }
+        for (backend, group) in &self.state_groups {
+            if !self.backends.iter().any(|b| &b.name == backend) {
+                return Err(ConfigError::StateGroupOfUnknownBackend(backend.clone()));
+            }
+            if group.trim().is_empty() {
+                return Err(ConfigError::EmptyStateGroup(backend.clone()));
+            }
         }
         if self.online_mode != (self.auth_mode != AuthMode::Offline) {
             return Err(ConfigError::AuthModeConflict {

@@ -73,6 +73,7 @@ The servers behind the proxy. At least one is required.
 | `role` | What the server is for in load balancing: `"lobby"`, `"sublobby"` or `"game"`. Without one, the server is not balanced. Only `"lobby"` is used so far, by `[balancing] enabled` ([LOAD-BALANCING.md](LOAD-BALANCING.md)) | One of the three. Needs `soft-cap` |
 | `soft-cap` | The players the server is filled to before the next server of its role is opened | At least 1; only with a `role` |
 | `hard-cap` | The most players the balancer ever places on it. Defaults to `soft-cap` | At least `soft-cap`; only with a `role` |
+| `state-group` | The worlds whose players share their state. A move between two servers of the same group (`/server`, `/hub`, `send`, `drain --move`, an evacuation, an extension's `send`) carries the player's state: inventory, ender chest, experience, health, effects, game mode, respawn point, recipe book, advancements. A move between two groups carries none of it: the server the player arrives on loads its own copy of the player, and the one they leave saves theirs (OPERATING.md, 5.15). A server that names no group is in one unnamed group with the others that name none, so a file without the setting carries the state on every move, as before it | Not empty |
 
 Once any server has a `role`, one of them must be a `"lobby"`.
 
@@ -86,6 +87,7 @@ server. Empty by default.
 | `host` | The host name the player typed in their server list. Case does not matter; it is kept in lower case | Not empty; no port, no path, no space and no final dot; each host once |
 | `backend` | The server it leads to | A configured server |
 | `motd` | The line the server list shows to a player who typed this host, in place of the top-level `motd`. Left out, the top-level `motd` is shown. The host is matched as it is for the server choice: case does not matter, a final dot is ignored, and what a mod loader adds after the host is dropped. A reload applies it. There is no favicon per host: the `favicon` above is the same for all | None |
+| `seamless` | Whether a vanilla transfer that a server sends a player to this host (`/transfer <host> ...`) is made a seamless move to `backend`, with no loading screen, instead of being passed to the client. `false` by default: the client gets the transfer and connects again. When the move cannot be made before the client is sent anything (the player and the arrival in different dimensions, a server that cannot be reached), the transfer is passed on as it came, and the player goes with the loading screen. The host is compared without its case, and the port of the transfer is not looked at. What the move carries follows `state-group` (OPERATING.md, 5.15) | `backend` needs a `sidecar` |
 
 ## `[[group]]` and `[[route]]`
 

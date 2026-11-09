@@ -86,6 +86,12 @@ pub enum ConfigError {
     InvalidForcedHost { host: String, reason: &'static str },
     /// Two forced hosts have the same host name.
     DuplicateForcedHost(String),
+    /// A forced host is `seamless`, and its backend has no sidecar to move players with.
+    SeamlessWithoutSidecar { host: String, backend: String },
+    /// A backend's `state-group` is empty.
+    EmptyStateGroup(String),
+    /// A state group names a backend the configuration does not have.
+    StateGroupOfUnknownBackend(String),
     /// A group has an empty name.
     EmptyGroupName,
     /// Two groups have the same name.
@@ -448,6 +454,18 @@ impl fmt::Display for ConfigError {
             ConfigError::DuplicateForcedHost(host) => write!(
                 f,
                 "two [[forced-host]] entries have the host \"{host}\": each host leads to one backend"
+            ),
+            ConfigError::SeamlessWithoutSidecar { host, backend } => write!(
+                f,
+                "[[forced-host]] \"{host}\" is seamless, but its backend \"{backend}\" has no                  sidecar: a seamless move needs the sidecars of both servers (or remove                  seamless, and the transfer is the game's own, with its loading screen)"
+            ),
+            ConfigError::EmptyStateGroup(backend) => write!(
+                f,
+                "backend \"{backend}\" has an empty state-group: name the group, or leave the                  setting out"
+            ),
+            ConfigError::StateGroupOfUnknownBackend(backend) => write!(
+                f,
+                "a state group is given to \"{backend}\", which is not a backend of the                  configuration"
             ),
             ConfigError::LimitWithoutRole { backend, key } => write!(
                 f,

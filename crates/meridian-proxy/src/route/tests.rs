@@ -415,6 +415,7 @@ fn a_forced_host_still_comes_first_with_balancing_on() {
         host: "play.example.com".into(),
         backend: "west".into(),
         motd: None,
+        seamless: false,
     }];
     assert_eq!(
         names(candidates(&config, Some("play.example.com"), VERIFIED)),

@@ -70,6 +70,7 @@ fn forced_east(config: &mut Config) {
         host: "east.example.com".into(),
         backend: "east".into(),
         motd: None,
+        seamless: false,
     }];
 }
 

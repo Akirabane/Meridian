@@ -1932,6 +1932,7 @@ pub(crate) mod tests {
                 host: "east.example.com".into(),
                 backend: "east".into(),
                 motd: None,
+                seamless: false,
             }],
             ..routed()
         };
