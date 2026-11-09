@@ -105,8 +105,9 @@ part of every figure, and each page says them first.
   from the proxy's log, and a server stopped with players on it. Single observations, one session
   each; it is not a load test, and the clients and the second server share the PC.
 - [docs/EXTENSION-COMMANDS-RUN.md](docs/EXTENSION-COMMANDS-RUN.md): the commands of an extension with a real Horizon
-  server and two real Horizon clients, on one PC over the loopback, on 9 November 2026: the server never saw the words
-  an extension declares, with the extension up, stopped and back (22 checks, one run, offline accounts).
+  server and two real Horizon clients, on one PC over the loopback, on 9 November 2026: `/time set 18000`, typed through
+  the proxy, did not move the server's clock with the extension up, stopped or back (22 checks, one clean pass after a
+  first with two wrong checks, offline accounts).
 
 No figure comes from a real Horizon server under load (the run of VALIDATION.md measured delays,
 not a load) or from many real players, and none is a comparison with another proxy. The figures
