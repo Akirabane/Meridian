@@ -12,6 +12,7 @@ use crate::log::{info, warning};
 use crate::restart::Detector;
 use crate::state::Proxy;
 use meridian_config::{Config, Sidecar};
+use meridian_extension::decide::{ServerReport, Why};
 use meridian_extension::events::DownCause;
 use meridian_sidecar::{client::SidecarClient, request::ServerStatus};
 use std::collections::{HashMap, HashSet};
@@ -51,7 +52,23 @@ struct State {
     /// change of. A backend is in it from the first round that read it, which sets the
     /// state it starts from and is not a change.
     answering: HashMap<String, bool>,
+    /// The state each backend was last seen in by the extensions (`servers/state`): set by the first round that reads
+    /// it, which is not a change.
+    told: HashMap<String, Told>,
 }
+
+/// What `servers/state` tells of a backend, and a change of which is told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Told {
+    /// `open`, `closed`, `draining` or `not_offered`.
+    pub state: &'static str,
+    pub why: Option<Why>,
+    /// What the backend said of its stop at its last reading that is believed.
+    pub stopping: Option<bool>,
+}
+
+/// The longest age a report is given with: a reading older than that is `not_offered` long before.
+const MAX_AGE_MS: u64 = 86_400_000;
 
 /// A backend that did not answer after it did, or answers after it did not.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +120,23 @@ impl Statuses {
         }
     }
 
+    /// The last state `backend` reported, and when, however old.
+    pub fn reading(&self, backend: &str) -> Option<(Instant, ServerStatus)> {
+        self.lock().reported.get(backend).copied()
+    }
+
+    /// Whether `backend` answered at the last round that read it; `None` for one no round read.
+    pub fn answering(&self, backend: &str) -> Option<bool> {
+        self.lock().answering.get(backend).copied()
+    }
+
+    /// `backend` is in state `now` at this round. Whether that is a change since the round before: the first round that
+    /// sees a backend sets the state it starts from, and is not a change.
+    pub fn saw_state(&self, backend: &str, now: Told) -> bool {
+        let before = self.lock().told.insert(backend.to_owned(), now.clone());
+        before.is_some_and(|before| before != now)
+    }
+
     /// An attempt to read `backend`'s state failed. `true` the first time in a row,
     /// which is when it is worth saying.
     fn failed(&self, backend: &str) -> bool {
@@ -136,6 +170,7 @@ impl Statuses {
         state.pings.retain(|b, _| keep(b));
         state.failing.retain(|b| keep(b));
         state.answering.retain(|b, _| keep(b));
+        state.told.retain(|b, _| keep(b));
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -253,6 +288,70 @@ pub fn tell(extensions: &Registry, detector: &Detector, changes: Vec<Change>) {
     }
 }
 
+/// What `backend` last said of itself, as an extension is told it (`report` of `servers/list` and of the candidates of
+/// `decide/server`), with its age at `now`. `None` for a backend no round read, or that never answered.
+pub fn report_of(statuses: &Statuses, backend: &str, now: Instant) -> Option<ServerReport> {
+    let (at, status) = statuses.reading(backend)?;
+    let age = u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX);
+    Some(ServerReport {
+        players: status.players,
+        capacity: status.capacity,
+        held: status.held,
+        expected: status.expected,
+        frozen: status.frozen,
+        full: status.full,
+        stopping: status.stopping,
+        age_ms: age.min(MAX_AGE_MS),
+    })
+}
+
+/// After a round: the backends with a role whose state for new players changed since the round before (`state`, `why`,
+/// or what they said of their stop), as `servers/state` tells it. One at most for each backend: a round is read once.
+/// `on` gives the players the sessions count on a backend.
+pub fn state_changes(
+    config: &Config,
+    shared: &crate::session::Shared,
+    on: impl Fn(&str) -> usize,
+    now: Instant,
+) -> Vec<Kind> {
+    let max_age = Duration::from_secs(config.balancing.state_max_age_seconds);
+    config
+        .balanced
+        .iter()
+        .filter_map(|b| {
+            let restarting = shared.restarting(&b.backend);
+            let standing = crate::placing::standing(
+                config,
+                shared,
+                &b.backend,
+                on(&b.backend),
+                restarting.as_deref(),
+            )?;
+            // Only a report that is believed says what the backend does: an old `stopping` is not news.
+            let fresh = match shared.statuses.report(&b.backend, max_age, now) {
+                Report::Fresh(status) => Some(status),
+                Report::Unknown | Report::Stale => None,
+            };
+            let told = Told {
+                state: standing.offer.state(),
+                why: standing.offer.why(),
+                stopping: fresh.and_then(|s| s.stopping),
+            };
+            shared
+                .statuses
+                .saw_state(&b.backend, told.clone())
+                .then(|| Kind::ServerState {
+                    server: b.backend.clone(),
+                    state: told.state.to_owned(),
+                    why: told.why,
+                    players: u64::try_from(standing.players).ok(),
+                    capacity: fresh.and_then(|s| s.capacity),
+                    stopping: told.stopping,
+                })
+        })
+        .collect()
+}
+
 /// Whether `why`, the error of a state request, is the backend saying it does not know
 /// the request: that is an answer, not a silence.
 fn no_such_request(why: &str) -> bool {
@@ -309,6 +408,13 @@ pub fn spawn(proxy: &Arc<Proxy>) -> std::io::Result<std::thread::JoinHandle<()>>
                     );
                     // After the detector read the round: a stop it announced or deduced is the cause.
                     tell(&proxy.sessions.extensions, &proxy.restarts, changes);
+                    // Then what changed of each backend's state for new players, once for this round.
+                    let shared = proxy.sessions.shared();
+                    let counts = shared.counts();
+                    let on = |backend: &str| counts.get(backend).copied().unwrap_or(0);
+                    for kind in state_changes(&config, &shared, on, Instant::now()) {
+                        proxy.sessions.extensions.emit(move || kind);
+                    }
                     if config.balancing.tie_break == meridian_config::TieBreak::Ping {
                         measure(&config, &*proxy.probe, &proxy.sessions.statuses);
                     }

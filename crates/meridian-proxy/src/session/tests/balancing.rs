@@ -484,6 +484,7 @@ fn accepting(players: u64, capacity: u64) -> ServerStatus {
         players: Some(players),
         capacity: Some(capacity),
         accepts_transfers: Some(true),
+        ..ServerStatus::default()
     }
 }
 

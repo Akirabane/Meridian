@@ -17,7 +17,7 @@
 //! [`wire::code::OVER_BUDGET`] and one that finds too many running with [`wire::code::TOO_MANY_RUNNING`].
 //! Neither ran.
 
-use crate::decide::Auth;
+use crate::decide::{Auth, ServerReport, Why};
 use crate::wire::DiscoverMethod;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -337,6 +337,15 @@ pub struct ServerInfo {
     /// How long it took to answer the last time the proxy asked its sidecar, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ping_ms: Option<u64>,
+    /// Why it is `draining` or `not_offered`; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<Why>,
+    /// Whether it answered at the proxy's last round of readings; absent for a server the rounds do not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<bool>,
+    /// What it last said of itself; absent for a server the rounds do not read, or that never answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ServerReport>,
 }
 
 /// `result` of [`SERVERS_LIST`].

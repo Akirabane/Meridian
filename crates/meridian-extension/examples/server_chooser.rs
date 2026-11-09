@@ -81,6 +81,9 @@ mod tests {
                     soft_cap: None,
                     hard_cap: None,
                     state: state.map(str::to_owned),
+                    why: None,
+                    up: None,
+                    report: None,
                 })
                 .collect(),
         }

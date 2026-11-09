@@ -897,6 +897,7 @@ fn the_state_of_the_backend_comes_back_as_a_status() {
             players: Some(4),
             capacity: Some(12),
             accepts_transfers: Some(true),
+            ..ServerStatus::default()
         }
     );
     // The same connection can ask again, and nothing but the one line was sent.
@@ -921,6 +922,11 @@ fn horizons_transfer_status_comes_back_as_a_status() {
             players: Some(13),
             capacity: Some(20),
             accepts_transfers: Some(true),
+            held: Some(1),
+            expected: Some(2),
+            frozen: Some(0),
+            full: Some(false),
+            stopping: None,
         }
     );
     assert_eq!(*running.seen.lock().unwrap(), ["transfer-status"]);

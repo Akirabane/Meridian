@@ -79,6 +79,9 @@ pub struct Sessions {
     /// The configuration in force, which a reload replaces: set by the proxy that owns these
     /// sessions, for what a session decides long after its login (the fallback).
     live: OnceLock<Arc<RwLock<Arc<Config>>>>,
+    /// The detector of the backends that are going down (docs/RESTART.md), held weakly: set by the proxy that owns it,
+    /// for what placement tells of a backend (why it is drained).
+    pub restarts: OnceLock<std::sync::Weak<crate::restart::Detector>>,
 }
 
 /// What placement reads, held apart from [`Sessions`] so that a command typed in
@@ -96,9 +99,16 @@ pub struct Shared {
     pub permissions: Arc<crate::permissions::Lists>,
     /// The operators of the servers, who are members of a group of the permissions.
     pub operators: Arc<crate::operators::Operators>,
+    /// The detector of the backends that are going down, when the proxy that owns the sessions set one.
+    pub restarts: Option<Arc<crate::restart::Detector>>,
 }
 
 impl Shared {
+    /// Why the proxy believes `backend` is going down, if it does (docs/RESTART.md).
+    pub fn restarting(&self, backend: &str) -> Option<String> {
+        self.restarts.as_ref()?.describe(backend)
+    }
+
     /// The players being relayed, in the order they joined.
     pub fn players(&self) -> Vec<Player> {
         let mut players: Vec<Player> = self
@@ -407,6 +417,7 @@ impl Sessions {
             metrics: Arc::clone(self.metrics()),
             permissions: Arc::clone(&self.permissions),
             operators: Arc::clone(&self.operators),
+            restarts: self.restarts.get().and_then(std::sync::Weak::upgrade),
         }
     }
 

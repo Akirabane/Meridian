@@ -150,13 +150,23 @@ pub struct ServerStatus {
     /// transfers on, and one that has them off answers an error instead, which
     /// [`crate::client::SidecarClient::status`] reads as `Some(false)`.
     pub accepts_transfers: Option<bool>,
+    /// Players held for a hand-over: logged in, not placed yet (Horizon's `held`).
+    pub held: Option<u64>,
+    /// Places promised to players the proxy announced and that have not logged in yet (`expected`).
+    pub expected: Option<u64>,
+    /// Players this server is handing over to another (`frozen`).
+    pub frozen: Option<u64>,
+    /// Whether it takes no more ordinary logins: `online` at `max_players` or above (`full`).
+    pub full: Option<bool>,
+    /// Whether it has begun to stop, and takes nobody any more (`stopping`).
+    pub stopping: Option<bool>,
 }
 
 impl ServerStatus {
     /// Reads the answer of the backend: a JSON object, whose `players` (or `online`),
-    /// `capacity` (or `max_players`) are whole numbers and `accepts_transfers` a boolean
-    /// when they are there. `full` and the other fields of Horizon's answer are not
-    /// read: a server is full when `online` reaches `max_players`, which the caps say.
+    /// `capacity` (or `max_players`), `held`, `expected` and `frozen` are whole numbers and
+    /// `accepts_transfers`, `full` and `stopping` booleans when they are there. A field that is
+    /// there with another type is an error; any other field is ignored.
     pub fn from_value(answer: &Value) -> Result<ServerStatus, String> {
         let Value::Object(map) = answer else {
             return Err(format!("the status is not a JSON object: {answer}"));
@@ -175,7 +185,11 @@ impl ServerStatus {
                 return Err(format!("accepts_transfers is not true or false: {other}"));
             }
         };
-        // Horizon's `held`, `expected` and `frozen` are numbers too, but are not read.
+        let flag = |key: &str| match map.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(other) => Err(format!("{key} is not true or false: {other}")),
+        };
         let horizon = map.contains_key("max_players");
         Ok(ServerStatus {
             players: match number("online")? {
@@ -187,6 +201,11 @@ impl ServerStatus {
                 None => number("capacity")?,
             },
             accepts_transfers: accepts_transfers.or(horizon.then_some(true)),
+            held: number("held")?,
+            expected: number("expected")?,
+            frozen: number("frozen")?,
+            full: flag("full")?,
+            stopping: flag("stopping")?,
         })
     }
 }
@@ -1079,6 +1098,7 @@ mod tests {
                 players: Some(3),
                 capacity: Some(20),
                 accepts_transfers: Some(false),
+                ..ServerStatus::default()
             })
         );
         // What is left out, or null, is unknown, and other fields are ignored.
@@ -1096,6 +1116,44 @@ mod tests {
         );
     }
 
+    /// The fields of `transfer-status` a proxy shows its extensions: read when they are there, unknown when they are
+    /// not, and an error when one is there with another type, as for the others.
+    #[test]
+    fn the_counts_and_the_flags_of_horizons_answer_are_read_or_unknown() {
+        let answer = |text: &str| ServerStatus::from_value(&serde_json::from_str(text).unwrap());
+        let read = answer(r#"{"online":5,"max_players":20,"held":2,"expected":3,"frozen":1,"full":true,"stopping":true}"#).unwrap();
+        assert_eq!(
+            (
+                read.held,
+                read.expected,
+                read.frozen,
+                read.full,
+                read.stopping
+            ),
+            (Some(2), Some(3), Some(1), Some(true), Some(true))
+        );
+        let none = answer(r#"{"online":5,"max_players":20,"held":null}"#).unwrap();
+        assert_eq!(
+            (
+                none.held,
+                none.expected,
+                none.frozen,
+                none.full,
+                none.stopping
+            ),
+            (None, None, None, None, None)
+        );
+        for bad in [
+            r#"{"held":-1}"#,
+            r#"{"expected":"2"}"#,
+            r#"{"frozen":1.5}"#,
+            r#"{"full":1}"#,
+            r#"{"stopping":"yes"}"#,
+        ] {
+            assert!(answer(bad).is_err(), "{bad}");
+        }
+    }
+
     /// The answer of Horizon's `transfer-status`, as its `docs/server.md` gives it.
     #[test]
     fn horizons_answer_to_transfer_status_is_read() {
@@ -1111,6 +1169,11 @@ mod tests {
                 players: Some(13),
                 capacity: Some(20),
                 accepts_transfers: Some(true),
+                held: Some(1),
+                expected: Some(2),
+                frozen: Some(0),
+                full: Some(false),
+                stopping: None,
             })
         );
         assert_eq!(
@@ -1121,6 +1184,11 @@ mod tests {
                 players: Some(20),
                 capacity: Some(20),
                 accepts_transfers: Some(true),
+                held: Some(1),
+                expected: Some(0),
+                frozen: Some(0),
+                full: Some(true),
+                stopping: None,
             })
         );
         // An answer that names `accepts_transfers` is believed over the default.

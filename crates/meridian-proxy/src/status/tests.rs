@@ -13,6 +13,7 @@ fn status(players: u64) -> ServerStatus {
         players: Some(players),
         capacity: Some(20),
         accepts_transfers: Some(true),
+        ..ServerStatus::default()
     }
 }
 
@@ -440,6 +441,7 @@ fn the_proxy_reads_a_backends_state_through_its_sidecar() {
             players: Some(6),
             capacity: Some(16),
             accepts_transfers: Some(false),
+            ..ServerStatus::default()
         }
     );
 }
@@ -457,6 +459,11 @@ fn the_proxy_reads_horizons_transfer_status_through_its_sidecar() {
             players: Some(13),
             capacity: Some(20),
             accepts_transfers: Some(true),
+            held: Some(1),
+            expected: Some(2),
+            frozen: Some(0),
+            full: Some(false),
+            stopping: None,
         }
     );
 }

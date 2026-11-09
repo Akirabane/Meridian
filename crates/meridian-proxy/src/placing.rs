@@ -537,6 +537,19 @@ pub enum Offer {
 }
 
 impl Offer {
+    /// Why it is kept from new players, in the word an extension is told (`servers/list`, `decide/server`,
+    /// `servers/state`): `None` for `open` and `closed`, which say it all.
+    pub fn why(&self) -> Option<meridian_extension::decide::Why> {
+        use meridian_extension::decide::Why;
+        match self {
+            Offer::Open | Offer::Closed => None,
+            Offer::Restarting(_) => Some(Why::Restarting),
+            Offer::Drained => Some(Why::Drained),
+            Offer::NoTransfers => Some(Why::NotAccepting),
+            Offer::Stale => Some(Why::NoReport),
+        }
+    }
+
     /// The word the metrics give for it: `draining` covers the three ways a backend is
     /// kept from new players on purpose.
     pub fn state(&self) -> &'static str {
