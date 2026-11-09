@@ -936,8 +936,10 @@ The proxy never asks for one during the login and uses none to decide anything. 
 vanilla does. Once the player is on a server, that server may ask for the cookies another server left; the proxy
 passes the request and the answer as they are, so what a cookie means is the servers' business.
 
-`meridian_transfers_total{outcome}` counts them: `refused` (the setting is off), `logged_in`, and `failed` (taken, but
-the login did not finish: a check refused it, or it broke off).
+`meridian_incoming_transfers_total{outcome}` counts them: `refused` (the setting is off), `logged_in` (their login with
+the proxy finished: the account checked, the name and the limits of a login passed), and `failed` (taken, but that login did
+not finish). The proxy's own checks come after the login, so a `logged_in` player can still be turned away by a ban, the
+whitelist or a full proxy, as any player is; those refusals are counted with every login's (`meridian_login_failures_total{reason}`).
 
 ## 6. Restarting a server without losing its players
 
@@ -1048,7 +1050,7 @@ the gauges are worked out when the page is read.
 | `meridian_backend_soft_cap{backend}`, `meridian_backend_hard_cap{backend}` | The caps of each server that has a role |
 | `meridian_backend_state{backend,state}` | 1 for the state the balancer sees: `open`, `closed`, `draining` (drained, restarting, or not accepting transfers) or `not_offered` (no recent report) |
 | `meridian_connections_total`, `meridian_connections_throttled_total` | Connections accepted, and the ones closed unread for opening too many in a minute |
-| `meridian_transfers_total{outcome}` | Players other servers sent with a vanilla transfer: `refused` (`accept-transfers` off), `logged_in`, `failed` (section 5.13) |
+| `meridian_incoming_transfers_total{outcome}` | Players other servers sent here with a vanilla transfer: `refused` (`accept-transfers` off), `logged_in` (their login finished; a ban, the whitelist or a full proxy can still turn them away), `failed` (section 5.13) |
 | `meridian_logins_total` | Players who ended on a server |
 | `meridian_login_failures_total{reason}` | Logins that did not: `protocol` (the handshake or login broke the protocol, or the connection failed), `duplicate`, `full`, `no_route`, `unreachable`, `banned` (including a connection closed for its address), `not_whitelisted`, `extension` (an extension refused the login, or refused the player at the choice of server, or could not be asked and its on-error policy refuses; [EXTENSIONS.md](EXTENSIONS.md) sections 4.2 and 4.4). A refusal by the authentication, and a server list ping, are not counted here |
 | `meridian_transfers_total` | Transfers that succeeded |

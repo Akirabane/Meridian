@@ -44,6 +44,25 @@ fn value(page: &str, series: &str) -> String {
         .to_owned()
 }
 
+/// Each family is declared once: a Prometheus parser refuses a page that gives one name two `# TYPE` or
+/// two `# HELP` lines (two families of one name, as a new counter named like an old one would make).
+#[test]
+fn every_family_is_declared_once() {
+    let page = render(&proxy());
+    for kind in ["# TYPE ", "# HELP "] {
+        let mut seen = std::collections::HashSet::new();
+        for line in page.lines().filter(|l| l.starts_with(kind)) {
+            let name = line[kind.len()..].split_whitespace().next().unwrap();
+            assert!(
+                seen.insert(name.to_owned()),
+                "{kind}{name} is declared twice:
+{page}"
+            );
+        }
+        assert!(!seen.is_empty(), "{page}");
+    }
+}
+
 #[test]
 fn a_fresh_proxy_shows_zeroes_and_the_backends() {
     let page = render(&proxy());

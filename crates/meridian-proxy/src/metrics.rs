@@ -434,9 +434,9 @@ pub fn render(proxy: &Proxy) -> String {
     );
     family(
         &mut out,
-        "meridian_transfers_total",
+        "meridian_incoming_transfers_total",
         "counter",
-        "Players another server sent with a vanilla transfer: refused (accept-transfers off), logged_in, or failed (taken, the login did not finish).",
+        "Players another server sent here with a vanilla transfer: refused (accept-transfers off), logged_in (their login with the proxy finished; a ban, the whitelist or a full proxy can still turn them away after), or failed (taken, that login did not finish).",
     );
     let transfers = meridian_net::client::transfers();
     for (outcome, n) in [
@@ -444,7 +444,10 @@ pub fn render(proxy: &Proxy) -> String {
         ("logged_in", transfers.logged_in),
         ("failed", transfers.failed),
     ] {
-        let _ = writeln!(out, "meridian_transfers_total{{outcome=\"{outcome}\"}} {n}");
+        let _ = writeln!(
+            out,
+            "meridian_incoming_transfers_total{{outcome=\"{outcome}\"}} {n}"
+        );
     }
     family(
         &mut out,
