@@ -312,8 +312,18 @@ fn bench() -> Bench {
     bench_as(&INFORMATION)
 }
 
+/// As [`bench`], with a transfer hook that holds a handle to the session and takes the
+/// transfers to `taken.example.org`.
+fn bench_with_transfers() -> Bench {
+    bench_hooked(&INFORMATION, true)
+}
+
 /// As [`bench`], for a client that sends `information` as its Client Information.
 fn bench_as(information: &[u8]) -> Bench {
+    bench_hooked(information, false)
+}
+
+fn bench_hooked(information: &[u8], transfers: bool) -> Bench {
     let (proxy_client, mut player) = pipe();
     let (proxy_backend, mut source) = pipe();
     let client = ClientSession {
@@ -326,6 +336,14 @@ fn bench_as(information: &[u8]) -> Bench {
         connection: proxy_backend,
     };
     let (session, handle) = Session::new(client, backend, "source").unwrap();
+    let session = if transfers {
+        let kept = handle.clone();
+        session.with_transfers(Arc::new(move |_: &SessionHandle, host: &str, _: i32| {
+            !kept.is_over() && host == "taken.example.org"
+        }))
+    } else {
+        session
+    };
     let run = std::thread::spawn(move || session.run());
     join_source_as(&mut player, &mut source, information);
     Bench {

@@ -361,3 +361,76 @@ fn what_a_thread_tells_while_a_command_is_answered_comes_after_the_answer() {
         run.join().unwrap().unwrap();
     }
 }
+
+/// A session whose transfer hook holds a handle to it: a transfer the hook takes is not relayed,
+/// one it passes is, a transfer it gives back with `pass_transfer` reaches the client, and once
+/// the session is over, or was never run, nothing of it is left.
+#[test]
+fn a_transfer_the_hook_takes_is_held_and_the_session_is_freed_after() {
+    let transfer = |host: &str, port: i32| {
+        play::Clientbound::Transfer(horizon_protocol::packets::configuration::Transfer {
+            host: host.into(),
+            port,
+        })
+        .encode()
+    };
+    let Bench {
+        handle,
+        run,
+        mut player,
+        mut source,
+    } = bench_with_transfers();
+    let left = Arc::downgrade(&handle.0);
+    // Taken: the next packet the client gets is the keep-alive sent after it.
+    source.send(&transfer("taken.example.org", 25566)).unwrap();
+    send(&mut source, pc::KEEP_ALIVE, &7u64.to_be_bytes());
+    assert_eq!(
+        player.recv().unwrap(),
+        (pc::KEEP_ALIVE, 7u64.to_be_bytes().to_vec())
+    );
+    // Given back by the hook's owner: it reaches the client as it came.
+    assert!(handle.pass_transfer("taken.example.org", 25566));
+    let (id, payload) = player.recv().unwrap();
+    match play::Clientbound::decode(id, &payload) {
+        Ok(play::Clientbound::Transfer(t)) => {
+            assert_eq!((t.host.as_str(), t.port), ("taken.example.org", 25566))
+        }
+        other => panic!("{other:?}"),
+    }
+    // Passed by the hook: relayed at once.
+    source.send(&transfer("other.example.org", 25565)).unwrap();
+    let (id, payload) = player.recv().unwrap();
+    assert!(matches!(
+        play::Clientbound::decode(id, &payload),
+        Ok(play::Clientbound::Transfer(t)) if t.host == "other.example.org"
+    ));
+    drop(source);
+    run.join().unwrap().unwrap();
+    drop(handle);
+    wait_for(|| left.upgrade().is_none());
+
+    // Never run: freed as well.
+    let (proxy_client, _player) = pipe();
+    let (proxy_backend, _source) = pipe();
+    let (session, handle) = Session::new(
+        ClientSession {
+            profile: profile(),
+            auth: AuthKind::Offline,
+            virtual_host: None,
+            connection: proxy_client,
+        },
+        BackendLink {
+            connection: proxy_backend,
+        },
+        "source",
+    )
+    .unwrap();
+    let kept = handle.clone();
+    let session = session.with_transfers(Arc::new(move |_: &SessionHandle, _: &str, _: i32| {
+        kept.is_over()
+    }));
+    let left = Arc::downgrade(&handle.0);
+    drop(session);
+    drop(handle);
+    assert!(left.upgrade().is_none());
+}

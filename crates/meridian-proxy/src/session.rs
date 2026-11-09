@@ -883,6 +883,18 @@ fn place(
     let relay = relay
         .with_compression_level(config.compression_level)
         .with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
+    // The backends' transfers are only looked at when one of them may be made seamless.
+    let relay = if config.forced_hosts.iter().any(|f| f.seamless) {
+        relay.with_transfers(switching::transfers_hook(
+            Arc::new(config.clone()),
+            Arc::clone(&sessions.switcher),
+            sessions.shared(),
+            name.clone(),
+            peer.ip(),
+        ))
+    } else {
+        relay
+    };
     let player = Player {
         name: name.clone(),
         uuid,

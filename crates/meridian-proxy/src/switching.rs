@@ -5,7 +5,9 @@
 use crate::log::{error, info, warning};
 use crate::metrics::{self, Metrics};
 use meridian_config::{Config, Sidecar};
-use meridian_handoff::{Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend};
+use meridian_handoff::{
+    Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend, TransferHook,
+};
 use meridian_net::backend::BackendOptions;
 use meridian_sidecar::client::SidecarClient;
 use std::cell::Cell;
@@ -331,6 +333,70 @@ pub fn in_game(
     if let Err(e) = spawned {
         warning!("cannot start a thread for a switch: {e}");
     }
+}
+
+/// What a session does with the vanilla transfers its backends send (`/transfer <host>` on a
+/// server): a transfer to a `[[forced-host]]` marked `seamless` is taken, and the player is moved
+/// to that host's backend on a thread of its own, with no loading screen. When the move fails
+/// while the player is still where they were, with nothing of the other world sent (another
+/// dimension, a server that cannot be reached, a full one), the transfer is passed to the client
+/// as it came: the player goes all the same, with the loading screen. Any other transfer is
+/// passed at once. What the move carries follows `state-group`, as for every move.
+///
+/// The hook is kept by the session only while its relay runs, so it may hold the proxy's state.
+pub fn transfers_hook(
+    config: Arc<Config>,
+    switcher: Arc<Switcher>,
+    shared: crate::session::Shared,
+    name: String,
+    player_address: IpAddr,
+) -> Arc<TransferHook> {
+    Arc::new(
+        move |handle: &SessionHandle, host: &str, port: i32| -> bool {
+            // As the server choice reads a handshake's host: no case, no final dot.
+            let wanted = host.trim_end_matches('.').to_ascii_lowercase();
+            let Some(target) = config
+                .forced_hosts
+                .iter()
+                .find(|f| f.seamless && f.host == wanted)
+                .map(|f| f.backend.clone())
+            else {
+                return false;
+            };
+            // Already there, or already moving: the transfer is the game's own.
+            if handle.backend() == target || handle.is_switching() {
+                return false;
+            }
+            let (config, switcher, shared) =
+                (Arc::clone(&config), Arc::clone(&switcher), shared.clone());
+            let (handle, name, host) = (handle.clone(), name.clone(), host.to_owned());
+            std::thread::Builder::new()
+                .name(format!("transfer-{name}"))
+                .spawn(move || {
+                    let from = handle.backend();
+                    let pass = |why: &str| {
+                        warning!(
+                            "{name}: the transfer from {from} to {host} is passed to the client                              (a loading screen): {why}"
+                        );
+                        handle.pass_transfer(&host, port);
+                    };
+                    // The place reserved on the target is kept until the move has ended.
+                    let _place = match crate::placing::named(&config, &shared, &target) {
+                        Ok(place) => place,
+                        Err(line) => return pass(&line),
+                    };
+                    info!("{name}: a transfer from {from} to {host} is made a seamless move to {target}");
+                    match switch(&config, &switcher, &handle, &name, player_address, &target) {
+                        Ok(moved) => info!("{}", moved.describe(&name)),
+                        // Still on the server that sent the transfer, and nothing of the target
+                        // was sent: the transfer goes as it came.
+                        Err(why) if !handle.is_over() && handle.backend() == from => pass(&why),
+                        Err(why) => warning!("{why}"),
+                    }
+                })
+                .is_ok()
+        },
+    )
 }
 
 #[cfg(test)]

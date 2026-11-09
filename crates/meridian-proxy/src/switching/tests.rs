@@ -144,7 +144,13 @@ struct Sidecars {
     announce: Option<(bool, bool)>,
     /// The `state-group` of `lobby` and of `east`, when the test gives them.
     state_groups: Option<(&'static str, &'static str)>,
+    /// Whether `east.example.org` is a seamless forced host of east, and the session takes
+    /// the backends' transfers as the proxy's sessions do then.
+    seamless: bool,
 }
+
+/// The host of east's seamless forced host, when the test has one.
+const EAST_HOST: &str = "east.example.org";
 
 /// How the other threads of a test ended, and when, since its world was made. A failure that
 /// only says that the player's connection closed leaves open who closed it, and a failure in CI
@@ -298,6 +304,15 @@ fn world(sidecars: Sidecars) -> World {
         config.state_groups.insert("lobby".into(), lobby.into());
         config.state_groups.insert("east".into(), east.into());
     }
+    if sidecars.seamless {
+        config.forced_hosts.push(meridian_config::ForcedHost {
+            host: EAST_HOST.into(),
+            backend: "east".into(),
+            motd: None,
+            seamless: true,
+        });
+    }
+    let hook_config = Arc::new(config.clone());
     let mut proxy = Proxy::new(
         config,
         "does-not-exist/meridian.toml".into(),
@@ -311,6 +326,7 @@ fn world(sidecars: Sidecars) -> World {
         during_export,
         announce: _,
         state_groups: _,
+        seamless,
     } = sidecars;
     let during_export = during_export.map(Arc::new);
     let controls = {
@@ -367,6 +383,17 @@ fn world(sidecars: Sidecars) -> World {
         "lobby",
     )
     .unwrap();
+    let session = if seamless {
+        session.with_transfers(transfers_hook(
+            hook_config,
+            Arc::clone(&proxy.sessions.switcher),
+            proxy.sessions.shared(),
+            "Alex".into(),
+            "198.51.100.7".parse().unwrap(),
+        ))
+    } else {
+        session
+    };
     let relay = watched(
         &ended,
         "the relay",
@@ -1418,5 +1445,111 @@ fn a_switch_between_two_state_groups_carries_no_state() {
         attack(&mut player, TARGET_ID);
         target.join().unwrap().unwrap();
         relay.join().unwrap().unwrap();
+    }
+}
+
+/// What lobby's `/transfer <host> <port> Alex` sends the player.
+fn transfer(host: &str, port: i32) -> Vec<u8> {
+    C::Transfer(horizon_protocol::packets::configuration::Transfer {
+        host: host.into(),
+        port,
+    })
+    .encode()
+}
+
+/// Waits until the fake sidecars were asked `lines`, up to a few seconds.
+fn asked(log: &Log, lines: &[&str]) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while log.lines() != lines {
+        assert!(
+            Instant::now() < until,
+            "{:?}
+{}",
+            log.lines(),
+            ended_report()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A transfer lobby sends to a seamless forced host is a seamless move to its backend: the
+/// player never gets the transfer, and gets east's world on the connection they have. The host
+/// is compared without its case or a final dot, and the port is not looked at.
+#[test]
+fn a_transfer_to_a_seamless_host_moves_the_player_without_a_loading_screen() {
+    let World {
+        proxy: _proxy,
+        log,
+        mut player,
+        mut _source,
+        relay,
+        target,
+    } = world(Sidecars {
+        seamless: true,
+        ..Sidecars::default()
+    });
+    _source.send(&transfer("East.Example.ORG.", 25599)).unwrap();
+    asked(
+        &log,
+        &[
+            "east expect",
+            "lobby export",
+            "east import place=false",
+            "east confirm",
+            "lobby release Moved",
+        ],
+    );
+    let (chat, _) = client_after_switch(&mut player);
+    assert!(chat.is_empty(), "the move is quiet: {chat:?}");
+    attack(&mut player, TARGET_ID);
+    target.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
+}
+
+/// A move the proxy cannot make while the player is still on lobby (here east will not expect
+/// them) gives the transfer back to the client as lobby sent it: the player goes, with the
+/// loading screen.
+#[test]
+fn a_transfer_the_move_cannot_make_is_passed_to_the_client() {
+    let World {
+        log,
+        mut player,
+        mut _source,
+        ..
+    } = world(Sidecars {
+        seamless: true,
+        target_refuses: Some(("expect", "64 players already expected".into())),
+        ..Sidecars::default()
+    });
+    _source.send(&transfer(EAST_HOST, 25599)).unwrap();
+    let (id, payload) = heard(&mut player);
+    match C::decode(id, &payload) {
+        Ok(C::Transfer(t)) => assert_eq!((t.host.as_str(), t.port), (EAST_HOST, 25599)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(log.lines(), ["east expect"]);
+}
+
+/// A transfer to a host that is not a seamless forced host, or a session without seamless hosts,
+/// is passed to the client at once, as the proxy always did.
+#[test]
+fn a_transfer_to_another_host_is_passed_at_once() {
+    for (seamless, host) in [(true, "west.example.org"), (false, EAST_HOST)] {
+        let World {
+            log,
+            mut player,
+            mut _source,
+            ..
+        } = world(Sidecars {
+            seamless,
+            ..Sidecars::default()
+        });
+        _source.send(&transfer(host, 25565)).unwrap();
+        let (id, payload) = heard(&mut player);
+        match C::decode(id, &payload) {
+            Ok(C::Transfer(t)) => assert_eq!(t.host, host),
+            other => panic!("{seamless} {host}: {other:?}"),
+        }
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
 }
