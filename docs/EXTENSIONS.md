@@ -1362,10 +1362,12 @@ them. **Not built:** `file-permissions`, below, which this page planned and whic
     (`cargo build -p meridian-extension --example allow_all --message-format=json`, the same on Linux and Windows),
     started with a token file and port 0, the port the system picks being read from the line the SDK writes when it
     listens. With fake backends, they check that with it a player goes where the routes and the balancer send them
-    without it, that a command is decided by `permissions.toml` as without it, that it is asked each time and never runs
-    out of time, and that once it is stopped the on-error policies (`default`) decide at once. Every wait is for a line
-    or a state, bounded (10 s), and fails with what was seen; no port is fixed. The test needs cargo, which runs it; it
-    does not fall back on the SDK's `serve` in a thread, which would not be a separate process.
+    without it, at login and when their server is lost, that a command is decided by `permissions.toml` as without it,
+    that it is asked each time and never runs out of time, that what it writes holds neither the host the player typed
+    nor their address (it does not ask for `addresses`, so it is not given it even when granted), and that once it is
+    stopped the on-error policies (`default`) decide at once. Every wait is for a line or a state, bounded (10 s), and
+    fails with what was seen; no port is fixed. The test needs cargo, which runs it; it does not fall back on the SDK's
+    `serve` in a thread, which would not be a separate process.
 - **`file-permissions`** (not built). It reads a TOML file of players (by unique id) and the nodes they are
   given or denied. It answers `decide.command` from it, with `cache_seconds` 60. It declares one
   command, `/extperms reload`, under its own node, which reads the file again and sends
