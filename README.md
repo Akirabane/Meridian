@@ -97,6 +97,12 @@ part of every figure, and each page says them first.
   test on a real network (three real clients, one run of each scenario) and a reading of the proxy's memory on
   Linux. At 1,000 typical players the load generator was the limit, so the latency there is not judged; the raw
   files are not in this repository.
+- [docs/LOAD-LEVEL2.md](docs/LOAD-LEVEL2.md): the proxy in front of real Horizon servers, on one Windows machine over
+  the loopback, on 8 and 9 November 2026: 100 players on one server, 125, 250 players on 3 servers and 500 on 6
+  (one run each for the last three), the compression's share of the proxy's processor time, and a network simulator's
+  relay. It also lists what gave no result: 750 players on 9 servers (no result, twice),
+  1,000 not run, and two compression-level comparisons that could not be judged. The raw files are not in this
+  repository.
 - [docs/BENCH.md](docs/BENCH.md): the older latency benchmark, over the loopback, against a
   stand-in server.
 - [docs/REAL-NETWORK-RUN.md](docs/REAL-NETWORK-RUN.md): the seamless switch with real clients over a real
@@ -371,7 +377,8 @@ player for their own copy of the game, and Meridian carries no game content. Sec
   build against Horizon's head, and how to move the pin.
 - [docs/BASELINE.md](docs/BASELINE.md), [docs/LOAD-REMOTE.md](docs/LOAD-REMOTE.md),
   [docs/LOAD-LAN-250.md](docs/LOAD-LAN-250.md), [docs/LOAD-VPS-250.md](docs/LOAD-VPS-250.md),
-  [docs/LOAD-1000.md](docs/LOAD-1000.md), [docs/BENCH.md](docs/BENCH.md): the load measurements and their limits
+  [docs/LOAD-1000.md](docs/LOAD-1000.md), [docs/LOAD-LEVEL2.md](docs/LOAD-LEVEL2.md),
+  [docs/BENCH.md](docs/BENCH.md): the load measurements and their limits
   (see Measures).
 - [docs/REAL-CLIENT-RUNS.md](docs/REAL-CLIENT-RUNS.md): the runs made with a real Horizon client:
   one over the Internet to a proxy on a rented server with 250 bots, the fallback of a player whose
