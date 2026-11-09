@@ -936,10 +936,12 @@ The proxy never asks for one during the login and uses none to decide anything. 
 vanilla does. Once the player is on a server, that server may ask for the cookies another server left; the proxy
 passes the request and the answer as they are, so what a cookie means is the servers' business.
 
-`meridian_incoming_transfers_total{outcome}` counts them: `refused` (the setting is off), `logged_in` (their login with
-the proxy finished: the account checked, the name and the limits of a login passed), and `failed` (taken, but that login did
-not finish). The proxy's own checks come after the login, so a `logged_in` player can still be turned away by a ban, the
-whitelist or a full proxy, as any player is; those refusals are counted with every login's (`meridian_login_failures_total{reason}`).
+`meridian_incoming_transfers_total{outcome}` counts them: `refused` (the setting is off: every transfer is refused,
+whatever the version of its client), `logged_in` (their login with the proxy finished: the account checked, the name and
+the limits of a login passed), and `failed` (taken, as the setting is on, but that login did not finish, a client of
+another version included: as vanilla, the version is checked once the transfer is taken). The proxy's own checks come
+after the login, so a `logged_in` player can still be turned away by a ban, the whitelist or a full proxy, as any player
+is; those refusals are counted with every login's (`meridian_login_failures_total{reason}`).
 
 ### 5.14 Compression: processor time against bandwidth
 
