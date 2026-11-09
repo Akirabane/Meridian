@@ -1405,6 +1405,28 @@ mod tests {
         assert!(transfers().refused > before.refused);
     }
 
+    /// Off, a transfer is refused before its version is read: a client of another version is told that transfers are
+    /// disabled, not that its version is wrong, and is counted `refused`, never `failed` (vanilla's order:
+    /// `ServerHandshakePacketListenerImpl` checks `acceptsTransfers` first, and the version only in `beginLogin`).
+    #[test]
+    fn a_transfer_of_another_version_is_refused_as_a_transfer_when_they_are_off() {
+        let before = transfers();
+        let (mut client, accepted) = proxy(offline(-1));
+        handshake(
+            &mut client,
+            horizon_protocol::PROTOCOL_VERSION + 1,
+            handshake::TRANSFER,
+        );
+        let json = reason(login_reply(&mut client));
+        assert_eq!(
+            json["translate"],
+            "multiplayer.disconnect.transfers_disabled"
+        );
+        assert!(accepted.join().unwrap().unwrap().is_none());
+        // Other tests may count at the same time: the refusals grew by this one at least.
+        assert!(transfers().refused > before.refused);
+    }
+
     /// Which count a login ends in, apart from the other tests' logins (the counts are shared).
     #[test]
     fn only_a_transferred_player_is_counted_and_in_the_count_of_how_it_ended() {

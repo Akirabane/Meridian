@@ -436,7 +436,7 @@ pub fn render(proxy: &Proxy) -> String {
         &mut out,
         "meridian_incoming_transfers_total",
         "counter",
-        "Players another server sent here with a vanilla transfer: refused (accept-transfers off), logged_in (their login with the proxy finished; a ban, the whitelist or a full proxy can still turn them away after), or failed (taken, that login did not finish).",
+        "Players another server sent here with a vanilla transfer: refused (accept-transfers off), logged_in (their login with the proxy finished; a ban, the whitelist or a full proxy can still turn them away after), or failed (taken, as accept-transfers is on, but that login did not finish, a client of another version included).",
     );
     let transfers = meridian_net::client::transfers();
     for (outcome, n) in [
