@@ -13,11 +13,11 @@ by real `horizon-server` processes, with their engine, each holding its own worl
 
 | Question | Answer |
 | --- | --- |
-| 100 players on one real server | **Holds.** 0.44 cores of the proxy in each of nine steps (0.435 to 0.444), about 190 to 200 MB |
+| 100 players on one real server | **Holds.** 0.44 cores of the proxy in each of nine steps (0.435 to 0.444; seven of them "not clean", section 2), about 190 to 200 MB |
 | 125 players on one real server | **Holds, one run:** 0.58 cores, 250 MB; the server's tick p95 was 37.9 ms |
 | 250 players on 3 real servers | **Holds, one run:** 1.24 cores, 456 MB |
 | 500 players on 6 real servers | **Holds, one run:** 3.31 cores, 875 MB |
-| 750 players on 9 real servers | **No result**, twice: the servers could not keep 20 ticks a second on this PC. Nothing is concluded about the proxy |
+| 750 players on 9 real servers | **No result**, twice: the servers could not carry the load on this PC (disconnections in the first run, five servers under the rule in the second). Nothing is concluded about the proxy |
 | 1,000 players on real servers | **Not run** (the plan stops where 750 stops) |
 | Share of the compression in the proxy's processor time | **About 41 %** (towards the players); the part towards the servers, about 4 %, **cannot be told from zero** |
 | A relay that delays each way by 20 ms | A round trip grew by **40.05 ms** more than the proxy's own 49 µs, for two delays of 20 ms (one run, with 1.39 cores of other load: not clean) |
@@ -31,20 +31,20 @@ by real `horizon-server` processes, with their engine, each holding its own worl
 | Machine | Windows 11, Intel Core i9-14900KF: 8 performance cores with two threads each (logical 0-15) and 16 efficiency cores (logical 16-31); 64 GB. Servers, proxy, bots and samplers all on it, over `127.0.0.1` |
 | Servers | real `horizon-server` and its engine, from one Horizon commit (`1597853de7`), release build; one process each, started from a copy of the same template world (about 22,800 chunks generated around the spawn beforehand), view and simulation distance 10, creative, offline mode, at a low priority |
 | Players | `horizon-bots`, behaviour `mixed`: bots that walk, that explore at 0.8 blocks a second, and that stand still. They are creative-mode flyers; they do not mine, build or fight. Joins every 0.2 to 0.5 s |
-| Proxy | Meridian `b734ba9` (main after #160), release build, balancing on, soft cap 85 and hard cap 110 for steps of several servers (200 for one server), compression threshold 256 on both sides |
+| Proxy | Meridian `b734ba9` (main after #160) for the steps of sections 2 to 4; `1a6fe90` (main `337d0ff` plus the `compression-level` setting) for the comparisons of section 5; `337d0ff` for the compressor pool's comparison (section 6); release builds, balancing on, soft cap 85 and hard cap 110 for steps of several servers (200 for one server), compression threshold 256 on both sides |
 | Placement | the servers, the proxy, the bots and the samplers each pinned to their own logical processors. The proxy ran on 8-11 (four threads of performance cores) at 100, 125 and 250 players, and on 16-19 (four efficiency cores) at 500 |
 | A step | 5 minutes of warm-up, then 10 minutes measured, one step after another, from a fresh set of servers |
 | Sampling | once a second: each server's TPS, tick time and chunks (its own metrics page), the proxy's processor (by the processor cycles Windows counts, the figure used here; the time-based figure is noisier), memory and threads, and the load of every logical processor |
 
-**The rule of validity**, fixed before the runs. A step counts only if every server's mean TPS is at least 19.5, the mean
-of each server's tick-time p95 is under 50 ms, and no bot is lost. A step that fails it is a result about the machine
-or the servers, and is written as such: nothing is read from it about the proxy.
+**The rule of validity**, fixed before the runs. A step counts only if every server's mean TPS is at least 19.5, the
+mean of each server's tick-time p95 is under 50 ms, and no bot is lost. A step that fails it is a result about the
+machine or the servers, and is written as such: nothing is read from it about the proxy.
 
-**The load of the machine.** Before each step a check read the load of every other process (any program that is not
-the step's) and refused to start while something was being built. The steps of sections 2 and 3 ran with 0.27 to 0.35
-cores of other load on average in the window (at most 1.43 cores in one second), and the machine was 0 to 6 % busy
-before each of them, 14 % before the 500-player step. The step of section 4 with the relay had 1.39 cores of other
-load, and section 6 lists the runs for which the load was higher.
+**The load of the machine.** Before each step a check read the load of every other process (any program that is not the
+step's) and refused to start while something was being built. The steps of sections 2 and 3 ran with 0.27 to 0.35 cores
+of other load on average in the window (at most 1.43 cores in a 5-second sample), and the machine was 0 to 6 % busy
+before each of them, 14 % before the 500-player step. The step of section 4 with the relay had 1.39 cores of other load,
+and section 6 lists the runs for which the load was higher.
 
 **The raw data** (a CSV per step, the samplers' files and the analysis) is kept on the machine that ran it. It is not in
 this repository.
@@ -63,16 +63,18 @@ cores of this machine.
 
 No bot was lost in any of these steps and every one passed the rule above.
 
-**Nine steps at 100 players on one server** with the default compression level (the two above and seven more taken from the
-comparisons of section 5, with three builds of the proxy) used 0.435 to 0.444 cores: the spread between runs is about 2 %.
+**Nine steps at 100 players on one server** with the default compression level (the two above and seven more taken from
+other comparisons of the campaign, on three builds of the proxy) used 0.435 to 0.444 cores. Those seven had 0.72 to 0.96
+cores of other load in their windows (not clean, over 0.5), so the spread between runs, about 2 %, is said with that
+reserve.
 
 **What the table shows:**
-- the cost of a player is not flat in these steps: 0.44, 0.46, 0.50 and 0.66 % of a core at 100, 125, 250 and 500 players.
-  The reason is not known. The 500 step also ran the proxy on efficiency cores, which are slower than the performance
-  cores of the other steps, so its figure is not on the same footing as the others;
+- the cost of a player is not flat in these steps: 0.44, 0.46, 0.50 and 0.66 % of a core at 100, 125, 250 and 500
+  players. The reason is not known. The 500 step also ran the proxy on efficiency cores, which are slower than the
+  performance cores of the other steps, so its figure is not on the same footing as the others;
 - memory is 1.8 to 2.1 MB a player at every size;
-- these figures are for these bots on this machine. They do not give a figure for 750 or 1,000 players: the cost per player
-  rose between sizes, and a straight line would be a guess.
+- these figures are for these bots on this machine. They do not give a figure for 750 or 1,000 players: the cost per
+  player rose between sizes, and a straight line would be a guess.
 
 ### One server on its own
 
@@ -83,9 +85,9 @@ One real server, in the afternoon of 8 November, one run each, valid by the rule
 | Tick, mean over the window | 17.1 ms | 20.6 ms | 29.4 ms | 41.1 ms | 33.9 ms |
 | Other load, mean | | | | 1.64 cores | 0.29 cores |
 
-The afternoon's 125 players ran while the machine was used by other programs (1.6 cores of other load on average, over
-1 core for 456 of 569 s), and its tick was 41 ms. The same size repeated at night with 0.29 cores of other load gave 34 ms.
-So the edge of one server is not read from the afternoon run: it depends on the background load. The step with 50
+The afternoon's 125 players ran while the machine was used by other programs (1.6 cores of other load on average, over 1
+core for 456 of 569 s), and its tick was 41 ms. The same size repeated at night with 0.29 cores of other load gave 34
+ms. So the edge of one server is not read from the afternoon run: it depends on the background load. The step with 50
 players was also run direct, with no proxy: the tick was 16.9 ms direct and 17.1 ms through the proxy, with the same
 chunks and about the same bytes received (one run of each).
 
@@ -163,9 +165,9 @@ effect: they say it was not shown on this machine.
     servers, which then did the same, and 220 players were left. The load of each processor showed afterwards that the
     servers' work sat on four efficiency cores that their mask allowed, while the performance-core threads were nearly
     idle (probably because the servers run at a low priority; not proven).
-  - Second run, the servers on the performance cores only (`FFFF`), the proxy on 6 efficiency cores: all 750 bots
-    joined and none was lost, but five of the nine servers missed the rule (mean TPS down to 18.59, or a tick p95 of 51 to
-    58 ms), with 10.3 cores for the servers and a run queue of 65. The limit was **the machine's performance cores**, not
+  - Second run, the servers on the performance cores only (`FFFF`), the proxy on 6 efficiency cores: all 750 bots joined
+    and none was lost, but five of the nine servers missed the rule (mean TPS down to 18.59, or a tick p95 of 51 to 58
+    ms), with 10.3 cores for the servers and a run queue of 65. The limit was **the machine's performance cores**, not
     the proxy: nothing can be concluded about the proxy at 750.
   - One observation is kept and not concluded from: in that run the proxy used 6.27 cores on its six pinned processors
     (96 to 97 % busy), 0.84 % of a core a player. Either its cost per player grows with the number of sessions, or it
@@ -175,8 +177,13 @@ effect: they say it was not shown on this machine.
   8 servers; it was not started.
 - **The first 250-player run** (8 November, afternoon) has no server data because of a fault in the sampler script for
   several servers, and was redone after the fix; only the redone step is above.
-- **The first 125-player run** (8 November, afternoon) ran with 1.64 cores of other load: it is valid by the rule but not
-  clean, and the clean repeat is the one in the table.
+- **The first 125-player run** (8 November, afternoon) ran with 1.64 cores of other load: it is valid by the rule but
+  not clean, and the clean repeat is the one in the table.
+- **A pool of compressors: not shown.** A candidate change to the proxy's compression (a pool of compressors) was run
+  against the build without it at 100 players on one server, in the order A, B, A, B (the first A redone, for its
+  other load). It lowered the proxy's processor time by about 1.7 % (0.0075 cores, 0.4285 against 0.436), under the 3 %
+  fixed beforehand, so the effect is **not shown** and the change was not adopted on this evidence. B was not worse than
+  A, and the work was the same on both sides. Every step had 0.66 to 0.79 cores of other load (not clean).
 - **Level 3 and the 500-player pair:** section 5.
 
 ## 7. What these figures do not say
